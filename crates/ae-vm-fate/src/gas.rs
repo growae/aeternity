@@ -39,6 +39,7 @@ impl CostModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error<E = Infallible> {
     OutOfGas,
+    NativeIntegerLimit,
     Data(DataError),
     Host(E),
     InvalidOrder,
@@ -90,18 +91,56 @@ pub fn traversal_with_host<H: UnfoldHost>(
     order: &impl MapOrder,
     limits: Limits,
 ) -> Result<Charge, Error<H::Error>> {
-    if protocol < 5 {
-        return Ok(Charge {
-            gas,
-            remaining_limits: limits,
-        });
+    TraversalMeter {
+        protocol,
+        model,
+        native_capacity: None,
     }
-    let mut result = raw_traversal(model, value, gas * DENOMINATOR, host, order, limits)?;
-    if result.gas.sign() == Sign::Minus {
-        return Err(Error::OutOfGas);
+    .charge(value, gas, host, order, limits)
+}
+pub(crate) struct TraversalMeter {
+    pub protocol: u32,
+    pub model: CostModel,
+    pub native_capacity: Option<u64>,
+}
+impl TraversalMeter {
+    pub(crate) fn charge<H: UnfoldHost>(
+        &self,
+        value: &Value,
+        gas: BigInt,
+        host: &mut H,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Charge, Error<H::Error>> {
+        if self.protocol < 5 {
+            return Ok(Charge {
+                gas,
+                remaining_limits: limits,
+            });
+        }
+        let milligas = native_integer(gas * DENOMINATOR, self.native_capacity)?;
+        let mut result = raw_traversal_checked(
+            self.model,
+            value,
+            milligas,
+            host,
+            order,
+            limits,
+            self.native_capacity,
+        )?;
+        if result.gas.sign() == Sign::Minus {
+            return Err(Error::OutOfGas);
+        }
+        result.gas /= DENOMINATOR;
+        Ok(result)
     }
-    result.gas /= DENOMINATOR;
-    Ok(result)
+}
+fn native_integer<E>(n: BigInt, capacity: Option<u64>) -> Result<BigInt, Error<E>> {
+    if capacity.is_some_and(|bits| n.magnitude().bits() > bits) {
+        Err(Error::NativeIntegerLimit)
+    } else {
+        Ok(n)
+    }
 }
 // The original lower-level helper can return negative milligas. Its caller
 // performs the final out-of-gas check and rounds down to whole gas.
@@ -113,12 +152,24 @@ pub fn raw_traversal<H: UnfoldHost>(
     order: &impl MapOrder,
     limits: Limits,
 ) -> Result<Charge, Error<H::Error>> {
+    raw_traversal_checked(model, value, milligas, host, order, limits, None)
+}
+fn raw_traversal_checked<H: UnfoldHost>(
+    model: CostModel,
+    value: &Value,
+    milligas: BigInt,
+    host: &mut H,
+    order: &impl MapOrder,
+    limits: Limits,
+    native_capacity: Option<u64>,
+) -> Result<Charge, Error<H::Error>> {
     let mut walk = Walk {
         model,
         host,
         order,
         budget: Budget::new(limits),
         bytes: 0,
+        native_capacity,
     };
     let gas = walk.value(milligas, value, 0)?;
     Ok(Charge {
@@ -132,8 +183,12 @@ struct Walk<'a, H, O> {
     order: &'a O,
     budget: Budget,
     bytes: usize,
+    native_capacity: Option<u64>,
 }
 impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
+    fn integer(&self, n: BigInt) -> Result<BigInt, Error<H::Error>> {
+        native_integer(n, self.native_capacity)
+    }
     fn limits(&self) -> Limits {
         Limits {
             max_nodes: self
@@ -155,7 +210,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
     fn leaf(&mut self, gas: BigInt, v: &Value) -> Result<BigInt, Error<H::Error>> {
         let rate = self.model.leaf();
         if rate == 0 {
-            return Ok(gas - NODE);
+            return self.integer(gas - NODE);
         }
         let size = match v {
             Value::Integer(n) | Value::Bits(n) => {
@@ -174,7 +229,8 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
         if self.bytes > self.budget.limits.max_bytes {
             return Err(DataError::ResourceLimit.into());
         }
-        Ok(gas - NODE - BigInt::from(size) * rate)
+        let cost = self.integer(BigInt::from(size) * rate)?;
+        self.integer(self.integer(gas - NODE)? - cost)
     }
     fn value(&mut self, gas: BigInt, v: &Value, depth: usize) -> Result<BigInt, Error<H::Error>> {
         self.nonnegative(&gas)?;
@@ -189,9 +245,9 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
             | Value::Bytes(_)
             | Value::String(_)
             | Value::Object(..) => self.leaf(gas, v),
-            Value::TypeRep(ty) => self.ty(gas - NODE, ty, depth + 1),
+            Value::TypeRep(ty) => self.ty(self.integer(gas - NODE)?, ty, depth + 1),
             Value::Tuple(vs) | Value::Variant { values: vs, .. } => {
-                self.list(gas - NODE, vs, depth + 1)
+                self.list(self.integer(gas - NODE)?, vs, depth + 1)
             }
             Value::List(vs) => self.list(gas, vs, depth + 1),
             Value::Map(map) => self.map(gas, map, depth + 1),
@@ -200,7 +256,8 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
                 if size.magnitude().bits().div_ceil(8) > self.limits().max_bytes as u64 {
                     return Err(DataError::ResourceLimit.into());
                 }
-                let gas = gas - size * self.model.unfold() - NODE;
+                let cost = self.integer(size * self.model.unfold())?;
+                let gas = self.integer(self.integer(gas - cost)? - NODE)?;
                 self.nonnegative(&gas)?;
                 let unfolded = self.host.unfold(id, self.limits()).map_err(Error::Host)?;
                 let gas = self.value(gas, &unfolded, depth + 1)?;
@@ -217,10 +274,10 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
     ) -> Result<BigInt, Error<H::Error>> {
         for v in values {
             self.budget.visit(depth)?;
-            gas = self.value(gas - NODE, v, depth)?;
+            gas = self.value(self.integer(gas - NODE)?, v, depth)?;
         }
         self.budget.visit(depth)?;
-        Ok(gas - NODE)
+        self.integer(gas - NODE)
     }
     fn map(
         &mut self,
@@ -229,7 +286,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
         depth: usize,
     ) -> Result<BigInt, Error<H::Error>> {
         self.budget.visit(depth)?;
-        gas -= NODE;
+        gas = self.integer(gas - NODE)?;
         if map.len() > self.limits().max_nodes {
             return Err(DataError::ResourceLimit.into());
         }
@@ -246,7 +303,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
             MapError::Lookup(n) => match n {},
         })?;
         for i in indices {
-            gas = self.value(gas - NODE, entries[i].0, depth)?;
+            gas = self.value(self.integer(gas - NODE)?, entries[i].0, depth)?;
             gas = self.value(gas, entries[i].1, depth)?;
         }
         Ok(gas)
@@ -255,10 +312,12 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
         self.nonnegative(&gas)?;
         self.budget.visit(depth)?;
         match ty {
-            Type::Tuple(vs) | Type::Variant(vs) => self.ty_list(gas - NODE, vs, depth + 1),
-            Type::List(t) => self.ty(gas - NODE, t, depth + 1),
+            Type::Tuple(vs) | Type::Variant(vs) => {
+                self.ty_list(self.integer(gas - NODE)?, vs, depth + 1)
+            }
+            Type::List(t) => self.ty(self.integer(gas - NODE)?, t, depth + 1),
             Type::Map(k, v) => {
-                let gas = self.ty(gas - NODE, k, depth + 1)?;
+                let gas = self.ty(self.integer(gas - NODE)?, k, depth + 1)?;
                 self.ty(gas, v, depth + 1)
             }
             Type::Integer
@@ -271,7 +330,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
                 | ObjectKind::Contract
                 | ObjectKind::Oracle
                 | ObjectKind::Channel,
-            ) => Ok(gas - self.model.leaf()),
+            ) => self.integer(gas - self.model.leaf()),
             _ => Err(DataError::InvalidType.into()),
         }
     }
@@ -288,7 +347,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
         }
         self.nonnegative(&gas)?;
         self.budget.visit(depth)?;
-        Ok(gas - self.model.leaf())
+        self.integer(gas - self.model.leaf())
     }
 }
 

@@ -13,6 +13,7 @@ use crate::{
 };
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
+mod compare;
 mod numbers;
 mod ops;
 
@@ -246,6 +247,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     fn gas_fault(e: gas::Error) -> Fault<S::Error> {
         match e {
             gas::Error::OutOfGas => Fault::Abort(Reason::OutOfGas),
+            gas::Error::NativeIntegerLimit => Fault::Exception(Exception::Native("system_limit")),
             gas::Error::Data(e) => e.into(),
             _ => unreachable!(),
         }
@@ -301,6 +303,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 Fault::Operational(Error::NeedContract(self.executor.context.current_contract))
             }
             StoreError::OutOfGas => Fault::Abort(Reason::OutOfGas),
+            StoreError::NativeIntegerLimit => self.native("system_limit"),
             _ => Fault::Exception(Exception::StoreData),
         }
     }

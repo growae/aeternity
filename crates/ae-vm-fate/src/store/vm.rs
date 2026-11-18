@@ -24,6 +24,7 @@ fn gas_error<E>(error: gas::Error) -> StoreError<E> {
     match error {
         gas::Error::Data(e) => StoreError::Data(e),
         gas::Error::OutOfGas => StoreError::OutOfGas,
+        gas::Error::NativeIntegerLimit => StoreError::NativeIntegerLimit,
         gas::Error::InvalidOrder => StoreError::InvalidOrder,
         gas::Error::Host(never) => match never {},
     }
@@ -385,6 +386,41 @@ impl<S: CachedSubtreeBackend, O: MapOrder> gas::UnfoldHost for Unfolder<'_, S, O
         self.lookup(id, limits).map(Value::Map)
     }
 }
+pub(crate) struct UnfoldPreparation {
+    pub charge: Charge,
+    pub has_maps: bool,
+    native_capacity: Option<u64>,
+}
+pub(crate) struct Unfolded {
+    pub value: Value,
+    pub charge: Charge,
+}
+// This phase runs before ensure_contract_store in the original VM. Keeping it
+// separate lets the interpreter preserve the exact failure/cache checkpoint.
+pub(crate) fn prepare_unfold(
+    protocol: u32,
+    value: &Value,
+    gas: BigInt,
+    order: &impl MapOrder,
+    limits: Limits,
+    native_capacity: Option<u64>,
+) -> Result<UnfoldPreparation, gas::Error> {
+    let mut charge = gas::TraversalMeter {
+        protocol,
+        model: CostModel::Simple,
+        native_capacity,
+    }
+    .charge(value, gas, &mut gas::NoUnfold, order, limits)?;
+    let mut budget = Budget::new(charge.remaining_limits);
+    let mut counts = maps::RefCounts::new();
+    maps::count(value, &mut counts, &mut budget, 0)?;
+    charge.remaining_limits.max_nodes -= budget.nodes;
+    Ok(UnfoldPreparation {
+        charge,
+        has_maps: !counts.is_empty(),
+        native_capacity,
+    })
+}
 impl<S: CachedSubtreeBackend> Scope<'_, S> {
     pub fn unfold(
         &mut self,
@@ -394,21 +430,28 @@ impl<S: CachedSubtreeBackend> Scope<'_, S> {
         order: &impl MapOrder,
         limits: Limits,
     ) -> Result<Outcome<Value>, StoreError<S::Error>> {
-        let simple = gas::traversal(self.protocol, CostModel::Simple, &value, gas, order, limits)
-            .map_err(gas_error)?;
-        let mut budget = Budget::new(simple.remaining_limits);
-        let mut counts = maps::RefCounts::new();
-        maps::count(&value, &mut counts, &mut budget, 0)?;
-        if counts.is_empty() {
-            return Ok(Outcome {
+        let prepared =
+            prepare_unfold(self.protocol, &value, gas, order, limits, None).map_err(gas_error)?;
+        let unfolded = self.unfold_prepared(value, prepared, model, order)?;
+        Ok(Outcome {
+            value: unfolded.value,
+            gas: unfolded.charge.gas,
+        })
+    }
+    pub(crate) fn unfold_prepared(
+        &mut self,
+        value: Value,
+        prepared: UnfoldPreparation,
+        model: CostModel,
+        order: &impl MapOrder,
+    ) -> Result<Unfolded, StoreError<S::Error>> {
+        if !prepared.has_maps {
+            return Ok(Unfolded {
                 value,
-                gas: simple.gas,
+                charge: prepared.charge,
             });
         }
-        let limits = Limits {
-            max_nodes: budget.limits.max_nodes - budget.nodes,
-            ..budget.limits
-        };
+        let limits = prepared.charge.remaining_limits;
         let mut staged = self.stores.clone();
         staged.cache_metadata(&self.current, limits)?;
         let metadata = staged
@@ -423,18 +466,16 @@ impl<S: CachedSubtreeBackend> Scope<'_, S> {
             order,
             remaining: limits,
         };
-        let charged = gas::traversal_with_host(
-            self.protocol,
+        let charged = gas::TraversalMeter {
+            protocol: self.protocol,
             model,
-            &value,
-            simple.gas,
-            &mut host,
-            order,
-            limits,
-        )
+            native_capacity: prepared.native_capacity,
+        }
+        .charge(&value, prepared.charge.gas, &mut host, order, limits)
         .map_err(|e| match e {
             gas::Error::Data(e) => StoreError::Data(e),
             gas::Error::OutOfGas => StoreError::OutOfGas,
+            gas::Error::NativeIntegerLimit => StoreError::NativeIntegerLimit,
             gas::Error::InvalidOrder => StoreError::InvalidOrder,
             gas::Error::Host(e) => e,
         })?;
@@ -451,7 +492,7 @@ impl<S: CachedSubtreeBackend> Scope<'_, S> {
                     MapError::InvalidOrder => StoreError::InvalidOrder,
                     MapError::Lookup(e) => e,
                 })?;
-        subtract_work(
+        let remaining_limits = subtract_work(
             host.remaining,
             limits,
             Limits {
@@ -460,9 +501,12 @@ impl<S: CachedSubtreeBackend> Scope<'_, S> {
             },
         )?;
         *self.stores = host.stores;
-        Ok(Outcome {
+        Ok(Unfolded {
             value,
-            gas: charged.gas,
+            charge: Charge {
+                gas: charged.gas,
+                remaining_limits,
+            },
         })
     }
 }

@@ -180,11 +180,26 @@ impl MapOrder for Otp26 {
     }
 }
 pub fn compare(a: &Value, b: &Value, limits: Limits) -> Result<Ordering, Error> {
+    compare_counted(a, b, limits).map(|(order, _)| order)
+}
+pub(crate) fn compare_counted(
+    a: &Value,
+    b: &Value,
+    limits: Limits,
+) -> Result<(Ordering, Limits), Error> {
     let mut budget = Budget::new(limits);
     let mut bytes = 0;
     let a = value_term(a, &mut budget, &mut bytes, 0)?;
     let b = value_term(b, &mut budget, &mut bytes, 0)?;
-    compare_terms(&a, &b, &mut budget, 0)
+    let order = compare_terms(&a, &b, &mut budget, 0)?;
+    Ok((
+        order,
+        Limits {
+            max_nodes: limits.max_nodes - budget.nodes,
+            max_bytes: limits.max_bytes - bytes,
+            ..limits
+        },
+    ))
 }
 #[derive(Debug)]
 enum Term<'a> {

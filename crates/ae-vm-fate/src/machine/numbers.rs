@@ -306,7 +306,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         Ok(())
     }
-    fn native_capacity(&self) -> u64 {
+    pub(super) fn native_capacity(&self) -> u64 {
         // OTP26 erl_term.h BIG_ARITY_MAX and big.h D_EXP. Both are
         // explicit compatibility inputs, independent of the Rust target.
         match self.executor.context.arithmetic_word_size {

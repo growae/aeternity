@@ -47,6 +47,7 @@ pub enum StoreError<E> {
     ProtocolMismatch,
     MissingMap,
     OutOfGas,
+    NativeIntegerLimit,
 }
 impl<E> From<Error> for StoreError<E> {
     fn from(e: Error) -> Self {
