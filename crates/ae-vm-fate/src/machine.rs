@@ -104,6 +104,12 @@ pub enum Error<E> {
     NeedContract([u8; 32]),
     ProtocolMismatch,
     Unsupported(Opcode),
+    // The original native code has undefined behavior for this input. Keep
+    // this outside VM outcomes: it must not become block validity or an abort.
+    UnresolvedNativeBehavior {
+        opcode: Opcode,
+        profile: ae_crypto::bls::Profile,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {

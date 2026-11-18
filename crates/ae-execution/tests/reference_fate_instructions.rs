@@ -63,6 +63,9 @@ static BLS_GT: LazyLock<J> = LazyLock::new(|| {
 static BLS_PAIRING: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_bls_pairing.json")).unwrap()
 });
+static BLS_REVERSE: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_bls_reverse.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -350,10 +353,13 @@ fn instruction_results_abort_checkpoints_and_store_caches_match_original_dispatc
     check_runs(&FIXTURE);
 }
 fn check_runs(fixture: &J) {
+    check_run_rows(fixture, &fixture["cases"]);
+}
+fn check_run_rows(fixture: &J, cases: &J) {
     assert_eq!(fixture["base"], FIXTURE["base"]);
     let order = otp_order::profile(&fixture["profile"]);
     let contracts = BTreeMap::new();
-    for (i, row) in rows(&fixture["cases"]).iter().enumerate() {
+    for (i, row) in rows(cases).iter().enumerate() {
         let overrides = overrides(row);
         let ctx = context(row);
         let executor = Executor {
@@ -383,6 +389,76 @@ fn check_runs(fixture: &J) {
                 row["op"],
                 run[0]
             );
+        }
+    }
+}
+#[test]
+fn bls_reverse_conversion_defined_results_and_failure_checkpoints_match_original() {
+    check_runs(&BLS_REVERSE);
+    check_sequences(&BLS_REVERSE);
+    check_fetches(&BLS_REVERSE);
+    check_run_rows(&BLS_REVERSE, &BLS_REVERSE["prefix"]);
+}
+
+#[test]
+fn bls_undefined_native_write_is_an_operational_stop_without_publishing_state() {
+    let order = otp_order::profile(&BLS_REVERSE["profile"]);
+    let overrides = Overrides::default();
+    let contracts = BTreeMap::new();
+    for row in rows(&BLS_REVERSE["prefix"]).iter().filter(|r| r["vm"] != 5) {
+        let ctx = context(row);
+        let executor = Executor {
+            context: &ctx,
+            order: &order,
+            overrides: &overrides,
+            contracts: &contracts,
+        };
+        let original = instruction(&row["op"]);
+        let Operand::Immediate(raw) = &original.operands[1] else {
+            unreachable!()
+        };
+        for source in [
+            Operand::Immediate(raw.clone()),
+            Operand::Stack,
+            Operand::Variable(Value::Integer(3.into())),
+            Operand::Variable(Value::Integer((-3).into())),
+        ] {
+            for destination in [
+                Operand::Stack,
+                Operand::Variable(Value::Integer((-4).into())),
+                Operand::Immediate(Value::Integer(0.into())),
+            ] {
+                let mut input = state(row, &serde_json::json!("1000000"));
+                input.accumulator.top = raw.clone();
+                input.accumulator.rest = [Value::Integer(99.into())].into();
+                input
+                    .memory
+                    .insert(Register::Variable(Value::Integer(3.into())), raw.clone());
+                input.stores.put_value(&KEY, 3.into(), raw.clone()).unwrap();
+                let before = format!("{input:?}");
+                let ins = Instruction {
+                    opcode: original.opcode,
+                    operands: vec![destination, source.clone()],
+                };
+                for _ in 0..2 {
+                    assert!(matches!(executor.step(&input, &ins, Limits::default()),
+                        Err(Error::UnresolvedNativeBehavior { opcode, profile })
+                        if opcode == original.opcode && profile == ctx.bls_profile));
+                    assert_eq!(format!("{input:?}"), before);
+                }
+                assert!(matches!(
+                    executor.step(
+                        &input,
+                        &ins,
+                        Limits {
+                            max_nodes: 0,
+                            ..Limits::default()
+                        }
+                    ),
+                    Err(Error::Data(ae_vm_fate::Error::ResourceLimit))
+                ));
+                assert_eq!(format!("{input:?}"), before);
+            }
         }
     }
 }

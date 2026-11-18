@@ -9,6 +9,8 @@ pub(super) fn supported(op: Opcode) -> bool {
         op,
         Bls12381IntToFr
             | Bls12381IntToFp
+            | Bls12381FrToInt
+            | Bls12381FpToInt
             | Bls12381G1Neg
             | Bls12381G1Norm
             | Bls12381G1Valid
@@ -36,6 +38,8 @@ fn name(op: Opcode) -> &'static str {
     match op {
         Bls12381IntToFr => "bls12_381_int_to_fr",
         Bls12381IntToFp => "bls12_381_int_to_fp",
+        Bls12381FrToInt => "bls12_381_fr_to_int",
+        Bls12381FpToInt => "bls12_381_fp_to_int",
         Bls12381G1Neg => "bls12_381_g1_neg",
         Bls12381G1Norm => "bls12_381_g1_norm",
         Bls12381G1Valid => "bls12_381_g1_valid",
@@ -112,6 +116,32 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         let x = self.read(&a[1])?;
         let profile = self.executor.context.bls_profile;
+        if matches!(op, Bls12381FrToInt | Bls12381FpToInt) {
+            let result = if op == Bls12381FrToInt {
+                let Some(raw) = field(&x) else {
+                    return Err(self.type_error(name, vec![x]));
+                };
+                bls::fr_to_integer(profile, &raw)
+            } else {
+                let Some(raw) = fp(&x) else {
+                    return Err(self.type_error(name, vec![x]));
+                };
+                bls::fp_to_integer(profile, &raw)
+            };
+            let integer = match result {
+                Ok(value) => value,
+                Err(bls::IntegerConversionError::DecimalBufferRejected) => {
+                    return Err(self.native("badmatch"));
+                }
+                Err(bls::IntegerConversionError::UndefinedDecimalBufferWrite) => {
+                    return Err(Fault::Operational(Error::UnresolvedNativeBehavior {
+                        opcode: op,
+                        profile,
+                    }));
+                }
+            };
+            return self.write(&a[0], Value::Integer(integer.into()));
+        }
         if matches!(
             op,
             Bls12381G1Add

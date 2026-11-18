@@ -1,10 +1,12 @@
 // Legacy emcl raw coordinates, not standard compressed BLS encodings.
 // The explicit native profile must come from trusted chain compatibility data.
 // MCL 11976be. Copyright (c) 2015 MITSUNARI Shigeo. See LICENSE-MCL.
+mod conversion;
 mod field;
 mod point;
 mod scalar;
 mod tower;
+pub use conversion::{IntegerConversionError, fp_to_integer, fr_to_integer};
 use field::{Field, Fp, Fp2};
 use point::Point;
 
