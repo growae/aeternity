@@ -13,6 +13,7 @@ use crate::{
 };
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
+mod numbers;
 mod ops;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +37,8 @@ pub struct Context {
     pub in_auth: bool,
     pub on_chain: bool,
     pub reserved_gas: BigInt,
+    // Pinned native integer capacity; never infer it from the Rust host.
+    pub arithmetic_word_size: crate::maps::order::WordSize,
 }
 pub struct Executor<'a, S, O> {
     pub context: &'a Context,
@@ -53,6 +56,9 @@ pub enum Reason {
     MissingMapKey,
     HeadEmpty,
     TailEmpty,
+    Arithmetic(&'static str),
+    DivisionByZero,
+    ModuloByZero,
     Undefined(Register),
     Type {
         operation: &'static str,
@@ -216,7 +222,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             }
             Err(Fault::Exception(e)) => Ok(Outcome::Exception(e)),
             Err(Fault::Revert(value)) => {
-                step.state.meter.gas += &self.context.reserved_gas;
+                step.state.meter.gas =
+                    match step.native_integer(&step.state.meter.gas + &self.context.reserved_gas) {
+                        Ok(gas) => gas,
+                        Err(Fault::Exception(e)) => return Ok(Outcome::Exception(e)),
+                        _ => unreachable!(),
+                    };
                 Ok(Outcome::Revert {
                     state: step.state,
                     value,
@@ -240,19 +251,29 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
     }
     fn spend(&mut self, n: BigInt) -> Result<(), Fault<S::Error>> {
-        self.state.meter.spend(n).map_err(Self::gas_fault)
+        let left = self.native_integer(&self.state.meter.gas - n)?;
+        if left.sign() == Sign::Minus {
+            return Err(Fault::Abort(Reason::OutOfGas));
+        }
+        self.state.meter.gas = left;
+        Ok(())
     }
     fn cells(&mut self, n: BigInt) -> Result<(), Fault<S::Error>> {
-        let delta = if n.sign() == Sign::Minus && self.state.meter.protocol >= 5 {
-            -&n + 2
+        let delta = self.native_integer(
+            if n.sign() == Sign::Minus && self.state.meter.protocol >= 5 {
+                -&n + 2
+            } else {
+                n
+            },
+        )?;
+        let total = self.native_integer(&self.state.meter.created_cells + &delta)?;
+        let cost = if total <= BigInt::from(1024) {
+            delta
         } else {
-            n.clone()
+            self.product(&delta, &self.native_integer((&total >> 10) + 1)?)?
         };
-        let result = self.state.meter.new_cells(n);
-        if result.is_err() {
-            self.state.meter.created_cells += delta;
-        }
-        result.map_err(Self::gas_fault)
+        self.state.meter.created_cells = total;
+        self.spend(cost)
     }
     fn stack_fault(e: stack::Error) -> Fault<S::Error> {
         match e {
@@ -297,11 +318,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     }
     fn read(&mut self, operand: &Operand) -> Result<Value, Fault<S::Error>> {
         match operand {
-            Operand::Stack => self
-                .state
-                .accumulator
-                .pop(&mut self.state.meter)
-                .map_err(Self::stack_fault),
+            Operand::Stack => {
+                let result = self.state.accumulator.pop(&mut self.state.meter);
+                self.native_meter()?;
+                result.map_err(Self::stack_fault)
+            }
             Operand::Immediate(v) => {
                 self.check(v)?;
                 Ok(v.clone())
@@ -373,11 +394,14 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     fn write(&mut self, to: &Operand, value: Value) -> Result<(), Fault<S::Error>> {
         self.check(&value)?;
         match to {
-            Operand::Stack => self
-                .state
-                .accumulator
-                .push(value, &mut self.state.meter, self.remaining)
-                .map_err(Self::stack_fault),
+            Operand::Stack => {
+                let result =
+                    self.state
+                        .accumulator
+                        .push(value, &mut self.state.meter, self.remaining);
+                self.native_meter()?;
+                result.map_err(Self::stack_fault)
+            }
             Operand::Immediate(_) => Err(Fault::Exception(Exception::Native("function_clause"))),
             Operand::Variable(Value::Integer(n)) if n.sign() == Sign::Minus => {
                 self.ensure_store()?;

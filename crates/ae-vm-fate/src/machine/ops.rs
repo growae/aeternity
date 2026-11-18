@@ -4,47 +4,48 @@ use num_traits::ToPrimitive;
 
 pub(super) fn supported(op: Opcode) -> bool {
     use Opcode::*;
-    matches!(
-        op,
-        Push | Pop
-            | Store
-            | Dupa
-            | Dup
-            | Nop
-            | Inca
-            | Inc
-            | Deca
-            | Dec
-            | And
-            | Or
-            | Not
-            | Tuple
-            | Element
-            | Setelement
-            | MapEmpty
-            | MapLookup
-            | MapLookupd
-            | MapUpdate
-            | MapDelete
-            | MapMember
-            | MapFromList
-            | MapSize
-            | MapToList
-            | Nil
-            | IsNil
-            | Cons
-            | Hd
-            | Tl
-            | Length
-            | Append
-            | Jump
-            | Jumpif
-            | SwitchV2
-            | SwitchV3
-            | SwitchVn
-            | Abort
-            | Exit
-    )
+    super::numbers::supported(op)
+        || matches!(
+            op,
+            Push | Pop
+                | Store
+                | Dupa
+                | Dup
+                | Nop
+                | Inca
+                | Inc
+                | Deca
+                | Dec
+                | And
+                | Or
+                | Not
+                | Tuple
+                | Element
+                | Setelement
+                | MapEmpty
+                | MapLookup
+                | MapLookupd
+                | MapUpdate
+                | MapDelete
+                | MapMember
+                | MapFromList
+                | MapSize
+                | MapToList
+                | Nil
+                | IsNil
+                | Cons
+                | Hd
+                | Tl
+                | Length
+                | Append
+                | Jump
+                | Jumpif
+                | SwitchV2
+                | SwitchV3
+                | SwitchVn
+                | Abort
+                | Exit
+        )
 }
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     pub(super) fn eval(&mut self, instruction: &Instruction) -> Result<Control, Fault<S::Error>> {
@@ -71,10 +72,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 } else {
                     self.read(&a[0])?
                 };
-                self.state
-                    .accumulator
-                    .duplicate(&n, &mut self.state.meter, self.remaining)
-                    .map_err(Self::stack_fault)?;
+                let result =
+                    self.state
+                        .accumulator
+                        .duplicate(&n, &mut self.state.meter, self.remaining);
+                self.native_meter()?;
+                result.map_err(Self::stack_fault)?;
             }
             Inca | Inc | Deca | Dec => {
                 let to = if matches!(op, Inca | Deca) {
@@ -93,10 +96,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         })
                     });
                 };
-                self.write(
-                    to,
-                    Value::Integer(n + if matches!(op, Inca | Inc) { 1 } else { -1 }),
-                )?;
+                let n = self.native_integer(n + if matches!(op, Inca | Inc) { 1 } else { -1 })?;
+                self.write(to, Value::Integer(n))?;
             }
             And | Or => {
                 let x = self.read(&a[1])?;
@@ -137,8 +138,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let vs = self
                     .state
                     .accumulator
-                    .pop_n(size, &mut self.state.meter, self.remaining)
-                    .map_err(Self::stack_fault)?;
+                    .pop_n(size, &mut self.state.meter, self.remaining);
+                self.native_meter()?;
+                let vs = vs.map_err(Self::stack_fault)?;
                 self.cells(n + 2)?;
                 self.write(&a[0], Value::Tuple(vs))?;
             }
@@ -385,6 +387,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     Fault::Abort(Reason::UserExit(bytes))
                 });
             }
+            _ if super::numbers::supported(op) => self.numeric(op, a)?,
             _ => return Err(Fault::Operational(Error::Unsupported(op))),
         }
         Ok(Control::Next)

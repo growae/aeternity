@@ -5,7 +5,7 @@ use crate::{
     Budget, Error, Limits,
     value::{ObjectKind, ObjectPayload, Value},
 };
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -25,7 +25,7 @@ pub enum Type {
     Variant(Vec<Type>),
     // Inferred, unvisited variant constructors have an arity, not a full type.
     // This is not a serializable type representation.
-    Arity(u8),
+    Arity(BigInt),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -67,7 +67,16 @@ fn infer_inner(v: &Value, budget: &mut Budget, depth: usize) -> Result<Type, Err
             if *tag >= arities.len() {
                 return Err(Error::InvalidValue);
             }
-            let mut ts: Vec<_> = arities.iter().map(|a| Type::Arity(*a)).collect();
+            // Runtime arities can be large signed integers. Bound the graph
+            // before copying it, then charge each inferred constructor node.
+            crate::value::check_limits(v, budget.limits)?;
+            let mut ts: Vec<_> = arities
+                .iter()
+                .map(|n| {
+                    budget.visit(depth + 1)?;
+                    Ok(Type::Arity(n.clone()))
+                })
+                .collect::<Result<_, Error>>()?;
             ts[*tag] = Type::Tuple(
                 values
                     .iter()
@@ -116,7 +125,7 @@ fn intersect(a: &Type, b: &Type, budget: &mut Budget, depth: usize) -> Result<Ty
                 .zip(b)
                 .map(|(a, b)| match (a, b) {
                     (Type::Arity(n), Type::Tuple(ts)) | (Type::Tuple(ts), Type::Arity(n))
-                        if usize::from(*n) == ts.len() =>
+                        if *n == BigInt::from(ts.len()) =>
                     {
                         Ok(Type::Tuple(ts.clone()))
                     }
@@ -198,7 +207,7 @@ fn match_inner(
             let mut result = Bindings::new();
             for (a, b) in a.iter().zip(b) {
                 match (a, b) {
-                    (Type::Tuple(ts), Type::Arity(n)) if ts.len() == usize::from(*n) => {}
+                    (Type::Tuple(ts), Type::Arity(n)) if BigInt::from(ts.len()) == *n => {}
                     (Type::Tuple(_), Type::Tuple(_)) => merge(
                         &mut result,
                         match_inner(a, b, version, budget, depth + 1)?,

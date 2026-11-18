@@ -409,6 +409,7 @@ fn value_term<'a>(
             Term::Atom(Atom::Bits),
             integer(n, budget, bytes, depth + 1)?,
         ]),
+        Value::BitsNil => Term::Tuple(vec![Term::Atom(Atom::Bits), Term::List(vec![])]),
         Value::String(v) => {
             bytes_used(v.len(), budget, bytes)?;
             Term::Binary(v)
@@ -447,11 +448,14 @@ fn value_term<'a>(
             if arities.len() > budget.limits.max_nodes.saturating_sub(budget.nodes) {
                 return Err(Error::ResourceLimit);
             }
-            budget.nodes += arities.len();
-            bytes_used(arities.len(), budget, bytes)?;
             Term::Tuple(vec![
                 Term::Atom(Atom::Variant),
-                Term::List(arities.iter().map(|&n| small(n)).collect()),
+                Term::List(
+                    arities
+                        .iter()
+                        .map(|n| integer(n, budget, bytes, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                ),
                 small(*tag),
                 Term::Tuple(values(vs, budget, bytes, depth + 1)?),
             ])
@@ -477,7 +481,7 @@ fn type_term<'a>(
         Type::Any => Term::Atom(Atom::Any),
         Type::ContractBytearray => Term::Atom(Atom::ContractBytearray),
         Type::Object(k) => Term::Atom(object_atom(*k)),
-        Type::Arity(n) => small(*n),
+        Type::Arity(n) => integer(n, budget, bytes, depth + 1)?,
         Type::Variable(n) => Term::Tuple(vec![Term::Atom(Atom::TypeVariable), small(*n)]),
         Type::Bytes(n) => Term::Tuple(vec![
             Term::Atom(Atom::Bytes),

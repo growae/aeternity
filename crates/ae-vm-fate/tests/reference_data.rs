@@ -10,6 +10,44 @@ static FIXTURE: LazyLock<Json> =
 #[path = "support/values.rs"]
 mod values;
 use values::*;
+#[test]
+fn variant_arity_expansion_obeys_node_budgets_and_retries_canonical_bytes() {
+    let v = Value::Variant {
+        arities: vec![0.into(); 1024],
+        tag: 0,
+        values: vec![],
+    };
+    let limits = Limits {
+        max_nodes: 64,
+        ..Limits::default()
+    };
+    assert_eq!(encoding::encode(&v, limits), Err(Error::ResourceLimit));
+    assert_eq!(types::infer(&v, limits), Err(Error::ResourceLimit));
+    let encoded = encoding::encode(&v, Limits::default()).unwrap();
+    assert_eq!(
+        encoding::decode(&encoded, limits),
+        Err(Error::ResourceLimit)
+    );
+    assert_eq!(encoding::decode(&encoded, Limits::default()).unwrap(), v);
+    assert_eq!(encoding::encode(&v, Limits::default()).unwrap(), encoded);
+    assert!(types::infer(&v, Limits::default()).is_ok());
+    let large = Value::Variant {
+        arities: vec![0.into(), -(num_bigint::BigInt::from(1) << 8192_usize)],
+        tag: 0,
+        values: vec![],
+    };
+    assert_eq!(
+        types::infer(
+            &large,
+            Limits {
+                max_bytes: 128,
+                ..Limits::default()
+            }
+        ),
+        Err(Error::ResourceLimit)
+    );
+    assert!(types::infer(&large, Limits::default()).is_ok());
+}
 fn bindings(v: &Json) -> Option<Bindings> {
     if v.is_null() {
         None
@@ -269,7 +307,7 @@ fn budgets_remain_distinct_from_malformed_data() {
         Err(Error::InvalidType)
     );
     assert_eq!(
-        encoding::encode_type(&Type::Arity(0), Limits::default()),
+        encoding::encode_type(&Type::Arity(0.into()), Limits::default()),
         Err(Error::InvalidType)
     );
     let mut map = BTreeMap::new();

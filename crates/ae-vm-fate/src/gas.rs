@@ -164,6 +164,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
             }
             Value::String(b) | Value::Bytes(b) => b.len(),
             Value::Object(..) => 32,
+            Value::BitsNil => return Err(DataError::InvalidValue.into()),
             _ => 1,
         };
         self.bytes = self
@@ -184,6 +185,7 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
             | Value::Boolean(_)
             | Value::Integer(_)
             | Value::Bits(_)
+            | Value::BitsNil
             | Value::Bytes(_)
             | Value::String(_)
             | Value::Object(..) => self.leaf(gas, v),

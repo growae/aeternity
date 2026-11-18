@@ -35,7 +35,7 @@ impl Walk {
         self.budget.visit(depth)?;
         match value {
             Value::Integer(n) | Value::Bits(n) => self.number(n.magnitude().bits())?,
-            Value::Boolean(_) | Value::Tombstone | Value::Void => {}
+            Value::Boolean(_) | Value::Tombstone | Value::Void | Value::BitsNil => {}
             Value::String(s) | Value::Bytes(s) | Value::ContractBytearray(s) => {
                 self.bytes(s.len())?
             }
@@ -46,7 +46,10 @@ impl Walk {
                 tag: _,
                 values,
             } => {
-                self.bytes(arities.len())?;
+                for n in arities {
+                    self.budget.visit(depth + 1)?;
+                    self.number(n.magnitude().bits())?;
+                }
                 self.values(values, depth + 1)?;
             }
             Value::Map(m) => self.map(m, depth + 1)?,
@@ -87,6 +90,7 @@ impl Walk {
         self.budget.visit(depth)?;
         match ty {
             Type::Bytes(Some(n)) => self.number(n.bits())?,
+            Type::Arity(n) => self.number(n.magnitude().bits())?,
             Type::List(t) => self.ty(t, depth + 1)?,
             Type::Tuple(ts) | Type::Variant(ts) => {
                 for t in ts {

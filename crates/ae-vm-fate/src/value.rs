@@ -51,6 +51,9 @@ pub enum Value {
     Integer(BigInt),
     Boolean(bool),
     Bits(BigInt),
+    // OTP26 bitwise overflow can return NIL, wrapped by a FATE bits opcode
+    // as {bits, []}. This runtime term is not a valid serialized FATE value.
+    BitsNil,
     String(Vec<u8>),
     Bytes(Vec<u8>),
     Object(ObjectKind, ObjectPayload),
@@ -68,7 +71,9 @@ pub enum Value {
     // expose it inside the engine; it has no canonical FATE wire encoding.
     Void,
     Variant {
-        arities: Vec<u8>,
+        // Runtime constructors historically accept negative, unselected
+        // arities. Only the wire encoding requires bytes.
+        arities: Vec<BigInt>,
         tag: usize,
         values: Vec<Value>,
     },

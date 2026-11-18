@@ -255,8 +255,18 @@ impl<'a> Decoder<'a> {
                 if arities.get(tag).map(|n| usize::from(*n)) != Some(values.len()) {
                     return Err(Error::InvalidEncoding);
                 }
+                if arities.len()
+                    > self
+                        .budget
+                        .limits
+                        .max_nodes
+                        .saturating_sub(self.budget.nodes)
+                {
+                    return Err(Error::ResourceLimit);
+                }
+                self.budget.nodes += arities.len();
                 Value::Variant {
-                    arities: arities.to_vec(),
+                    arities: arities.iter().map(|n| BigInt::from(*n)).collect(),
                     tag,
                     values,
                 }
@@ -452,17 +462,39 @@ impl Encoder {
                 self.put(&[0xbf])?;
                 self.rlp_integer(&id)
             }
-            Value::StoreMap { .. } | Value::Tombstone | Value::Void => Err(Error::InvalidValue),
+            Value::StoreMap { .. } | Value::Tombstone | Value::Void | Value::BitsNil => {
+                Err(Error::InvalidValue)
+            }
             Value::Variant {
                 arities,
                 tag,
                 values,
             } => {
-                if arities.get(*tag).map(|n| usize::from(*n)) != Some(values.len()) {
+                if arities.get(*tag) != Some(&BigInt::from(values.len())) {
                     return Err(Error::InvalidValue);
                 }
+                if arities.len()
+                    > self
+                        .budget
+                        .limits
+                        .max_nodes
+                        .saturating_sub(self.budget.nodes)
+                    || arities.len()
+                        > self
+                            .budget
+                            .limits
+                            .max_bytes
+                            .saturating_sub(self.bytes.len())
+                {
+                    return Err(Error::ResourceLimit);
+                }
+                self.budget.nodes += arities.len();
                 self.put(&[0xaf])?;
-                self.rlp_bytes(arities)?;
+                let arities = arities
+                    .iter()
+                    .map(|n| n.to_u8().ok_or(Error::InvalidValue))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.rlp_bytes(&arities)?;
                 self.put(&[*tag as u8])?;
                 self.elements(values, true, depth + 1)
             }

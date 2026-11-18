@@ -27,6 +27,12 @@ use values::{bytes, rows, string, value};
 static FIXTURE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_instructions.json")).unwrap()
 });
+static NUMBERS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_numbers.json")).unwrap()
+});
+static NATIVE_LIMITS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_integer_limits.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -96,6 +102,11 @@ fn context(row: &J) -> Context {
         in_auth: row["auth"].as_bool().unwrap(),
         on_chain: row["onchain"].as_bool().unwrap(),
         reserved_gas: 18.into(),
+        arithmetic_word_size: match row["word_size"].as_u64().unwrap_or(64) {
+            32 => ae_vm_fate::maps::order::WordSize::Bits32,
+            64 => ae_vm_fate::maps::order::WordSize::Bits64,
+            _ => unreachable!(),
+        },
     }
 }
 fn instruction(j: &J) -> Instruction {
@@ -183,6 +194,12 @@ fn assert_reason(actual: &Reason, expected: &J) {
         Reason::MissingMapKey => "missing_map_key",
         Reason::HeadEmpty => "head_empty",
         Reason::TailEmpty => "tail_empty",
+        Reason::DivisionByZero => "division_by_zero",
+        Reason::ModuloByZero => "mod_by_zero",
+        Reason::Arithmetic(reason) => {
+            assert_eq!(*reason, string(&expected[1]));
+            "arithmetic"
+        }
         Reason::Undefined(r) => {
             assert_eq!(r, &register(&expected[1], &expected[2]));
             "undefined"
@@ -288,9 +305,13 @@ fn assert_outcome(out: Outcome<Backend>, expected: &J) {
 }
 #[test]
 fn instruction_results_abort_checkpoints_and_store_caches_match_original_dispatcher() {
-    let order = otp_order::profile(&FIXTURE["profile"]);
+    check_runs(&FIXTURE);
+}
+fn check_runs(fixture: &J) {
+    assert_eq!(fixture["base"], FIXTURE["base"]);
+    let order = otp_order::profile(&fixture["profile"]);
     let contracts = BTreeMap::new();
-    for (i, row) in rows(&FIXTURE["cases"]).iter().enumerate() {
+    for (i, row) in rows(&fixture["cases"]).iter().enumerate() {
         let overrides = overrides(row);
         let ctx = context(row);
         let executor = Executor {
@@ -300,10 +321,11 @@ fn instruction_results_abort_checkpoints_and_store_caches_match_original_dispatc
             contracts: &contracts,
         };
         let ins = instruction(&row["op"]);
+        let mut initial = state(row, &row["initial"]["gas"]);
         for run in rows(&row["runs"]) {
-            let expected = &FIXTURE["results"][run[1].as_u64().unwrap() as usize];
+            initial.meter.gas = number(&run[0]);
+            let expected = &fixture["results"][run[1].as_u64().unwrap() as usize];
             let result = std::panic::catch_unwind(|| {
-                let initial = state(row, &run[0]);
                 assert_outcome(
                     executor.step(&initial, &ins, Limits::default()).unwrap(),
                     expected,
@@ -324,10 +346,13 @@ fn instruction_results_abort_checkpoints_and_store_caches_match_original_dispatc
 }
 #[test]
 fn chained_instructions_reuse_dirty_registers_and_store_caches() {
-    let order = otp_order::profile(&FIXTURE["profile"]);
+    check_sequences(&FIXTURE);
+}
+fn check_sequences(fixture: &J) {
+    let order = otp_order::profile(&fixture["profile"]);
     let overrides = Overrides::default();
     let contracts = BTreeMap::new();
-    for row in rows(&FIXTURE["sequences"]) {
+    for row in rows(&fixture["sequences"]) {
         let ctx = context(row);
         let executor = Executor {
             context: &ctx,
@@ -345,7 +370,7 @@ fn chained_instructions_reuse_dirty_registers_and_store_caches() {
             } else {
                 assert_eq!(i + 1, rows(&row["steps"]).len());
             }
-            assert_outcome(out, &FIXTURE["results"][step[1].as_u64().unwrap() as usize]);
+            assert_outcome(out, &fixture["results"][step[1].as_u64().unwrap() as usize]);
         }
     }
 }
@@ -416,17 +441,334 @@ fn unimplemented_instruction_body_is_an_operational_stop() {
         overrides: &overrides,
         contracts: &contracts,
     };
-    let add = Instruction {
-        opcode: Opcode::Add,
-        operands: vec![
-            Operand::Stack,
-            Operand::Immediate(Value::Integer(1.into())),
-            Operand::Immediate(Value::Integer(2.into())),
-        ],
+    let call = Instruction {
+        opcode: Opcode::Call,
+        operands: vec![Operand::Immediate(Value::Integer(0.into()))],
     };
     assert!(matches!(
-        executor.step(&input, &add, Limits::default()),
-        Err(Error::Unsupported(Opcode::Add))
+        executor.step(&input, &call, Limits::default()),
+        Err(Error::Unsupported(Opcode::Call))
     ));
     assert_state(&input, &row["initial"]);
+}
+
+#[test]
+fn arithmetic_bits_and_variants_match_original_dispatcher_and_sequences() {
+    check_runs(&NUMBERS);
+    check_sequences(&NUMBERS);
+}
+
+#[test]
+fn signed_runtime_variant_arities_preserve_inference_order_hash_and_wire_rejection() {
+    let order = otp_order::profile(&NUMBERS["profile"]);
+    for row in rows(&NUMBERS["variants"]) {
+        let v = value(&row["value"]);
+        let encoded = ae_vm_fate::encoding::encode(&v, Limits::default());
+        assert_ne!(encoded, Err(ae_vm_fate::Error::ResourceLimit));
+        assert_eq!(
+            encoded.ok(),
+            row["encoded"].as_str().map(|s| hex::decode(s).unwrap())
+        );
+        assert_eq!(
+            ae_vm_fate::types::infer(&v, Limits::default()).unwrap(),
+            values::ty(&row["inferred"])
+        );
+        assert_eq!(
+            order.hash(&v, Limits::default()).unwrap(),
+            row["hash"].as_u64().unwrap() as u32
+        );
+        for (j, other) in rows(&NUMBERS["variants"]).iter().enumerate() {
+            let w = value(&other["value"]);
+            assert_eq!(
+                ae_vm_fate::value::compare(&v, &w, Limits::default())
+                    .unwrap()
+                    .is_lt(),
+                row["comparisons"][j][0]
+            );
+            assert_eq!(
+                ae_vm_fate::maps::order::compare(&v, &w, Limits::default())
+                    .unwrap()
+                    .is_lt(),
+                row["comparisons"][j][1]
+            );
+        }
+    }
+}
+
+#[test]
+fn expanding_arithmetic_and_long_powers_stop_operationally_and_retry_unchanged_inputs() {
+    let order = otp_order::profile(&NUMBERS["profile"]);
+    let overrides = Overrides::default();
+    let contracts = BTreeMap::new();
+    for (opcode, left, right, limits) in [
+        (
+            "BSL",
+            BigInt::from(17),
+            BigInt::from(1024),
+            Limits {
+                max_bytes: 128,
+                ..Limits::default()
+            },
+        ),
+        (
+            "MUL",
+            BigInt::from(1) << 256,
+            BigInt::from(1) << 256,
+            Limits {
+                max_bytes: 200,
+                ..Limits::default()
+            },
+        ),
+        (
+            "POW",
+            BigInt::from(17),
+            BigInt::from(255),
+            Limits {
+                max_bytes: 128,
+                ..Limits::default()
+            },
+        ),
+        (
+            "POW",
+            BigInt::from(1),
+            BigInt::from(1) << 80,
+            Limits {
+                max_nodes: 40,
+                ..Limits::default()
+            },
+        ),
+    ] {
+        let row = rows(&NUMBERS["cases"])
+            .iter()
+            .find(|r| {
+                r["protocol"] == 5
+                    && r["op"][0] == opcode
+                    && value(&r["initial"]["top"]) == Value::Integer(left.clone())
+                    && value(&r["initial"]["rest"][0]) == Value::Integer(right.clone())
+            })
+            .unwrap();
+        let input = state(row, &row["initial"]["gas"]);
+        let ctx = context(row);
+        let executor = Executor {
+            context: &ctx,
+            order: &order,
+            overrides: &overrides,
+            contracts: &contracts,
+        };
+        let ins = instruction(&row["op"]);
+        assert!(
+            matches!(
+                executor.step(&input, &ins, limits),
+                Err(Error::Data(ae_vm_fate::Error::ResourceLimit))
+            ),
+            "{opcode}"
+        );
+        assert_state(&input, &row["initial"]);
+        let high = rows(&row["runs"])
+            .iter()
+            .find(|r| r[0] == row["initial"]["gas"])
+            .unwrap();
+        assert_outcome(
+            executor.step(&input, &ins, Limits::default()).unwrap(),
+            &NUMBERS["results"][high[1].as_u64().unwrap() as usize],
+        );
+    }
+}
+
+fn large_value(j: &J) -> Value {
+    match string(&j[0]) {
+        "power" => Value::Integer(BigInt::from(1) << j[1].as_u64().unwrap() as usize),
+        "ones" => Value::Integer((BigInt::from(1) << j[1].as_u64().unwrap() as usize) - 1),
+        "negative" => {
+            let Value::Integer(n) = large_value(&j[1]) else {
+                unreachable!()
+            };
+            Value::Integer(-n)
+        }
+        "bits" => {
+            let Value::Integer(n) = large_value(&j[1]) else {
+                unreachable!()
+            };
+            Value::Bits(n)
+        }
+        _ => value(j),
+    }
+}
+fn assert_compact(v: &Value, j: &J) {
+    match (v, string(&j[0])) {
+        (Value::Integer(n), "integer_digest") => {
+            let b = if n == &BigInt::from(0) {
+                vec![0]
+            } else {
+                n.magnitude().to_bytes_be()
+            };
+            assert_eq!(n.sign() == num_bigint::Sign::Minus, j[1]);
+            assert_eq!(b.len() as u64, j[2]);
+            assert_eq!(hex::encode(ae_crypto::sha256(&b).0), string(&j[3]));
+        }
+        (Value::Bits(n), "bits") => assert_compact(&Value::Integer(n.clone()), &j[1]),
+        _ => assert_eq!(*v, value(j)),
+    }
+}
+#[test]
+fn native_integer_capacity_and_bitwise_nil_results_match_original_runtime() {
+    let order = otp_order::profile(&NATIVE_LIMITS["profile"]);
+    let overrides = Overrides::default();
+    let contracts = BTreeMap::new();
+    for (i, row) in rows(&NATIVE_LIMITS["cases"]).iter().enumerate() {
+        let mut input = state(&FIXTURE["cases"][0], &FIXTURE["cases"][0]["initial"]["gas"]);
+        input.meter.gas = if row["gas"].is_string() {
+            number(&row["gas"])
+        } else {
+            let Value::Integer(n) = large_value(&row["gas"]) else {
+                unreachable!()
+            };
+            n
+        };
+        input.meter.protocol = row["protocol"].as_u64().unwrap() as u32;
+        input.stores = Stores::new(Version::for_protocol(input.meter.protocol));
+        input.stores.put_contract(KEY, backend());
+        let args: Vec<_> = rows(&row["arguments"]).iter().map(large_value).collect();
+        input.accumulator = Accumulator {
+            top: args[0].clone(),
+            rest: args[1..]
+                .iter()
+                .cloned()
+                .chain([Value::Integer(42.into())])
+                .collect(),
+        };
+        let mut ctx = context(&FIXTURE["cases"][0]);
+        ctx.vm_version = VmVersion::Three;
+        ctx.arithmetic_word_size = match NATIVE_LIMITS["word_size"].as_u64().unwrap() {
+            64 => ae_vm_fate::maps::order::WordSize::Bits64,
+            32 => ae_vm_fate::maps::order::WordSize::Bits32,
+            _ => unreachable!(),
+        };
+        let opcode = *Opcode::ALL
+            .iter()
+            .find(|op| op.info().name == string(&row["opcode"]))
+            .unwrap();
+        let instruction = Instruction {
+            opcode,
+            operands: vec![Operand::Stack; opcode.info().arity],
+        };
+        let executor = Executor {
+            context: &ctx,
+            order: &order,
+            overrides: &overrides,
+            contracts: &contracts,
+        };
+        let out = executor
+            .step(&input, &instruction, Limits::default())
+            .unwrap();
+        let expected = &row["result"];
+        let (kind, state) = match out {
+            Outcome::Continue { state, control, .. } => {
+                assert_eq!(control, Control::Next);
+                ("ok", Some(state))
+            }
+            Outcome::Abort { state, reason, .. } => {
+                assert_reason(&reason, &expected["reason"]);
+                ("abort", Some(state))
+            }
+            Outcome::Exception(Exception::Native(e)) => {
+                assert_eq!(e, string(&expected["reason"]), "case {i}: {row}");
+                ("exception", None)
+            }
+            other => panic!("case {i}: unexpected {other:?}"),
+        };
+        assert_eq!(kind, string(&expected["kind"]), "case {i}: {row}");
+        if let Some(st) = state {
+            let e = &expected["state"];
+            assert_compact(&st.accumulator.top, &e["top"]);
+            assert_eq!(st.accumulator.rest.len(), rows(&e["rest"]).len());
+            for (v, j) in st.accumulator.rest.iter().zip(rows(&e["rest"])) {
+                assert_compact(v, j);
+            }
+            for (n, j) in [
+                (&st.meter.gas, &e["gas"]),
+                (&st.meter.created_cells, &e["cells"]),
+            ] {
+                if j.is_string() {
+                    assert_eq!(*n, number(j));
+                } else {
+                    assert_compact(&Value::Integer(n.clone()), j);
+                }
+            }
+            assert_eq!(e["memory_unchanged"], true);
+            assert_eq!(st.memory, input.memory);
+            assert_eq!(e["stores_unchanged"], true);
+            let st = st.stores.entry(&KEY).unwrap();
+            let before = input.stores.entry(&KEY).unwrap();
+            assert_eq!(st.terms(), before.terms());
+            assert_eq!(st.dirty(), before.dirty());
+            assert_eq!(st.backend().0.read_cache(), before.backend().0.read_cache());
+            assert_eq!(
+                st.backend().0.write_cache(),
+                before.backend().0.write_cache()
+            );
+        }
+    }
+}
+
+#[test]
+fn native_overflow_bits_term_preserves_helper_acceptance_and_rejection() {
+    let row = &NATIVE_LIMITS["bits_nil"];
+    let v = value(&row["value"]);
+    assert_eq!(v, Value::BitsNil);
+    let order = otp_order::profile(&NATIVE_LIMITS["profile"]);
+    assert!(row["encoded"].is_null());
+    assert_eq!(
+        ae_vm_fate::encoding::encode(&v, Limits::default()),
+        Err(ae_vm_fate::Error::InvalidValue)
+    );
+    assert!(row["inferred"].is_null());
+    assert_eq!(
+        ae_vm_fate::types::infer(&v, Limits::default()),
+        Err(ae_vm_fate::Error::InvalidValue)
+    );
+    assert_eq!(
+        order.hash(&v, Limits::default()).unwrap(),
+        row["hash"].as_u64().unwrap() as u32
+    );
+    assert_eq!(value(&row["refcount"]), Value::Map(BTreeMap::new()));
+    assert!(
+        ae_vm_fate::maps::refcount(&v, Limits::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        ae_vm_fate::maps::unfold(
+            v.clone(),
+            &order,
+            |_: &BigInt| Ok::<_, ()>(BTreeMap::new()),
+            Limits::default()
+        )
+        .unwrap(),
+        value(&row["unfold"])
+    );
+    for r in rows(&row["traversal"]) {
+        use ae_vm_fate::gas::CostModel::*;
+        let model = match string(&r["model"]) {
+            "simple" => Simple,
+            "serial" => Serial,
+            "unfold" => Unfold,
+            "unfold_compare" => UnfoldCompare,
+            "unfold_serial" => UnfoldSerial,
+            "final" => Final,
+            _ => unreachable!(),
+        };
+        let actual = ae_vm_fate::gas::traversal(
+            r["protocol"].as_u64().unwrap() as u32,
+            model,
+            &v,
+            1000.into(),
+            &order,
+            Limits::default(),
+        );
+        assert_eq!(
+            actual.ok().map(|r| r.gas),
+            r["gas"].as_str().map(|s| s.parse().unwrap())
+        );
+    }
 }

@@ -41,7 +41,14 @@ pub fn ty(v: &Json) -> Type {
     match string(&vs[0]) {
         "bytes" => Type::Bytes(vs[1].as_str().map(|s| s.parse().unwrap())),
         "variable" => Type::Variable(index(&vs[1]) as u8),
-        "arity" => Type::Arity(index(&vs[1]) as u8),
+        "arity" => Type::Arity(
+            vs[1]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| vs[1].to_string())
+                .parse()
+                .unwrap(),
+        ),
         "list" => Type::List(Box::new(ty(&vs[1]))),
         "tuple" => Type::Tuple(rows(&vs[1]).iter().map(ty).collect()),
         "variant" => Type::Variant(rows(&vs[1]).iter().map(ty).collect()),
@@ -63,6 +70,7 @@ pub fn value(v: &Json) -> Value {
         "void" => Value::Void,
         "integer" => Value::Integer(string(&vs[1]).parse().unwrap()),
         "bits" => Value::Bits(string(&vs[1]).parse().unwrap()),
+        "bits_nil" => Value::BitsNil,
         "boolean" => Value::Boolean(vs[1].as_bool().unwrap()),
         "string" => Value::String(bytes(&vs[1])),
         "bytes" => Value::Bytes(bytes(&vs[1])),
@@ -90,7 +98,16 @@ pub fn value(v: &Json) -> Value {
         },
         "type" => Value::TypeRep(ty(&vs[1])),
         "variant" => Value::Variant {
-            arities: rows(&vs[1]).iter().map(|v| index(v) as u8).collect(),
+            arities: rows(&vs[1])
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())
+                        .parse()
+                        .unwrap()
+                })
+                .collect(),
             tag: index(&vs[2]),
             values: rows(&vs[3]).iter().map(value).collect(),
         },
