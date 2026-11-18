@@ -83,10 +83,14 @@ fn ttl(v: &Value, absolute: bool) -> Option<Ttl> {
     })
 }
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
-    fn oracle_error(&self, operation: &'static str, reason: &'static str) -> Fault<S::Error> {
+    pub(super) fn oracle_error(
+        &self,
+        operation: &'static str,
+        reason: &'static str,
+    ) -> Fault<S::Error> {
         Fault::Abort(Reason::Primop { operation, reason })
     }
-    fn oracle_key(
+    pub(super) fn oracle_key(
         &self,
         v: &Value,
         kind: ObjectKind,
@@ -100,7 +104,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             })),
         }
     }
-    fn oracle_integer(&self, v: &Value) -> Result<BigInt, Fault<S::Error>> {
+    pub(super) fn oracle_integer(&self, v: &Value) -> Result<BigInt, Fault<S::Error>> {
         match v {
             Value::Integer(n) => Ok(n.clone()),
             _ => Err(Fault::Abort(Reason::ValueType {
@@ -109,7 +113,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             })),
         }
     }
-    fn oracle_signature(&self, v: &Value) -> Result<[u8; 64], Fault<S::Error>> {
+    pub(super) fn oracle_signature(&self, v: &Value) -> Result<[u8; 64], Fault<S::Error>> {
         if let Value::Bytes(b) = v
             && let Ok(s) = b.as_slice().try_into()
         {
@@ -135,7 +139,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             Err(self.oracle_error(name, if both { "bad_types" } else { "bad_type" }))
         }
     }
-    fn delegation<H: Host<S::Error>>(
+    pub(super) fn delegation<H: Host<S::Error>>(
         &mut self,
         session: &mut Session<S, H>,
         name: &'static str,
@@ -153,45 +157,75 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 .into(),
         )?;
         let network = &session.host.environment().network_id;
-        let message = if self.context.vm_version < VmVersion::Three {
-            [network.as_slice(), query.unwrap_or(key), current.as_slice()].concat()
+        let aens = name.starts_with("aens_");
+        let preclaim = name == "aens_preclaim";
+        let messages = if self.context.vm_version < VmVersion::Three {
+            let parts: Vec<&[u8]> = if aens && !preclaim {
+                vec![network, key, query.expect("name hash"), &current]
+            } else {
+                vec![network, query.unwrap_or(key), &current]
+            };
+            vec![join_message(&parts, &mut self.remaining)?]
         } else {
-            let data = Id::new(
-                if query.is_some() {
-                    IdTag::Oracle
+            let typed = |tag, raw: &[u8]| -> Result<Vec<u8>, Fault<S::Error>> {
+                Ok(Id::new(
+                    tag,
+                    raw.try_into().map_err(|_| self.native("illegal_field"))?,
+                )
+                .to_bytes()
+                .to_vec())
+            };
+            let contract = typed(IdTag::Contract, &current)?;
+            let account = if aens || query.is_none() {
+                typed(IdTag::Account, key)?
+            } else {
+                vec![]
+            };
+            let mut forms = Vec::new();
+            if aens {
+                if preclaim {
+                    forms.push((3, vec![account.clone(), contract.clone()]));
                 } else {
-                    IdTag::Account
-                },
-                query
-                    .unwrap_or(key)
-                    .try_into()
-                    .map_err(|_| self.native("illegal_field"))?,
-            )
-            .to_bytes();
-            let contract = Id::new(IdTag::Contract, current).to_bytes();
-            let encoded = rlp::encode(&Rlp::List(vec![
-                Rlp::Bytes(if query.is_some() { &[5] } else { &[4] }),
-                Rlp::Bytes(&[1]),
-                Rlp::Bytes(&data),
-                Rlp::Bytes(&contract),
-            ]));
-            [&[0x1a, 0x01], network.as_slice(), encoded.as_slice()].concat()
+                    forms.push((
+                        2,
+                        vec![
+                            account.clone(),
+                            typed(IdTag::Name, query.expect("name hash"))?,
+                            contract.clone(),
+                        ],
+                    ));
+                }
+                forms.push((1, vec![account, contract]));
+            } else if let Some(query) = query {
+                forms.push((5, vec![typed(IdTag::Oracle, query)?, contract]));
+            } else {
+                forms.push((4, vec![account, contract]));
+            }
+            let mut messages = Vec::new();
+            for (tag, fields) in forms {
+                let tag_bytes = [tag];
+                let mut values = vec![Rlp::Bytes(&tag_bytes), Rlp::Bytes(&[1])];
+                values.extend(fields.iter().map(|b| Rlp::Bytes(b)));
+                let encoded = rlp::encode(&Rlp::List(values));
+                messages.push(join_message(
+                    &[&[0x1a, 0x01], network, &encoded],
+                    &mut self.remaining,
+                )?);
+            }
+            messages
         };
-        self.remaining.max_bytes = self
-            .remaining
-            .max_bytes
-            .checked_sub(message.len())
-            .ok_or(DataError::ResourceLimit)?;
-        if session
-            .host
-            .verify_delegation(key, &message, &signature, self.context.vm_version)
-            .map_err(Self::host_fault)?
-        {
-            Ok(())
-        } else {
-            Err(self.oracle_error(name, "bad_signature"))
+        for message in messages {
+            if session
+                .host
+                .verify_delegation(key, &message, &signature, self.context.vm_version)
+                .map_err(Self::host_fault)?
+            {
+                return Ok(());
+            }
         }
+        Err(self.oracle_error(name, "bad_signature"))
     }
+
     pub(super) fn oracle_write<H: Host<S::Error>>(
         &mut self,
         session: &mut Session<S, H>,
@@ -328,4 +362,16 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         Ok(())
     }
+}
+
+fn join_message<E>(parts: &[&[u8]], limits: &mut Limits) -> Result<Vec<u8>, Fault<E>> {
+    let len = parts
+        .iter()
+        .try_fold(0usize, |n, p| n.checked_add(p.len()))
+        .ok_or(DataError::ResourceLimit)?;
+    limits.max_bytes = limits
+        .max_bytes
+        .checked_sub(len)
+        .ok_or(DataError::ResourceLimit)?;
+    Ok(parts.concat())
 }

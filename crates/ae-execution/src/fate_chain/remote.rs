@@ -32,10 +32,13 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
     pub height: u64,
     pub authentication: Authentication,
     pub events: Vec<TransferEvent>,
+    pub names: ae_state::names::Names<C, C>,
+    pub name_cache: super::names::Cache,
     pub oracles: ae_state::oracles::Oracles<C, C>,
     pub oracle_reads: super::oracle::Cache,
     // Invocation-entry trees, before any primitive cache publication. Start
     // each new invocation with None; protected snapshots preserve this field.
+    pub name_base: Option<ae_state::names::Names<C, C>>,
     pub oracle_base: Option<ae_state::oracles::Oracles<C, C>>,
     pub onchain: Option<Box<View<A, C>>>,
     pub environment: Environment,
@@ -45,6 +48,8 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
 pub struct View<A = MemoryStore, C = MemoryStore> {
     pub accounts: Accounts<A>,
     pub contracts: Contracts<C>,
+    pub names: ae_state::names::Names<C, C>,
+    pub name_cache: super::names::Cache,
     pub oracles: ae_state::oracles::Oracles<C, C>,
     pub oracle_reads: super::oracle::Cache,
 }
@@ -192,6 +197,34 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
     ) -> Result<ae_vm_fate::machine::program::remote::oracle_write::ResultValue, HostFailure<Error>>
     {
         super::oracle_write::execute(self, request, protocol, limits)
+    }
+    fn name_hash(
+        &mut self,
+        operation: &'static str,
+        name: &[u8],
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<Error>> {
+        super::names::hash(operation, name, limits)
+    }
+    fn name_read(
+        &mut self,
+        name: &[u8],
+        pointer: Option<&[u8]>,
+        limits: Limits,
+    ) -> Result<Option<ae_vm_fate::machine::program::remote::names::Read>, HostFailure<Error>> {
+        match &mut self.onchain {
+            Some(v) => super::names::read(&v.names, &mut v.name_cache, name, pointer, limits),
+            None => super::names::read(&self.names, &mut self.name_cache, name, pointer, limits),
+        }
+    }
+    fn name_write(
+        &mut self,
+        request: &ae_vm_fate::machine::program::remote::names::Request,
+        protocol: u32,
+        vm: Version,
+        limits: Limits,
+    ) -> Result<BigInt, HostFailure<Error>> {
+        super::names::write(self, request, protocol, vm, limits)
     }
     fn verify_delegation(
         &mut self,

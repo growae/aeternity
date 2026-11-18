@@ -14,6 +14,7 @@ use ae_vm_fate::{
     types::Version,
 };
 pub mod history;
+pub mod names;
 pub mod oracle;
 mod oracle_write;
 pub mod remote;
@@ -26,6 +27,7 @@ pub enum Error {
     InvalidReferenceId(Id),
     UnsupportedContractKey(Vec<u8>),
     Oracles(ae_state::oracles::Error),
+    Names(ae_state::names::Error),
     UnsupportedAccountKey(Vec<u8>),
     UnsupportedOracleKey(Vec<u8>),
     Primitive(Box<crate::Error>),
@@ -173,6 +175,17 @@ pub enum TransferFailure {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferEvent {
+    NameCall {
+        info: &'static str,
+        // The original revoke event stores the atom error, represented by None.
+        transaction: Option<ae_tx::NameTransaction>,
+    },
+    NameDelta {
+        info: &'static str,
+        account: AccountPublicKey,
+        debit: bool,
+        amount: Unsigned,
+    },
     Delta {
         account: AccountPublicKey,
         debit: bool,

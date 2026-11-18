@@ -209,6 +209,32 @@ impl Host<ae_execution::fate_chain::Error> for FailingHost {
     > {
         self.inner.oracle_write(r, p, l)
     }
+    fn name_hash(
+        &mut self,
+        op: &'static str,
+        n: &[u8],
+        l: Limits,
+    ) -> Result<[u8; 32], remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.name_hash(op, n, l)
+    }
+    fn name_read(
+        &mut self,
+        n: &[u8],
+        p: Option<&[u8]>,
+        l: Limits,
+    ) -> Result<Option<remote::names::Read>, remote::HostFailure<ae_execution::fate_chain::Error>>
+    {
+        self.inner.name_read(n, p, l)
+    }
+    fn name_write(
+        &mut self,
+        r: &remote::names::Request,
+        p: u32,
+        v: VmVersion,
+        l: Limits,
+    ) -> Result<BigInt, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.name_write(r, p, v, l)
+    }
     fn verify_delegation(
         &mut self,
         k: &[u8],
@@ -327,6 +353,9 @@ pub(super) fn chain(row: &J) -> Chain {
         contracts: Contracts::from_root(c.root_hash(), c.into_store()).unwrap(),
         authentication: Default::default(),
         oracle_base: None,
+        name_base: None,
+        name_cache: Default::default(),
+        names: Default::default(),
         height: row["height"].as_u64().unwrap(),
         events: vec![],
         oracles: Default::default(),
@@ -366,6 +395,31 @@ fn oracle_cache(c: &ae_execution::fate_chain::oracle::Cache) -> J {
     }
     json!(items)
 }
+fn name_cache(c: &ae_execution::fate_chain::names::Cache) -> J {
+    let mut entries = vec![];
+    for (k, v) in &c.commitments {
+        entries.push(json!([
+            "commitment",
+            hex::encode(k),
+            hex::encode(v.serialize().unwrap())
+        ]));
+    }
+    for (k, v) in &c.names {
+        entries.push(json!([
+            "name",
+            hex::encode(k),
+            hex::encode(v.serialize().unwrap())
+        ]));
+    }
+    for (k, v) in &c.auctions {
+        entries.push(json!([
+            "name_auction",
+            hex::encode(k),
+            hex::encode(v.serialize().unwrap())
+        ]));
+    }
+    json!(entries)
+}
 fn tree_entries<S: ae_trie::NodeReader>(tree: &Trie<S>) -> J {
     json!(
         tree.iter()
@@ -387,6 +441,37 @@ pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
     actual: &Chain<A, C>,
     expected: &J,
 ) {
+    if expected.get("name_objects").is_some() {
+        assert_eq!(
+            tree_entries(actual.names.tree()),
+            expected["name_objects"],
+            "name objects"
+        );
+        assert_eq!(
+            tree_entries(actual.names.cache()),
+            expected["name_expiry_entries"],
+            "name expiry entries"
+        );
+        assert_eq!(
+            json!(actual.names.cache_root_hash().map(|h| hex::encode(h.0))),
+            expected["name_expiry_root"],
+            "name expiry root"
+        );
+        assert_eq!(
+            name_cache(&actual.name_cache),
+            expected["name_reads"],
+            "name primitive cache"
+        );
+        assert_eq!(
+            actual
+                .onchain
+                .as_ref()
+                .map(|v| name_cache(&v.name_cache))
+                .unwrap_or(J::Null),
+            expected["onchain_name_reads"],
+            "onchain name cache"
+        );
+    }
     if expected.get("oracle_objects").is_some() {
         assert_eq!(
             tree_entries(actual.oracles.tree()),
@@ -448,6 +533,7 @@ pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
                 accounts: actual.accounts.root_hash(),
                 contracts: actual.contracts.root_hash(),
                 oracles: actual.oracles.root_hash(),
+                names: actual.names.root_hash(),
                 ..Default::default()
             }
             .hash()
@@ -457,6 +543,8 @@ pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
         "tree root"
     );
     let events:Vec<_>=actual.events.iter().map(|e|match e {
+        TransferEvent::NameCall {info,transaction}=>json!({"kind":"internal_call","info":info,"transaction":transaction.as_ref().map(|t|hex::encode(t.encode())),"type":"non_tx","tx_hash":""}),
+        TransferEvent::NameDelta {info,account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})},
         TransferEvent::OracleCall {info,transaction}=>json!({"kind":"internal_call","info":info,"transaction":hex::encode(transaction.encode()),"type":"non_tx","tx_hash":""}),
         TransferEvent::OracleDelta {info,account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})},
         TransferEvent::InternalCall(tx)=>json!({"kind":"internal_call","info":String::from_utf8_lossy(tx.payload()),"transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),

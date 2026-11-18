@@ -27,16 +27,42 @@ pub(super) fn chain_base(row: &J) -> Chain {
         cache.into_store(),
     )
     .unwrap();
+    if row.get("names").is_some() {
+        let main = remote_tests::tree(&row["names"]);
+        let cache = remote_tests::tree(&row["name_expiry"]);
+        c.names = ae_state::names::Names::from_roots(
+            main.root_hash(),
+            cache.root_hash(),
+            main.into_store(),
+            cache.into_store(),
+        )
+        .unwrap();
+    }
     if !row["onchain"].as_bool().unwrap() {
         let a = remote_tests::tree(&row["onchain_view"]["accounts"]);
         let o = remote_tests::tree(&row["onchain_view"]["oracles"]);
         c.onchain = Some(Box::new(View {
+            name_cache: Default::default(),
+            names: Default::default(),
             oracle_reads: Default::default(),
             accounts: Accounts::from_root(a.root_hash(), a.into_store()).unwrap(),
             contracts: Contracts::default(),
             oracles: Oracles::from_roots(o.root_hash(), None, o.into_store(), Default::default())
                 .unwrap(),
         }));
+    }
+    if let Some(v) = &mut c.onchain
+        && row["onchain_view"].get("names").is_some()
+    {
+        let main = remote_tests::tree(&row["onchain_view"]["names"]);
+        let cache = remote_tests::tree(&row["onchain_view"]["name_expiry"]);
+        v.names = ae_state::names::Names::from_roots(
+            main.root_hash(),
+            cache.root_hash(),
+            main.into_store(),
+            cache.into_store(),
+        )
+        .unwrap();
     }
     let e = &row["environment"];
     c.authentication.dry_run = e["dry_run"] == true;
@@ -313,6 +339,11 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
             fail: Rc::clone(fail),
         };
         View {
+            name_cache: Default::default(),
+            names: ae_state::names::Names::new(
+                reader(&MemoryStore::default()),
+                reader(&MemoryStore::default()),
+            ),
             oracle_reads: Default::default(),
             accounts: Accounts::from_root(
                 c.accounts.root_hash(),
@@ -348,6 +379,9 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
         onchain: Some(Box::new(view(&c, &fail))),
         authentication: Default::default(),
         oracle_base: None,
+        name_base: None,
+        name_cache: v.name_cache,
+        names: v.names,
         height: c.height,
         events: vec![],
         environment: c.environment,

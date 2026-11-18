@@ -92,12 +92,12 @@ fn terminal(row: &J) -> &J {
     &HOSTS["results"][run["terminal"].as_u64().unwrap() as usize]
 }
 #[derive(Clone, Debug, Default)]
-struct Faults {
-    writes_left: Rc<Cell<Option<usize>>>,
-    fail_reads: Rc<Cell<bool>>,
+pub(super) struct Faults {
+    pub writes_left: Rc<Cell<Option<usize>>>,
+    pub fail_reads: Rc<Cell<bool>>,
 }
 #[derive(Clone, Debug)]
-struct FaultStore {
+pub(super) struct FaultStore {
     inner: MemoryStore,
     faults: Faults,
 }
@@ -120,8 +120,8 @@ impl NodeWriter for FaultStore {
         self.inner.put_node(hash, bytes)
     }
 }
-fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, FaultStore> {
-    assert!(host.onchain.is_none() && host.oracle_base.is_none());
+pub(super) fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, FaultStore> {
+    assert!(host.onchain.is_none() && host.oracle_base.is_none() && host.name_base.is_none());
     let wrap = |inner: &MemoryStore| FaultStore {
         inner: inner.clone(),
         faults: faults.clone(),
@@ -149,6 +149,15 @@ fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, FaultStore> {
         events: host.events,
         oracle_reads: host.oracle_reads,
         oracle_base: None,
+        name_base: None,
+        name_cache: host.name_cache,
+        names: ae_state::names::Names::from_roots(
+            host.names.root_hash(),
+            host.names.cache_root_hash(),
+            wrap(host.names.tree().store()),
+            wrap(host.names.cache().store()),
+        )
+        .unwrap(),
         onchain: None,
         environment: host.environment,
         history: host.history,

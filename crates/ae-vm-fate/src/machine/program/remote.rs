@@ -8,6 +8,7 @@ use crate::{
 use std::sync::Arc;
 pub mod context;
 pub mod hosts;
+pub mod names;
 pub mod oracle_write;
 use context::{AddressTest, Environment, Log};
 
@@ -25,6 +26,10 @@ pub enum HostFailure<E> {
     Primop {
         operation: &'static str,
         reason: &'static str,
+    },
+    NameEncoding {
+        operation: &'static str,
+        error: ae_codec::idna::Error,
     },
 }
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
@@ -54,6 +59,25 @@ pub trait Host<E>: Clone {
         protocol: u32,
         limits: Limits,
     ) -> Result<oracle_write::ResultValue, HostFailure<E>>;
+    fn name_hash(
+        &mut self,
+        operation: &'static str,
+        name: &[u8],
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<E>>;
+    fn name_read(
+        &mut self,
+        name: &[u8],
+        pointer: Option<&[u8]>,
+        limits: Limits,
+    ) -> Result<Option<names::Read>, HostFailure<E>>;
+    fn name_write(
+        &mut self,
+        request: &names::Request,
+        protocol: u32,
+        vm: VmVersion,
+        limits: Limits,
+    ) -> Result<BigInt, HostFailure<E>>;
     fn verify_delegation(
         &mut self,
         signer: &[u8],
@@ -313,6 +337,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 || context::supported(ins.opcode)
                 || hosts::supported(ins.opcode)
                 || oracle_write::supported(ins.opcode)
+                || names::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
                     Opcode::Call
@@ -445,6 +470,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     fn host_fault(error: HostFailure<S::Error>) -> Fault<S::Error> {
         match error {
+            HostFailure::NameEncoding { operation, error } => {
+                Fault::Abort(Reason::NameEncoding { operation, error })
+            }
             HostFailure::Backend(e) => Fault::Operational(Error::Backend(e)),
             HostFailure::ResourceLimit => DataError::ResourceLimit.into(),
             HostFailure::Exception(e) => Fault::Exception(e),
@@ -469,6 +497,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         match ins.opcode {
+            op if names::supported(op) => {
+                self.name_instruction(session, ins)?;
+                cursor.instruction += 1;
+                Ok(())
+            }
             op if oracle_write::supported(op) => {
                 self.oracle_write(session, ins)?;
                 cursor.instruction += 1;

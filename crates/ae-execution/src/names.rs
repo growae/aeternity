@@ -138,15 +138,13 @@ pub fn process<S: NodeWriter, N: NodeWriter, C: NodeWriter>(
             }];
             match tx.operation() {
                 NameOperation::Preclaim { commitment } => {
-                    if names.commitment(*commitment)?.is_some() {
-                        return Err(Failure::CommitmentAlreadyPresent.into());
-                    }
-                    names.insert_commitment(&Commitment::new(
-                        *commitment,
+                    preclaim(
+                        names,
                         account,
+                        *commitment,
                         rules::PRECLAIM_EXPIRATION.into(),
-                        context.height.into(),
-                    ))?;
+                        context.height,
+                    )?;
                 }
                 NameOperation::Claim { name, salt, .. } => {
                     let claim = Claim {
@@ -158,22 +156,12 @@ pub fn process<S: NodeWriter, N: NodeWriter, C: NodeWriter>(
                     process_claim(accounts, &mut changes, names, &claim, context, &mut events)?;
                 }
                 NameOperation::Revoke { name } => {
-                    let mut record = owned_name(names, account, *name)?;
-                    record.status = b"revoked".to_vec();
-                    record.expires_by =
-                        Unsigned::from(context.height).add(&rules::PROTECTION_PERIOD.into());
-                    names.enter_name(&record)?;
+                    revoke(names, account, *name, context.height)?;
                 }
                 NameOperation::Transfer { name, recipient } => {
-                    let mut record = owned_name(names, account, *name)?;
-                    let recipient = if recipient.tag == IdTag::Name {
-                        names.resolve_account(recipient.value)?
-                    } else {
-                        AccountPublicKey(recipient.value)
-                    };
-                    record.owner = Id::new(IdTag::Account, recipient.0);
-                    names.enter_name(&record)?;
+                    transfer(names, account, *name, *recipient)?;
                 }
+
                 NameOperation::Update {
                     name,
                     name_ttl,
@@ -202,7 +190,7 @@ pub fn process<S: NodeWriter, N: NodeWriter, C: NodeWriter>(
         })
     })
 }
-fn owned_name<N: NodeReader, C: NodeReader>(
+pub(crate) fn owned_name<N: NodeReader, C: NodeReader>(
     names: &Names<N, C>,
     owner: AccountPublicKey,
     hash: [u8; 32],
@@ -293,13 +281,13 @@ pub fn update_name<N: NodeWriter, C: NodeWriter>(
     names.enter_name(&record)?;
     Ok(())
 }
-struct Claim<'a> {
-    owner: AccountPublicKey,
-    name: &'a [u8],
-    salt: &'a Unsigned,
-    fee: &'a Unsigned,
+pub(crate) struct Claim<'a> {
+    pub owner: AccountPublicKey,
+    pub name: &'a [u8],
+    pub salt: &'a Unsigned,
+    pub fee: &'a Unsigned,
 }
-fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
+pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
     accounts: &Accounts<S>,
     changes: &mut BTreeMap<AccountPublicKey, Account>,
     names: &mut Names<N, C>,
@@ -472,5 +460,47 @@ fn credit<S: NodeReader>(
     let mut account = load(accounts, changes, key, create)?;
     account.earn(amount);
     changes.insert(key, account);
+    Ok(())
+}
+
+pub(crate) fn preclaim<N: NodeWriter, C: NodeWriter>(
+    names: &mut Names<N, C>,
+    owner: AccountPublicKey,
+    hash: [u8; 32],
+    delta: Unsigned,
+    height: u64,
+) -> Result<(), Error> {
+    if names.commitment(hash)?.is_some() {
+        return Err(Failure::CommitmentAlreadyPresent.into());
+    }
+    names.insert_commitment(&Commitment::new(hash, owner, delta, height.into()))?;
+    Ok(())
+}
+pub(crate) fn revoke<N: NodeWriter, C: NodeWriter>(
+    names: &mut Names<N, C>,
+    owner: AccountPublicKey,
+    hash: [u8; 32],
+    height: u64,
+) -> Result<(), Error> {
+    let mut record = owned_name(names, owner, hash)?;
+    record.status = b"revoked".to_vec();
+    record.expires_by = Unsigned::from(height).add(&rules::PROTECTION_PERIOD.into());
+    names.enter_name(&record)?;
+    Ok(())
+}
+pub(crate) fn transfer<N: NodeWriter, C: NodeWriter>(
+    names: &mut Names<N, C>,
+    owner: AccountPublicKey,
+    hash: [u8; 32],
+    recipient: Id,
+) -> Result<(), Error> {
+    let mut record = owned_name(names, owner, hash)?;
+    let recipient = if recipient.tag == IdTag::Name {
+        names.resolve_account(recipient.value)?
+    } else {
+        AccountPublicKey(recipient.value)
+    };
+    record.owner = Id::new(IdTag::Account, recipient.0);
+    names.enter_name(&record)?;
     Ok(())
 }

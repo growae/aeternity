@@ -75,6 +75,7 @@ fn entries<S: NodeReader>(tree: &Trie<S>) -> J {
 }
 fn events(events: &[TransferEvent]) -> J {
     json!(events.iter().map(|e| match e {
+        TransferEvent::NameCall { .. } | TransferEvent::NameDelta { .. } => panic!("unexpected name event"),
         TransferEvent::OracleCall {..} | TransferEvent::OracleDelta {..} => panic!("unexpected oracle event in transfer test"),
         TransferEvent::InternalCall(tx) => json!({"kind":"internal_call","info":"Call.amount","transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),
         TransferEvent::Delta { account, debit, amount } => {

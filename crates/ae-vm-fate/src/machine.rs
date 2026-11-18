@@ -106,6 +106,10 @@ pub enum Reason {
     RemoteTypeMismatch,
     BadGasCap(BigInt),
     CallError(&'static str),
+    NameEncoding {
+        operation: &'static str,
+        error: ae_codec::idna::Error,
+    },
     Primop {
         operation: &'static str,
         reason: &'static str,

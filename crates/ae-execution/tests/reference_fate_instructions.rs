@@ -28,6 +28,8 @@ use values::{bytes, rows, string, value};
 mod context_tests;
 #[path = "support/fate_hosts.rs"]
 mod host_tests;
+#[path = "support/fate_names.rs"]
+mod name_tests;
 #[path = "support/fate_oracle_writes.rs"]
 mod oracle_write_tests;
 #[path = "support/fate_program.rs"]
@@ -243,6 +245,33 @@ fn assert_state(actual: &State<Backend>, expected: &J) {
 }
 fn assert_reason(actual: &Reason, expected: &J) {
     let name = match actual {
+        Reason::NameEncoding { operation, error } => {
+            assert_eq!(*operation, string(&expected[1]));
+            let label = match error {
+                ae_codec::idna::Error::NoRegistrar => "no_registrar",
+                ae_codec::idna::Error::RegistrarUnknown => "registrar_unknown",
+                ae_codec::idna::Error::MultipleNamespaces => "multiple_namespaces",
+                ae_codec::idna::Error::NoLabelInRegistrar => "no_label_in_registrar",
+                ae_codec::idna::Error::InvalidCodepoint(cp) => {
+                    assert_eq!(*cp as u64, expected[2]["codepoint"].as_u64().unwrap());
+                    "invalid_codepoint"
+                }
+                ae_codec::idna::Error::BadLabel(b) => match b {
+                    ae_codec::idna::BadLabel::Nfc => "nfc",
+                    ae_codec::idna::BadLabel::Hyphen => "hyphen",
+                    ae_codec::idna::BadLabel::InitialCombiner => "initial_combiner",
+                    ae_codec::idna::BadLabel::Context => "context",
+                    ae_codec::idna::BadLabel::ContextJ => "contextj",
+                    ae_codec::idna::BadLabel::ContextO => "contexto",
+                    ae_codec::idna::BadLabel::Bidi => "bidi",
+                    ae_codec::idna::BadLabel::Alabel => "alabel",
+                    ae_codec::idna::BadLabel::TooLong => "too_long",
+                },
+                other => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(label, string(&expected[2]["error"]));
+            "name_error"
+        }
         Reason::Primop { operation, reason } => {
             assert_eq!(*operation, string(&expected[1]));
             assert_eq!(*reason, string(&expected[2]));
