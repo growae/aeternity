@@ -52,6 +52,8 @@ dependencies = [
  "ae-trie",
  "ae-tx",
  "ae-types",
+ "ae-vm-aevm",
+ "ae-vm-fate",
  "hex",
  "serde_json",
 ]
@@ -107,6 +109,17 @@ version = "0.1.0"
 name = "ae-vm-aevm"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "serde_json",
+]
+
+[[package]]
+name = "ae-vm-fate"
+version = "0.1.0"
+dependencies = [
+ "ae-codec",
  "hex",
  "num-bigint",
  "num-traits",

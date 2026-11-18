@@ -12,6 +12,8 @@ ae-state.workspace = true
 ae-tx.workspace = true
 ae-trie.workspace = true
 ae-protocol.workspace = true
+ae-vm-aevm.workspace = true
+ae-vm-fate.workspace = true
 
 [dev-dependencies]
 ae-crypto.workspace = true

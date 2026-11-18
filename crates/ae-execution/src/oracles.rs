@@ -8,6 +8,8 @@ use ae_trie::NodeWriter;
 use ae_tx::OracleTransaction;
 use ae_types::Unsigned;
 
+pub mod abi;
+
 pub fn gas(tx: &OracleTransaction, context: &Context) -> Unsigned {
     gas_for_size(tx, context, tx.wire_size())
 }
