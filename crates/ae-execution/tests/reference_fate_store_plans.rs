@@ -428,3 +428,88 @@ fn complete_finalization_matches_entry_and_multi_contract_reference() {
         }
     }
 }
+
+#[test]
+fn vm_traversal_precedes_all_finalization_writes_and_matches_erlang() {
+    use ae_vm_fate::store::{Gas, RegisterRead, Stores, write::Written};
+    let fixture: J =
+        serde_json::from_str(include_str!("fixtures/erlang_fate_vm_finalize.json")).unwrap();
+    for row in rows(&fixture["cases"]) {
+        let mut stores = Stores::new(Version::for_protocol(
+            row["protocol"].as_u64().unwrap() as u32
+        ));
+        let order = ReferenceOrder(&row["orders"]);
+        let mut original = vec![];
+        for entry in rows(&row["contracts"]) {
+            let backend = raw(&json!({"mode":row["mode"],"base":entry["base"]}));
+            let key: [u8; 32] = bytes(&entry["key"]).try_into().unwrap();
+            original.push((backend.clone(), backend.0.contents().unwrap()));
+            stores.put_contract(key, backend);
+            for (pos, (v, dirty)) in terms(&entry["terms"]) {
+                if dirty {
+                    stores.put_value(&key, pos, v).unwrap();
+                } else {
+                    assert!(matches!(
+                        stores
+                            .find_value(&key, &pos, Gas::Unmetered, Limits::default())
+                            .unwrap(),
+                        RegisterRead::Loaded { .. }
+                    ));
+                }
+            }
+        }
+        for run in rows(&row["runs"]) {
+            let gas = string(&run["gas"]).parse().unwrap();
+            let pre = stores.charge_finalization(gas, &order, Limits::default());
+            let pre = match pre {
+                Ok(c) => json!(c.gas.to_string()),
+                Err(e) => error(e),
+            };
+            assert_eq!(
+                pre, run["result"]["pre"],
+                "pre {} {} gas {}",
+                row["protocol"], row["name"], run["gas"]
+            );
+            let final_result = stores.clone().finalize_with_traversal(
+                string(&run["gas"]).parse().unwrap(),
+                &order,
+                Limits::default(),
+            );
+            let actual = match final_result {
+                Ok(out) => {
+                    json!({"gas":out.gas.to_string(),"stores":out.stores.into_iter().map(|(k,s)|json!([hex::encode(k),final_state(Written {store:s,gas:0.into(),remaining_limits:Limits::default()})])).collect::<Vec<_>>()})
+                }
+                Err(e) => error(e),
+            };
+            let expected = if run["result"]["final"].is_null() {
+                &run["result"]["pre"]
+            } else {
+                &run["result"]["final"]
+            };
+            assert_eq!(
+                &actual, expected,
+                "final {} {} gas {}",
+                row["protocol"], row["name"], run["gas"]
+            );
+            for (backend, before) in &original {
+                assert_eq!(&backend.0.contents().unwrap(), before);
+            }
+        }
+        if row["name"] == "forty_contracts" {
+            assert!(matches!(
+                stores.clone().finalize_with_traversal(
+                    1_000_000_000.into(),
+                    &order,
+                    Limits {
+                        max_nodes: 20,
+                        ..Limits::default()
+                    }
+                ),
+                Err(StoreError::Data(Error::ResourceLimit))
+            ));
+            stores
+                .finalize_with_traversal(1_000_000_000.into(), &order, Limits::default())
+                .unwrap();
+        }
+    }
+}

@@ -281,7 +281,15 @@ pub fn unfold<E>(
     mut lookup: impl FnMut(&BigInt) -> Result<Map, E>,
     limits: Limits,
 ) -> Result<Value, MapError<E>> {
-    unfold_value(value, order, &mut lookup, &mut Budget::new(limits), 0)
+    unfold_budgeted(value, order, &mut lookup, &mut Budget::new(limits))
+}
+pub(crate) fn unfold_budgeted<E>(
+    value: Value,
+    order: &impl MapOrder,
+    lookup: &mut impl FnMut(&BigInt) -> Result<Map, E>,
+    budget: &mut Budget,
+) -> Result<Value, MapError<E>> {
+    unfold_value(value, order, lookup, budget, 0)
 }
 fn unfold_map<E>(
     map: Map,

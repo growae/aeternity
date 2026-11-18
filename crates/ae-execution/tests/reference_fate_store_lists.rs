@@ -29,13 +29,17 @@ const KEY: [u8; 32] = [1; 32];
 struct ReferenceOrder<'a>(&'a J);
 impl MapOrder for ReferenceOrder<'_> {
     fn indices(&self, keys: &[&Value], mode: Traversal, _: Limits) -> Result<Vec<usize>, Error> {
-        assert_eq!(mode, Traversal::ToList);
+        let field = match mode {
+            Traversal::ToList => "list",
+            Traversal::Fold => "fold",
+            Traversal::TermSorted => "sorted",
+        };
         if keys.len() <= 1 {
             return Ok((0..keys.len()).collect());
         }
         let set: BTreeSet<_> = keys.iter().copied().collect();
         for row in rows(self.0) {
-            let expected: Vec<_> = rows(&row["list"]).iter().map(value).collect();
+            let expected: Vec<_> = rows(&row[field]).iter().map(value).collect();
             if expected.iter().collect::<BTreeSet<_>>() == set {
                 return Ok(expected
                     .iter()
@@ -325,4 +329,297 @@ fn listing_reads_before_charging_and_discards_failed_caches_before_retry() {
         .map_to_list(&KEY, &0.into(), Gas::Unmetered, &order, Limits::default())
         .unwrap();
     assert_eq!(listed.0.len(), 3);
+}
+
+#[test]
+fn vm_map_operations_preserve_historical_entry_gas_cache_hits_and_discarded_reads() {
+    let fixture: J =
+        serde_json::from_str(include_str!("fixtures/erlang_fate_vm_maps.json")).unwrap();
+    for case in rows(&fixture["cases"]) {
+        let protocol = case["protocol"].as_u64().unwrap() as u32;
+        let Value::Map(cache) = value(&case["cache"]) else {
+            unreachable!()
+        };
+        let order = ReferenceOrder(&case["orders"]);
+        let mut original = Stores::new(Version::for_protocol(protocol));
+        original.put_contract(KEY, raw(case));
+        for operation in rows(&case["operations"]) {
+            let op = &operation["op"];
+            for run in rows(&operation["runs"]) {
+                let mut stores = original.clone();
+                let mut scope = stores.vm_scope(protocol, KEY).unwrap();
+                let gas = string(&run[0]).parse().unwrap();
+                let result = match string(&op[0]) {
+                    "lookup" => scope
+                        .map_lookup(&cache, &0.into(), &value(&op[1]), gas, Limits::default())
+                        .map(|o| (o.value, o.gas)),
+                    "member" => scope
+                        .map_member(&cache, &0.into(), &value(&op[1]), gas, Limits::default())
+                        .map(|o| (Some(Value::Boolean(o.value)), o.gas)),
+                    "size" => scope
+                        .map_size(&cache, &0.into(), gas, &order, Limits::default())
+                        .map(|o| (Some(o.value), o.gas)),
+                    "clean" => scope
+                        .map_get_clean(&cache, &0.into(), gas, &order, Limits::default())
+                        .map(|o| (Some(Value::Map(o.value)), o.gas)),
+                    _ => unreachable!(),
+                };
+                let context = format!("{protocol} {} {op} gas={}", case["name"], run[0]);
+                match result {
+                    Ok((v, g)) => {
+                        assert!(
+                            run[1].get("gas").is_some(),
+                            "unexpected success {context}: {}",
+                            run[1]
+                        );
+                        let expected =
+                            (!run[1]["value"].is_null()).then(|| value(&run[1]["value"]));
+                        assert_eq!(v, expected, "value {context}");
+                        assert_eq!(g.to_string(), string(&run[1]["gas"]), "gas {context}");
+                    }
+                    Err(StoreError::OutOfGas) => {
+                        assert_eq!(run[1], json!({"out_of_gas":true}), "{context}")
+                    }
+                    Err(
+                        StoreError::Data(Error::ResourceLimit)
+                        | StoreError::InvalidOrder
+                        | StoreError::ProtocolMismatch,
+                    ) => panic!("unexpected operational failure {context}"),
+                    Err(e) => assert_eq!(run[1], json!({"exception":true}), "{context}: {e:?}"),
+                }
+                assert_eq!(
+                    snapshot(&stores),
+                    case["states"][run[2].as_u64().unwrap() as usize],
+                    "state {context}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn vm_map_scope_rejects_protocol_mismatch_and_preserves_caches_on_operational_abort() {
+    let case = rows(&FIXTURE["cases"])
+        .iter()
+        .find(|c| c["name"] == "ordinary" && c["mode"] == "tree" && c["module"] == "aefa_stores")
+        .unwrap();
+    let mut s = stores(case);
+    assert!(matches!(
+        s.vm_scope(6, KEY),
+        Err(StoreError::ProtocolMismatch)
+    ));
+    let before = snapshot(&s);
+    let order = ReferenceOrder(&case["orders"]);
+    assert!(matches!(
+        s.vm_scope(7, KEY).unwrap().map_get_clean(
+            &Default::default(),
+            &0.into(),
+            1_000_000.into(),
+            &order,
+            Limits {
+                max_bytes: 1,
+                ..Limits::default()
+            }
+        ),
+        Err(StoreError::Data(Error::ResourceLimit))
+    ));
+    assert_eq!(snapshot(&s), before);
+    let out = s
+        .vm_scope(7, KEY)
+        .unwrap()
+        .map_get_clean(
+            &Default::default(),
+            &0.into(),
+            1_000_000.into(),
+            &order,
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(out.value.len(), 3);
+    let mut absent = Stores::<Backend>::new(Version::Arcus);
+    let cache = [(Value::Integer(1.into()), Value::Integer(42.into()))].into();
+    let out = absent
+        .vm_scope(7, KEY)
+        .unwrap()
+        .map_lookup(
+            &cache,
+            &0.into(),
+            &Value::Integer(1.into()),
+            (-1).into(),
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(out.gas.to_string(), "-1");
+    assert_eq!(out.value, Some(Value::Integer(42.into())));
+    assert!(matches!(
+        absent.vm_scope(7, KEY).unwrap().map_lookup(
+            &cache,
+            &0.into(),
+            &Value::Integer(2.into()),
+            1_000_000.into(),
+            Limits::default()
+        ),
+        Err(StoreError::MissingContract)
+    ));
+}
+
+fn cost_model(j: &J) -> ae_vm_fate::gas::CostModel {
+    use ae_vm_fate::gas::CostModel::*;
+    match string(j) {
+        "simple" => Simple,
+        "serial" => Serial,
+        "unfold" => Unfold,
+        "unfold_compare" => UnfoldCompare,
+        "unfold_serial" => UnfoldSerial,
+        "final" => Final,
+        _ => unreachable!(),
+    }
+}
+fn unfold_stores(case: &J) -> Stores<Backend> {
+    let mut stores = Stores::new(Version::for_protocol(
+        case["protocol"].as_u64().unwrap() as u32
+    ));
+    stores.put_contract(
+        KEY,
+        raw(&json!({"mode":case["mode"],"base":case["base"],"overlay":[]})),
+    );
+    stores
+}
+#[test]
+fn vm_unfolding_composes_both_gas_traversals_and_materialization_like_erlang() {
+    let fixture: J =
+        serde_json::from_str(include_str!("fixtures/erlang_fate_vm_unfold.json")).unwrap();
+    for case in rows(&fixture["cases"]) {
+        let protocol = case["protocol"].as_u64().unwrap() as u32;
+        let original = unfold_stores(case);
+        let input = value(&case["value"]);
+        let order = ReferenceOrder(&case["orders"]);
+        for model in rows(&case["models"]) {
+            for run in rows(&model["runs"]) {
+                let mut stores = original.clone();
+                let result = stores.vm_scope(protocol, KEY).unwrap().unfold(
+                    input.clone(),
+                    string(&run[0]).parse().unwrap(),
+                    cost_model(&model["model"]),
+                    &order,
+                    Limits::default(),
+                );
+                let context = format!(
+                    "{protocol} {} {} gas={}",
+                    case["name"], model["model"], run[0]
+                );
+                match result {
+                    Ok(out) => {
+                        assert!(
+                            run[1].get("gas").is_some(),
+                            "unexpected success {context}: {}",
+                            run[1]
+                        );
+                        assert_eq!(out.value, value(&run[1]["value"]), "value {context}");
+                        assert_eq!(out.gas.to_string(), string(&run[1]["gas"]), "gas {context}");
+                    }
+                    Err(StoreError::OutOfGas) => {
+                        assert_eq!(run[1], json!({"out_of_gas":true}), "{context}")
+                    }
+                    Err(
+                        StoreError::Data(Error::ResourceLimit)
+                        | StoreError::InvalidOrder
+                        | StoreError::ProtocolMismatch,
+                    ) => panic!("unexpected operational failure {context}"),
+                    Err(e) => assert_eq!(run[1], json!({"exception":true}), "{context}: {e:?}"),
+                }
+                assert_eq!(
+                    snapshot(&stores),
+                    case["states"][run[2].as_u64().unwrap() as usize],
+                    "state {context}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn unfolding_bounds_cumulative_decode_bytes_and_cycles_without_publishing_caches() {
+    use ae_vm_fate::gas::CostModel;
+    let fixture: J =
+        serde_json::from_str(include_str!("fixtures/erlang_fate_vm_unfold.json")).unwrap();
+    let case = rows(&fixture["cases"])
+        .iter()
+        .find(|c| c["name"] == "map_1" && c["mode"] == "tree" && c["protocol"] == 7)
+        .unwrap();
+    let mut stores = unfold_stores(case);
+    stores.cache_metadata(&KEY, Limits::default()).unwrap();
+    let before = snapshot(&stores);
+    let order = ReferenceOrder(&case["orders"]);
+    let mut run = |maximum| {
+        stores.vm_scope(7, KEY).unwrap().unfold(
+            value(&case["value"]),
+            1_000_000.into(),
+            CostModel::Unfold,
+            &order,
+            Limits {
+                max_bytes: maximum,
+                ..Limits::default()
+            },
+        )
+    };
+    assert!(matches!(
+        run(3),
+        Err(StoreError::Data(Error::ResourceLimit))
+    ));
+    assert_eq!(snapshot(&stores), before);
+    stores
+        .vm_scope(7, KEY)
+        .unwrap()
+        .unfold(
+            value(&case["value"]),
+            1_000_000.into(),
+            CostModel::Unfold,
+            &order,
+            Limits {
+                max_bytes: 4,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+    let sm = Value::StoreMap {
+        id: 0.into(),
+        cache: Default::default(),
+    };
+    let mut backend = Store::default();
+    let metadata = Value::Map(
+        [(
+            Value::Integer(0.into()),
+            Value::Tuple(vec![
+                Value::Integer(5.into()),
+                Value::Integer(1.into()),
+                Value::Integer(1.into()),
+            ]),
+        )]
+        .into(),
+    );
+    backend.put(
+        vec![0, 0],
+        encoding::encode(&metadata, Limits::default()).unwrap(),
+    );
+    backend.put(vec![1, 0, 0, 0, 5], vec![0]);
+    backend.put(
+        vec![1, 0, 0, 0, 5, 0],
+        encoding::encode(&sm, Limits::default()).unwrap(),
+    );
+    let mut stores = Stores::new(Version::Arcus);
+    stores.put_contract(KEY, Backend(backend));
+    let before = snapshot(&stores);
+    assert!(matches!(
+        stores.vm_scope(7, KEY).unwrap().unfold(
+            sm,
+            1_000_000.into(),
+            CostModel::Simple,
+            &ReferenceOrder(&J::Null),
+            Limits {
+                max_depth: 8,
+                ..Limits::default()
+            }
+        ),
+        Err(StoreError::Data(Error::ResourceLimit))
+    ));
+    assert_eq!(snapshot(&stores), before);
 }

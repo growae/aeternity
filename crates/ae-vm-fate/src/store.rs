@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 pub mod plan;
 pub mod read;
+pub mod vm;
 pub mod write;
 
 // Backends keep their byte-read cache separate from FATE's decoded term cache.
@@ -43,6 +44,7 @@ pub enum StoreError<E> {
     MissingMetadata,
     InvalidMetadata,
     InvalidOrder,
+    ProtocolMismatch,
     MissingMap,
     OutOfGas,
 }

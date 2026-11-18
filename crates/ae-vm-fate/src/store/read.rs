@@ -19,6 +19,11 @@ pub trait CachedSubtreeBackend: SubtreeBackend {
     ) -> Result<Option<(RawMap, usize)>, Self::Error>;
 }
 pub type MapList = Vec<(Value, Value)>;
+pub(crate) struct Listed {
+    pub values: MapList,
+    pub gas: Gas,
+    pub remaining_limits: Limits,
+}
 
 impl<S: CachedSubtreeBackend> Stores<S> {
     pub fn map_to_list(
@@ -29,6 +34,17 @@ impl<S: CachedSubtreeBackend> Stores<S> {
         order: &impl MapOrder,
         limits: Limits,
     ) -> Result<(MapList, Gas), StoreError<S::Error>> {
+        self.map_to_list_counted(key, id, gas, order, limits)
+            .map(|r| (r.values, r.gas))
+    }
+    pub(crate) fn map_to_list_counted(
+        &mut self,
+        key: &[u8; 32],
+        id: &BigInt,
+        gas: Gas,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Listed, StoreError<S::Error>> {
         self.staged(key, |entry, version| {
             // As with single-key lookup, replace the byte cache captured before
             // metadata lookup, while retaining the decoded metadata term.
@@ -95,7 +111,15 @@ impl<S: CachedSubtreeBackend> Stores<S> {
             if version != Version::Lima {
                 entry.store = store;
             }
-            Ok((list, gas))
+            Ok(Listed {
+                values: list,
+                gas,
+                remaining_limits: Limits {
+                    max_nodes: limits.max_nodes - budget.nodes,
+                    max_bytes: limits.max_bytes - decoded_bytes,
+                    ..limits
+                },
+            })
         })
     }
 }
