@@ -35,6 +35,11 @@ impl From<ae_trie::Error> for Error {
         Self::Tree(e)
     }
 }
+impl From<crate::sext::Error> for Error {
+    fn from(_: crate::sext::Error) -> Self {
+        Self::InvalidCache
+    }
+}
 
 pub use ae_codec::name_pointer::{Pointer, PointerValue};
 impl From<ae_codec::name_pointer::PointerError> for Error {

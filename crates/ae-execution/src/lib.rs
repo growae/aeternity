@@ -15,6 +15,7 @@ use std::{
 };
 
 pub mod names;
+pub mod oracles;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -50,6 +51,8 @@ impl Context {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Oracle(ae_state::oracles::Error),
+    OracleRefundAccountMissing(AccountPublicKey),
     State(AccountError),
     Name(name_state::Error),
     Signature(ae_tx::Error),
@@ -100,9 +103,25 @@ impl From<ae_tx::Error> for Error {
         Self::Signature(e)
     }
 }
+impl From<ae_state::oracles::Error> for Error {
+    fn from(e: ae_state::oracles::Error) -> Self {
+        match e {
+            ae_state::oracles::Error::SkippedExpiryHeight
+            | ae_state::oracles::Error::InvalidIdType => Self::ReferenceException {
+                class: "error",
+                reason: "function_clause",
+            },
+            _ => Self::Oracle(e),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    OracleRefund {
+        account: AccountPublicKey,
+        amount: Unsigned,
+    },
     NameDebit {
         account: AccountPublicKey,
         amount: Unsigned,
