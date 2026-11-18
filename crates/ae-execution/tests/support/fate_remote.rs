@@ -12,6 +12,7 @@ use ae_vm_fate::{
 };
 use serde_json::json;
 use std::sync::Arc;
+type ChainState<A, C> = remote::State<RemoteStore, Chain<A, C>>;
 static REMOTE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../fixtures/erlang_fate_remote.json")).unwrap()
 });
@@ -197,6 +198,26 @@ impl Host<ae_execution::fate_chain::Error> for FailingHost {
     ) -> Result<Value, remote::HostFailure<ae_execution::fate_chain::Error>> {
         self.inner.oracle_read(r, l)
     }
+    fn oracle_write(
+        &mut self,
+        r: &remote::oracle_write::Request,
+        p: u32,
+        l: Limits,
+    ) -> Result<
+        remote::oracle_write::ResultValue,
+        remote::HostFailure<ae_execution::fate_chain::Error>,
+    > {
+        self.inner.oracle_write(r, p, l)
+    }
+    fn verify_delegation(
+        &mut self,
+        k: &[u8],
+        m: &[u8],
+        s: &[u8; 64],
+        v: VmVersion,
+    ) -> Result<bool, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.verify_delegation(k, m, s, v)
+    }
     fn environment(&self) -> &remote::context::Environment {
         self.inner.environment()
     }
@@ -304,6 +325,8 @@ pub(super) fn chain(row: &J) -> Chain {
     Chain {
         accounts: Accounts::from_root(a.root_hash(), a.into_store()).unwrap(),
         contracts: Contracts::from_root(c.root_hash(), c.into_store()).unwrap(),
+        authentication: Default::default(),
+        oracle_base: None,
         height: row["height"].as_u64().unwrap(),
         events: vec![],
         oracles: Default::default(),
@@ -343,7 +366,44 @@ fn oracle_cache(c: &ae_execution::fate_chain::oracle::Cache) -> J {
     }
     json!(items)
 }
-pub(super) fn assert_chain(actual: &Chain, expected: &J) {
+fn tree_entries<S: ae_trie::NodeReader>(tree: &Trie<S>) -> J {
+    json!(
+        tree.iter()
+            .map(|r| {
+                let (k, TrieValue::Bytes(v)) = r.unwrap() else {
+                    panic!()
+                };
+                let k: Vec<_> = k
+                    .as_slice()
+                    .chunks_exact(2)
+                    .map(|p| p[0] << 4 | p[1])
+                    .collect();
+                json!({"key":hex::encode(k),"encoded":hex::encode(v)})
+            })
+            .collect::<Vec<_>>()
+    )
+}
+pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
+    actual: &Chain<A, C>,
+    expected: &J,
+) {
+    if expected.get("oracle_objects").is_some() {
+        assert_eq!(
+            tree_entries(actual.oracles.tree()),
+            expected["oracle_objects"],
+            "oracle objects"
+        );
+        assert_eq!(
+            tree_entries(actual.oracles.cache()),
+            expected["oracle_cache_entries"],
+            "oracle expiry cache"
+        );
+        assert_eq!(
+            json!(actual.oracles.cache_root_hash().map(|h| hex::encode(h.0))),
+            expected["oracle_cache_root"],
+            "oracle expiry cache root"
+        );
+    }
     if expected.get("oracle_reads").is_some() {
         assert_eq!(
             oracle_cache(&actual.oracle_reads),
@@ -397,6 +457,8 @@ pub(super) fn assert_chain(actual: &Chain, expected: &J) {
         "tree root"
     );
     let events:Vec<_>=actual.events.iter().map(|e|match e {
+        TransferEvent::OracleCall {info,transaction}=>json!({"kind":"internal_call","info":info,"transaction":hex::encode(transaction.encode()),"type":"non_tx","tx_hash":""}),
+        TransferEvent::OracleDelta {info,account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})},
         TransferEvent::InternalCall(tx)=>json!({"kind":"internal_call","info":String::from_utf8_lossy(tx.payload()),"transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),
         TransferEvent::Delta {account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":"Spend.amount","type":"non_tx","tx_hash":""})}
     }).collect();
@@ -446,7 +508,11 @@ fn assert_local(f: &LocalFrame, e: &J) {
     assert_eq!(f.memory, memory(&e[8]));
     assert_eq!(f.call_value, number(&e[9]));
 }
-pub(super) fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected: &J, pc: bool) {
+pub(super) fn assert_remote<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
+    actual: &ChainState<A, C>,
+    expected: &J,
+    pc: bool,
+) {
     let m = &actual.program.machine;
     let c = &actual.program.cursor;
     let s = &actual.session;
@@ -555,10 +621,10 @@ pub(super) fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected
         }
     }
 }
-pub(super) fn check(
-    out: remote::Outcome<RemoteStore, Chain>,
+pub(super) fn check<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
+    out: remote::Outcome<RemoteStore, Chain<A, C>>,
     e: &J,
-) -> Option<(remote::State<RemoteStore, Chain>, Limits)> {
+) -> Option<(ChainState<A, C>, Limits)> {
     match out {
         remote::Outcome::Continue {
             state,

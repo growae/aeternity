@@ -13,16 +13,30 @@ use ae_vm_fate::{
     },
 };
 use num_bigint::{BigInt, Sign};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+#[derive(Debug, Clone, Default)]
+pub struct Authentication {
+    pub dry_run: bool,
+    pub payer: Option<AccountPublicKey>,
+    pub ga_authenticated: BTreeSet<AccountPublicKey>,
+    pub ga_nonces: BTreeMap<AccountPublicKey, Vec<u8>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct State<A = MemoryStore, C = MemoryStore> {
     pub accounts: Accounts<A>,
     pub contracts: Contracts<C>,
     pub height: u64,
+    pub authentication: Authentication,
     pub events: Vec<TransferEvent>,
     pub oracles: ae_state::oracles::Oracles<C, C>,
     pub oracle_reads: super::oracle::Cache,
+    // Invocation-entry trees, before any primitive cache publication. Start
+    // each new invocation with None; protected snapshots preserve this field.
+    pub oracle_base: Option<ae_state::oracles::Oracles<C, C>>,
     pub onchain: Option<Box<View<A, C>>>,
     pub environment: Environment,
     pub history: Arc<super::history::Snapshot>,
@@ -57,7 +71,7 @@ fn failure(error: Error) -> HostFailure<Error> {
         e => HostFailure::Backend(e),
     }
 }
-impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
+impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
     fn code(
         &mut self,
         key: &[u8],
@@ -169,6 +183,51 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
             Some(v) => super::oracle::read(&v.oracles, &mut v.oracle_reads, request, limits),
             None => super::oracle::read(&self.oracles, &mut self.oracle_reads, request, limits),
         }
+    }
+    fn oracle_write(
+        &mut self,
+        request: &ae_vm_fate::machine::program::remote::oracle_write::Request,
+        protocol: u32,
+        limits: Limits,
+    ) -> Result<ae_vm_fate::machine::program::remote::oracle_write::ResultValue, HostFailure<Error>>
+    {
+        super::oracle_write::execute(self, request, protocol, limits)
+    }
+    fn verify_delegation(
+        &mut self,
+        signer: &[u8],
+        message: &[u8],
+        signature: &[u8; 64],
+        vm: Version,
+    ) -> Result<bool, HostFailure<Error>> {
+        let key = key(
+            self.accounts.tree(),
+            signer,
+            Error::UnsupportedAccountKey,
+            |e| Error::Accounts(e.into()),
+        )?;
+        let account = match key {
+            Some(key) => self
+                .accounts
+                .lookup(AccountPublicKey(key))
+                .map_err(|e| failure(e.into()))?,
+            None => None,
+        };
+        if account
+            .as_ref()
+            .is_some_and(|a| a.authorization().is_some())
+            || (account.is_none() && vm < Version::Three)
+        {
+            return Ok(false);
+        }
+        let signer = signer
+            .try_into()
+            .map_err(|_| HostFailure::Exception(Exception::Native("badarg")))?;
+        Ok(ae_crypto::verify_ed25519(
+            &AccountPublicKey(signer),
+            message,
+            &ae_types::Signature(*signature),
+        ))
     }
     fn environment(&self) -> &Environment {
         &self.environment

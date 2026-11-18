@@ -24,7 +24,7 @@ pub struct Cache {
     pub queries: BTreeMap<([u8; 32], [u8; 32]), Query>,
 }
 impl Cache {
-    fn budget(&self, mut limits: Limits) -> Result<Limits, HostFailure<Error>> {
+    pub(super) fn budget(&self, mut limits: Limits) -> Result<Limits, HostFailure<Error>> {
         let mut take = |parts: &[&[u8]]| {
             limits.max_nodes = limits
                 .max_nodes
@@ -203,7 +203,7 @@ fn short_query_failure(bytes: &[u8], key: Vec<u8>, limits: Limits) -> HostFailur
     }
     HostFailure::Backend(Error::UnsupportedOracleKey(key))
 }
-fn encode(v: &Value, limits: Limits) -> Result<Vec<u8>, HostFailure<Error>> {
+pub(super) fn encode(v: &Value, limits: Limits) -> Result<Vec<u8>, HostFailure<Error>> {
     encoding::encode_for_vm(v, limits).map_err(|e| {
         if e.error == ae_vm_fate::Error::ResourceLimit {
             HostFailure::ResourceLimit
@@ -243,26 +243,7 @@ pub fn read<S: NodeReader, C: NodeReader>(
     let r = request
         .response_type
         .ok_or(HostFailure::Exception(Exception::Native("function_clause")))?;
-    let mismatch = match &oracle {
-        None => Some("oracle_not_found"),
-        Some(o)
-            if o.abi_version == 0.into()
-                && *q == Value::TypeRep(Type::String)
-                && *r == Value::TypeRep(Type::String) =>
-        {
-            None
-        }
-        Some(o) if o.abi_version == 3.into() => {
-            let qb = encode(q, limits)?;
-            let rb = encode(r, limits)?;
-            if qb == o.query_format && rb == o.response_format {
-                None
-            } else {
-                Some("wrong_oracle_types")
-            }
-        }
-        _ => Some("wrong_abi_version"),
-    };
+    let mismatch = check_types(oracle.as_ref(), q, r, limits)?;
     if let Some(reason) = mismatch {
         return if matches!(op, Check | CheckQuery) {
             Ok(Value::Boolean(false))
@@ -329,4 +310,32 @@ pub fn read<S: NodeReader, C: NodeReader>(
     ae_vm_fate::value::check_limits(&value, limits).map_err(|_| HostFailure::ResourceLimit)?;
     *cache = staged;
     Ok(value)
+}
+
+pub(super) fn check_types(
+    oracle: Option<&Oracle>,
+    q: &Value,
+    r: &Value,
+    limits: Limits,
+) -> Result<Option<&'static str>, HostFailure<Error>> {
+    Ok(match oracle {
+        None => Some("oracle_not_found"),
+        Some(o)
+            if o.abi_version == 0.into()
+                && *q == Value::TypeRep(Type::String)
+                && *r == Value::TypeRep(Type::String) =>
+        {
+            None
+        }
+        Some(o) if o.abi_version == 3.into() => {
+            let qb = encode(q, limits)?;
+            let rb = encode(r, limits)?;
+            if qb == o.query_format && rb == o.response_format {
+                None
+            } else {
+                Some("wrong_oracle_types")
+            }
+        }
+        _ => Some("wrong_abi_version"),
+    })
 }

@@ -28,6 +28,8 @@ use values::{bytes, rows, string, value};
 mod context_tests;
 #[path = "support/fate_hosts.rs"]
 mod host_tests;
+#[path = "support/fate_oracle_writes.rs"]
+mod oracle_write_tests;
 #[path = "support/fate_program.rs"]
 mod program_tests;
 #[path = "support/fate_remote.rs"]

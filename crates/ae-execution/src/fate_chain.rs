@@ -15,6 +15,7 @@ use ae_vm_fate::{
 };
 pub mod history;
 pub mod oracle;
+mod oracle_write;
 pub mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub enum Error {
     Oracles(ae_state::oracles::Error),
     UnsupportedAccountKey(Vec<u8>),
     UnsupportedOracleKey(Vec<u8>),
+    Primitive(Box<crate::Error>),
+    UnsupportedProtocol(u32),
     NeedHeader([u8; 32]),
     NeedHeight(u64),
 }
@@ -176,6 +179,16 @@ pub enum TransferEvent {
         amount: Unsigned,
     },
     InternalCall(Spend),
+    OracleCall {
+        info: &'static str,
+        transaction: ae_tx::OracleTransaction,
+    },
+    OracleDelta {
+        info: &'static str,
+        account: AccountPublicKey,
+        debit: bool,
+        amount: Unsigned,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transfer {

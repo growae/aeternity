@@ -16,8 +16,17 @@ static CONTEXT: LazyLock<J> = LazyLock::new(|| {
 pub(super) fn chain_base(row: &J) -> Chain {
     let mut c = remote_tests::chain(row);
     let t = remote_tests::tree(&row["oracles"]);
-    c.oracles =
-        Oracles::from_roots(t.root_hash(), None, t.into_store(), Default::default()).unwrap();
+    let cache = row
+        .get("oracle_cache")
+        .map(remote_tests::tree)
+        .unwrap_or_else(|| Trie::new(MemoryStore::default()));
+    c.oracles = Oracles::from_roots(
+        t.root_hash(),
+        cache.root_hash(),
+        t.into_store(),
+        cache.into_store(),
+    )
+    .unwrap();
     if !row["onchain"].as_bool().unwrap() {
         let a = remote_tests::tree(&row["onchain_view"]["accounts"]);
         let o = remote_tests::tree(&row["onchain_view"]["oracles"]);
@@ -30,6 +39,20 @@ pub(super) fn chain_base(row: &J) -> Chain {
         }));
     }
     let e = &row["environment"];
+    c.authentication.dry_run = e["dry_run"] == true;
+    c.authentication.payer = e["payer"]
+        .as_str()
+        .map(|_| ae_types::AccountPublicKey(key(&e["payer"])));
+    if e["ga_auth"] == true {
+        c.authentication
+            .ga_authenticated
+            .insert(ae_types::AccountPublicKey(small(1)));
+    }
+    if !e["ga_nonce"].is_null() {
+        c.authentication
+            .ga_nonces
+            .insert(ae_types::AccountPublicKey(small(1)), bytes(&e["ga_nonce"]));
+    }
     c.environment = Environment {
         auth_tx_hash: e["auth_hash"].as_str().map(|s| hex::decode(s).unwrap()),
         origin: key(&e["origin"]),
@@ -323,6 +346,8 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
         oracles: v.oracles,
         oracle_reads: Default::default(),
         onchain: Some(Box::new(view(&c, &fail))),
+        authentication: Default::default(),
+        oracle_base: None,
         height: c.height,
         events: vec![],
         environment: c.environment,

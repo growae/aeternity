@@ -393,6 +393,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             StoreError::OutOfGas => Fault::Abort(Reason::OutOfGas),
             StoreError::NativeIntegerLimit => self.native("system_limit"),
+            // Historical stores use maps:get(MapId, Meta) without a default.
+            StoreError::MissingMap => self.native("badkey"),
             _ => Fault::Exception(Exception::StoreData),
         }
     }

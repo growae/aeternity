@@ -9,6 +9,7 @@ use ae_tx::OracleTransaction;
 use ae_types::Unsigned;
 
 pub mod abi;
+pub(crate) mod primitives;
 
 pub fn gas(tx: &OracleTransaction, context: &Context) -> Unsigned {
     gas_for_size(tx, context, tx.wire_size())
@@ -154,9 +155,9 @@ pub fn process_with_limits<
     context: &Context,
     limits: abi::Limits,
 ) -> Result<crate::Receipt, Error> {
-    use ae_state::oracles::{Oracle, Query, ga_query_id};
+    use ae_state::oracles::Oracle;
     use ae_tx::OracleOperation;
-    use ae_types::{Id, IdTag};
+    use ae_types::IdTag;
     if context.origin != Origin::Contract {
         let min = minimum_fee(tx, context);
         if min == 0.into() {
@@ -197,33 +198,15 @@ pub fn process_with_limits<
                 ..
             } = tx.operation()
             {
-                let mut query = oracles
-                    .query(actor.0, response_id.expect("response ID checked"))?
-                    .ok_or(Failure::NoMatchingQuery)?;
-                if &query.response_ttl != response_ttl {
-                    return Err(Failure::WrongResponseTtl.into());
-                }
-                let oracle = oracles
-                    .oracle(actor.0)?
-                    .ok_or(Failure::OracleDoesNotExist)?;
-                if query.oracle.tag != IdTag::Oracle {
-                    return Err(function_clause());
-                }
-                if query.oracle.value != actor.0 {
-                    return Err(Failure::WrongOracle.into());
-                }
-                abi::validate_content(
-                    &oracle.abi_version,
-                    &oracle.response_format,
+                let query = primitives::respond(
+                    oracles,
+                    actor.0,
+                    response_id.expect("response ID checked"),
                     response,
-                    context.protocol,
+                    Some(response_ttl),
+                    context,
                     limits,
                 )?;
-                if !query.is_open() {
-                    return Err(Failure::QueryClosed.into());
-                }
-                query.add_response(&context.height.into(), Some(response.clone()));
-                oracles.enter_query(&query)?;
                 Some(query.fee)
             } else {
                 None
@@ -257,33 +240,24 @@ pub fn process_with_limits<
                     abi_version,
                     ..
                 } => {
-                    if oracles.oracle(actor.0)?.is_some() {
-                        return Err(Failure::AlreadyOracle.into());
-                    }
-                    abi::validate_registration(
-                        abi_version,
-                        query_format,
-                        response_format,
-                        context.protocol,
+                    primitives::register(
+                        oracles,
+                        Oracle {
+                            public_key: actor.0,
+                            query_format: query_format.clone(),
+                            response_format: response_format.clone(),
+                            query_fee: query_fee.clone(),
+                            expires_by: Unsigned::from(context.height).add(&delta),
+                            abi_version: abi_version.clone(),
+                        },
+                        context,
                         limits,
                     )?;
-                    oracles.enter_oracle(&Oracle {
-                        public_key: actor.0,
-                        query_format: query_format.clone(),
-                        response_format: response_format.clone(),
-                        query_fee: query_fee.clone(),
-                        expires_by: Unsigned::from(context.height).add(&delta),
-                        abi_version: abi_version.clone(),
-                    })?;
                 }
                 OracleOperation::Extend { delta } => {
-                    if delta == &0.into() {
-                        return Err(Failure::ZeroExtensionTtl.into());
-                    }
-                    let mut oracle = oracles.oracle(actor.0)?.ok_or(Failure::NotActiveOracle)?;
-                    oracle.expires_by = oracle.expires_by.add(delta);
-                    oracles.enter_oracle(&oracle)?;
+                    primitives::extend(oracles, actor.0, delta)?;
                 }
+
                 OracleOperation::Query {
                     oracle: ident,
                     query,
@@ -299,50 +273,21 @@ pub fn process_with_limits<
                     } else {
                         ident.value
                     };
-                    let oracle = oracles
-                        .oracle(oracle_key)?
-                        .ok_or(Failure::OracleDoesNotExist)?;
-                    if query_fee < &oracle.query_fee {
-                        return Err(Failure::QueryFeeTooLow.into());
-                    }
-                    let expires_by = Unsigned::from(context.height).add(&delta);
-                    if expires_by.add(response_ttl) > oracle.expires_by {
-                        return Err(Failure::TooLongTtl.into());
-                    }
-                    abi::validate_content(
-                        &oracle.abi_version,
-                        &oracle.query_format,
-                        query,
-                        context.protocol,
+                    primitives::query(
+                        oracles,
+                        primitives::NewQuery {
+                            ident: *ident,
+                            oracle: oracle_key,
+                            sender: actor,
+                            nonce: tx.nonce(),
+                            content: query,
+                            fee: query_fee,
+                            delta: &delta,
+                            response_ttl,
+                        },
+                        context,
                         limits,
                     )?;
-                    let mut query = Query::new(
-                        *ident,
-                        actor,
-                        tx.nonce().clone(),
-                        query.clone(),
-                        query_fee.clone(),
-                        expires_by,
-                        response_ttl.clone(),
-                    )
-                    .map_err(|e| match e {
-                        ae_state::oracles::Error::ZeroResponseTtl => {
-                            Error::from(Failure::IllegalQuerySpec)
-                        }
-                        _ => e.into(),
-                    })?;
-                    query.oracle = Id::new(IdTag::Oracle, oracle_key);
-                    if let Some(nonce) = context.ga_nonces.get(&actor) {
-                        query.id = ga_query_id(
-                            nonce.as_slice().try_into().map_err(|_| function_clause())?,
-                            oracle_key,
-                        )
-                        .0;
-                    }
-                    if oracles.query(oracle_key, query.id)?.is_some() {
-                        return Err(Failure::QueryAlreadyPresent.into());
-                    }
-                    oracles.enter_query(&query)?;
                 }
                 OracleOperation::Response { .. } => {
                     let amount = response_fee.expect("response checked before nonce and fee");

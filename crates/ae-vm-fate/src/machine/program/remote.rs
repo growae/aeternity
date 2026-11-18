@@ -8,6 +8,7 @@ use crate::{
 use std::sync::Arc;
 pub mod context;
 pub mod hosts;
+pub mod oracle_write;
 use context::{AddressTest, Environment, Log};
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,19 @@ pub trait Host<E>: Clone {
         request: hosts::OracleRead<'_>,
         limits: Limits,
     ) -> Result<Value, HostFailure<E>>;
+    fn oracle_write(
+        &mut self,
+        request: &oracle_write::Request,
+        protocol: u32,
+        limits: Limits,
+    ) -> Result<oracle_write::ResultValue, HostFailure<E>>;
+    fn verify_delegation(
+        &mut self,
+        signer: &[u8],
+        message: &[u8],
+        signature: &[u8; 64],
+        vm: VmVersion,
+    ) -> Result<bool, HostFailure<E>>;
     fn environment(&self) -> &Environment;
     fn balance(&mut self, key: &[u8]) -> Result<Option<BigInt>, HostFailure<E>>;
     fn creator(&mut self, key: [u8; 32]) -> Result<[u8; 32], HostFailure<E>>;
@@ -298,6 +312,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             let supported = ops::supported(ins.opcode)
                 || context::supported(ins.opcode)
                 || hosts::supported(ins.opcode)
+                || oracle_write::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
                     Opcode::Call
@@ -454,6 +469,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         match ins.opcode {
+            op if oracle_write::supported(op) => {
+                self.oracle_write(session, ins)?;
+                cursor.instruction += 1;
+                Ok(())
+            }
             op if hosts::supported(op) => {
                 self.host_instruction(session, ins)?;
                 cursor.instruction += 1;
