@@ -32,6 +32,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-state"
+version = "0.1.0"
+dependencies = [
+ "ae-codec",
+ "ae-crypto",
+ "ae-protocol",
+ "ae-trie",
+ "ae-types",
+ "hex",
+ "serde_json",
+]
+
+[[package]]
 name = "ae-trie"
 version = "0.1.0"
 dependencies = [

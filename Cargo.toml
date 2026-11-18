@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie"]
+members = ["crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie", "crates/ae-state"]
 resolver = "3"
 
 [workspace.package]
@@ -12,12 +12,14 @@ publish = false
 ae-types = { path = "crates/ae-types" }
 ae-crypto = { path = "crates/ae-crypto" }
 ae-codec = { path = "crates/ae-codec" }
+ae-trie = { path = "crates/ae-trie" }
+ae-protocol = { path = "crates/ae-protocol" }
 blake2 = "=0.10.6"
 sha2 = "=0.10.9"
 bs58 = "=0.5.1"
 base64 = "=0.22.1"
 hex = "=0.4.3"
-serde_json = "=1.0.149"
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

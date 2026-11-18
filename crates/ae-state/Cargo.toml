@@ -1,0 +1,20 @@
+[package]
+name = "ae-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ae-types.workspace = true
+ae-crypto.workspace = true
+ae-codec.workspace = true
+ae-trie.workspace = true
+ae-protocol.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+
+[lints]
+workspace = true
