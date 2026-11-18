@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod genesis;
+pub mod names;
 
 use ae_crypto::blake2b_256;
 use ae_types::Hash256;

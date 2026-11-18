@@ -233,6 +233,19 @@ impl<S: NodeReader> Accounts<S> {
     }
 }
 impl<S: NodeWriter> Accounts<S> {
+    pub fn apply(&mut self, accounts: &[Account]) -> Result<(), AccountError> {
+        let updates = accounts
+            .iter()
+            .map(|account| {
+                Ok((
+                    Nibbles::from_bytes(account.public_key.as_ref()),
+                    ae_trie::Value::Bytes(account.serialize()?),
+                ))
+            })
+            .collect::<Result<Vec<_>, AccountError>>()?;
+        self.tree.apply_batch(updates)?;
+        Ok(())
+    }
     pub fn enter(&mut self, account: &Account) -> Result<(), AccountError> {
         self.tree.put(
             &Nibbles::from_bytes(account.public_key.as_ref()),

@@ -111,6 +111,24 @@ impl Id {
 pub struct Unsigned(Vec<u8>);
 
 impl Unsigned {
+    pub fn mul_u64(&self, multiplier: u64) -> Self {
+        if multiplier == 0 {
+            return 0.into();
+        }
+        let mut output = Vec::with_capacity(self.0.len() + 8);
+        let mut carry = 0u128;
+        for b in self.0.iter().rev() {
+            let product = u128::from(*b) * u128::from(multiplier) + carry;
+            output.push(product as u8);
+            carry = product >> 8;
+        }
+        while carry != 0 {
+            output.push(carry as u8);
+            carry >>= 8;
+        }
+        output.reverse();
+        Self(output)
+    }
     pub fn from_decimal(text: &str) -> Result<Self, TypeError> {
         if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
             return Err(TypeError::InvalidDecimal);
@@ -235,6 +253,13 @@ mod tests {
         assert_eq!(b.checked_sub(&a), Err(TypeError::IntegerUnderflow));
         assert_eq!(Unsigned::from_decimal("00000").unwrap(), 0.into());
         for a in [0, 1, 255, 256, 65535, u32::MAX as u64, u64::MAX] {
+            for multiplier in [0, 1, 255, 256, u64::MAX] {
+                assert_eq!(
+                    Unsigned::from(a).mul_u64(multiplier),
+                    Unsigned::from_decimal(&(u128::from(a) * u128::from(multiplier)).to_string())
+                        .unwrap()
+                );
+            }
             for b in [0, 1, 255, 256, 65535] {
                 let sum = Unsigned::from(a).add(&Unsigned::from(b));
                 assert_eq!(

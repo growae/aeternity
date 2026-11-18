@@ -181,9 +181,9 @@ mod tests {
     fn fixture() -> (Ed25519SecretKey, Spend, NetworkProfile) {
         let key = Ed25519SecretKey::from_seed(&[7; 32]);
         let mut spend = Spend::new(key.public_key(), Id::new(IdTag::Account, [8; 32])).unwrap();
-        spend.amount = 100.into();
-        spend.nonce = 1.into();
-        spend.fee = 20_000.into();
+        spend.set_amount(100.into());
+        spend.set_nonce(1.into());
+        spend.set_fee(20_000.into());
         (key, spend, NetworkProfile::mainnet())
     }
     #[test]

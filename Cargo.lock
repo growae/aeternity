@@ -42,6 +42,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-execution"
+version = "0.1.0"
+dependencies = [
+ "ae-codec",
+ "ae-crypto",
+ "ae-protocol",
+ "ae-state",
+ "ae-trie",
+ "ae-tx",
+ "ae-types",
+ "hex",
+ "serde_json",
+]
+
+[[package]]
 name = "ae-protocol"
 version = "0.1.0"
 dependencies = [

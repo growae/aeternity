@@ -556,6 +556,21 @@ impl<S: NodeReader> Trie<S> {
     }
 }
 impl<S: NodeWriter> Trie<S> {
+    // Publish the new root only after every update succeeds. Content-addressed
+    // nodes written before a backend failure may remain unreachable until GC.
+    pub fn apply_batch(
+        &mut self,
+        updates: impl IntoIterator<Item = (Nibbles, Value)>,
+    ) -> Result<(), Error> {
+        let root = self.root;
+        for (key, value) in updates {
+            if let Err(error) = self.put(&key, value) {
+                self.root = root;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
     pub fn put(&mut self, key: &Nibbles, value: Value) -> Result<(), Error> {
         if key.0.is_empty() {
             return Err(Error::EmptyKey);
