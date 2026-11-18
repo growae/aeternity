@@ -82,15 +82,21 @@ impl SophiaCode {
         )
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, ObjectError> {
-        let env = object::decode_envelope(bytes)?;
+        Self::decode_with_limits(bytes, crate::rlp::DecodeLimits::default())
+    }
+    pub fn decode_with_limits(
+        bytes: &[u8],
+        limits: crate::rlp::DecodeLimits,
+    ) -> Result<Self, ObjectError> {
+        let env = object::decode_envelope_with_limits(bytes, limits)?;
         let version = env
             .version
             .to_u64()
             .ok()
             .and_then(|v| u8::try_from(v).ok())
             .ok_or(ObjectError::WrongVersion)?;
-        let fields = object::deserialize(
-            bytes,
+        let fields = object::deserialize_envelope(
+            &env,
             ObjectTag::CompilerSophia,
             &env.version,
             &schema(version)?,

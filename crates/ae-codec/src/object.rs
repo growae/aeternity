@@ -72,7 +72,14 @@ pub struct Envelope<'a> {
 }
 
 pub fn decode_envelope(bytes: &[u8]) -> Result<Envelope<'_>, ObjectError> {
-    let Rlp::List(mut fields) = rlp::decode(bytes)? else {
+    decode_envelope_with_limits(bytes, rlp::DecodeLimits::default())
+}
+
+pub fn decode_envelope_with_limits(
+    bytes: &[u8],
+    limits: rlp::DecodeLimits,
+) -> Result<Envelope<'_>, ObjectError> {
+    let Rlp::List(mut fields) = rlp::decode_with_limits(bytes, limits)? else {
         return Err(ObjectError::ExpectedList);
     };
     if fields.len() < 2 {
@@ -98,6 +105,15 @@ pub fn deserialize(
     template: &[Field],
 ) -> Result<Vec<(String, Value)>, ObjectError> {
     let envelope = decode_envelope(bytes)?;
+    deserialize_envelope(&envelope, tag, version, template)
+}
+
+pub(crate) fn deserialize_envelope(
+    envelope: &Envelope<'_>,
+    tag: ObjectTag,
+    version: &Unsigned,
+    template: &[Field],
+) -> Result<Vec<(String, Value)>, ObjectError> {
     if envelope.tag != tag {
         return Err(ObjectError::WrongTag);
     }
