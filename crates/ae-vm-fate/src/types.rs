@@ -238,6 +238,21 @@ fn merge(
     Ok(())
 }
 
+pub(crate) fn compatible_bindings(
+    a: &Bindings,
+    b: &Bindings,
+    mut limits: Limits,
+) -> Result<bool, Error> {
+    for ty in a.values().chain(b.values()) {
+        limits = crate::value::check_type_limits(ty, limits)?;
+    }
+    match merge(&mut b.clone(), a.clone(), &mut Budget::new(limits), 0) {
+        Ok(()) => Ok(true),
+        Err(Error::ResourceLimit) => Err(Error::ResourceLimit),
+        Err(_) => Ok(false),
+    }
+}
+
 pub fn instantiate(bindings: &Bindings, ty: &Type, limits: Limits) -> Result<Type, Error> {
     fn go(
         bindings: &Bindings,

@@ -8,6 +8,7 @@ use crate::{
 };
 use num_traits::ToPrimitive;
 use std::collections::VecDeque;
+pub mod remote;
 
 #[derive(Debug, Clone)]
 pub struct LocalFrame {
@@ -22,6 +23,8 @@ pub struct LocalFrame {
 pub enum Frame {
     Local(Box<LocalFrame>),
     Gas(BigInt),
+    Remote(Box<remote::RemoteFrame>),
+    ReturnCheck(Box<remote::ReturnCheck>),
 }
 #[derive(Debug, Clone)]
 pub struct Cursor {
@@ -133,6 +136,13 @@ impl Cursor {
                         limits = value::check_limits(v, limits)?;
                     }
                     limits = memory_budget(&f.memory, limits)?;
+                }
+                Frame::Remote(f) => {
+                    limits = f.budget(limits)?;
+                }
+                Frame::ReturnCheck(f) => {
+                    limits = bindings_budget(&f.bindings, limits)?;
+                    limits = value::check_type_limits(&f.returns, limits)?;
                 }
             }
         }
@@ -379,7 +389,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     ) -> Result<(), Fault<S::Error>> {
         cursor.block = target;
         cursor.instruction = 0;
-        if block(code, cursor).is_none() {
+        if !self.defer_program_jumps && block(code, cursor).is_none() {
             return Err(Fault::Abort(Reason::MissingBlock(cursor.block.clone())));
         }
         Ok(())
@@ -442,7 +452,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     code,
                     cursor,
                     name,
-                    self.executor.context.vm_version == VmVersion::One,
+                    self.context.vm_version == VmVersion::One,
                 )?;
                 self.jump_program(code, cursor, Value::Integer(0.into()))
             }
@@ -464,6 +474,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                             self.set_function(code, cursor, frame.function, true)?;
                             cursor.bindings = frame.bindings;
                             return self.jump_program(code, cursor, frame.return_block);
+                        }
+                        Frame::Remote(_) | Frame::ReturnCheck(_) => {
+                            return Err(Fault::Operational(Error::Unsupported(ins.opcode)));
                         }
                     }
                 }

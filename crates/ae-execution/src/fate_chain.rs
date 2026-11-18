@@ -13,6 +13,7 @@ use ae_vm_fate::{
     code::{Code, CodeError},
     types::Version,
 };
+pub mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -20,6 +21,7 @@ pub enum Error {
     Contracts(contracts::Error),
     ResourceLimit,
     InvalidReferenceId(Id),
+    UnsupportedContractKey(Vec<u8>),
 }
 impl From<AccountError> for Error {
     fn from(e: AccountError) -> Self {

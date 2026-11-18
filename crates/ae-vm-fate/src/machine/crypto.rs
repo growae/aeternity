@@ -39,7 +39,7 @@ fn bytes<const N: usize>(v: &Value) -> Option<&[u8; N]> {
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     pub(super) fn crypto(&mut self, op: Opcode, a: &[Operand]) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
-        if op == Poseidon && self.executor.context.vm_version < VmVersion::Three {
+        if op == Poseidon && self.context.vm_version < VmVersion::Three {
             return Err(Fault::Abort(Reason::Unavailable("poseidon")));
         }
         let x = self.read(&a[1])?;
@@ -106,7 +106,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             return self.write(&a[0], Value::Bytes(hash.0.to_vec()));
         }
         let y = self.read(&a[2])?;
-        let operation = name(op, self.executor.context.vm_version);
+        let operation = name(op, self.context.vm_version);
         if op == EcrecoverSecp256K1 {
             let (Some(digest), Some(signature)) = (bytes(&x), bytes(&y)) else {
                 return Err(self.type_error(operation, vec![x, y]));
@@ -135,7 +135,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 else {
                     return Err(self.type_error(operation, vec![x, y, z]));
                 };
-                if self.executor.context.vm_version < VmVersion::Three && message.len() != 32 {
+                if self.context.vm_version < VmVersion::Three && message.len() != 32 {
                     return Err(self.type_error(operation, vec![x, y, z]));
                 }
                 let key = key

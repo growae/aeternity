@@ -111,11 +111,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     pub(super) fn bls(&mut self, op: Opcode, a: &[Operand]) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
         let name = name(op);
-        if self.executor.context.vm_version < VmVersion::Two {
+        if self.context.vm_version < VmVersion::Two {
             return Err(Fault::Abort(Reason::Unavailable(name)));
         }
         let x = self.read(&a[1])?;
-        let profile = self.executor.context.bls_profile;
+        let profile = self.context.bls_profile;
         if matches!(op, Bls12381FrToInt | Bls12381FpToInt) {
             let result = if op == Bls12381FrToInt {
                 let Some(raw) = field(&x) else {

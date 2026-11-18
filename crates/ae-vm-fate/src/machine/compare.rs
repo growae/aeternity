@@ -97,10 +97,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         let result = self
             .state
             .stores
-            .vm_scope(
-                self.state.meter.protocol,
-                self.executor.context.current_contract,
-            )
+            .vm_scope(self.state.meter.protocol, self.context.current_contract)
             .map_err(|_| Fault::Operational(Error::ProtocolMismatch))?
             .unfold_prepared(value, prepared, model, self.executor.order)
             .map_err(|e| self.store_fault(e))?;

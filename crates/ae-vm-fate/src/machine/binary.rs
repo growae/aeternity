@@ -111,11 +111,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         Ok(Some(points))
     }
     fn nfc(&mut self, points: &[u32]) -> Result<Vec<u32>, Fault<S::Error>> {
-        let mapped = self
-            .executor
-            .context
-            .unicode_profile
-            .nfc(points, self.remaining)?;
+        let mapped = self.context.unicode_profile.nfc(points, self.remaining)?;
         self.remaining = mapped.remaining_limits;
         Ok(mapped.points)
     }
@@ -173,7 +169,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         Ok(true)
     }
-    fn simple_traversal(&mut self, value: &Value) -> Result<(), Fault<S::Error>> {
+    pub(super) fn simple_traversal(&mut self, value: &Value) -> Result<(), Fault<S::Error>> {
         let charge = gas::TraversalMeter {
             protocol: self.state.meter.protocol,
             model: gas::CostModel::Simple,
@@ -202,7 +198,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         if matches!(
             op,
             StrToBytes | IntToBytes | AddressToBytes | BytesSize | BytesSplitAny | BytesToFixedSize
-        ) && self.executor.context.vm_version < VmVersion::Three
+        ) && self.context.vm_version < VmVersion::Three
         {
             return Err(Fault::Abort(Reason::Unavailable(name(op))));
         }
@@ -286,9 +282,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let Value::String(bytes) = &x else {
                     return Err(if matches!(op, StrReverse | StrToBytes) {
                         self.type_error(
-                            if op == StrReverse
-                                && self.executor.context.vm_version >= VmVersion::Two
-                            {
+                            if op == StrReverse && self.context.vm_version >= VmVersion::Two {
                                 "str_reverse_unicode"
                             } else {
                                 name(op)
@@ -302,9 +296,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 if op == StrToBytes {
                     self.cells((bytes.len() / 8 + 1).into())?;
                     Value::Bytes(bytes.clone())
-                } else if op == StrLength && self.executor.context.vm_version == VmVersion::One {
+                } else if op == StrLength && self.context.vm_version == VmVersion::One {
                     Value::Integer(bytes.len().into())
-                } else if op == StrReverse && self.executor.context.vm_version == VmVersion::One {
+                } else if op == StrReverse && self.context.vm_version == VmVersion::One {
                     let mut bytes = bytes.clone();
                     bytes.reverse();
                     self.cells((bytes.len() / 8 + 1).into())?;
@@ -320,7 +314,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         });
                     };
                     if matches!(op, StrToUpper | StrToLower) {
-                        let mapped = self.executor.context.unicode_profile.case(
+                        let mapped = self.context.unicode_profile.case(
                             &points,
                             op == StrToUpper,
                             self.remaining,

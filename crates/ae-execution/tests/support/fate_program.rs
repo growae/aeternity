@@ -4,7 +4,7 @@ use ae_vm_fate::{
     machine::program::{self, Entry, Frame},
     types::Bindings,
 };
-fn code(j: &J) -> Code {
+pub(super) fn code(j: &J) -> Code {
     let mut code = Code {
         functions: rows(&j["functions"])
             .iter()
@@ -51,7 +51,7 @@ fn code(j: &J) -> Code {
         code
     }
 }
-fn bindings(j: &J) -> Bindings {
+pub(super) fn bindings(j: &J) -> Bindings {
     rows(j)
         .iter()
         .map(|p| (p[0].as_u64().unwrap() as u8, values::ty(&p[1])))
@@ -90,6 +90,7 @@ fn assert_cursor(cursor: &program::Cursor, expected: &J, check_pc: bool) {
                 assert_eq!(f.memory, memory(&e[5]));
                 assert_eq!(f.call_value, number(&e[6]));
             }
+            _ => panic!("unexpected remote frame in local fixture"),
         }
     }
 }

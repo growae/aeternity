@@ -26,6 +26,8 @@ mod values;
 use values::{bytes, rows, string, value};
 #[path = "support/fate_program.rs"]
 mod program_tests;
+#[path = "support/fate_remote.rs"]
+mod remote_tests;
 static FIXTURE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_instructions.json")).unwrap()
 });
@@ -355,6 +357,28 @@ fn assert_reason(actual: &Reason, expected: &J) {
             );
             "call_type"
         }
+        Reason::MissingContract(key) => {
+            assert_eq!(*key, bytes(&expected[1]));
+            "missing_contract"
+        }
+        Reason::ReentrantCall => "reentrant",
+        Reason::RemoteTypeMismatch => "remote_type",
+        Reason::BadGasCap(n) => {
+            assert_eq!(*n, number(&expected[1]));
+            "gas_cap"
+        }
+        Reason::CallError(s) => {
+            assert_eq!(*s, string(&expected[1]));
+            "call_error"
+        }
+        Reason::BadReturnType {
+            value: v,
+            expected: t,
+        } => {
+            assert_eq!(*v, value(&expected[1]));
+            assert_eq!(*t, values::ty(&expected[2]));
+            "return_type"
+        }
     };
     assert_eq!(name, string(&expected[0]));
 }
@@ -387,6 +411,7 @@ fn assert_outcome(out: Outcome<Backend>, expected: &J) {
                     Exception::Native(s) => s,
                     Exception::DetachedDuplicateIndex => "dup",
                     Exception::StoreData => "store_data",
+                    Exception::Host { .. } => "host",
                 },
                 string(&expected["reason"])
             );

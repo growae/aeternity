@@ -101,6 +101,15 @@ pub enum Reason {
         arguments: Vec<Value>,
         expected: Vec<crate::types::Type>,
     },
+    MissingContract(Vec<u8>),
+    ReentrantCall,
+    RemoteTypeMismatch,
+    BadGasCap(BigInt),
+    CallError(&'static str),
+    BadReturnType {
+        value: Value,
+        expected: crate::types::Type,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exception {
@@ -110,6 +119,10 @@ pub enum Exception {
     // Malformed lower-level stores retain structured data failures. Mapping
     // every such failure to exact Erlang reason text belongs to the adapter.
     StoreData,
+    Host {
+        operation: &'static str,
+        detail: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error<E> {
@@ -118,6 +131,8 @@ pub enum Error<E> {
     NeedContract([u8; 32]),
     ProtocolMismatch,
     Unsupported(Opcode),
+    UnsupportedContractKey(Vec<u8>),
+    NeedCode([u8; 32]),
     // The original native code has undefined behavior for this input. Keep
     // this outside VM outcomes: it must not become block validity or an abort.
     UnresolvedNativeBehavior {
@@ -166,6 +181,8 @@ struct Step<'a, 'b, S, O> {
     executor: &'a Executor<'b, S, O>,
     remaining: Limits,
     reserved_gas: BigInt,
+    context: Context,
+    defer_program_jumps: bool,
 }
 impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
     // An unimplemented opcode is an operational stop, never an invented VM
@@ -249,6 +266,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             }
         }
         let mut step = Step {
+            defer_program_jumps: false,
+            context: self.context.clone(),
             state: state.clone(),
             entry: state.clone(),
             executor: self,
@@ -357,7 +376,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             StoreError::Backend(e) => Fault::Operational(Error::Backend(e)),
             StoreError::ProtocolMismatch => Fault::Operational(Error::ProtocolMismatch),
             StoreError::MissingContract => {
-                Fault::Operational(Error::NeedContract(self.executor.context.current_contract))
+                Fault::Operational(Error::NeedContract(self.context.current_contract))
             }
             StoreError::OutOfGas => Fault::Abort(Reason::OutOfGas),
             StoreError::NativeIntegerLimit => self.native("system_limit"),
@@ -365,7 +384,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
     }
     fn ensure_store(&mut self) -> Result<(), Fault<S::Error>> {
-        let key = self.executor.context.current_contract;
+        let key = self.context.current_contract;
         if !self.state.stores.has_contract(&key) {
             let store = self
                 .executor
@@ -393,7 +412,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let mut stores = self.state.stores.clone();
                 let result = stores
                     .find_value(
-                        &self.executor.context.current_contract,
+                        &self.context.current_contract,
                         &position,
                         Gas::Metered(self.state.meter.gas.clone()),
                         self.remaining,
@@ -467,7 +486,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 self.ensure_store()?;
                 self.state
                     .stores
-                    .put_value(&self.executor.context.current_contract, -n, value)
+                    .put_value(&self.context.current_contract, -n, value)
                     .map_err(|e| self.store_fault(e))
             }
             Operand::Argument(v) | Operand::Variable(v) => {

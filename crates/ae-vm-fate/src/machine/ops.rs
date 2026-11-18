@@ -265,7 +265,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     Tl => "tl",
                     _ => "length",
                 };
-                if op == Length && self.executor.context.vm_version >= VmVersion::Two {
+                if op == Length && self.context.vm_version >= VmVersion::Two {
                     return Err(Fault::Abort(Reason::Unavailable("length")));
                 }
                 let v = self.read(&a[1])?;
@@ -317,6 +317,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     // APPEND re-reads its first operand from the entry state
                     // solely to obtain its length; that read's effects vanish.
                     let mut probe = Step {
+                        defer_program_jumps: self.defer_program_jumps,
+                        context: self.context.clone(),
                         reserved_gas: self.reserved_gas.clone(),
                         state: self.entry.clone(),
                         entry: self.entry.clone(),
@@ -455,10 +457,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let mut scope = self
                     .state
                     .stores
-                    .vm_scope(
-                        self.state.meter.protocol,
-                        self.executor.context.current_contract,
-                    )
+                    .vm_scope(self.state.meter.protocol, self.context.current_contract)
                     .map_err(|_| Fault::Operational(Error::ProtocolMismatch))?;
                 let gas = self.state.meter.gas.clone();
                 match op {

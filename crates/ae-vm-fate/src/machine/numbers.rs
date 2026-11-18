@@ -82,7 +82,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             _ => None,
         };
         if let Some(name) = availability
-            && self.executor.context.vm_version < VmVersion::Three
+            && self.context.vm_version < VmVersion::Three
         {
             return Err(Fault::Abort(Reason::Unavailable(name)));
         }
@@ -309,7 +309,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     pub(super) fn native_capacity(&self) -> u64 {
         // OTP26 erl_term.h BIG_ARITY_MAX and big.h D_EXP. Both are
         // explicit compatibility inputs, independent of the Rust target.
-        match self.executor.context.arithmetic_word_size {
+        match self.context.arithmetic_word_size {
             crate::maps::order::WordSize::Bits64 => 65535 * 64,
             crate::maps::order::WordSize::Bits32 => 131071 * 32,
         }
