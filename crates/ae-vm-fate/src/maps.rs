@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, convert::Infallible};
 pub type Map = BTreeMap<Value, Value>;
 pub type RefCounts = BTreeMap<BigInt, BigInt>;
 pub const STORE_MAP_THRESHOLD: usize = 100;
+pub mod order;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Traversal {

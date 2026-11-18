@@ -13,6 +13,8 @@ use ae_vm_fate::{
 };
 use serde_json::{Value as J, json};
 use std::{collections::BTreeSet, sync::LazyLock};
+#[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
+mod otp_order;
 #[path = "../../ae-vm-fate/tests/support/values.rs"]
 mod values;
 use values::{bytes, rows, string, value};
@@ -512,4 +514,46 @@ fn vm_traversal_precedes_all_finalization_writes_and_matches_erlang() {
                 .unwrap();
         }
     }
+}
+
+#[test]
+fn computed_runtime_order_reproduces_original_finalization_roots() {
+    use ae_vm_fate::store::{Stores, initialize, write::Written};
+    let mut key = [0u8; 32];
+    key[31] = 1;
+    let mut roots = vec![];
+    for encoded in [
+        include_str!("../../ae-vm-fate/tests/fixtures/erlang_fate_order_0.json"),
+        include_str!("../../ae-vm-fate/tests/fixtures/erlang_fate_order_1000.json"),
+    ] {
+        let fixture: J = serde_json::from_str(encoded).unwrap();
+        // Only runtime characteristics configure the order provider. Recorded
+        // traversals in this fixture are deliberately not consulted here.
+        let profile = otp_order::profile(&fixture);
+        let backend = initialize(Backend(Store::default()), Limits::default()).unwrap();
+        let before = backend.0.contents().unwrap();
+        let mut stores = Stores::new(Version::Ceres);
+        stores.put_contract(key, backend.clone());
+        stores
+            .put_value(&key, 1.into(), value(&fixture["probe"]["value"]))
+            .unwrap();
+        let mut out = stores
+            .finalize(1_000_000_000.into(), &profile, Limits::default())
+            .unwrap();
+        assert_eq!(out.stores.len(), 1);
+        let (actual_key, store) = out.stores.pop().unwrap();
+        assert_eq!(actual_key, key);
+        let actual = final_state(Written {
+            store,
+            gas: out.gas,
+            remaining_limits: out.remaining_limits,
+        });
+        assert_eq!(actual, fixture["probe"]["result"]);
+        roots.push(actual["root"].clone());
+        assert_eq!(backend.0.contents().unwrap(), before);
+    }
+    assert_ne!(
+        roots[0], roots[1],
+        "runtime profiles affect this allocation probe"
+    );
 }

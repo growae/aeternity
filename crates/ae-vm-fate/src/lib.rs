@@ -19,6 +19,7 @@ pub enum Error {
     InvalidType,
     InvalidMapKey,
     UnorderedValue,
+    InvalidOrderProfile,
     ResourceLimit,
 }
 impl std::fmt::Display for Error {
