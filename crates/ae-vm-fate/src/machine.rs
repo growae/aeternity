@@ -13,6 +13,7 @@ use crate::{
 };
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
+mod binary;
 mod compare;
 mod numbers;
 mod ops;
@@ -40,6 +41,7 @@ pub struct Context {
     pub reserved_gas: BigInt,
     // Pinned native integer capacity; never infer it from the Rust host.
     pub arithmetic_word_size: crate::maps::order::WordSize,
+    pub unicode_profile: crate::unicode::Profile,
 }
 pub struct Executor<'a, S, O> {
     pub context: &'a Context,
@@ -78,6 +80,7 @@ pub enum Reason {
     BadVariantSize(usize),
     BadVariantTag(usize),
     Unavailable(&'static str),
+    Disabled(Opcode),
     NotAllowedInAuth(Opcode),
     NotAllowedOffchain(Opcode),
     UserExit(Vec<u8>),

@@ -4,7 +4,8 @@ use num_traits::ToPrimitive;
 
 pub(super) fn supported(op: Opcode) -> bool {
     use Opcode::*;
-    super::compare::supported(op)
+    super::binary::supported(op)
+        || super::compare::supported(op)
         || super::numbers::supported(op)
         || matches!(
             op,
@@ -388,6 +389,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     Fault::Abort(Reason::UserExit(bytes))
                 });
             }
+            _ if super::binary::supported(op) => self.binary(op, a)?,
             _ if super::compare::supported(op) => self.compare(op, a)?,
             _ if super::numbers::supported(op) => self.numeric(op, a)?,
             _ => return Err(Fault::Operational(Error::Unsupported(op))),

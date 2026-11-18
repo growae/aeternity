@@ -36,6 +36,12 @@ static NATIVE_LIMITS: LazyLock<J> = LazyLock::new(|| {
 static COMPARISONS: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_comparisons.json")).unwrap()
 });
+static BINARY: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_binary.json")).unwrap()
+});
+static BINARY_LIMITS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_binary_limits.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -107,6 +113,7 @@ fn context(row: &J) -> Context {
         in_auth: row["auth"].as_bool().unwrap(),
         on_chain: row["onchain"].as_bool().unwrap(),
         reserved_gas: 18.into(),
+        unicode_profile: ae_vm_fate::unicode::Profile::Otp26Unicode15,
         arithmetic_word_size: match row["word_size"].as_u64().unwrap_or(64) {
             32 => ae_vm_fate::maps::order::WordSize::Bits32,
             64 => ae_vm_fate::maps::order::WordSize::Bits64,
@@ -259,6 +266,10 @@ fn assert_reason(actual: &Reason, expected: &J) {
         Reason::Unavailable(op) => {
             assert_eq!(*op, string(&expected[1]));
             "unavailable"
+        }
+        Reason::Disabled(op) => {
+            assert_eq!(op.info().name, string(&expected[1]));
+            "disabled"
         }
         Reason::NotAllowedInAuth(op) => {
             assert_eq!(op.info().name, string(&expected[1]));
@@ -465,6 +476,12 @@ fn unimplemented_instruction_body_is_an_operational_stop() {
 fn arithmetic_bits_and_variants_match_original_dispatcher_and_sequences() {
     check_runs(&NUMBERS);
     check_sequences(&NUMBERS);
+}
+
+#[test]
+fn byte_string_character_and_address_instructions_match_original_dispatcher() {
+    check_runs(&BINARY);
+    check_sequences(&BINARY);
 }
 
 #[test]
@@ -696,8 +713,114 @@ fn expanding_arithmetic_and_long_powers_stop_operationally_and_retry_unchanged_i
     }
 }
 
+#[test]
+fn binary_and_unicode_expansion_limits_preserve_inputs_for_retry() {
+    let order = otp_order::profile(&BINARY["profile"]);
+    let overrides = Overrides::default();
+    let contracts = BTreeMap::new();
+    for (opcode, operand, second, limits) in [
+        (
+            "ADDR_TO_STR",
+            Value::Object(
+                ae_vm_fate::value::ObjectKind::Address,
+                ae_vm_fate::value::ObjectPayload::Bytes(vec![255; 33]),
+            ),
+            None,
+            Limits {
+                max_nodes: 1000,
+                ..Limits::default()
+            },
+        ),
+        (
+            "INT_TO_STR",
+            Value::Integer(BigInt::from(1) << 256),
+            None,
+            Limits {
+                max_nodes: 64,
+                ..Limits::default()
+            },
+        ),
+        (
+            "INT_TO_BYTES",
+            Value::Integer((-1).into()),
+            Some(Value::Integer(128.into())),
+            Limits {
+                max_bytes: 100,
+                ..Limits::default()
+            },
+        ),
+        (
+            "STR_TO_LIST",
+            Value::String(b"123456789abcdefgH".to_vec()),
+            None,
+            Limits {
+                max_bytes: 200,
+                ..Limits::default()
+            },
+        ),
+        (
+            "STR_TO_UPPER",
+            Value::String("ßİΣﬃ".as_bytes().to_vec()),
+            None,
+            Limits {
+                max_nodes: 24,
+                ..Limits::default()
+            },
+        ),
+    ] {
+        let row = rows(&BINARY["cases"])
+            .iter()
+            .find(|r| {
+                r["protocol"] == 8
+                    && (r["vm"] == 8 || opcode == "INT_TO_STR")
+                    && r["op"][0] == opcode
+                    && value(&r["initial"]["top"]) == operand
+                    && second
+                        .as_ref()
+                        .is_none_or(|v| value(&r["initial"]["rest"][0]) == *v)
+            })
+            .unwrap();
+        let input = state(row, &row["initial"]["gas"]);
+        let ctx = context(row);
+        let executor = Executor {
+            context: &ctx,
+            order: &order,
+            overrides: &overrides,
+            contracts: &contracts,
+        };
+        let ins = instruction(&row["op"]);
+        assert!(
+            matches!(
+                executor.step(&input, &ins, limits),
+                Err(Error::Data(ae_vm_fate::Error::ResourceLimit))
+            ),
+            "{opcode}"
+        );
+        assert_state(&input, &row["initial"]);
+        let high = rows(&row["runs"])
+            .iter()
+            .find(|r| r[0] == row["initial"]["gas"])
+            .unwrap();
+        let expected = &BINARY["results"][high[1].as_u64().unwrap() as usize];
+        assert_eq!(expected["kind"], "ok");
+        assert_outcome(
+            executor.step(&input, &ins, Limits::default()).unwrap(),
+            expected,
+        );
+    }
+}
+
 fn large_value(j: &J) -> Value {
     match string(&j[0]) {
+        "filled_bytes" => Value::Bytes(vec![
+            j[2].as_u64().unwrap() as u8;
+            j[1].as_u64().unwrap() as usize
+        ]),
+        "padded_bytes" => {
+            let mut bytes = vec![0; j[1].as_u64().unwrap() as usize];
+            *bytes.last_mut().unwrap() = j[2].as_u64().unwrap() as u8;
+            Value::Bytes(bytes)
+        }
         "power" => Value::Integer(BigInt::from(1) << j[1].as_u64().unwrap() as usize),
         "ones" => Value::Integer((BigInt::from(1) << j[1].as_u64().unwrap() as usize) - 1),
         "negative" => {
@@ -717,6 +840,10 @@ fn large_value(j: &J) -> Value {
 }
 fn assert_compact(v: &Value, j: &J) {
     match (v, string(&j[0])) {
+        (Value::Bytes(b), "bytes_digest") => {
+            assert_eq!(b.len() as u64, j[1]);
+            assert_eq!(hex::encode(ae_crypto::sha256(b).0), string(&j[2]));
+        }
         (Value::Integer(n), "integer_digest") => {
             let b = if n == &BigInt::from(0) {
                 vec![0]
@@ -734,6 +861,10 @@ fn assert_compact(v: &Value, j: &J) {
 #[test]
 fn native_integer_capacity_and_bitwise_nil_results_match_original_runtime() {
     check_native_cases(&NATIVE_LIMITS);
+}
+#[test]
+fn byte_integer_native_capacity_and_zero_padding_match_original_runtime() {
+    check_native_cases(&BINARY_LIMITS);
 }
 fn check_native_cases(fixture: &J) {
     let order = otp_order::profile(&fixture["profile"]);

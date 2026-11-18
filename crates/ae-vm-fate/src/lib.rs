@@ -9,6 +9,7 @@ pub mod opcodes;
 pub mod stack;
 pub mod store;
 pub mod types;
+pub mod unicode;
 pub mod value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
