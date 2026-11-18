@@ -24,7 +24,7 @@ static RW: LazyLock<Fp> = LazyLock::new(|| Fp::read(&constants::RW));
 static G2: LazyLock<Fp2> = LazyLock::new(|| Fp2::read(&constants::G2));
 static G3: LazyLock<Fp2> = LazyLock::new(|| Fp2::read(&constants::G3));
 
-fn decode(raw: &Fr) -> BigUint {
+pub(super) fn decode(raw: &Fr) -> BigUint {
     // Original fromMont multiplies raw limbs by 1. Its result is canonical
     // for every 256-bit input, including inputs >= q. No decimal conversion.
     (BigUint::from_bytes_le(raw) * &*R_INVERSE) % BlsField::Scalar.modulus()
@@ -62,17 +62,14 @@ impl ScalarField for Fp2 {
             .collect()
     }
     fn lambda(point: &Point<Self>) -> Point<Self> {
-        fn frobenius(x: &Fp2) -> Fp2 {
-            Fp2([x.0[0].clone(), x.0[1].neg()])
-        }
         Point {
-            x: frobenius(&point.x).mul(&G2),
-            y: frobenius(&point.y).mul(&G3),
-            z: frobenius(&point.z),
+            x: point.x.frobenius().mul(&G2),
+            y: point.y.frobenius().mul(&G3),
+            z: point.z.frobenius(),
         }
     }
 }
-fn naf(value: BigInt, width: u32) -> Vec<i8> {
+pub(super) fn naf(value: BigInt, width: u32) -> Vec<i8> {
     let negative = value.sign() == Sign::Minus;
     let mut n = value.magnitude().clone();
     let mut out = Vec::new();

@@ -24,6 +24,8 @@ pub(super) fn supported(op: Opcode) -> bool {
             | Bls12381GtInv
             | Bls12381GtIsOne
             | Bls12381GtAdd
+            | Bls12381GtMul
+            | Bls12381GtPow
     )
 }
 fn name(op: Opcode) -> &'static str {
@@ -46,6 +48,8 @@ fn name(op: Opcode) -> &'static str {
         Bls12381GtInv => "bls12_381_gt_inv",
         Bls12381GtIsOne => "bls12_381_gt_is_one",
         Bls12381GtAdd => "bls12_381_gt_add",
+        Bls12381GtMul => "bls12_381_gt_mul",
+        Bls12381GtPow => "bls12_381_gt_pow",
         _ => unreachable!(),
     }
 }
@@ -104,7 +108,13 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         let profile = self.executor.context.bls_profile;
         if matches!(
             op,
-            Bls12381G1Add | Bls12381G2Add | Bls12381GtAdd | Bls12381G1Mul | Bls12381G2Mul
+            Bls12381G1Add
+                | Bls12381G2Add
+                | Bls12381GtAdd
+                | Bls12381G1Mul
+                | Bls12381G2Mul
+                | Bls12381GtMul
+                | Bls12381GtPow
         ) {
             let y = self.read(&a[2])?;
             let result = match op {
@@ -132,11 +142,21 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     };
                     value2(bls::g2_add(profile, &p, &q))
                 }
-                Bls12381GtAdd => {
+                Bls12381GtAdd | Bls12381GtMul => {
                     let (Some(p), Some(q)) = (gt(&x), gt(&y)) else {
                         return Err(self.type_error(name, vec![x, y]));
                     };
-                    field_values(bls::gt_add(profile, &p, &q))
+                    field_values(if op == Bls12381GtAdd {
+                        bls::gt_add(profile, &p, &q)
+                    } else {
+                        bls::gt_multiply(profile, &p, &q)
+                    })
+                }
+                Bls12381GtPow => {
+                    let (Some(p), Some(k)) = (gt(&x), field(&y)) else {
+                        return Err(self.type_error(name, vec![x, y]));
+                    };
+                    field_values(bls::gt_power(profile, &p, &k))
                 }
                 _ => unreachable!(),
             };

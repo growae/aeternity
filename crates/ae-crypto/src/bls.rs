@@ -4,6 +4,7 @@
 mod field;
 mod point;
 mod scalar;
+mod tower;
 use field::{Field, Fp, Fp2};
 use point::Point;
 
@@ -85,4 +86,12 @@ pub fn gt_add(_: Profile, left: &Gt, right: &Gt) -> Gt {
 }
 pub fn gt_is_one(_: Profile, value: &Gt) -> bool {
     Fp::read(&value[0]).is_one() && value[1..].iter().all(|v| Fp::read(v).is_zero())
+}
+pub fn gt_multiply(_: Profile, left: &Gt, right: &Gt) -> Gt {
+    tower::Fp12::read(left)
+        .mul(&tower::Fp12::read(right))
+        .bytes()
+}
+pub fn gt_power(_: Profile, value: &Gt, scalar: &Fr) -> Gt {
+    tower::Fp12::read(value).pow(scalar).bytes()
 }

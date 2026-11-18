@@ -11,6 +11,8 @@ static MASK: LazyLock<BigUint> = LazyLock::new(|| &*R - 1u8);
 static MASK448: LazyLock<BigUint> = LazyLock::new(|| (BigUint::from(1u8) << 448usize) - 1u8);
 static R2: LazyLock<BigUint> = LazyLock::new(|| &*R * &*R);
 static MASK768: LazyLock<BigUint> = LazyLock::new(|| &*R2 - 1u8);
+static RADIX832: LazyLock<BigUint> = LazyLock::new(|| &*R2 << 64usize);
+static P_RADIX: LazyLock<BigUint> = LazyLock::new(|| modulus() << 384usize);
 static R3MOD: LazyLock<BigUint> = LazyLock::new(|| (&*R2 * &*R) % modulus());
 fn modulus() -> &'static BigUint {
     BlsField::Base.modulus()
@@ -143,7 +145,7 @@ fn sub_pre(x: &BigUint, y: &BigUint) -> BigUint {
 fn sub_dbl(x: &BigUint, y: &BigUint) -> BigUint {
     let difference = sub_pre(x, y);
     if x < y {
-        (difference + (modulus() << 384usize)) & &*MASK768
+        (difference + &*P_RADIX) & &*MASK768
     } else {
         difference
     }
@@ -154,6 +156,15 @@ impl Fp2 {
     }
     pub(super) fn bytes(&self) -> [[u8; 48]; 2] {
         self.0.each_ref().map(Fp::bytes)
+    }
+    pub(super) fn add_pre(&self, other: &Self) -> Self {
+        Self(std::array::from_fn(|i| self.0[i].add_pre(&other.0[i])))
+    }
+    pub(super) fn mul_xi(&self) -> Self {
+        Self([self.0[0].sub(&self.0[1]), self.0[0].add(&self.0[1])])
+    }
+    pub(super) fn frobenius(&self) -> Self {
+        Self([self.0[0].clone(), self.0[1].neg()])
     }
 }
 impl Field for Fp2 {
@@ -179,13 +190,7 @@ impl Field for Fp2 {
         Self(self.0.each_ref().map(Field::neg))
     }
     fn mul(&self, other: &Self) -> Self {
-        let [a, b] = &self.0;
-        let [c, d] = &other.0;
-        let ac = a.product(c);
-        let bd = b.product(d);
-        let cross = a.add_pre(b).product(&c.add_pre(d));
-        let imag = sub_pre(&sub_pre(&cross, &ac), &bd);
-        Self([Fp::reduce(sub_dbl(&ac, &bd)), Fp::reduce(imag)])
+        Fp2Wide::product(self, other).reduce()
     }
     fn square(&self) -> Self {
         let [a, b] = &self.0;
@@ -196,5 +201,51 @@ impl Field for Fp2 {
         let norm = Fp::reduce((a.product(a) + b.product(b)) & &*MASK768);
         let inv = norm.inverse();
         Self([a.mul(&inv), b.mul(&inv).neg()])
+    }
+}
+
+// MCL's double-width field intermediates are not ordinary reduced Fp2 values.
+#[derive(Clone)]
+pub(super) struct Fp2Wide([BigUint; 2]);
+fn add_dbl(x: &BigUint, y: &BigUint) -> BigUint {
+    let sum = x + y;
+    let difference = &sum + &*RADIX832 - &*P_RADIX;
+    // Preserve the LLVM i448 high-half bit-384 selection, including a carry
+    // from arbitrary raw operands. It is not an unrestricted modulus test.
+    if difference.bit(768) {
+        sum & &*MASK768
+    } else {
+        difference & &*MASK768
+    }
+}
+impl Fp2Wide {
+    pub(super) fn product(x: &Fp2, y: &Fp2) -> Self {
+        let [a, b] = &x.0;
+        let [c, d] = &y.0;
+        let ac = a.product(c);
+        let bd = b.product(d);
+        let cross = a.add_pre(b).product(&c.add_pre(d));
+        Self([sub_dbl(&ac, &bd), sub_pre(&sub_pre(&cross, &ac), &bd)])
+    }
+    pub(super) fn reduce(&self) -> Fp2 {
+        Fp2(self.0.each_ref().map(|x| Fp::reduce(x.clone())))
+    }
+    pub(super) fn add(&self, other: &Self) -> Self {
+        Self(std::array::from_fn(|i| add_dbl(&self.0[i], &other.0[i])))
+    }
+    pub(super) fn sub(&self, other: &Self) -> Self {
+        Self(std::array::from_fn(|i| sub_dbl(&self.0[i], &other.0[i])))
+    }
+    pub(super) fn sub_special(&self, other: &Self) -> Self {
+        Self([
+            sub_dbl(&self.0[0], &other.0[0]),
+            sub_pre(&self.0[1], &other.0[1]),
+        ])
+    }
+    pub(super) fn mul_xi(&self) -> Self {
+        Self([
+            sub_dbl(&self.0[0], &self.0[1]),
+            add_dbl(&self.0[0], &self.0[1]),
+        ])
     }
 }
