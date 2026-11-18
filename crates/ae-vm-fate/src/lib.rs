@@ -2,6 +2,7 @@
 pub mod abi;
 pub mod code;
 pub mod encoding;
+pub mod maps;
 pub mod opcodes;
 pub mod store;
 pub mod types;

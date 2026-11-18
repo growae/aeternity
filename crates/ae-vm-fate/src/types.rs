@@ -58,7 +58,7 @@ fn infer_inner(v: &Value, budget: &mut Budget, depth: usize) -> Result<Type, Err
             Box::new(infer_elements(vs.keys(), budget, depth + 1)?),
             Box::new(infer_elements(vs.values(), budget, depth + 1)?),
         ),
-        Value::StoreMap(_) => Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
+        Value::StoreMap { .. } => Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
         Value::Variant {
             arities,
             tag,

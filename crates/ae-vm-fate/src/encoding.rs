@@ -240,7 +240,10 @@ impl<'a> Decoder<'a> {
                 }
                 Value::Map(map)
             }
-            0xbf => Value::StoreMap(self.rlp_integer(depth + 1)?),
+            0xbf => Value::StoreMap {
+                id: self.rlp_integer(depth + 1)?.into(),
+                cache: BTreeMap::new(),
+            },
             0xaf => {
                 let Rlp::Bytes(arities) = self.rlp(depth + 1)? else {
                     return Err(Error::InvalidEncoding);
@@ -444,10 +447,12 @@ impl Encoder {
                 }
                 Ok(())
             }
-            Value::StoreMap(id) => {
+            Value::StoreMap { id, cache } if cache.is_empty() => {
+                let id = id.to_biguint().ok_or(Error::InvalidValue)?;
                 self.put(&[0xbf])?;
-                self.rlp_integer(id)
+                self.rlp_integer(&id)
             }
+            Value::StoreMap { .. } | Value::Tombstone => Err(Error::InvalidValue),
             Value::Variant {
                 arities,
                 tag,

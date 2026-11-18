@@ -1,7 +1,7 @@
 // Behavioral reference: aebytecode 009e036, aeb_fate_data / aeb_fate_encoding.
 // Copyright (c) 2017, aeternity developers. ISC notice in repository LICENSE.
 use crate::{Budget, Error, Limits, types::Type};
-use num_bigint::{BigInt, BigUint, Sign};
+use num_bigint::{BigInt, Sign};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,7 +56,12 @@ pub enum Value {
     Tuple(Vec<Value>),
     List(Vec<Value>),
     Map(BTreeMap<Value, Value>),
-    StoreMap(BigUint),
+    StoreMap {
+        id: BigInt,
+        cache: BTreeMap<Value, Value>,
+    },
+    // Runtime-only deletion marker in a persistent map's write cache.
+    Tombstone,
     Variant {
         arities: Vec<u8>,
         tag: usize,
@@ -204,7 +209,7 @@ pub(crate) fn sorted<'a>(
 pub(crate) fn valid_key(v: &Value, budget: &mut Budget, depth: usize) -> Result<(), Error> {
     budget.visit(depth)?;
     match v {
-        Value::Map(_) | Value::StoreMap(_) => Err(Error::InvalidMapKey),
+        Value::Map(_) | Value::StoreMap { .. } => Err(Error::InvalidMapKey),
         Value::List(vs) | Value::Tuple(vs) | Value::Variant { values: vs, .. } => {
             for v in vs {
                 valid_key(v, budget, depth + 1)?;
