@@ -3,6 +3,8 @@
 // Copyright (c) 2017, aeternity developers. ISC notice in repository LICENSE.
 use ae_types::Hash256;
 
+pub mod names;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 pub enum Protocol {

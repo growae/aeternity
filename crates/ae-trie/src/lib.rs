@@ -484,6 +484,10 @@ pub struct Trie<S = MemoryStore> {
     root: Option<Hash256>,
     store: S,
 }
+// Savepoints are valid only in the tree/backend that created them. Rolling
+// back changes root publication, not append-only content-addressed writes.
+#[derive(Debug, Clone, Copy)]
+pub struct Savepoint(Option<Hash256>);
 impl Default for Trie<MemoryStore> {
     fn default() -> Self {
         Self::new(MemoryStore::default())
@@ -501,6 +505,12 @@ impl<S: NodeReader> Trie<S> {
     }
     pub fn root_hash(&self) -> Option<Hash256> {
         self.root
+    }
+    pub fn savepoint(&self) -> Savepoint {
+        Savepoint(self.root)
+    }
+    pub fn rollback(&mut self, savepoint: Savepoint) {
+        self.root = savepoint.0;
     }
     pub fn store(&self) -> &S {
         &self.store

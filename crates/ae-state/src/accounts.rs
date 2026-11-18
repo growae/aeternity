@@ -233,6 +233,17 @@ impl<S: NodeReader> Accounts<S> {
     }
 }
 impl<S: NodeWriter> Accounts<S> {
+    pub fn transaction<T, E>(
+        &mut self,
+        action: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let savepoint = self.tree.savepoint();
+        let result = action(self);
+        if result.is_err() {
+            self.tree.rollback(savepoint);
+        }
+        result
+    }
     pub fn apply(&mut self, accounts: &[Account]) -> Result<(), AccountError> {
         let updates = accounts
             .iter()

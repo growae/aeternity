@@ -4,6 +4,13 @@ use ae_codec::object::{self, Field, FieldType, ObjectTag, Value};
 use ae_trie::{Nibbles, NodeReader, Trie};
 use ae_types::{AccountPublicKey, Id, IdTag, Unsigned};
 
+mod cache;
+pub mod hashing;
+mod objects;
+mod tree;
+pub use objects::{Auction, Commitment};
+pub use tree::{LockedFee, Names};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Object(object::ObjectError),
@@ -14,6 +21,9 @@ pub enum Error {
     NameRevoked,
     PointerNotFound,
     PointerNotId,
+    AlreadyPresent,
+    InvalidCache,
+    IllegalSalt,
 }
 impl From<object::ObjectError> for Error {
     fn from(e: object::ObjectError) -> Self {
@@ -92,6 +102,25 @@ impl Pointer {
         pointer.validate()?;
         Ok(pointer)
     }
+}
+
+pub fn sanitize_pointers(pointers: &[Pointer]) -> Vec<Pointer> {
+    let mut seen = std::collections::BTreeSet::new();
+    pointers
+        .iter()
+        .filter(|p| p.key.len() <= 256 && seen.insert(&p.key))
+        .take(32)
+        .cloned()
+        .collect()
+}
+
+pub fn pointers_valid_at(pointers: &[Pointer], protocol: ae_protocol::Protocol) -> bool {
+    pointers.iter().all(|p| p.validate().is_ok())
+        && (protocol >= ae_protocol::Protocol::Ceres
+            || !pointers
+                .iter()
+                .any(|p| matches!(p.value, PointerValue::Data(_))))
+        && (protocol < ae_protocol::Protocol::Iris || sanitize_pointers(pointers) == pointers)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

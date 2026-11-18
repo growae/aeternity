@@ -4,7 +4,7 @@
 use ae_protocol::{NetworkProfile, Protocol};
 use ae_state::{
     accounts::{Account, AccountError, Accounts},
-    names::{self, NameResolver},
+    names::{self as name_state, NameResolver},
 };
 use ae_trie::{NodeReader, NodeWriter};
 use ae_tx::{SignedTransaction, Spend};
@@ -13,6 +13,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
+
+pub mod names;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -49,7 +51,7 @@ impl Context {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     State(AccountError),
-    Name(names::Error),
+    Name(name_state::Error),
     Signature(ae_tx::Error),
     TooLowFee,
     TtlExpired,
@@ -79,10 +81,10 @@ impl From<AccountError> for Error {
         Self::State(e)
     }
 }
-impl From<names::Error> for Error {
-    fn from(e: names::Error) -> Self {
+impl From<name_state::Error> for Error {
+    fn from(e: name_state::Error) -> Self {
         match e {
-            names::Error::PointerNotId => Self::ReferenceException {
+            name_state::Error::PointerNotId => Self::ReferenceException {
                 class: "error",
                 reason: "function_clause",
             },
@@ -98,6 +100,9 @@ impl From<ae_tx::Error> for Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    NameFeeLocked {
+        amount: Unsigned,
+    },
     Spend {
         from: AccountPublicKey,
         to: AccountPublicKey,
