@@ -4,6 +4,7 @@ use ae_types::Hash256;
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use sha2::Sha256;
 
+pub mod bls;
 mod bls_field;
 mod poseidon;
 mod secp;

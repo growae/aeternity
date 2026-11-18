@@ -51,6 +51,9 @@ static POSEIDON: LazyLock<J> = LazyLock::new(|| {
 static BLS_FIELDS: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_bls_fields.json")).unwrap()
 });
+static BLS_POINTS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_bls_points.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -123,6 +126,7 @@ fn context(row: &J) -> Context {
         on_chain: row["onchain"].as_bool().unwrap(),
         reserved_gas: 18.into(),
         unicode_profile: ae_vm_fate::unicode::Profile::Otp26Unicode15,
+        bls_profile: ae_crypto::bls::Profile::Mcl11976beLlvm64VintArm64,
         arithmetic_word_size: match row["word_size"].as_u64().unwrap_or(64) {
             32 => ae_vm_fate::maps::order::WordSize::Bits32,
             64 => ae_vm_fate::maps::order::WordSize::Bits64,
@@ -521,6 +525,13 @@ fn bls_integer_to_field_gates_and_store_writes_match_original_dispatcher() {
     check_sequences(&BLS_FIELDS);
     check_fetches(&BLS_FIELDS);
     check_native_cases(&BLS_FIELDS["native"]);
+}
+
+#[test]
+fn bls_point_and_target_operations_gates_and_store_effects_match_original_dispatcher() {
+    check_runs(&BLS_POINTS);
+    check_sequences(&BLS_POINTS);
+    check_fetches(&BLS_POINTS);
 }
 
 #[test]

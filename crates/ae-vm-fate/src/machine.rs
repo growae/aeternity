@@ -44,6 +44,7 @@ pub struct Context {
     // Pinned native integer capacity; never infer it from the Rust host.
     pub arithmetic_word_size: crate::maps::order::WordSize,
     pub unicode_profile: crate::unicode::Profile,
+    pub bls_profile: ae_crypto::bls::Profile,
 }
 pub struct Executor<'a, S, O> {
     pub context: &'a Context,
