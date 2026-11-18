@@ -24,6 +24,8 @@ mod otp_order;
 #[path = "../../ae-vm-fate/tests/support/values.rs"]
 mod values;
 use values::{bytes, rows, string, value};
+#[path = "support/fate_program.rs"]
+mod program_tests;
 static FIXTURE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_instructions.json")).unwrap()
 });
@@ -65,6 +67,9 @@ static BLS_PAIRING: LazyLock<J> = LazyLock::new(|| {
 });
 static BLS_REVERSE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_bls_reverse.json")).unwrap()
+});
+static PROGRAMS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_programs.json")).unwrap()
 });
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
@@ -307,6 +312,48 @@ fn assert_reason(actual: &Reason, expected: &J) {
         Reason::UserExit(v) => {
             assert_eq!(*v, bytes(&expected[1]));
             "exit"
+        }
+        Reason::MissingFunction(v) => {
+            assert_eq!(*v, value(&expected[1]));
+            "missing_function"
+        }
+        Reason::MissingBlock(v) => {
+            assert_eq!(*v, value(&expected[1]));
+            "missing_block"
+        }
+        Reason::InvalidInitCall => "invalid_init",
+        Reason::PrivateFunction(v) => {
+            assert_eq!(*v, value(&expected[1]));
+            "private"
+        }
+        Reason::NonPayableFunction(v) => {
+            assert_eq!(*v, value(&expected[1]));
+            "nonpayable"
+        }
+        Reason::FunctionArity {
+            given,
+            expected: arity,
+        } => {
+            assert_eq!(*given, expected[1].as_u64().unwrap() as usize);
+            assert_eq!(*arity, expected[2].as_u64().unwrap() as usize);
+            "arity"
+        }
+        Reason::CallType {
+            arguments,
+            expected: types,
+        } => {
+            assert_eq!(
+                *arguments,
+                rows(&expected[1]).iter().map(value).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                *types,
+                rows(&expected[2])
+                    .iter()
+                    .map(values::ty)
+                    .collect::<Vec<_>>()
+            );
+            "call_type"
         }
     };
     assert_eq!(name, string(&expected[0]));

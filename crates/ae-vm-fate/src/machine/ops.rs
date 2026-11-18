@@ -317,6 +317,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     // APPEND re-reads its first operand from the entry state
                     // solely to obtain its length; that read's effects vanish.
                     let mut probe = Step {
+                        reserved_gas: self.reserved_gas.clone(),
                         state: self.entry.clone(),
                         entry: self.entry.clone(),
                         executor: self.executor,

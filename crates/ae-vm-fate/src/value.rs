@@ -5,6 +5,7 @@ use num_bigint::{BigInt, Sign};
 use std::{cmp::Ordering, collections::BTreeMap};
 mod resource;
 pub use resource::check_limits;
+pub(crate) use resource::check_type_limits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ObjectKind {

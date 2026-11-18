@@ -19,6 +19,7 @@ mod compare;
 mod crypto;
 mod numbers;
 mod ops;
+pub mod program;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Register {
@@ -87,6 +88,19 @@ pub enum Reason {
     NotAllowedInAuth(Opcode),
     NotAllowedOffchain(Opcode),
     UserExit(Vec<u8>),
+    MissingFunction(Value),
+    MissingBlock(Value),
+    InvalidInitCall,
+    PrivateFunction(Value),
+    NonPayableFunction(Value),
+    FunctionArity {
+        given: usize,
+        expected: usize,
+    },
+    CallType {
+        arguments: Vec<Value>,
+        expected: Vec<crate::types::Type>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exception {
@@ -117,10 +131,10 @@ pub enum Control {
     Jump(Value),
 }
 #[derive(Debug, Clone)]
-pub enum Outcome<S> {
+pub enum Outcome<S, C = Control> {
     Continue {
         state: State<S>,
-        control: Control,
+        control: C,
         remaining_limits: Limits,
     },
     Abort {
@@ -151,6 +165,7 @@ struct Step<'a, 'b, S, O> {
     entry: State<S>,
     executor: &'a Executor<'b, S, O>,
     remaining: Limits,
+    reserved_gas: BigInt,
 }
 impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
     // An unimplemented opcode is an operational stop, never an invented VM
@@ -161,6 +176,22 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         instruction: &Instruction,
         limits: Limits,
     ) -> Result<Outcome<S>, Error<S::Error>> {
+        self.step_with(
+            state,
+            instruction,
+            limits,
+            ops::supported(instruction.opcode),
+            |step| step.eval(instruction),
+        )
+    }
+    fn step_with<C>(
+        &self,
+        state: &State<S>,
+        instruction: &Instruction,
+        limits: Limits,
+        supported: bool,
+        eval: impl FnOnce(&mut Step<'_, '_, S, O>) -> Result<C, Fault<S::Error>>,
+    ) -> Result<Outcome<S, C>, Error<S::Error>> {
         let info = instruction.opcode.info();
         if instruction.operands.len() != info.arity
             || info
@@ -176,38 +207,14 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         ) {
             return Ok(Outcome::Exception(Exception::UnknownInstruction));
         }
-        let mut remaining = limits;
-        for value in std::iter::once(&state.accumulator.top).chain(state.accumulator.rest.iter()) {
-            remaining = value::check_limits(value, remaining).map_err(Error::Data)?;
-        }
-        for (key, value) in &state.memory {
-            let (Register::Argument(k) | Register::Variable(k)) = key;
-            remaining = value::check_limits(k, remaining).map_err(Error::Data)?;
-            remaining = value::check_limits(value, remaining).map_err(Error::Data)?;
-        }
-        for operand in &instruction.operands {
-            if let Operand::Argument(v) | Operand::Variable(v) | Operand::Immediate(v) = operand {
-                remaining = value::check_limits(v, remaining).map_err(Error::Data)?;
-            }
-        }
-        let mut step = Step {
-            state: state.clone(),
-            entry: state.clone(),
-            executor: self,
-            remaining,
-        };
-        step.state
-            .stores
-            .vm_scope(state.meter.protocol, self.context.current_contract)
-            .map_err(|_| Error::ProtocolMismatch)?;
-        let result = (|| {
+        self.action(state, &instruction.operands, limits, |step| {
             if !info.offchain && !self.context.on_chain {
                 return Err(Fault::Abort(Reason::NotAllowedOffchain(instruction.opcode)));
             }
             if !info.in_auth && self.context.in_auth {
                 return Err(Fault::Abort(Reason::NotAllowedInAuth(instruction.opcode)));
             }
-            if !ops::supported(instruction.opcode) {
+            if !supported {
                 return Err(Fault::Operational(Error::Unsupported(instruction.opcode)));
             }
             step.spend(
@@ -217,8 +224,42 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                     .into(),
             )?;
             step.entry = step.state.clone();
-            step.eval(instruction)
-        })();
+            eval(step)
+        })
+    }
+    fn action<C>(
+        &self,
+        state: &State<S>,
+        operands: &[Operand],
+        limits: Limits,
+        eval: impl FnOnce(&mut Step<'_, '_, S, O>) -> Result<C, Fault<S::Error>>,
+    ) -> Result<Outcome<S, C>, Error<S::Error>> {
+        let mut remaining = limits;
+        for value in std::iter::once(&state.accumulator.top).chain(state.accumulator.rest.iter()) {
+            remaining = value::check_limits(value, remaining).map_err(Error::Data)?;
+        }
+        for (key, value) in &state.memory {
+            let (Register::Argument(k) | Register::Variable(k)) = key;
+            remaining = value::check_limits(k, remaining).map_err(Error::Data)?;
+            remaining = value::check_limits(value, remaining).map_err(Error::Data)?;
+        }
+        for operand in operands {
+            if let Operand::Argument(v) | Operand::Variable(v) | Operand::Immediate(v) = operand {
+                remaining = value::check_limits(v, remaining).map_err(Error::Data)?;
+            }
+        }
+        let mut step = Step {
+            state: state.clone(),
+            entry: state.clone(),
+            executor: self,
+            remaining,
+            reserved_gas: self.context.reserved_gas.clone(),
+        };
+        step.state
+            .stores
+            .vm_scope(state.meter.protocol, self.context.current_contract)
+            .map_err(|_| Error::ProtocolMismatch)?;
+        let result = eval(&mut step);
         match result {
             Ok(control) => Ok(Outcome::Continue {
                 state: step.state,
@@ -226,7 +267,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 remaining_limits: step.remaining,
             }),
             Err(Fault::Abort(reason)) => {
-                step.state.meter.gas = self.context.reserved_gas.clone();
+                step.state.meter.gas = match step.native_integer(step.reserved_gas.clone()) {
+                    Ok(gas) => gas,
+                    Err(Fault::Exception(e)) => return Ok(Outcome::Exception(e)),
+                    _ => unreachable!(),
+                };
                 Ok(Outcome::Abort {
                     state: step.state,
                     reason,
@@ -236,7 +281,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             Err(Fault::Exception(e)) => Ok(Outcome::Exception(e)),
             Err(Fault::Revert(value)) => {
                 step.state.meter.gas =
-                    match step.native_integer(&step.state.meter.gas + &self.context.reserved_gas) {
+                    match step.native_integer(&step.state.meter.gas + &step.reserved_gas) {
                         Ok(gas) => gas,
                         Err(Fault::Exception(e)) => return Ok(Outcome::Exception(e)),
                         _ => unreachable!(),

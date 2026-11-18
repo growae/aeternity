@@ -16,6 +16,18 @@ pub fn check_limits(value: &Value, limits: Limits) -> Result<Limits, Error> {
         ..limits
     })
 }
+pub(crate) fn check_type_limits(ty: &Type, limits: Limits) -> Result<Limits, Error> {
+    let mut walk = Walk {
+        budget: Budget::new(limits),
+        bytes: 0,
+    };
+    walk.ty(ty, 0)?;
+    Ok(Limits {
+        max_nodes: limits.max_nodes - walk.budget.nodes,
+        max_bytes: limits.max_bytes - walk.bytes,
+        ..limits
+    })
+}
 struct Walk {
     budget: Budget,
     bytes: usize,
