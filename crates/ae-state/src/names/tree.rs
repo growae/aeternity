@@ -2,7 +2,7 @@
 // for persistence; only the main root enters the six-tree state commitment.
 // Copyright (c) 2018, Aeternity Anstalt. ISC notice in repository LICENSE.
 use super::{
-    Auction, Commitment, Error, Name, NameResolver,
+    Auction, Commitment, Error, Name, NamePointerResolver, NameResolver,
     cache::{self, Kind},
 };
 use ae_protocol::{Protocol, names as rules};
@@ -87,6 +87,11 @@ impl<S: NodeReader, C: NodeReader> Names<S, C> {
 impl<S: NodeReader, C: NodeReader> NameResolver for Names<S, C> {
     fn resolve_account(&self, hash: [u8; 32]) -> Result<AccountPublicKey, Error> {
         self.tree.resolve_account(hash)
+    }
+}
+impl<S: NodeReader, C: NodeReader> NamePointerResolver for Names<S, C> {
+    fn resolve_id(&self, hash: [u8; 32], pointer: &[u8]) -> Result<ae_types::Id, Error> {
+        self.tree.resolve_id(hash, pointer)
     }
 }
 impl<S: NodeWriter, C: NodeWriter> Names<S, C> {

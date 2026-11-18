@@ -130,7 +130,7 @@ pub fn process<S: NodeWriter, N: NodeWriter, C: NodeWriter>(
             let mut changes = BTreeMap::new();
             let account = tx.account();
             prepare_sender(accounts, &mut changes, account, tx.nonce(), context)?;
-            let payer = context.payer.unwrap_or(account);
+            let payer = crate::fee_payer(account, tx.fee(), context);
             debit(accounts, &mut changes, payer, tx.fee())?;
             let mut events = vec![Event::FeeDebit {
                 account: payer,

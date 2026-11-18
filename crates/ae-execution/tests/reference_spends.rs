@@ -58,8 +58,16 @@ fn reason(e: &Error) -> &str {
 fn spend_transitions_errors_events_and_state_roots_match_original_erlang() {
     let cases: Json = serde_json::from_str(include_str!("fixtures/erlang_spends.json")).unwrap();
     assert_eq!(cases.as_array().unwrap().len(), 376);
+    let extra: Json =
+        serde_json::from_str(include_str!("fixtures/erlang_zero_fee_spends.json")).unwrap();
+    assert_eq!(extra.as_array().unwrap().len(), 48);
     let mut successes = 0;
-    for case in cases.as_array().unwrap() {
+    for case in cases
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(extra.as_array().unwrap())
+    {
         let mut accounts = Accounts::default();
         let mut names = Trie::default();
         for a in case["accounts"].as_array().unwrap() {
@@ -162,5 +170,5 @@ fn spend_transitions_errors_events_and_state_roots_match_original_erlang() {
             assert_eq!(receipt.events, expected, "{}", case["label"]);
         }
     }
-    assert_eq!(successes, 154);
+    assert_eq!(successes, 194);
 }

@@ -200,17 +200,27 @@ fn schema(version: u64) -> Result<Vec<Field>, Error> {
 pub trait NameResolver {
     fn resolve_account(&self, name_hash: [u8; 32]) -> Result<AccountPublicKey, Error>;
 }
+pub trait NamePointerResolver {
+    fn resolve_id(&self, name_hash: [u8; 32], pointer: &[u8]) -> Result<Id, Error>;
+}
 // Read directly from the names tree. Expiry caches are not needed for lookup;
 // writes and pre-block expiry processing are separate state operations.
 impl<S: NodeReader> NameResolver for Trie<S> {
     fn resolve_account(&self, hash: [u8; 32]) -> Result<AccountPublicKey, Error> {
+        Ok(AccountPublicKey(
+            self.resolve_id(hash, b"account_pubkey")?.value,
+        ))
+    }
+}
+impl<S: NodeReader> NamePointerResolver for Trie<S> {
+    fn resolve_id(&self, hash: [u8; 32], pointer: &[u8]) -> Result<Id, Error> {
         let Some(ae_trie::Value::Bytes(bytes)) = self.get(&Nibbles::from_bytes(&hash))? else {
             return Err(Error::NameNotFound);
         };
         let name = Name::deserialize(hash, &bytes)?;
-        match name.resolve(b"account_pubkey")? {
+        match name.resolve(pointer)? {
             // The legacy resolver accepts any admitted ID tag here.
-            PointerValue::Id(id) => Ok(AccountPublicKey(id.value)),
+            PointerValue::Id(id) => Ok(*id),
             PointerValue::Data(_) => Err(Error::PointerNotId),
         }
     }

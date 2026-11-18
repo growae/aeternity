@@ -51,6 +51,8 @@ impl Context {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    OracleTransaction(oracles::Failure),
+    OracleAbi(oracles::abi::Error),
     Oracle(ae_state::oracles::Error),
     OracleRefundAccountMissing(AccountPublicKey),
     State(AccountError),
@@ -118,6 +120,10 @@ impl From<ae_state::oracles::Error> for Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    OracleQueryFee {
+        account: AccountPublicKey,
+        amount: Unsigned,
+    },
     OracleRefund {
         account: AccountPublicKey,
         amount: Unsigned,
@@ -228,7 +234,7 @@ pub fn process_spend<S: NodeWriter, N: NameResolver>(
     } else {
         AccountPublicKey(tx.recipient().value)
     };
-    let payer = context.payer.unwrap_or(sender);
+    let payer = fee_payer(sender, tx.fee(), context);
     debit(accounts, &mut changes, payer, tx.fee())?;
     debit(accounts, &mut changes, sender, tx.amount())?;
     let mut receiver = load(accounts, &mut changes, recipient, true)?;
@@ -262,6 +268,25 @@ fn prepare_sender<S: NodeReader>(
     nonce: &Unsigned,
     context: &Context,
 ) -> Result<(), Error> {
+    prepare_sender_with_nonce(accounts, changes, sender, nonce, context, false)
+}
+fn fee_payer(sender: AccountPublicKey, fee: &Unsigned, context: &Context) -> AccountPublicKey {
+    // spend_fee/5 selects From when the delegated amount is zero, even if
+    // another payer is present (and even if that payer account is absent).
+    if fee == &0.into() {
+        sender
+    } else {
+        context.payer.unwrap_or(sender)
+    }
+}
+fn prepare_sender_with_nonce<S: NodeReader>(
+    accounts: &Accounts<S>,
+    changes: &mut BTreeMap<AccountPublicKey, Account>,
+    sender: AccountPublicKey,
+    nonce: &Unsigned,
+    context: &Context,
+    force: bool,
+) -> Result<(), Error> {
     let mut account = load(accounts, changes, sender, context.payer.is_some())?;
     if context.ga_authenticated.contains(&sender) {
         if context.protocol < Protocol::Fortuna {
@@ -290,7 +315,7 @@ fn prepare_sender<S: NodeReader>(
         if nonce != &account.nonce().add(&1.into()) {
             return Err(Error::NonceTooHigh);
         }
-        if context.origin != Origin::Contract || context.protocol == Protocol::Roma {
+        if force || context.origin != Origin::Contract || context.protocol == Protocol::Roma {
             account.set_nonce(nonce.clone());
         }
     }

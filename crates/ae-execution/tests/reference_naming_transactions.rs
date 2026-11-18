@@ -184,9 +184,17 @@ fn event(e: &Json) -> Event {
 fn all_five_naming_callbacks_match_original_erlang_bytes_rules_events_and_roots() {
     let corpus: Json =
         serde_json::from_str(include_str!("fixtures/erlang_naming_transactions.json")).unwrap();
+    let extra: Json =
+        serde_json::from_str(include_str!("fixtures/erlang_zero_fee_names.json")).unwrap();
+    assert_eq!(extra.as_array().unwrap().len(), 240);
     let mut successes = 0;
     let mut invalid = 0;
-    for row in corpus.as_array().unwrap() {
+    for row in corpus
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(extra.as_array().unwrap())
+    {
         let label = row["label"].as_str().unwrap();
         let decoded = NameTransaction::decode(&bytes(&row["transaction"]));
         if !row["decoded"].as_bool().unwrap() {
@@ -236,7 +244,7 @@ fn all_five_naming_callbacks_match_original_erlang_bytes_rules_events_and_roots(
         }
     }
     assert_eq!(corpus.as_array().unwrap().len(), 1864);
-    assert_eq!((successes, invalid), (698, 144));
+    assert_eq!((successes, invalid), (922, 144));
 }
 
 #[test]
