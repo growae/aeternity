@@ -4,11 +4,13 @@ use ae_codec::object::{self, ObjectError, Value};
 use ae_types::TypeError;
 use std::fmt;
 
+mod contracts;
 mod names;
 mod oracles;
 mod schema;
 mod signed;
 mod spend;
+pub use contracts::{ContractOperation, ContractTransaction};
 pub use names::{NameOperation, NameTransaction};
 pub use oracles::{OracleOperation, OracleTransaction};
 pub use schema::TransactionKind;

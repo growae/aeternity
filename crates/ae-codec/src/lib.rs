@@ -6,3 +6,4 @@ pub mod idna;
 pub mod name_pointer;
 pub mod object;
 pub mod rlp;
+pub mod sophia;

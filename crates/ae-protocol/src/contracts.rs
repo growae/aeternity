@@ -4,6 +4,32 @@ use crate::Protocol;
 use ae_types::Unsigned;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializationError {
+    UnsupportedAbi,
+    UnsupportedVersion,
+}
+pub fn serialization_available(
+    abi: &Unsigned,
+    version: &Unsigned,
+    protocol: Protocol,
+) -> Result<bool, SerializationError> {
+    match abi.to_u64() {
+        Ok(2) => Ok(true),
+        Ok(1 | 3) => match version.to_u64() {
+            Ok(1) => Ok(protocol <= Protocol::Fortuna),
+            Ok(2) => Ok((Protocol::Minerva..=Protocol::Fortuna).contains(&protocol)),
+            Ok(3) => Ok(protocol >= Protocol::Lima),
+            _ => Err(SerializationError::UnsupportedVersion),
+        },
+        _ => Err(SerializationError::UnsupportedAbi),
+    }
+}
+pub const CREATE_BASE_GAS: u64 = 75_000;
+pub fn call_base_gas(abi: &Unsigned) -> u64 {
+    if *abi == 3.into() { 180_000 } else { 450_000 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Version {
     pub vm: u16,
     pub abi: u16,
