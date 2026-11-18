@@ -28,6 +28,8 @@ pub struct Authentication {
 
 #[derive(Debug, Clone)]
 pub struct State<A = MemoryStore, C = MemoryStore> {
+    // Pending records and stores belong to this invocation, before publication.
+    pub contract_cache: super::deployment::Cache,
     // Trusted invocation input; wire shape alone does not authenticate/admit a transaction.
     pub auth_tx: Option<Arc<ae_tx::WireTransaction>>,
     pub accounts: Accounts<A>,
@@ -105,7 +107,14 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
                 ))),
             };
         };
-        match contract_fate_bytecode(&self.contracts, fixed, limits).map_err(failure)? {
+        self.contract_cache.budget(limits)?;
+        match super::code_from(
+            |key| self.contract_cache.record(&self.contracts, key),
+            fixed,
+            limits,
+        )
+        .map_err(failure)?
+        {
             CodeLookup::Loaded(code) => Ok(Some(LoadedCode {
                 code: Arc::new(code.code),
                 vm_version: code.vm_version,
@@ -297,9 +306,9 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
         Ok(amount.map(|n| BigInt::from_bytes_be(Sign::Plus, n.as_bytes())))
     }
     fn creator(&mut self, k: [u8; 32]) -> Result<[u8; 32], HostFailure<Error>> {
-        self.contracts
-            .record(k)
-            .map_err(|e| failure(e.into()))?
+        self.contract_cache
+            .record(&self.contracts, k)
+            .map_err(failure)?
             .map(|c| c.owner.0)
             .ok_or(HostFailure::Exception(Exception::Native("badmatch")))
     }
@@ -333,10 +342,19 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
                 match key(contracts.tree(), k, Error::UnsupportedContractKey, |e| {
                     Error::Contracts(e.into())
                 })? {
-                    Some(k) => contracts
-                        .record(k)
-                        .map_err(|e| failure(e.into()))?
-                        .is_some(),
+                    Some(k) => {
+                        if self.onchain.is_none() {
+                            self.contract_cache
+                                .record(contracts, k)
+                                .map_err(failure)?
+                                .is_some()
+                        } else {
+                            contracts
+                                .record(k)
+                                .map_err(|e| failure(e.into()))?
+                                .is_some()
+                        }
+                    }
                     None => false,
                 },
             ),

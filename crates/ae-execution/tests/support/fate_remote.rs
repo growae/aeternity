@@ -356,6 +356,7 @@ pub(super) fn chain(row: &J) -> Chain {
     let a = tree(&row["initial"]["chain"]["accounts"]);
     let c = tree(&row["contracts"]);
     Chain {
+        contract_cache: Default::default(),
         auth_tx: None,
 
         accounts: Accounts::from_root(a.root_hash(), a.into_store()).unwrap(),
@@ -429,7 +430,7 @@ fn name_cache(c: &ae_execution::fate_chain::names::Cache) -> J {
     }
     json!(entries)
 }
-fn tree_entries<S: ae_trie::NodeReader>(tree: &Trie<S>) -> J {
+pub(super) fn tree_entries<S: ae_trie::NodeReader>(tree: &Trie<S>) -> J {
     json!(
         tree.iter()
             .map(|r| {
@@ -551,15 +552,11 @@ pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
         expected["tree_root"],
         "tree root"
     );
-    let events:Vec<_>=actual.events.iter().map(|e|match e {
-        TransferEvent::NameCall {info,transaction}=>json!({"kind":"internal_call","info":info,"transaction":transaction.as_ref().map(|t|hex::encode(t.encode())),"type":"non_tx","tx_hash":""}),
-        TransferEvent::NameDelta {info,account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})},
-        TransferEvent::OracleCall {info,transaction}=>json!({"kind":"internal_call","info":info,"transaction":hex::encode(transaction.encode()),"type":"non_tx","tx_hash":""}),
-        TransferEvent::OracleDelta {info,account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})},
-        TransferEvent::InternalCall(tx)=>json!({"kind":"internal_call","info":String::from_utf8_lossy(tx.payload()),"transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),
-        TransferEvent::Delta {account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":"Spend.amount","type":"non_tx","tx_hash":""})}
-    }).collect();
-    assert_eq!(json!(events), expected["events"], "chain events");
+    assert_eq!(
+        json!(actual.events.iter().map(event_json).collect::<Vec<_>>()),
+        expected["events"],
+        "chain events"
+    );
 }
 pub(super) fn assert_stores(actual: &Stores<RemoteStore>, expected: &J) {
     let entries: BTreeMap<_, _> = rows(expected).iter().map(|e| (key(&e[0]), &e[1])).collect();
@@ -866,6 +863,49 @@ fn remote_programs_and_protected_recovery_match_original_instruction_and_whole_e
                     break;
                 }
             }
+        }
+    }
+}
+
+pub(super) fn event_json(e: &TransferEvent) -> J {
+    match e {
+        TransferEvent::DeploymentCall { info } => {
+            json!({"kind":"internal_call","info":info,"transaction":null,"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::NameCall { info, transaction } => {
+            json!({"kind":"internal_call","info":info,"transaction":transaction.as_ref().map(|t|hex::encode(t.encode())),"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::NameDelta {
+            info,
+            account,
+            debit,
+            amount,
+        } => {
+            let n = BigInt::from_bytes_be(num_bigint::Sign::Plus, amount.as_bytes());
+            json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::OracleCall { info, transaction } => {
+            json!({"kind":"internal_call","info":info,"transaction":hex::encode(transaction.encode()),"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::OracleDelta {
+            info,
+            account,
+            debit,
+            amount,
+        } => {
+            let n = BigInt::from_bytes_be(num_bigint::Sign::Plus, amount.as_bytes());
+            json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":info,"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::InternalCall(tx) => {
+            json!({"kind":"internal_call","info":String::from_utf8_lossy(tx.payload()),"transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""})
+        }
+        TransferEvent::Delta {
+            account,
+            debit,
+            amount,
+        } => {
+            let n = BigInt::from_bytes_be(num_bigint::Sign::Plus, amount.as_bytes());
+            json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":"Spend.amount","type":"non_tx","tx_hash":""})
         }
     }
 }

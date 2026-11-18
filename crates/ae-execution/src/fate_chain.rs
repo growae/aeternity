@@ -14,6 +14,7 @@ use ae_vm_fate::{
     types::Version,
 };
 pub mod auth_transaction;
+pub mod deployment;
 pub mod history;
 pub mod names;
 pub mod oracle;
@@ -76,7 +77,14 @@ pub fn contract_fate_bytecode<S: NodeReader>(
     public_key: [u8; 32],
     limits: Limits,
 ) -> Result<CodeLookup, Error> {
-    let Some(contract) = contracts.record(public_key)? else {
+    code_from(|key| Ok(contracts.record(key)?), public_key, limits)
+}
+fn code_from(
+    mut lookup: impl FnMut([u8; 32]) -> Result<Option<contracts::Contract>, Error>,
+    public_key: [u8; 32],
+    limits: Limits,
+) -> Result<CodeLookup, Error> {
+    let Some(contract) = lookup(public_key)? else {
         return Ok(CodeLookup::Unavailable);
     };
     let vm_version = match contract.version.vm {
@@ -93,7 +101,7 @@ pub fn contract_fate_bytecode<S: NodeReader>(
             if id.tag != IdTag::Contract {
                 return Ok(CodeLookup::Exception(CodeException::InvalidReferenceId(id)));
             }
-            let Some(reference) = contracts.record(id.value)? else {
+            let Some(reference) = lookup(id.value)? else {
                 return Ok(CodeLookup::Exception(CodeException::MissingReference(id)));
             };
             match reference.code {
@@ -135,11 +143,22 @@ pub fn contract_vm_version<S: NodeReader>(
 // the original recursion does not manufacture a VM rejection for a cycle.
 pub fn contract_find_final_ref<S: NodeReader>(
     contracts: &Contracts<S>,
+    public_key: [u8; 32],
+    maximum_lookups: usize,
+) -> Result<Option<([u8; 32], u16)>, Error> {
+    final_ref_from(
+        |key| Ok(contracts.record(key)?),
+        public_key,
+        maximum_lookups,
+    )
+}
+fn final_ref_from(
+    mut lookup: impl FnMut([u8; 32]) -> Result<Option<contracts::Contract>, Error>,
     mut public_key: [u8; 32],
     maximum_lookups: usize,
 ) -> Result<Option<([u8; 32], u16)>, Error> {
     for _ in 0..maximum_lookups {
-        let Some(contract) = contracts.record(public_key)? else {
+        let Some(contract) = lookup(public_key)? else {
             return Ok(None);
         };
         match contract.code {
@@ -177,6 +196,9 @@ pub enum TransferFailure {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferEvent {
+    DeploymentCall {
+        info: &'static str,
+    },
     NameCall {
         info: &'static str,
         // The original revoke event stores the atom error, represented by None.
