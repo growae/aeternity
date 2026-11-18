@@ -4,8 +4,19 @@ use ae_types::Hash256;
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use sha2::Sha256;
 
+mod secp;
 mod signature;
+pub use secp::{InvalidSecp256k1PublicKey, recover_secp256k1_address, verify_secp256k1};
 pub use signature::{Ed25519SecretKey, verify_ed25519};
+
+pub fn keccak256(bytes: &[u8]) -> Hash256 {
+    use tiny_keccak::{Hasher, Keccak};
+    let mut hash = [0; 32];
+    let mut state = Keccak::v256();
+    state.update(bytes);
+    state.finalize(&mut hash);
+    Hash256(hash)
+}
 
 pub fn blake2b_256(bytes: &[u8]) -> Hash256 {
     // Output size is part of BLAKE2's parameters, not truncation of BLAKE2b-512.

@@ -68,7 +68,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             _ => self.native("function_clause"),
         })
     }
-    fn unfold(&mut self, value: Value, model: CostModel) -> Result<Value, Fault<S::Error>> {
+    pub(super) fn unfold(
+        &mut self,
+        value: Value,
+        model: CostModel,
+    ) -> Result<Value, Fault<S::Error>> {
         let prepared = vm::prepare_unfold(
             self.state.meter.protocol,
             &value,

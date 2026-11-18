@@ -52,8 +52,21 @@ pub fn encode(value: &Value, limits: Limits) -> Result<Vec<u8>, Error> {
     Ok(encode_counted(value, limits)?.0)
 }
 pub(crate) fn encode_counted(value: &Value, limits: Limits) -> Result<(Vec<u8>, usize), Error> {
+    encode_vm_counted(value, limits).map_err(|e| e.error)
+}
+pub(crate) struct EncodingFailure {
+    pub error: Error,
+    pub native_exception: &'static str,
+}
+pub(crate) fn encode_vm_counted(
+    value: &Value,
+    limits: Limits,
+) -> Result<(Vec<u8>, usize), EncodingFailure> {
     let mut encoder = Encoder::new(limits);
-    encoder.value(value, 0)?;
+    encoder.value(value, 0).map_err(|error| EncodingFailure {
+        error,
+        native_exception: encoder.native_exception,
+    })?;
     Ok((encoder.bytes, encoder.budget.nodes))
 }
 pub fn encode_type(ty: &Type, limits: Limits) -> Result<Vec<u8>, Error> {
@@ -343,13 +356,19 @@ fn is_type_tag(tag: u8) -> bool {
 struct Encoder {
     bytes: Vec<u8>,
     budget: Budget,
+    native_exception: &'static str,
 }
 impl Encoder {
     fn new(limits: Limits) -> Self {
         Self {
             bytes: Vec::new(),
             budget: Budget::new(limits),
+            native_exception: "function_clause",
         }
+    }
+    fn fail(&mut self, error: Error, native_exception: &'static str) -> Result<(), Error> {
+        self.native_exception = native_exception;
+        Err(error)
     }
     fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if bytes.len()
@@ -446,7 +465,9 @@ impl Encoder {
             Value::List(values) => self.elements(values, false, depth + 1),
             Value::Map(map) => {
                 for key in map.keys() {
-                    value::valid_key(key, &mut self.budget, depth + 1)?;
+                    if let Err(error) = value::valid_key(key, &mut self.budget, depth + 1) {
+                        return self.fail(error, "map_as_key_in_map");
+                    }
                 }
                 let rows = value::sorted(map, &mut self.budget, depth + 1)?;
                 self.put(&[0x2f])?;
@@ -470,9 +491,6 @@ impl Encoder {
                 tag,
                 values,
             } => {
-                if arities.get(*tag) != Some(&BigInt::from(values.len())) {
-                    return Err(Error::InvalidValue);
-                }
                 if arities.len()
                     > self
                         .budget
@@ -489,6 +507,18 @@ impl Encoder {
                     return Err(Error::ResourceLimit);
                 }
                 self.budget.nodes += arities.len();
+                // Original encoding first asserts that filtering out arities
+                // >=256 did not change the list, then checks tag/field count,
+                // and only then converts negative arities to binary bytes.
+                if arities.iter().any(|n| n >= &BigInt::from(256)) {
+                    return self.fail(Error::InvalidValue, "badmatch");
+                }
+                if arities.get(*tag) != Some(&BigInt::from(values.len())) {
+                    return self.fail(Error::InvalidValue, "if_clause");
+                }
+                if arities.iter().any(|n| n.sign() == Sign::Minus) {
+                    return self.fail(Error::InvalidValue, "badarg");
+                }
                 self.put(&[0xaf])?;
                 let arities = arities
                     .iter()
@@ -534,7 +564,12 @@ impl Encoder {
         }
     }
     fn type_fields(&mut self, fields: &[Type], tuple: bool, depth: usize) -> Result<(), Error> {
-        let n = u8::try_from(fields.len()).map_err(|_| Error::InvalidType)?;
+        let Ok(n) = u8::try_from(fields.len()) else {
+            return self.fail(
+                Error::InvalidType,
+                if tuple { "case_clause" } else { "if_clause" },
+            );
+        };
         self.put(&[if tuple { 0x37 } else { 0x87 }, n])?;
         for t in fields {
             self.ty(t, depth + 1)?;

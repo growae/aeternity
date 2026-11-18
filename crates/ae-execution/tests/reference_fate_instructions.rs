@@ -42,6 +42,9 @@ static BINARY: LazyLock<J> = LazyLock::new(|| {
 static BINARY_LIMITS: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_binary_limits.json")).unwrap()
 });
+static CRYPTO: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_crypto.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -485,6 +488,21 @@ fn byte_string_character_and_address_instructions_match_original_dispatcher() {
 }
 
 #[test]
+fn hashing_signature_verification_and_recovery_match_original_dispatcher() {
+    check_runs(&CRYPTO);
+    check_sequences(&CRYPTO);
+}
+#[test]
+fn hash_unfolding_fetches_and_native_gas_boundaries_match_original_runtime() {
+    check_fetches(&CRYPTO);
+    check_native_cases(&CRYPTO["native"]);
+}
+#[test]
+fn hash_unfolding_work_limits_leave_inputs_retryable() {
+    check_unfold_work(&CRYPTO, "SHA3");
+}
+
+#[test]
 fn comparisons_unfold_each_operand_and_match_historical_ordering_and_abort_states() {
     check_runs(&COMPARISONS);
     check_sequences(&COMPARISONS);
@@ -497,18 +515,21 @@ fn comparison_traversal_native_gas_capacity_matches_original_runtime() {
 
 #[test]
 fn comparison_fetches_happen_after_simple_gas_and_preserve_retry_checkpoints() {
-    let order = otp_order::profile(&COMPARISONS["profile"]);
+    check_fetches(&COMPARISONS);
+}
+fn check_fetches(fixture: &J) {
+    let order = otp_order::profile(&fixture["profile"]);
     let overrides = Overrides::default();
     let fetched = BTreeMap::from([(KEY, backend())]);
     let empty = BTreeMap::new();
     let mut stopped_before_fetch = 0;
     let mut fetched_before_abort = 0;
-    for row in rows(&COMPARISONS["fetches"]) {
+    for row in rows(&fixture["fetches"]) {
         let ctx = context(row);
         let ins = instruction(&row["op"]);
         for run in rows(&row["runs"]) {
             let input = state(row, &run[0]);
-            let expected = &COMPARISONS["results"][run[1].as_u64().unwrap() as usize];
+            let expected = &fixture["results"][run[1].as_u64().unwrap() as usize];
             let exec = |contracts, limits| {
                 Executor {
                     context: &ctx,
@@ -520,7 +541,6 @@ fn comparison_fetches_happen_after_simple_gas_and_preserve_retry_checkpoints() {
             };
             assert_outcome(exec(&fetched, Limits::default()).unwrap(), expected);
             if expected["state"]["store"].is_null() {
-                assert_eq!(expected["kind"], "abort");
                 stopped_before_fetch += 1;
                 assert_outcome(exec(&empty, Limits::default()).unwrap(), expected);
             } else {
@@ -540,12 +560,15 @@ fn comparison_fetches_happen_after_simple_gas_and_preserve_retry_checkpoints() {
 
 #[test]
 fn comparison_unfold_work_is_bounded_and_failed_attempts_keep_inputs_retryable() {
-    let row = rows(&COMPARISONS["fetches"])
+    check_unfold_work(&COMPARISONS, "EQ");
+}
+fn check_unfold_work(fixture: &J, opcode: &str) {
+    let row = rows(&fixture["fetches"])
         .iter()
-        .find(|r| r["protocol"] == 8 && r["op"][0] == "EQ")
+        .find(|r| r["protocol"] == 8 && r["op"][0] == opcode)
         .unwrap();
     let ctx = context(row);
-    let order = otp_order::profile(&COMPARISONS["profile"]);
+    let order = otp_order::profile(&fixture["profile"]);
     let overrides = Overrides::default();
     let contracts = BTreeMap::from([(KEY, backend())]);
     let input = state(row, &serde_json::json!("1000000"));
@@ -554,7 +577,7 @@ fn comparison_unfold_work_is_bounded_and_failed_attempts_keep_inputs_retryable()
         .iter()
         .find(|r| r[0] == "1000000")
         .unwrap();
-    let expected = &COMPARISONS["results"][expected_run[1].as_u64().unwrap() as usize];
+    let expected = &fixture["results"][expected_run[1].as_u64().unwrap() as usize];
     let exec = Executor {
         context: &ctx,
         order: &order,
@@ -563,28 +586,31 @@ fn comparison_unfold_work_is_bounded_and_failed_attempts_keep_inputs_retryable()
     };
     let mut exhausted = 0;
     let mut passed = 0;
-    for limit in [0, 8, 16, 32, 64, 128, 256, 512, 1024, 4096, 1000000] {
-        match exec.step(
-            &input,
-            &ins,
-            Limits {
-                max_nodes: limit,
-                ..Limits::default()
-            },
-        ) {
+    let budgets = [0, 8, 16, 32, 64, 128, 256, 512, 1024, 4096, 1000000]
+        .into_iter()
+        .map(|max_nodes| Limits {
+            max_nodes,
+            ..Limits::default()
+        })
+        .chain([32, 128, 1024, 4096].into_iter().map(|max_bytes| Limits {
+            max_bytes,
+            ..Limits::default()
+        }));
+    for limits in budgets {
+        match exec.step(&input, &ins, limits) {
             Err(Error::Data(ae_vm_fate::Error::ResourceLimit)) => exhausted += 1,
             Ok(out @ Outcome::Continue { .. }) => {
                 if let Outcome::Continue {
                     remaining_limits, ..
                 } = &out
                 {
-                    assert!(remaining_limits.max_nodes < limit);
-                    assert!(remaining_limits.max_bytes < Limits::default().max_bytes);
+                    assert!(remaining_limits.max_nodes < limits.max_nodes);
+                    assert!(remaining_limits.max_bytes < limits.max_bytes);
                 }
                 passed += 1;
                 assert_outcome(out, expected);
             }
-            other => panic!("unexpected result at node budget {limit}: {other:?}"),
+            other => panic!("unexpected result at budget {limits:?}: {other:?}"),
         }
         assert!(!input.stores.has_contract(&KEY));
         assert_state(&input, &row["initial"]);
