@@ -4,6 +4,9 @@ use ae_types::Hash256;
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use sha2::Sha256;
 
+mod signature;
+pub use signature::{Ed25519SecretKey, verify_ed25519};
+
 pub fn blake2b_256(bytes: &[u8]) -> Hash256 {
     // Output size is part of BLAKE2's parameters, not truncation of BLAKE2b-512.
     Hash256(Blake2b::<U32>::digest(bytes).into())
