@@ -10,6 +10,7 @@ pub enum TypeError {
     IntegerOverflow,
     IntegerUnderflow,
     InvalidDecimal,
+    DivisionByZero,
 }
 
 impl fmt::Display for TypeError {
@@ -111,6 +112,20 @@ impl Id {
 pub struct Unsigned(Vec<u8>);
 
 impl Unsigned {
+    pub fn div_rem_u64(&self, divisor: u64) -> Result<(Self, u64), TypeError> {
+        if divisor == 0 {
+            return Err(TypeError::DivisionByZero);
+        }
+        let mut out = Vec::with_capacity(self.0.len());
+        let mut remainder = 0u128;
+        for byte in &self.0 {
+            let value = (remainder << 8) | u128::from(*byte);
+            out.push((value / u128::from(divisor)) as u8);
+            remainder = value % u128::from(divisor);
+        }
+        let start = out.iter().position(|b| *b != 0).unwrap_or(out.len() - 1);
+        Ok((Self(out[start..].to_vec()), remainder as u64))
+    }
     pub fn mul_u64(&self, multiplier: u64) -> Self {
         if multiplier == 0 {
             return 0.into();
@@ -243,6 +258,29 @@ impl PartialOrd for Unsigned {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn division_handles_full_width_divisors_and_arbitrary_precision_quotients() {
+        for n in [0u128, 1, 255, 256, u64::MAX.into(), u128::MAX] {
+            for d in [1u64, 2, 255, 256, 175_200, u64::MAX] {
+                let (q, r) = Unsigned::from_decimal(&n.to_string())
+                    .unwrap()
+                    .div_rem_u64(d)
+                    .unwrap();
+                assert_eq!(
+                    q,
+                    Unsigned::from_decimal(&(n / u128::from(d)).to_string()).unwrap()
+                );
+                assert_eq!(u128::from(r), n % u128::from(d));
+            }
+        }
+        let n = Unsigned::from_field_bytes(&[255; 129]).unwrap();
+        for d in [1, 175_200, u64::MAX] {
+            let (q, r) = n.div_rem_u64(d).unwrap();
+            assert!(r < d);
+            assert_eq!(q.mul_u64(d).add(&r.into()), n);
+        }
+        assert_eq!(n.div_rem_u64(0), Err(TypeError::DivisionByZero));
+    }
     #[test]
     fn arithmetic_preserves_large_balances_without_narrowing() {
         let a = Unsigned::from_decimal("10000000000000000000000000000000").unwrap();

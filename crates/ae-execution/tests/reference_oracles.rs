@@ -311,7 +311,7 @@ fn oracle_objects_query_hashes_and_ttls_match_original_without_narrowing() {
             if r[field].is_string() {
                 assert_eq!(actual.unwrap(), number(&r[field]));
             } else {
-                assert_eq!(actual, Err(state::Error::TooLowHeight));
+                assert_eq!(actual, Err(ae_protocol::oracles::TtlError));
             }
         }
     }

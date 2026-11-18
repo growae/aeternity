@@ -5,10 +5,12 @@ use ae_types::TypeError;
 use std::fmt;
 
 mod names;
+mod oracles;
 mod schema;
 mod signed;
 mod spend;
 pub use names::{NameOperation, NameTransaction};
+pub use oracles::{OracleOperation, OracleTransaction};
 pub use schema::TransactionKind;
 pub use signed::SignedTransaction;
 pub use spend::Spend;
@@ -23,6 +25,7 @@ pub enum Error {
     InvalidIdType,
     InvalidPointer,
     InvalidSerializationVersion,
+    InvalidTtlType,
     SignatureVerificationFailed,
 }
 impl fmt::Display for Error {

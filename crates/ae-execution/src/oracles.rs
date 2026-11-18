@@ -1,8 +1,30 @@
 // Aeternity fa2a6d7, aeo_state_tree pre-block expiry and query refunds.
 // Copyright (c) 2017, Aeternity Anstalt. ISC notice in repository LICENSE.
+use crate::{Context, Origin};
 use crate::{Error, Event};
+use ae_protocol::{Protocol, oracles::state_gas};
 use ae_state::{accounts::Accounts, oracles::Oracles};
 use ae_trie::NodeWriter;
+use ae_tx::OracleTransaction;
+use ae_types::Unsigned;
+
+pub fn gas(tx: &OracleTransaction, context: &Context) -> Unsigned {
+    gas_for_size(tx, context, tx.wire_size())
+}
+pub fn minimum_fee(tx: &OracleTransaction, context: &Context) -> Unsigned {
+    let size = if context.origin == Origin::Generalized && context.protocol < Protocol::Iris {
+        0
+    } else {
+        tx.wire_size()
+    };
+    gas_for_size(tx, context, size).mul_u64(context.protocol.minimum_gas_price())
+}
+fn gas_for_size(tx: &OracleTransaction, context: &Context, size: usize) -> Unsigned {
+    let Ok(delta) = tx.operation().state_ttl().delta(&context.height.into()) else {
+        return 0.into();
+    };
+    crate::simple_gas(size).add(&state_gas(&delta))
+}
 
 pub fn prune<S: NodeWriter, O: NodeWriter, C: NodeWriter>(
     accounts: &mut Accounts<S>,

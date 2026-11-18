@@ -4,6 +4,7 @@
 use ae_types::Hash256;
 
 pub mod names;
+pub mod oracles;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]

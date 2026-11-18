@@ -35,21 +35,10 @@ impl From<crate::sext::Error> for Error {
         Self::InvalidCache
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ttl {
-    Delta(Unsigned),
-    Block(Unsigned),
-}
-impl Ttl {
-    pub fn delta(&self, height: &Unsigned) -> Result<Unsigned, Error> {
-        match self {
-            Self::Delta(d) => Ok(d.clone()),
-            Self::Block(h) if h > height => h.checked_sub(height).map_err(|_| Error::TooLowHeight),
-            Self::Block(_) => Err(Error::TooLowHeight),
-        }
-    }
-    pub fn expiry(&self, height: &Unsigned) -> Result<Unsigned, Error> {
-        Ok(height.add(&self.delta(height)?))
+pub use ae_protocol::oracles::Ttl;
+impl From<ae_protocol::oracles::TtlError> for Error {
+    fn from(_: ae_protocol::oracles::TtlError) -> Self {
+        Self::TooLowHeight
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
