@@ -26,6 +26,8 @@ mod values;
 use values::{bytes, rows, string, value};
 #[path = "support/fate_context.rs"]
 mod context_tests;
+#[path = "support/fate_hosts.rs"]
+mod host_tests;
 #[path = "support/fate_program.rs"]
 mod program_tests;
 #[path = "support/fate_remote.rs"]
@@ -239,6 +241,11 @@ fn assert_state(actual: &State<Backend>, expected: &J) {
 }
 fn assert_reason(actual: &Reason, expected: &J) {
     let name = match actual {
+        Reason::Primop { operation, reason } => {
+            assert_eq!(*operation, string(&expected[1]));
+            assert_eq!(*reason, string(&expected[2]));
+            "primop"
+        }
         Reason::LogIllegalInt(n) => {
             assert_eq!(*n, number(&expected[1]));
             "log_integer"

@@ -16,7 +16,7 @@ static REMOTE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../fixtures/erlang_fate_remote.json")).unwrap()
 });
 
-fn start<H: Host<ae_execution::fate_chain::Error>, O: ae_vm_fate::maps::MapOrder>(
+pub(super) fn start<H: Host<ae_execution::fate_chain::Error>, O: ae_vm_fate::maps::MapOrder>(
     executor: &Executor<'_, RemoteStore, O>,
     row: &J,
     gas: &J,
@@ -182,6 +182,21 @@ impl Host<ae_execution::fate_chain::Error> for FailingHost {
         }
         Ok(())
     }
+    fn spend(
+        &mut self,
+        f: [u8; 32],
+        t: &[u8],
+        v: &BigInt,
+    ) -> Result<(), remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.spend(f, t, v)
+    }
+    fn oracle_read(
+        &mut self,
+        r: remote::hosts::OracleRead<'_>,
+        l: Limits,
+    ) -> Result<Value, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.oracle_read(r, l)
+    }
     fn environment(&self) -> &remote::context::Environment {
         self.inner.environment()
     }
@@ -292,9 +307,11 @@ pub(super) fn chain(row: &J) -> Chain {
         height: row["height"].as_u64().unwrap(),
         events: vec![],
         oracles: Default::default(),
+        oracle_reads: Default::default(),
         onchain: None,
         history: Default::default(),
         environment: ae_vm_fate::machine::program::remote::context::Environment {
+            auth_tx_hash: None,
             origin: small(9),
             gas_price: 0.into(),
             fee: 0.into(),
@@ -308,7 +325,41 @@ pub(super) fn chain(row: &J) -> Chain {
         },
     }
 }
+fn oracle_cache(c: &ae_execution::fate_chain::oracle::Cache) -> J {
+    let mut items = Vec::new();
+    for (key, value) in &c.oracles {
+        items.push(json!([
+            "oracle",
+            hex::encode(key),
+            hex::encode(value.serialize().unwrap())
+        ]));
+    }
+    for ((oracle, query), value) in &c.queries {
+        items.push(json!([
+            "oracle_query",
+            [hex::encode(oracle), hex::encode(query)],
+            hex::encode(value.serialize().unwrap())
+        ]));
+    }
+    json!(items)
+}
 pub(super) fn assert_chain(actual: &Chain, expected: &J) {
+    if expected.get("oracle_reads").is_some() {
+        assert_eq!(
+            oracle_cache(&actual.oracle_reads),
+            expected["oracle_reads"],
+            "local oracle cache"
+        );
+        assert_eq!(
+            actual
+                .onchain
+                .as_ref()
+                .map(|c| oracle_cache(&c.oracle_reads))
+                .unwrap_or(J::Null),
+            expected["onchain_oracle_reads"],
+            "onchain oracle cache"
+        );
+    }
     let accounts: Vec<_> = actual
         .accounts
         .tree()
@@ -346,7 +397,7 @@ pub(super) fn assert_chain(actual: &Chain, expected: &J) {
         "tree root"
     );
     let events:Vec<_>=actual.events.iter().map(|e|match e {
-        TransferEvent::InternalCall(tx)=>json!({"kind":"internal_call","info":"Call.amount","transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),
+        TransferEvent::InternalCall(tx)=>json!({"kind":"internal_call","info":String::from_utf8_lossy(tx.payload()),"transaction":hex::encode(tx.encode()),"type":"non_tx","tx_hash":""}),
         TransferEvent::Delta {account,debit,amount}=>{let n=BigInt::from_bytes_be(num_bigint::Sign::Plus,amount.as_bytes());json!({"kind":"delta","key":hex::encode(account.0),"amount":if *debit {(-n).to_string()} else {n.to_string()},"info":"Spend.amount","type":"non_tx","tx_hash":""})}
     }).collect();
     assert_eq!(json!(events), expected["events"], "chain events");

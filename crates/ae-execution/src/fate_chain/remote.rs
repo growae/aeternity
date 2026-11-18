@@ -22,6 +22,7 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
     pub height: u64,
     pub events: Vec<TransferEvent>,
     pub oracles: ae_state::oracles::Oracles<C, C>,
+    pub oracle_reads: super::oracle::Cache,
     pub onchain: Option<Box<View<A, C>>>,
     pub environment: Environment,
     pub history: Arc<super::history::Snapshot>,
@@ -31,6 +32,7 @@ pub struct View<A = MemoryStore, C = MemoryStore> {
     pub accounts: Accounts<A>,
     pub contracts: Contracts<C>,
     pub oracles: ae_state::oracles::Oracles<C, C>,
+    pub oracle_reads: super::oracle::Cache,
 }
 fn key<S: NodeReader>(
     tree: &ae_trie::Trie<S>,
@@ -111,6 +113,9 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
             Transfer::Rejected(TransferFailure::InsufficientFunds) => {
                 Err(HostFailure::Call("insufficient_funds"))
             }
+            Transfer::Rejected(TransferFailure::AccountNotPayable) => {
+                unreachable!("value transfer ignores payability")
+            }
             Transfer::Transferred(events) => {
                 self.events.splice(0..0, *events);
                 Ok(())
@@ -119,6 +124,51 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
     }
     fn height(&self) -> u64 {
         self.height
+    }
+    fn spend(
+        &mut self,
+        from: [u8; 32],
+        to: &[u8],
+        value: &BigInt,
+    ) -> Result<(), HostFailure<Error>> {
+        let to = <[u8; 32]>::try_from(to)
+            .map_err(|_| HostFailure::Exception(Exception::Native("function_clause")))?;
+        if value.sign() == Sign::Minus {
+            return Err(HostFailure::Exception(Exception::Native("function_clause")));
+        }
+        let amount =
+            Unsigned::from_field_bytes(&value.to_bytes_be().1).expect("canonical magnitude");
+        match super::spend(
+            &mut self.accounts,
+            AccountPublicKey(from),
+            AccountPublicKey(to),
+            &amount,
+        )
+        .map_err(failure)?
+        {
+            Transfer::Transferred(events) => {
+                self.events.splice(0..0, *events);
+                Ok(())
+            }
+            Transfer::Rejected(r) => Err(HostFailure::Primop {
+                operation: "spend",
+                reason: match r {
+                    TransferFailure::AccountNotFound => "account_not_found",
+                    TransferFailure::InsufficientFunds => "insufficient_funds",
+                    TransferFailure::AccountNotPayable => "account_is_not_payable",
+                },
+            }),
+        }
+    }
+    fn oracle_read(
+        &mut self,
+        request: ae_vm_fate::machine::program::remote::hosts::OracleRead<'_>,
+        limits: Limits,
+    ) -> Result<ae_vm_fate::value::Value, HostFailure<Error>> {
+        match &mut self.onchain {
+            Some(v) => super::oracle::read(&v.oracles, &mut v.oracle_reads, request, limits),
+            None => super::oracle::read(&self.oracles, &mut self.oracle_reads, request, limits),
+        }
     }
     fn environment(&self) -> &Environment {
         &self.environment
@@ -152,9 +202,18 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
             .ok_or(HostFailure::Exception(Exception::Native("badmatch")))
     }
     fn address_test(&mut self, what: AddressTest, k: &[u8]) -> Result<bool, HostFailure<Error>> {
-        let (accounts, contracts, oracles) = match &self.onchain {
-            Some(v) => (&v.accounts, &v.contracts, &v.oracles),
-            None => (&self.accounts, &self.contracts, &self.oracles),
+        if matches!(what, AddressTest::Oracle) {
+            return match &mut self.onchain {
+                Some(v) => {
+                    super::oracle::lookup(&v.oracles, &mut v.oracle_reads, k).map(|v| v.is_some())
+                }
+                None => super::oracle::lookup(&self.oracles, &mut self.oracle_reads, k)
+                    .map(|v| v.is_some()),
+            };
+        }
+        let (accounts, contracts) = match &self.onchain {
+            Some(v) => (&v.accounts, &v.contracts),
+            None => (&self.accounts, &self.contracts),
         };
         match what {
             AddressTest::Payable => Ok(
@@ -179,17 +238,7 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
                     None => false,
                 },
             ),
-            AddressTest::Oracle => Ok(
-                match key(oracles.tree(), k, Error::UnsupportedOracleKey, |e| {
-                    Error::Oracles(e.into())
-                })? {
-                    Some(k) => oracles
-                        .oracle(k)
-                        .map_err(|e| failure(Error::Oracles(e)))?
-                        .is_some(),
-                    None => false,
-                },
-            ),
+            AddressTest::Oracle => unreachable!(),
         }
     }
     fn block_hash(

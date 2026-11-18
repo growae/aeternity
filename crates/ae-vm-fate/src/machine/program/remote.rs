@@ -7,6 +7,7 @@ use crate::{
 };
 use std::sync::Arc;
 pub mod context;
+pub mod hosts;
 use context::{AddressTest, Environment, Log};
 
 #[derive(Debug, Clone)]
@@ -14,11 +15,16 @@ pub struct LoadedCode {
     pub code: Arc<Code>,
     pub vm_version: VmVersion,
 }
+#[derive(Debug)]
 pub enum HostFailure<E> {
     Backend(E),
     ResourceLimit,
     Exception(Exception),
     Call(&'static str),
+    Primop {
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
 // be shared, but later mutations must not change an earlier snapshot's roots.
@@ -35,6 +41,12 @@ pub trait Host<E>: Clone {
         value: &BigInt,
     ) -> Result<(), HostFailure<E>>;
     fn height(&self) -> u64;
+    fn spend(&mut self, from: [u8; 32], to: &[u8], value: &BigInt) -> Result<(), HostFailure<E>>;
+    fn oracle_read(
+        &mut self,
+        request: hosts::OracleRead<'_>,
+        limits: Limits,
+    ) -> Result<Value, HostFailure<E>>;
     fn environment(&self) -> &Environment;
     fn balance(&mut self, key: &[u8]) -> Result<Option<BigInt>, HostFailure<E>>;
     fn creator(&mut self, key: [u8; 32]) -> Result<[u8; 32], HostFailure<E>>;
@@ -285,6 +297,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         } else if let Some(ins) = instruction {
             let supported = ops::supported(ins.opcode)
                 || context::supported(ins.opcode)
+                || hosts::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
                     Opcode::Call
@@ -421,6 +434,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             HostFailure::ResourceLimit => DataError::ResourceLimit.into(),
             HostFailure::Exception(e) => Fault::Exception(e),
             HostFailure::Call(s) => Fault::Abort(Reason::CallError(s)),
+            HostFailure::Primop { operation, reason } => {
+                Fault::Abort(Reason::Primop { operation, reason })
+            }
         }
     }
     fn frame_room(&self, cursor: &Cursor) -> Result<(), Fault<S::Error>> {
@@ -438,6 +454,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         match ins.opcode {
+            op if hosts::supported(op) => {
+                self.host_instruction(session, ins)?;
+                cursor.instruction += 1;
+                Ok(())
+            }
             op if context::supported(op) => {
                 self.context_instruction(session, ins)?;
                 cursor.instruction += 1;
@@ -684,6 +705,41 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             (result, _) => result,
         }
     }
+    fn code_fetch_gas(&mut self) -> Result<(), Fault<S::Error>> {
+        self.spend(if self.state.meter.protocol >= 5 {
+            4900.into()
+        } else {
+            0.into()
+        })
+    }
+    fn fetch_code<H: Host<S::Error>>(
+        &mut self,
+        session: &mut Session<S, H>,
+        key: &[u8],
+    ) -> Result<Option<LoadedCode>, Fault<S::Error>> {
+        let fixed = <&[u8; 32]>::try_from(key).ok().copied();
+        let loaded = if let Some(c) = fixed.and_then(|k| session.code_cache.get(&k)) {
+            c.clone()
+        } else {
+            let gas = self.state.meter.gas.clone();
+            let host_before = session.host.clone();
+            self.code_fetch_gas()?;
+            let Some(c) = session
+                .host
+                .code(key, self.remaining)
+                .map_err(Self::host_fault)?
+            else {
+                self.state.meter.gas = gas;
+                session.host = host_before;
+                return Ok(None);
+            };
+            let fixed = fixed
+                .ok_or_else(|| Fault::Operational(Error::UnsupportedContractKey(key.to_vec())))?;
+            session.code_cache.insert(fixed, c.clone());
+            c
+        };
+        Ok(Some(loaded))
+    }
     #[allow(clippy::too_many_arguments)]
     fn load_remote<H: Host<S::Error>>(
         &mut self,
@@ -696,31 +752,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         private: bool,
         allow_init: bool,
     ) -> Result<(), Fault<S::Error>> {
-        let fixed = <&[u8; 32]>::try_from(key).ok().copied();
-        let loaded = if let Some(c) = fixed.and_then(|k| session.code_cache.get(&k)) {
-            c.clone()
-        } else {
-            let gas = self.state.meter.gas.clone();
-            self.spend(if self.state.meter.protocol >= 5 {
-                4900.into()
-            } else {
-                0.into()
-            })?;
-            let Some(c) = session
-                .host
-                .code(key, self.remaining)
-                .map_err(Self::host_fault)?
-            else {
-                self.state.meter.gas = gas;
-                return Err(Fault::Abort(Reason::MissingContract(key.to_vec())));
-            };
-            let fixed = fixed
-                .ok_or_else(|| Fault::Operational(Error::UnsupportedContractKey(key.to_vec())))?;
-            session.code_cache.insert(fixed, c.clone());
-            c
-        };
-        let fixed =
-            fixed.ok_or_else(|| Fault::Operational(Error::UnsupportedContractKey(key.to_vec())))?;
+        let loaded = self
+            .fetch_code(session, key)?
+            .ok_or_else(|| Fault::Abort(Reason::MissingContract(key.to_vec())))?;
+        let fixed = <[u8; 32]>::try_from(key)
+            .map_err(|_| Fault::Operational(Error::UnsupportedContractKey(key.to_vec())))?;
         self.context.current_contract = fixed;
         self.context.vm_version = loaded.vm_version;
         session.current_contract = fixed;

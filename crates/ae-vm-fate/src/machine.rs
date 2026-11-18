@@ -106,6 +106,10 @@ pub enum Reason {
     RemoteTypeMismatch,
     BadGasCap(BigInt),
     CallError(&'static str),
+    Primop {
+        operation: &'static str,
+        reason: &'static str,
+    },
     BadReturnType {
         value: Value,
         expected: crate::types::Type,

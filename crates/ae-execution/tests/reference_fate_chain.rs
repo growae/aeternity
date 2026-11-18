@@ -190,6 +190,7 @@ fn transfer_value_matches_original_account_bytes_roots_and_internal_events() {
                     match reason {
                         TransferFailure::AccountNotFound => "account_not_found",
                         TransferFailure::InsufficientFunds => "insufficient_funds",
+                        TransferFailure::AccountNotPayable => "account_is_not_payable",
                     },
                     "{row}"
                 );
@@ -243,6 +244,7 @@ fn transfer_sequences_preserve_event_order_and_rejected_call_state() {
                         match reason {
                             TransferFailure::AccountNotFound => "account_not_found",
                             TransferFailure::InsufficientFunds => "insufficient_funds",
+                            TransferFailure::AccountNotPayable => "account_is_not_payable",
                         }
                     );
                 }
@@ -354,14 +356,22 @@ fn value_transfer_rolls_back_partial_storage_failures_and_supports_nested_snapsh
     let root = base.root_hash();
     let mut failures = 0;
     let mut successes = 0;
-    for budget in 0..12 {
+    for (spending, budget) in [false, true]
+        .into_iter()
+        .flat_map(|s| (0..12).map(move |b| (s, b)))
+    {
         let remaining = Rc::new(Cell::new(Some(budget)));
         let store = FailingStore {
             inner: base.tree().store().clone(),
             remaining: remaining.clone(),
         };
         let mut trial = Accounts::from_root(root, store).unwrap();
-        let result = chain::transfer_value(
+        let transfer = if spending {
+            chain::spend
+        } else {
+            chain::transfer_value
+        };
+        let result = transfer(
             &mut trial,
             AccountPublicKey(small(1)),
             AccountPublicKey(small(2)),
@@ -376,7 +386,7 @@ fn value_transfer_rolls_back_partial_storage_failures_and_supports_nested_snapsh
                 assert_eq!(snapshot(&trial, &[]), snapshot(&base, &[]));
                 remaining.set(None);
                 assert!(matches!(
-                    chain::transfer_value(
+                    transfer(
                         &mut trial,
                         AccountPublicKey(small(1)),
                         AccountPublicKey(small(2)),
@@ -483,4 +493,51 @@ fn lookup_backend_failures_are_not_converted_to_absent_contracts_or_balances() {
         chain::account_balance(&local, Some(&onchain), AccountPublicKey(small(1))),
         Ok(Some(0.into()))
     );
+}
+
+#[test]
+fn spending_checks_payability_after_debit_and_rejection_rolls_back() {
+    let mut accounts = Accounts::default();
+    let sender = AccountPublicKey(small(1));
+    let recipient = AccountPublicKey(small(2));
+    accounts.enter(&Account::new(sender, 100.into())).unwrap();
+    let mut blocked = Account::new(recipient, 20.into());
+    blocked.set_non_payable(true);
+    accounts.enter(&blocked).unwrap();
+    for (from, to, amount) in [
+        (sender, recipient, 0),
+        (sender, recipient, 30),
+        (recipient, recipient, 0),
+        (recipient, recipient, 10),
+    ] {
+        let before = snapshot(&accounts, &[]);
+        assert_eq!(
+            chain::spend(&mut accounts, from, to, &amount.into()).unwrap(),
+            Transfer::Rejected(TransferFailure::AccountNotPayable)
+        );
+        assert_eq!(snapshot(&accounts, &[]), before);
+    }
+    assert!(matches!(
+        chain::transfer_value(&mut accounts, sender, recipient, &10.into()),
+        Ok(Transfer::Transferred(_))
+    ));
+    assert_eq!(
+        accounts.lookup(sender).unwrap().unwrap().balance(),
+        &90.into()
+    );
+    assert_eq!(
+        accounts.lookup(recipient).unwrap().unwrap().balance(),
+        &30.into()
+    );
+    let new = AccountPublicKey(small(3));
+    let Transfer::Transferred(events) =
+        chain::spend(&mut accounts, sender, new, &0.into()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(accounts.lookup(new).unwrap().unwrap().balance(), &0.into());
+    let TransferEvent::InternalCall(tx) = &events[0] else {
+        panic!()
+    };
+    assert_eq!(tx.payload(), b"Chain.spend");
 }

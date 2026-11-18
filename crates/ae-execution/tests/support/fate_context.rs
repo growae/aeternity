@@ -4,19 +4,16 @@ use ae_execution::fate_chain::{
     remote::{State as Chain, Store as RemoteStore, View},
 };
 use ae_state::{accounts::Accounts, contracts::Contracts, oracles::Oracles};
-use ae_vm_fate::machine::program::{
-    Entry,
-    remote::{
-        self,
-        context::{Consensus, Environment},
-    },
+use ae_vm_fate::machine::program::remote::{
+    self,
+    context::{Consensus, Environment},
 };
 use remote_tests::{key, small};
 use std::sync::Arc;
 static CONTEXT: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../fixtures/erlang_fate_context.json")).unwrap()
 });
-fn chain(row: &J) -> Chain {
+pub(super) fn chain_base(row: &J) -> Chain {
     let mut c = remote_tests::chain(row);
     let t = remote_tests::tree(&row["oracles"]);
     c.oracles =
@@ -25,6 +22,7 @@ fn chain(row: &J) -> Chain {
         let a = remote_tests::tree(&row["onchain_view"]["accounts"]);
         let o = remote_tests::tree(&row["onchain_view"]["oracles"]);
         c.onchain = Some(Box::new(View {
+            oracle_reads: Default::default(),
             accounts: Accounts::from_root(a.root_hash(), a.into_store()).unwrap(),
             contracts: Contracts::default(),
             oracles: Oracles::from_roots(o.root_hash(), None, o.into_store(), Default::default())
@@ -33,6 +31,7 @@ fn chain(row: &J) -> Chain {
     }
     let e = &row["environment"];
     c.environment = Environment {
+        auth_tx_hash: e["auth_hash"].as_str().map(|s| hex::decode(s).unwrap()),
         origin: key(&e["origin"]),
         gas_price: number(&e["gas_price"]),
         fee: number(&e["fee"]),
@@ -48,7 +47,11 @@ fn chain(row: &J) -> Chain {
         },
         key_hash: key(&e["key_hash"]),
     };
-    c.history = Arc::new(Snapshot {
+
+    c
+}
+static HISTORY: LazyLock<Arc<Snapshot>> = LazyLock::new(|| {
+    Arc::new(Snapshot {
         selected: rows(&CONTEXT["history"]["selected"])
             .iter()
             .map(|p| (p[0].as_u64().unwrap(), key(&p[1])))
@@ -65,7 +68,11 @@ fn chain(row: &J) -> Chain {
                 )
             })
             .collect(),
-    });
+    })
+});
+fn chain(row: &J) -> Chain {
+    let mut c = chain_base(row);
+    c.history = Arc::clone(&HISTORY);
     c
 }
 fn start<O: ae_vm_fate::maps::MapOrder>(
@@ -73,52 +80,15 @@ fn start<O: ae_vm_fate::maps::MapOrder>(
     row: &J,
     gas: &J,
 ) -> (remote::State<RemoteStore, Chain>, Limits) {
-    let mut stores = Stores::new(Version::for_protocol(
-        row["protocol"].as_u64().unwrap() as u32
-    ));
-    stores.put_contract(small(1), RemoteStore(backend()));
-    let machine = State {
-        accumulator: Accumulator {
-            top: Value::Void,
-            rest: Default::default(),
-        },
-        memory: BTreeMap::new(),
-        stores,
-        meter: Meter {
-            protocol: row["protocol"].as_u64().unwrap() as u32,
-            gas: number(gas),
-            created_cells: number(&row["initial"]["cells"]),
-            metering_floor: None,
-        },
-    };
-    let out = executor
-        .start_remote_program(
-            remote::LoadedCode {
-                code: Arc::new(program_tests::code(&row["codes"][0])),
-                vm_version: executor.context.vm_version,
-            },
-            Value::Object(
-                ae_vm_fate::value::ObjectKind::Address,
-                ae_vm_fate::value::ObjectPayload::Bytes(small(9).to_vec()),
-            ),
-            chain(row),
-            &machine,
-            &Entry {
-                function: Value::String(vec![0, 0, 0, 1]),
-                arguments: vec![],
-                call_value: 0.into(),
-                allow_init: false,
-            },
-            Limits::default(),
-        )
-        .unwrap();
-    let remote::Outcome::Continue {
-        mut state,
-        remaining_limits,
-    } = out
-    else {
-        panic!("entry")
-    };
+    start_with_host(executor, row, gas, chain(row))
+}
+pub(super) fn start_with_host<O: ae_vm_fate::maps::MapOrder>(
+    executor: &Executor<'_, RemoteStore, O>,
+    row: &J,
+    gas: &J,
+    host: Chain,
+) -> (remote::State<RemoteStore, Chain>, Limits) {
+    let (mut state, remaining_limits) = remote_tests::start(executor, row, gas, host);
     state.program.machine.accumulator.top = value(&row["initial"]["top"]);
     state.program.machine.accumulator.rest =
         rows(&row["initial"]["rest"]).iter().map(value).collect();
@@ -320,6 +290,7 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
             fail: Rc::clone(fail),
         };
         View {
+            oracle_reads: Default::default(),
             accounts: Accounts::from_root(
                 c.accounts.root_hash(),
                 reader(c.accounts.tree().store()),
@@ -350,6 +321,7 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
         accounts: v.accounts,
         contracts: v.contracts,
         oracles: v.oracles,
+        oracle_reads: Default::default(),
         onchain: Some(Box::new(view(&c, &fail))),
         height: c.height,
         events: vec![],

@@ -9,6 +9,7 @@ pub enum Consensus {
 }
 #[derive(Debug, Clone)]
 pub struct Environment {
+    pub auth_tx_hash: Option<Vec<u8>>,
     pub origin: [u8; 32],
     pub gas_price: BigInt,
     pub fee: BigInt,
@@ -22,6 +23,12 @@ pub struct Environment {
 }
 impl Environment {
     pub(super) fn budget(&self, mut limits: Limits) -> Result<Limits, DataError> {
+        if let Some(hash) = &self.auth_tx_hash {
+            limits.max_bytes = limits
+                .max_bytes
+                .checked_sub(hash.len())
+                .ok_or(DataError::ResourceLimit)?;
+        }
         limits.max_bytes = limits
             .max_bytes
             .checked_sub(self.network_id.len())

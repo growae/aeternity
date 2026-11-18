@@ -54,9 +54,14 @@ pub fn encode(value: &Value, limits: Limits) -> Result<Vec<u8>, Error> {
 pub(crate) fn encode_counted(value: &Value, limits: Limits) -> Result<(Vec<u8>, usize), Error> {
     encode_vm_counted(value, limits).map_err(|e| e.error)
 }
-pub(crate) struct EncodingFailure {
+pub struct EncodingFailure {
     pub error: Error,
     pub native_exception: &'static str,
+}
+// Preserve the original serialization exception category for VM host helpers
+// whose serialization occurs outside a catch boundary.
+pub fn encode_for_vm(value: &Value, limits: Limits) -> Result<Vec<u8>, EncodingFailure> {
+    encode_vm_counted(value, limits).map(|(bytes, _)| bytes)
 }
 pub(crate) fn encode_vm_counted(
     value: &Value,

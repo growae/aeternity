@@ -14,6 +14,7 @@ use ae_vm_fate::{
     types::Version,
 };
 pub mod history;
+pub mod oracle;
 pub mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,7 @@ pub fn account_balance<S: NodeReader, C: NodeReader>(
 pub enum TransferFailure {
     AccountNotFound,
     InsufficientFunds,
+    AccountNotPayable,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferEvent {
@@ -191,12 +193,39 @@ pub fn transfer_value<S: NodeWriter>(
     to: AccountPublicKey,
     amount: &Unsigned,
 ) -> Result<Transfer, Error> {
-    accounts.transaction(|accounts| {
+    move_value(accounts, from, to, amount, false)
+}
+pub fn spend<S: NodeWriter>(
+    accounts: &mut Accounts<S>,
+    from: AccountPublicKey,
+    to: AccountPublicKey,
+    amount: &Unsigned,
+) -> Result<Transfer, Error> {
+    move_value(accounts, from, to, amount, true)
+}
+#[derive(Debug)]
+enum TransferFault {
+    Reject(TransferFailure),
+    Backend(Error),
+}
+impl From<AccountError> for TransferFault {
+    fn from(e: AccountError) -> Self {
+        Self::Backend(e.into())
+    }
+}
+fn move_value<S: NodeWriter>(
+    accounts: &mut Accounts<S>,
+    from: AccountPublicKey,
+    to: AccountPublicKey,
+    amount: &Unsigned,
+    check_payable: bool,
+) -> Result<Transfer, Error> {
+    let result = accounts.transaction(|accounts| -> Result<_, TransferFault> {
         let Some(mut sender) = accounts.lookup(from)? else {
-            return Ok(Transfer::Rejected(TransferFailure::AccountNotFound));
+            return Err(TransferFault::Reject(TransferFailure::AccountNotFound));
         };
         if sender.balance() < amount {
-            return Ok(Transfer::Rejected(TransferFailure::InsufficientFunds));
+            return Err(TransferFault::Reject(TransferFailure::InsufficientFunds));
         }
         sender.spend_without_nonce_bump(amount)?;
         accounts.enter(&sender)?;
@@ -204,12 +233,19 @@ pub fn transfer_value<S: NodeWriter>(
         let mut receiver = accounts
             .lookup(to)?
             .unwrap_or_else(|| Account::new(to, 0.into()));
+        if check_payable && !receiver.is_payable() {
+            return Err(TransferFault::Reject(TransferFailure::AccountNotPayable));
+        }
         receiver.earn(amount);
         accounts.enter(&receiver)?;
         let mut transaction = Spend::new(from, Id::new(IdTag::Account, to.0))
             .expect("account recipient is a valid Spend ID");
         transaction.set_amount(amount.clone());
-        transaction.set_payload(b"Call.amount".to_vec());
+        transaction.set_payload(if check_payable {
+            b"Chain.spend".to_vec()
+        } else {
+            b"Call.amount".to_vec()
+        });
         Ok(Transfer::Transferred(Box::new([
             TransferEvent::InternalCall(transaction),
             TransferEvent::Delta {
@@ -223,5 +259,10 @@ pub fn transfer_value<S: NodeWriter>(
                 amount: amount.clone(),
             },
         ])))
-    })
+    });
+    match result {
+        Ok(v) => Ok(v),
+        Err(TransferFault::Reject(r)) => Ok(Transfer::Rejected(r)),
+        Err(TransferFault::Backend(e)) => Err(e),
+    }
 }
