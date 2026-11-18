@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+pub mod calls;
+pub mod contracts;
 pub mod genesis;
 pub mod names;
 pub mod oracles;

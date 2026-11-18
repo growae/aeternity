@@ -3,6 +3,7 @@
 // Copyright (c) 2017, aeternity developers. ISC notice in repository LICENSE.
 use ae_types::Hash256;
 
+pub mod contracts;
 pub mod names;
 pub mod oracles;
 

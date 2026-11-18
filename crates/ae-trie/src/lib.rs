@@ -506,6 +506,9 @@ impl<S: NodeReader> Trie<S> {
     pub fn root_hash(&self) -> Option<Hash256> {
         self.root
     }
+    pub fn clear(&mut self) {
+        self.root = None;
+    }
     pub fn savepoint(&self) -> Savepoint {
         Savepoint(self.root)
     }
