@@ -31,6 +31,9 @@ impl<S: NodeReader> Store<S> {
     pub fn write_cache(&self) -> &Contents {
         &self.writes
     }
+    pub fn read_cache(&self) -> &Contents {
+        &self.reads
+    }
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.writes.insert(key, value);
     }
