@@ -95,3 +95,14 @@ pub fn gt_multiply(_: Profile, left: &Gt, right: &Gt) -> Gt {
 pub fn gt_power(_: Profile, value: &Gt, scalar: &Fr) -> Gt {
     tower::Fp12::read(value).pow(scalar).bytes()
 }
+pub fn final_exponentiation(_: Profile, value: &Gt) -> Gt {
+    tower::Fp12::read(value).final_exponentiation().bytes()
+}
+pub fn miller_loop(_: Profile, p: &G1, q: &G2) -> Gt {
+    tower::Fp12::miller_loop(&read_g1(p), &read_g2(q)).bytes()
+}
+pub fn pairing(_: Profile, p: &G1, q: &G2) -> Gt {
+    tower::Fp12::miller_loop(&read_g1(p), &read_g2(q))
+        .final_exponentiation()
+        .bytes()
+}

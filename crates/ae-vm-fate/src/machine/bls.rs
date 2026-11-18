@@ -26,6 +26,9 @@ pub(super) fn supported(op: Opcode) -> bool {
             | Bls12381GtAdd
             | Bls12381GtMul
             | Bls12381GtPow
+            | Bls12381MillerLoop
+            | Bls12381Pairing
+            | Bls12381FinalExp
     )
 }
 fn name(op: Opcode) -> &'static str {
@@ -50,6 +53,9 @@ fn name(op: Opcode) -> &'static str {
         Bls12381GtAdd => "bls12_381_gt_add",
         Bls12381GtMul => "bls12_381_gt_mul",
         Bls12381GtPow => "bls12_381_gt_pow",
+        Bls12381MillerLoop => "bls12_381_miller_loop",
+        Bls12381Pairing => "bls12_381_pairing",
+        Bls12381FinalExp => "bls12_381_final_exp",
         _ => unreachable!(),
     }
 }
@@ -115,9 +121,21 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 | Bls12381G2Mul
                 | Bls12381GtMul
                 | Bls12381GtPow
+                | Bls12381MillerLoop
+                | Bls12381Pairing
         ) {
             let y = self.read(&a[2])?;
             let result = match op {
+                Bls12381MillerLoop | Bls12381Pairing => {
+                    let (Some(p), Some(q)) = (g1(&x), g2(&y)) else {
+                        return Err(self.type_error(name, vec![x, y]));
+                    };
+                    field_values(if op == Bls12381MillerLoop {
+                        bls::miller_loop(profile, &p, &q)
+                    } else {
+                        bls::pairing(profile, &p, &q)
+                    })
+                }
                 Bls12381G1Mul => {
                     let (Some(k), Some(p)) = (field(&x), g1(&y)) else {
                         return Err(self.type_error(name, vec![x, y]));
@@ -162,14 +180,15 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             };
             return self.write(&a[0], result);
         }
-        if matches!(op, Bls12381GtInv | Bls12381GtIsOne) {
+        if matches!(op, Bls12381GtInv | Bls12381GtIsOne | Bls12381FinalExp) {
             let Some(p) = gt(&x) else {
                 return Err(self.type_error(name, vec![x]));
             };
-            let result = if op == Bls12381GtInv {
-                field_values(bls::gt_unitary_inverse(profile, &p))
-            } else {
-                Value::Boolean(bls::gt_is_one(profile, &p))
+            let result = match op {
+                Bls12381GtInv => field_values(bls::gt_unitary_inverse(profile, &p)),
+                Bls12381GtIsOne => Value::Boolean(bls::gt_is_one(profile, &p)),
+                Bls12381FinalExp => field_values(bls::final_exponentiation(profile, &p)),
+                _ => unreachable!(),
             };
             return self.write(&a[0], result);
         }

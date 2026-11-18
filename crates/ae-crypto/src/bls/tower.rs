@@ -7,6 +7,7 @@ use super::{
 };
 use std::sync::LazyLock;
 mod constants;
+mod pairing;
 #[cfg(test)]
 mod tests;
 static FROBENIUS: LazyLock<[Fp2; 5]> =

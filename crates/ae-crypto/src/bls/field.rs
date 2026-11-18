@@ -71,6 +71,13 @@ impl Fp {
     fn add_pre(&self, other: &Self) -> Self {
         Self((&self.0 + &other.0) & &*MASK)
     }
+    fn half(&self) -> Self {
+        let mut value = &self.0 >> 1usize;
+        if self.0.bit(0) {
+            value += (modulus() + 1u8) >> 1usize;
+        }
+        Self(value & &*MASK)
+    }
     fn product(&self, other: &Self) -> BigUint {
         &self.0 * &other.0
     }
@@ -166,6 +173,12 @@ impl Fp2 {
     pub(super) fn frobenius(&self) -> Self {
         Self([self.0[0].clone(), self.0[1].neg()])
     }
+    pub(super) fn half(&self) -> Self {
+        Self(self.0.each_ref().map(Fp::half))
+    }
+    pub(super) fn mul_fp(&self, other: &Fp) -> Self {
+        Self(self.0.each_ref().map(|x| x.mul(other)))
+    }
 }
 impl Field for Fp2 {
     fn zero() -> Self {
@@ -227,11 +240,20 @@ impl Fp2Wide {
         let cross = a.add_pre(b).product(&c.add_pre(d));
         Self([sub_dbl(&ac, &bd), sub_pre(&sub_pre(&cross, &ac), &bd)])
     }
+    pub(super) fn square(x: &Fp2) -> Self {
+        let [a, b] = &x.0;
+        Self([a.sub(b).product(&a.add_pre(b)), b.add_pre(b).product(a)])
+    }
     pub(super) fn reduce(&self) -> Fp2 {
         Fp2(self.0.each_ref().map(|x| Fp::reduce(x.clone())))
     }
     pub(super) fn add(&self, other: &Self) -> Self {
         Self(std::array::from_fn(|i| add_dbl(&self.0[i], &other.0[i])))
+    }
+    pub(super) fn add_pre(&self, other: &Self) -> Self {
+        Self(std::array::from_fn(|i| {
+            (&self.0[i] + &other.0[i]) & &*MASK768
+        }))
     }
     pub(super) fn sub(&self, other: &Self) -> Self {
         Self(std::array::from_fn(|i| sub_dbl(&self.0[i], &other.0[i])))
