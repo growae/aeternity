@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ae-codec.workspace = true
+ae-crypto.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
 

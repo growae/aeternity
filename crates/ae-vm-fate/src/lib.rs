@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
+pub mod abi;
+pub mod code;
 pub mod encoding;
+pub mod opcodes;
 pub mod types;
 pub mod value;
 

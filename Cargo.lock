@@ -120,6 +120,7 @@ name = "ae-vm-fate"
 version = "0.1.0"
 dependencies = [
  "ae-codec",
+ "ae-crypto",
  "hex",
  "num-bigint",
  "num-traits",

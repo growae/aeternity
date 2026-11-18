@@ -18,9 +18,16 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Value, Error> {
     Ok(value)
 }
 pub fn decode_one(bytes: &[u8], limits: Limits) -> Result<(Value, &[u8]), Error> {
+    let (value, rest, _) = decode_one_counted(bytes, limits)?;
+    Ok((value, rest))
+}
+pub(crate) fn decode_one_counted(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Value, &[u8], usize), Error> {
     let mut decoder = Decoder::new(bytes, limits)?;
     let value = decoder.value(0)?;
-    Ok((value, &bytes[decoder.pos..]))
+    Ok((value, &bytes[decoder.pos..], decoder.budget.nodes))
 }
 pub fn decode_type(bytes: &[u8], limits: Limits) -> Result<Type, Error> {
     let (ty, rest) = decode_type_one(bytes, limits)?;
@@ -30,19 +37,41 @@ pub fn decode_type(bytes: &[u8], limits: Limits) -> Result<Type, Error> {
     Ok(ty)
 }
 pub fn decode_type_one(bytes: &[u8], limits: Limits) -> Result<(Type, &[u8]), Error> {
+    let (ty, rest, _) = decode_type_one_counted(bytes, limits)?;
+    Ok((ty, rest))
+}
+pub(crate) fn decode_type_one_counted(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Type, &[u8], usize), Error> {
     let mut decoder = Decoder::new(bytes, limits)?;
     let ty = decoder.ty(0)?;
-    Ok((ty, &bytes[decoder.pos..]))
+    Ok((ty, &bytes[decoder.pos..], decoder.budget.nodes))
 }
 pub fn encode(value: &Value, limits: Limits) -> Result<Vec<u8>, Error> {
+    Ok(encode_counted(value, limits)?.0)
+}
+pub(crate) fn encode_counted(value: &Value, limits: Limits) -> Result<(Vec<u8>, usize), Error> {
     let mut encoder = Encoder::new(limits);
     encoder.value(value, 0)?;
-    Ok(encoder.bytes)
+    Ok((encoder.bytes, encoder.budget.nodes))
 }
 pub fn encode_type(ty: &Type, limits: Limits) -> Result<Vec<u8>, Error> {
+    Ok(encode_type_counted(ty, limits)?.0)
+}
+pub(crate) fn encode_type_counted(ty: &Type, limits: Limits) -> Result<(Vec<u8>, usize), Error> {
     let mut encoder = Encoder::new(limits);
     encoder.ty(ty, 0)?;
-    Ok(encoder.bytes)
+    Ok((encoder.bytes, encoder.budget.nodes))
+}
+pub(crate) fn encode_tuple_type_counted(
+    fields: &[Type],
+    limits: Limits,
+) -> Result<(Vec<u8>, usize), Error> {
+    let mut encoder = Encoder::new(limits);
+    encoder.budget.visit(0)?;
+    encoder.type_fields(fields, true, 0)?;
+    Ok((encoder.bytes, encoder.budget.nodes))
 }
 
 struct Decoder<'a> {
@@ -455,21 +484,8 @@ impl Encoder {
                 self.ty(k, depth + 1)?;
                 self.ty(v, depth + 1)
             }
-            Type::Tuple(ts) | Type::Variant(ts) => {
-                let n = u8::try_from(ts.len()).map_err(|_| Error::InvalidType)?;
-                self.put(&[
-                    if matches!(ty, Type::Tuple(_)) {
-                        0x37
-                    } else {
-                        0x87
-                    },
-                    n,
-                ])?;
-                for t in ts {
-                    self.ty(t, depth + 1)?;
-                }
-                Ok(())
-            }
+            Type::Tuple(ts) => self.type_fields(ts, true, depth),
+            Type::Variant(ts) => self.type_fields(ts, false, depth),
             Type::Bytes(n) => {
                 self.put(&[0x97])?;
                 self.integer(
@@ -479,5 +495,13 @@ impl Encoder {
             }
             Type::Arity(_) => Err(Error::InvalidType),
         }
+    }
+    fn type_fields(&mut self, fields: &[Type], tuple: bool, depth: usize) -> Result<(), Error> {
+        let n = u8::try_from(fields.len()).map_err(|_| Error::InvalidType)?;
+        self.put(&[if tuple { 0x37 } else { 0x87 }, n])?;
+        for t in fields {
+            self.ty(t, depth + 1)?;
+        }
+        Ok(())
     }
 }
