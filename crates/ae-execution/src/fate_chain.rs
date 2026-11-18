@@ -13,6 +13,7 @@ use ae_vm_fate::{
     code::{Code, CodeError},
     types::Version,
 };
+pub mod history;
 pub mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,11 @@ pub enum Error {
     ResourceLimit,
     InvalidReferenceId(Id),
     UnsupportedContractKey(Vec<u8>),
+    Oracles(ae_state::oracles::Error),
+    UnsupportedAccountKey(Vec<u8>),
+    UnsupportedOracleKey(Vec<u8>),
+    NeedHeader([u8; 32]),
+    NeedHeight(u64),
 }
 impl From<AccountError> for Error {
     fn from(e: AccountError) -> Self {

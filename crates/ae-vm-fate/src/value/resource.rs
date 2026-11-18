@@ -28,6 +28,21 @@ pub(crate) fn check_type_limits(ty: &Type, limits: Limits) -> Result<Limits, Err
         ..limits
     })
 }
+pub(crate) fn check_payload_limits(
+    payload: &ObjectPayload,
+    limits: Limits,
+) -> Result<Limits, Error> {
+    let mut walk = Walk {
+        budget: Budget::new(limits),
+        bytes: 0,
+    };
+    walk.payload(payload, 0)?;
+    Ok(Limits {
+        max_nodes: limits.max_nodes - walk.budget.nodes,
+        max_bytes: limits.max_bytes - walk.bytes,
+        ..limits
+    })
+}
 struct Walk {
     budget: Budget,
     bytes: usize,

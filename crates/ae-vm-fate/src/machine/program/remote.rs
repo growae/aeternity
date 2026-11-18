@@ -6,6 +6,8 @@ use crate::{
     value::{ObjectKind, ObjectPayload},
 };
 use std::sync::Arc;
+pub mod context;
+use context::{AddressTest, Environment, Log};
 
 #[derive(Debug, Clone)]
 pub struct LoadedCode {
@@ -33,6 +35,16 @@ pub trait Host<E>: Clone {
         value: &BigInt,
     ) -> Result<(), HostFailure<E>>;
     fn height(&self) -> u64;
+    fn environment(&self) -> &Environment;
+    fn balance(&mut self, key: &[u8]) -> Result<Option<BigInt>, HostFailure<E>>;
+    fn creator(&mut self, key: [u8; 32]) -> Result<[u8; 32], HostFailure<E>>;
+    fn address_test(&mut self, what: AddressTest, key: &[u8]) -> Result<bool, HostFailure<E>>;
+    fn block_hash(
+        &mut self,
+        height: u64,
+        vm: VmVersion,
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<E>>;
 }
 #[derive(Debug, Clone)]
 pub struct RemoteFrame {
@@ -76,6 +88,8 @@ pub struct Session<S, H> {
     pub code_cache: BTreeMap<[u8; 32], LoadedCode>,
     pub host: H,
     pub snapshots: BTreeMap<usize, Snapshot<S, H>>,
+    pub creator_cache: BTreeMap<[u8; 32], [u8; 32]>,
+    pub logs: Vec<Log>,
 }
 #[derive(Debug, Clone)]
 pub struct State<S, H> {
@@ -171,6 +185,7 @@ impl<S, H> Session<S, H> {
             .len()
             .checked_add(self.code_cache.len())
             .and_then(|n| n.checked_add(self.snapshots.len()))
+            .and_then(|n| n.checked_add(self.creator_cache.len().checked_mul(2)?))
             .ok_or(DataError::ResourceLimit)?;
         limits.max_nodes = limits
             .max_nodes
@@ -180,6 +195,9 @@ impl<S, H> Session<S, H> {
             .max_bytes
             .checked_sub(count.checked_mul(32).ok_or(DataError::ResourceLimit)?)
             .ok_or(DataError::ResourceLimit)?;
+        for log in &self.logs {
+            limits = log.budget(limits)?;
+        }
         Ok(limits)
     }
     fn code<E>(&self) -> Result<Arc<Code>, Error<E>> {
@@ -199,7 +217,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         entry: &Entry,
         limits: Limits,
     ) -> Result<Outcome<S, H>, Error<S::Error>> {
-        let limits = value::check_limits(&caller, limits).map_err(Error::Data)?;
+        let limits = host
+            .environment()
+            .budget(value::check_limits(&caller, limits).map_err(Error::Data)?)
+            .map_err(Error::Data)?;
         let context = Context {
             vm_version: code.vm_version,
             ..self.context.clone()
@@ -219,6 +240,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             code_cache: BTreeMap::from([(context.current_contract, code)]),
             seen_contracts: vec![],
             snapshots: BTreeMap::new(),
+            creator_cache: BTreeMap::new(),
+            logs: vec![],
         };
         Ok(outcome(result, session))
     }
@@ -228,6 +251,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         input: &State<S, H>,
         limits: Limits,
     ) -> Result<Outcome<S, H>, Error<S::Error>> {
+        let limits = input
+            .session
+            .host
+            .environment()
+            .budget(limits)
+            .map_err(Error::Data)?;
         let limits = input
             .program
             .cursor
@@ -255,6 +284,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             executor.action(&input.program.machine, &[], limits, |_| Ok(()))?
         } else if let Some(ins) = instruction {
             let supported = ops::supported(ins.opcode)
+                || context::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
                     Opcode::Call
@@ -408,6 +438,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         match ins.opcode {
+            op if context::supported(op) => {
+                self.context_instruction(session, ins)?;
+                cursor.instruction += 1;
+                Ok(())
+            }
             Opcode::CallR | Opcode::CallGr | Opcode::CallPgr => {
                 self.remote_call(cursor, session, ins)
             }

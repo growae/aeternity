@@ -24,6 +24,8 @@ mod otp_order;
 #[path = "../../ae-vm-fate/tests/support/values.rs"]
 mod values;
 use values::{bytes, rows, string, value};
+#[path = "support/fate_context.rs"]
+mod context_tests;
 #[path = "support/fate_program.rs"]
 mod program_tests;
 #[path = "support/fate_remote.rs"]
@@ -237,6 +239,19 @@ fn assert_state(actual: &State<Backend>, expected: &J) {
 }
 fn assert_reason(actual: &Reason, expected: &J) {
     let name = match actual {
+        Reason::LogIllegalInt(n) => {
+            assert_eq!(*n, number(&expected[1]));
+            "log_integer"
+        }
+        Reason::LogIllegalBits => "log_bits",
+        Reason::NotImplemented(n) => {
+            assert_eq!(*n, string(&expected[1]));
+            "not_implemented"
+        }
+        Reason::DisabledName(n) => {
+            assert_eq!(*n, string(&expected[1]));
+            "disabled_name"
+        }
         Reason::OutOfGas => "out_of_gas",
         Reason::EmptyStack => "empty_stack",
         Reason::MissingMapKey => "missing_map_key",
@@ -409,6 +424,8 @@ fn assert_outcome(out: Outcome<Backend>, expected: &J) {
                 match e {
                     Exception::UnknownInstruction => "unknown",
                     Exception::Native(s) => s,
+                    Exception::Exit(s) => s,
+                    Exception::DetachedValueType { .. } => "detached_value_type",
                     Exception::DetachedDuplicateIndex => "dup",
                     Exception::StoreData => "store_data",
                     Exception::Host { .. } => "host",

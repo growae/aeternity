@@ -3,6 +3,7 @@ use ae_trie::{MemoryStore, Nibbles};
 use ae_vm_fate::{
     machine::{
         Exception,
+        program::remote::context::{AddressTest, Environment},
         program::remote::{Host, HostFailure, LoadedCode},
     },
     store::{
@@ -20,6 +21,33 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
     pub contracts: Contracts<C>,
     pub height: u64,
     pub events: Vec<TransferEvent>,
+    pub oracles: ae_state::oracles::Oracles<C, C>,
+    pub onchain: Option<Box<View<A, C>>>,
+    pub environment: Environment,
+    pub history: Arc<super::history::Snapshot>,
+}
+#[derive(Debug, Clone)]
+pub struct View<A = MemoryStore, C = MemoryStore> {
+    pub accounts: Accounts<A>,
+    pub contracts: Contracts<C>,
+    pub oracles: ae_state::oracles::Oracles<C, C>,
+}
+fn key<S: NodeReader>(
+    tree: &ae_trie::Trie<S>,
+    key: &[u8],
+    error: fn(Vec<u8>) -> Error,
+    tree_error: fn(ae_trie::Error) -> Error,
+) -> Result<Option<[u8; 32]>, HostFailure<Error>> {
+    match key.try_into() {
+        Ok(k) => Ok(Some(k)),
+        Err(_) => match tree
+            .get(&Nibbles::from_bytes(key))
+            .map_err(|e| HostFailure::Backend(tree_error(e)))?
+        {
+            None => Ok(None),
+            Some(_) => Err(HostFailure::Backend(error(key.to_vec()))),
+        },
+    }
 }
 fn failure(error: Error) -> HostFailure<Error> {
     match error {
@@ -91,6 +119,92 @@ impl<A: NodeWriter + Clone, C: NodeReader + Clone> Host<Error> for State<A, C> {
     }
     fn height(&self) -> u64 {
         self.height
+    }
+    fn environment(&self) -> &Environment {
+        &self.environment
+    }
+    fn balance(&mut self, k: &[u8]) -> Result<Option<BigInt>, HostFailure<Error>> {
+        let local = key(self.accounts.tree(), k, Error::UnsupportedAccountKey, |e| {
+            Error::Accounts(e.into())
+        })?;
+        let amount = if let Some(k) = local {
+            account_balance(
+                &self.accounts,
+                self.onchain.as_ref().map(|v| &v.accounts),
+                AccountPublicKey(k),
+            )
+            .map_err(failure)?
+        } else {
+            if let Some(v) = &self.onchain {
+                key(v.accounts.tree(), k, Error::UnsupportedAccountKey, |e| {
+                    Error::Accounts(e.into())
+                })?;
+            }
+            None
+        };
+        Ok(amount.map(|n| BigInt::from_bytes_be(Sign::Plus, n.as_bytes())))
+    }
+    fn creator(&mut self, k: [u8; 32]) -> Result<[u8; 32], HostFailure<Error>> {
+        self.contracts
+            .record(k)
+            .map_err(|e| failure(e.into()))?
+            .map(|c| c.owner.0)
+            .ok_or(HostFailure::Exception(Exception::Native("badmatch")))
+    }
+    fn address_test(&mut self, what: AddressTest, k: &[u8]) -> Result<bool, HostFailure<Error>> {
+        let (accounts, contracts, oracles) = match &self.onchain {
+            Some(v) => (&v.accounts, &v.contracts, &v.oracles),
+            None => (&self.accounts, &self.contracts, &self.oracles),
+        };
+        match what {
+            AddressTest::Payable => Ok(
+                match key(accounts.tree(), k, Error::UnsupportedAccountKey, |e| {
+                    Error::Accounts(e.into())
+                })? {
+                    Some(k) => accounts
+                        .lookup(AccountPublicKey(k))
+                        .map_err(|e| failure(e.into()))?
+                        .is_none_or(|a| a.is_payable()),
+                    None => true,
+                },
+            ),
+            AddressTest::Contract => Ok(
+                match key(contracts.tree(), k, Error::UnsupportedContractKey, |e| {
+                    Error::Contracts(e.into())
+                })? {
+                    Some(k) => contracts
+                        .record(k)
+                        .map_err(|e| failure(e.into()))?
+                        .is_some(),
+                    None => false,
+                },
+            ),
+            AddressTest::Oracle => Ok(
+                match key(oracles.tree(), k, Error::UnsupportedOracleKey, |e| {
+                    Error::Oracles(e.into())
+                })? {
+                    Some(k) => oracles
+                        .oracle(k)
+                        .map_err(|e| failure(Error::Oracles(e)))?
+                        .is_some(),
+                    None => false,
+                },
+            ),
+        }
+    }
+    fn block_hash(
+        &mut self,
+        height: u64,
+        vm: Version,
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<Error>> {
+        super::history::block_hash(
+            &self.history,
+            height,
+            self.environment.key_hash,
+            vm,
+            limits.max_nodes,
+        )
     }
 }
 

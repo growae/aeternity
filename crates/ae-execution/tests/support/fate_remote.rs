@@ -75,7 +75,7 @@ fn selected(name: &str) -> &'static J {
         })
         .unwrap()
 }
-fn sources() -> BTreeMap<[u8; 32], RemoteStore> {
+pub(super) fn sources() -> BTreeMap<[u8; 32], RemoteStore> {
     (1..=3)
         .map(|n| (small(n), RemoteStore(backend())))
         .collect()
@@ -182,6 +182,36 @@ impl Host<ae_execution::fate_chain::Error> for FailingHost {
         }
         Ok(())
     }
+    fn environment(&self) -> &remote::context::Environment {
+        self.inner.environment()
+    }
+    fn balance(
+        &mut self,
+        k: &[u8],
+    ) -> Result<Option<BigInt>, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.balance(k)
+    }
+    fn creator(
+        &mut self,
+        k: [u8; 32],
+    ) -> Result<[u8; 32], remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.creator(k)
+    }
+    fn address_test(
+        &mut self,
+        w: remote::context::AddressTest,
+        k: &[u8],
+    ) -> Result<bool, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.address_test(w, k)
+    }
+    fn block_hash(
+        &mut self,
+        h: u64,
+        v: VmVersion,
+        l: Limits,
+    ) -> Result<[u8; 32], remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.block_hash(h, v, l)
+    }
     fn height(&self) -> u64 {
         self.inner.height
     }
@@ -234,15 +264,15 @@ fn protected_call_does_not_swallow_host_failures_or_publish_a_mutated_host_attem
         assert!(state.program.cursor.frames.is_empty());
     }
 }
-fn key(j: &J) -> [u8; 32] {
+pub(super) fn key(j: &J) -> [u8; 32] {
     bytes(j).try_into().unwrap()
 }
-fn small(n: u8) -> [u8; 32] {
+pub(super) fn small(n: u8) -> [u8; 32] {
     let mut key = [0; 32];
     key[31] = n;
     key
 }
-fn tree(j: &J) -> Trie<MemoryStore> {
+pub(super) fn tree(j: &J) -> Trie<MemoryStore> {
     let mut t = Trie::new(MemoryStore::default());
     for row in rows(j) {
         t.put(
@@ -253,7 +283,7 @@ fn tree(j: &J) -> Trie<MemoryStore> {
     }
     t
 }
-fn chain(row: &J) -> Chain {
+pub(super) fn chain(row: &J) -> Chain {
     let a = tree(&row["initial"]["chain"]["accounts"]);
     let c = tree(&row["contracts"]);
     Chain {
@@ -261,9 +291,24 @@ fn chain(row: &J) -> Chain {
         contracts: Contracts::from_root(c.root_hash(), c.into_store()).unwrap(),
         height: row["height"].as_u64().unwrap(),
         events: vec![],
+        oracles: Default::default(),
+        onchain: None,
+        history: Default::default(),
+        environment: ae_vm_fate::machine::program::remote::context::Environment {
+            origin: small(9),
+            gas_price: 0.into(),
+            fee: 0.into(),
+            beneficiary: small(0),
+            timestamp: 0.into(),
+            difficulty: 0.into(),
+            block_gas_limit: 6000000.into(),
+            network_id: b"ae_mainnet".to_vec(),
+            consensus: ae_vm_fate::machine::program::remote::context::Consensus::Pow,
+            key_hash: small(0),
+        },
     }
 }
-fn assert_chain(actual: &Chain, expected: &J) {
+pub(super) fn assert_chain(actual: &Chain, expected: &J) {
     let accounts: Vec<_> = actual
         .accounts
         .tree()
@@ -291,6 +336,7 @@ fn assert_chain(actual: &Chain, expected: &J) {
             StateRoots {
                 accounts: actual.accounts.root_hash(),
                 contracts: actual.contracts.root_hash(),
+                oracles: actual.oracles.root_hash(),
                 ..Default::default()
             }
             .hash()
@@ -305,7 +351,7 @@ fn assert_chain(actual: &Chain, expected: &J) {
     }).collect();
     assert_eq!(json!(events), expected["events"], "chain events");
 }
-fn assert_stores(actual: &Stores<RemoteStore>, expected: &J) {
+pub(super) fn assert_stores(actual: &Stores<RemoteStore>, expected: &J) {
     let entries: BTreeMap<_, _> = rows(expected).iter().map(|e| (key(&e[0]), &e[1])).collect();
     for n in 1..=3 {
         let a = actual.entry(&small(n));
@@ -349,7 +395,7 @@ fn assert_local(f: &LocalFrame, e: &J) {
     assert_eq!(f.memory, memory(&e[8]));
     assert_eq!(f.call_value, number(&e[9]));
 }
-fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected: &J, pc: bool) {
+pub(super) fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected: &J, pc: bool) {
     let m = &actual.program.machine;
     let c = &actual.program.cursor;
     let s = &actual.session;
@@ -398,6 +444,30 @@ fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected: &J, pc: b
         rows(&expected["frames"]).len(),
         "frame count"
     );
+    if !expected["creator_cache"].is_null() {
+        assert_eq!(
+            s.creator_cache,
+            rows(&expected["creator_cache"])
+                .iter()
+                .map(|p| (key(&p[0]), key(&p[1])))
+                .collect()
+        );
+        let logs: Vec<_> = rows(&expected["logs"])
+            .iter()
+            .map(|l| remote::context::Log {
+                contract: key(&l[0]),
+                payload: bytes(&l[2]),
+                topics: rows(&l[1])
+                    .iter()
+                    .map(|v| match value(v) {
+                        Value::Object(_, p) => p,
+                        _ => panic!(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        assert_eq!(s.logs, logs, "logs");
+    }
     let (mut caller, mut contract, mut vm) = (s.caller.clone(), s.current_contract, s.vm_version);
     for (f, e) in c.frames.iter().rev().zip(rows(&expected["frames"])) {
         match f {
@@ -434,7 +504,7 @@ fn assert_remote(actual: &remote::State<RemoteStore, Chain>, expected: &J, pc: b
         }
     }
 }
-fn check(
+pub(super) fn check(
     out: remote::Outcome<RemoteStore, Chain>,
     e: &J,
 ) -> Option<(remote::State<RemoteStore, Chain>, Limits)> {
@@ -471,6 +541,18 @@ fn check(
             match exception {
                 Exception::Native(s) => assert_eq!(s, string(&e["reason"])),
                 Exception::Host { .. } => {}
+                Exception::Exit(s) => {
+                    assert_eq!(s, "op_not_implemented_yet");
+                    assert_eq!(e["reason"], "exit_unimplemented");
+                }
+                Exception::DetachedValueType {
+                    value: v,
+                    expected: t,
+                } => {
+                    assert_eq!(e["reason"], "detached_value_type");
+                    assert_eq!(v, value(&e["value"]));
+                    assert_eq!(t, string(&e["expected"]));
+                }
                 e => panic!("unexpected {e:?}"),
             };
             None

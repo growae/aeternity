@@ -110,12 +110,21 @@ pub enum Reason {
         value: Value,
         expected: crate::types::Type,
     },
+    LogIllegalInt(BigInt),
+    LogIllegalBits,
+    NotImplemented(&'static str),
+    DisabledName(&'static str),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exception {
+    Exit(&'static str),
     UnknownInstruction,
     Native(&'static str),
     DetachedDuplicateIndex,
+    DetachedValueType {
+        value: Value,
+        expected: &'static str,
+    },
     // Malformed lower-level stores retain structured data failures. Mapping
     // every such failure to exact Erlang reason text belongs to the adapter.
     StoreData,
