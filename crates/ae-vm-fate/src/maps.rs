@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, convert::Infallible};
 pub type Map = BTreeMap<Value, Value>;
 pub type RefCounts = BTreeMap<BigInt, BigInt>;
 pub const STORE_MAP_THRESHOLD: usize = 100;
+pub mod listing;
 pub mod order;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +211,7 @@ impl<O: MapOrder> Allocator<'_, O> {
                     cache: Map::new(),
                 }
             }
-            Value::ContractBytearray(_) => return Err(Error::InvalidValue.into()),
+            Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue.into()),
             other => other,
         })
     }
@@ -254,7 +255,7 @@ pub(crate) fn count(
                 count(value, counts, budget, depth + 1)?;
             }
         }
-        Value::ContractBytearray(_) => return Err(Error::InvalidValue),
+        Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue),
         _ => {}
     }
     Ok(())
@@ -355,7 +356,7 @@ fn unfold_value<E>(
             }
             Value::Map(stored)
         }
-        Value::ContractBytearray(_) => return Err(Error::InvalidValue.into()),
+        Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue.into()),
         other => other,
     })
 }

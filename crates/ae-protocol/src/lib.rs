@@ -107,6 +107,22 @@ impl NetworkProfile {
     pub fn network_id(&self) -> &[u8] {
         &self.network_id
     }
+    // Raw cb_ payloads from the pinned aecore pre-Iris ordering assets.
+    // The VM decodes these with its bounded FATE decoder. Custom networks
+    // have no bundled overrides; their caller may supply explicit entries.
+    pub fn pre_iris_map_ordering(&self) -> &'static [(&'static [u8], &'static [u8])] {
+        match self.network_id.as_slice() {
+            b"ae_mainnet" => &[(
+                include_bytes!("../data/mainnet_pre_iris_map.bin"),
+                include_bytes!("../data/mainnet_pre_iris_list.bin"),
+            )],
+            b"ae_uat" => &[(
+                include_bytes!("../data/uat_pre_iris_map.bin"),
+                include_bytes!("../data/uat_pre_iris_list.bin"),
+            )],
+            _ => &[],
+        }
+    }
     pub fn activations(&self) -> &[Activation] {
         &self.activations
     }

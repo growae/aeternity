@@ -3,6 +3,8 @@
 use crate::{Budget, Error, Limits, types::Type};
 use num_bigint::{BigInt, Sign};
 use std::{cmp::Ordering, collections::BTreeMap};
+mod resource;
+pub use resource::check_limits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ObjectKind {
@@ -62,6 +64,9 @@ pub enum Value {
     },
     // Runtime-only deletion marker in a persistent map's write cache.
     Tombstone,
+    // Runtime-only empty accumulator marker. Pre-Iris stack underflow can
+    // expose it inside the engine; it has no canonical FATE wire encoding.
+    Void,
     Variant {
         arities: Vec<u8>,
         tag: usize,
@@ -109,7 +114,12 @@ fn elements(
     }
     Ok(a.len().cmp(&b.len()))
 }
-fn cmp(a: &Value, b: &Value, budget: &mut Budget, depth: usize) -> Result<Ordering, Error> {
+pub(crate) fn cmp(
+    a: &Value,
+    b: &Value,
+    budget: &mut Budget,
+    depth: usize,
+) -> Result<Ordering, Error> {
     budget.visit(depth)?;
     let order = ordinal(a)?.cmp(&ordinal(b)?);
     if order != Ordering::Equal {

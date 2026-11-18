@@ -60,6 +60,7 @@ pub fn value(v: &Json) -> Value {
     let vs = rows(v);
     match string(&vs[0]) {
         "tombstone" => Value::Tombstone,
+        "void" => Value::Void,
         "integer" => Value::Integer(string(&vs[1]).parse().unwrap()),
         "bits" => Value::Bits(string(&vs[1]).parse().unwrap()),
         "boolean" => Value::Boolean(vs[1].as_bool().unwrap()),

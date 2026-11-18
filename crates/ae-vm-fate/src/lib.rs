@@ -5,6 +5,7 @@ pub mod encoding;
 pub mod gas;
 pub mod maps;
 pub mod opcodes;
+pub mod stack;
 pub mod store;
 pub mod types;
 pub mod value;

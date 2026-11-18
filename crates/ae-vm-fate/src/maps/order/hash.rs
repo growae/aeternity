@@ -131,7 +131,11 @@ fn walk(
                 }
             }
         }
-        Term::Atom(atom) => immediate(profile, hash, ((profile.atoms[atom] as u64) << 6) | 11),
+        Term::Atom(atom) => immediate(
+            profile,
+            hash,
+            ((*profile.atoms.get(atom).ok_or(Error::InvalidOrderProfile)? as u64) << 6) | 11,
+        ),
         Term::Binary(bytes) => {
             if bytes.len() > u32::MAX as usize {
                 return Err(Error::ResourceLimit);

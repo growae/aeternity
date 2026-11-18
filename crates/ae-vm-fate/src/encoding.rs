@@ -452,7 +452,7 @@ impl Encoder {
                 self.put(&[0xbf])?;
                 self.rlp_integer(&id)
             }
-            Value::StoreMap { .. } | Value::Tombstone => Err(Error::InvalidValue),
+            Value::StoreMap { .. } | Value::Tombstone | Value::Void => Err(Error::InvalidValue),
             Value::Variant {
                 arities,
                 tag,
