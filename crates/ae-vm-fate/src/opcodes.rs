@@ -203,6 +203,7 @@ pub struct OpcodeInfo {
     pub in_auth: bool,
     pub offchain: bool,
     pub gas_schedule: &'static [(u32, u64)],
+    pub literal_operands: &'static [usize],
 }
 impl Opcode {
     pub const ALL: &[Self] = &[
@@ -603,6 +604,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Returnr => OpcodeInfo {
                 name: "RETURNR",
@@ -611,6 +613,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Call => OpcodeInfo {
                 name: "CALL",
@@ -619,6 +622,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::CallR => OpcodeInfo {
                 name: "CALL_R",
@@ -627,6 +631,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[1],
             },
             Self::CallT => OpcodeInfo {
                 name: "CALL_T",
@@ -635,6 +640,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::CallGr => OpcodeInfo {
                 name: "CALL_GR",
@@ -643,6 +649,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[1],
             },
             Self::Jump => OpcodeInfo {
                 name: "JUMP",
@@ -651,6 +658,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[0],
             },
             Self::Jumpif => OpcodeInfo {
                 name: "JUMPIF",
@@ -659,6 +667,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[1],
             },
             Self::SwitchV2 => OpcodeInfo {
                 name: "SWITCH_V2",
@@ -667,6 +676,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[1, 2],
             },
             Self::SwitchV3 => OpcodeInfo {
                 name: "SWITCH_V3",
@@ -675,6 +685,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[1, 2, 3],
             },
             Self::SwitchVn => OpcodeInfo {
                 name: "SWITCH_VN",
@@ -683,6 +694,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[1],
             },
             Self::CallValue => OpcodeInfo {
                 name: "CALL_VALUE",
@@ -691,6 +703,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Push => OpcodeInfo {
                 name: "PUSH",
@@ -699,6 +712,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Dupa => OpcodeInfo {
                 name: "DUPA",
@@ -707,6 +721,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Dup => OpcodeInfo {
                 name: "DUP",
@@ -715,6 +730,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Pop => OpcodeInfo {
                 name: "POP",
@@ -723,6 +739,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Inca => OpcodeInfo {
                 name: "INCA",
@@ -731,6 +748,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Inc => OpcodeInfo {
                 name: "INC",
@@ -739,6 +757,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Deca => OpcodeInfo {
                 name: "DECA",
@@ -747,6 +766,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Dec => OpcodeInfo {
                 name: "DEC",
@@ -755,6 +775,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Add => OpcodeInfo {
                 name: "ADD",
@@ -763,6 +784,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Sub => OpcodeInfo {
                 name: "SUB",
@@ -771,6 +793,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Mul => OpcodeInfo {
                 name: "MUL",
@@ -779,6 +802,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Div => OpcodeInfo {
                 name: "DIV",
@@ -787,6 +811,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Mod => OpcodeInfo {
                 name: "MOD",
@@ -795,6 +820,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Pow => OpcodeInfo {
                 name: "POW",
@@ -803,6 +829,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Store => OpcodeInfo {
                 name: "STORE",
@@ -811,6 +838,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Sha3 => OpcodeInfo {
                 name: "SHA3",
@@ -819,6 +847,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Sha256 => OpcodeInfo {
                 name: "SHA256",
@@ -827,6 +856,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Blake2B => OpcodeInfo {
                 name: "BLAKE2B",
@@ -835,6 +865,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Lt => OpcodeInfo {
                 name: "LT",
@@ -843,6 +874,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Gt => OpcodeInfo {
                 name: "GT",
@@ -851,6 +883,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Eq => OpcodeInfo {
                 name: "EQ",
@@ -859,6 +892,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Elt => OpcodeInfo {
                 name: "ELT",
@@ -867,6 +901,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Egt => OpcodeInfo {
                 name: "EGT",
@@ -875,6 +910,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Neq => OpcodeInfo {
                 name: "NEQ",
@@ -883,6 +919,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::And => OpcodeInfo {
                 name: "AND",
@@ -891,6 +928,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Or => OpcodeInfo {
                 name: "OR",
@@ -899,6 +937,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Not => OpcodeInfo {
                 name: "NOT",
@@ -907,6 +946,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Tuple => OpcodeInfo {
                 name: "TUPLE",
@@ -915,6 +955,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[1],
             },
             Self::Element => OpcodeInfo {
                 name: "ELEMENT",
@@ -923,6 +964,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Setelement => OpcodeInfo {
                 name: "SETELEMENT",
@@ -931,6 +973,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapEmpty => OpcodeInfo {
                 name: "MAP_EMPTY",
@@ -939,6 +982,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapLookup => OpcodeInfo {
                 name: "MAP_LOOKUP",
@@ -947,6 +991,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapLookupd => OpcodeInfo {
                 name: "MAP_LOOKUPD",
@@ -955,6 +1000,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapUpdate => OpcodeInfo {
                 name: "MAP_UPDATE",
@@ -963,6 +1009,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapDelete => OpcodeInfo {
                 name: "MAP_DELETE",
@@ -971,6 +1018,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapMember => OpcodeInfo {
                 name: "MAP_MEMBER",
@@ -979,6 +1027,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapFromList => OpcodeInfo {
                 name: "MAP_FROM_LIST",
@@ -987,6 +1036,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapSize => OpcodeInfo {
                 name: "MAP_SIZE",
@@ -995,6 +1045,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::MapToList => OpcodeInfo {
                 name: "MAP_TO_LIST",
@@ -1003,6 +1054,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::IsNil => OpcodeInfo {
                 name: "IS_NIL",
@@ -1011,6 +1063,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Cons => OpcodeInfo {
                 name: "CONS",
@@ -1019,6 +1072,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Hd => OpcodeInfo {
                 name: "HD",
@@ -1027,6 +1081,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Tl => OpcodeInfo {
                 name: "TL",
@@ -1035,6 +1090,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Length => OpcodeInfo {
                 name: "LENGTH",
@@ -1043,6 +1099,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Nil => OpcodeInfo {
                 name: "NIL",
@@ -1051,6 +1108,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Append => OpcodeInfo {
                 name: "APPEND",
@@ -1059,6 +1117,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::StrJoin => OpcodeInfo {
                 name: "STR_JOIN",
@@ -1067,6 +1126,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::IntToStr => OpcodeInfo {
                 name: "INT_TO_STR",
@@ -1075,6 +1135,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::AddrToStr => OpcodeInfo {
                 name: "ADDR_TO_STR",
@@ -1083,6 +1144,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrReverse => OpcodeInfo {
                 name: "STR_REVERSE",
@@ -1091,6 +1153,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrLength => OpcodeInfo {
                 name: "STR_LENGTH",
@@ -1099,6 +1162,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesToInt => OpcodeInfo {
                 name: "BYTES_TO_INT",
@@ -1107,6 +1171,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesToStr => OpcodeInfo {
                 name: "BYTES_TO_STR",
@@ -1115,6 +1180,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::BytesConcat => OpcodeInfo {
                 name: "BYTES_CONCAT",
@@ -1123,6 +1189,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesSplit => OpcodeInfo {
                 name: "BYTES_SPLIT",
@@ -1131,6 +1198,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::IntToAddr => OpcodeInfo {
                 name: "INT_TO_ADDR",
@@ -1139,6 +1207,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Variant => OpcodeInfo {
                 name: "VARIANT",
@@ -1147,6 +1216,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::VariantTest => OpcodeInfo {
                 name: "VARIANT_TEST",
@@ -1155,6 +1225,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::VariantElement => OpcodeInfo {
                 name: "VARIANT_ELEMENT",
@@ -1163,6 +1234,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsNonea => OpcodeInfo {
                 name: "BITS_NONEA",
@@ -1171,6 +1243,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsNone => OpcodeInfo {
                 name: "BITS_NONE",
@@ -1179,6 +1252,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsAlla => OpcodeInfo {
                 name: "BITS_ALLA",
@@ -1187,6 +1261,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsAll => OpcodeInfo {
                 name: "BITS_ALL",
@@ -1195,6 +1270,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsAllN => OpcodeInfo {
                 name: "BITS_ALL_N",
@@ -1203,6 +1279,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsSet => OpcodeInfo {
                 name: "BITS_SET",
@@ -1211,6 +1288,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsClear => OpcodeInfo {
                 name: "BITS_CLEAR",
@@ -1219,6 +1297,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsTest => OpcodeInfo {
                 name: "BITS_TEST",
@@ -1227,6 +1306,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsSum => OpcodeInfo {
                 name: "BITS_SUM",
@@ -1235,6 +1315,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsOr => OpcodeInfo {
                 name: "BITS_OR",
@@ -1243,6 +1324,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsAnd => OpcodeInfo {
                 name: "BITS_AND",
@@ -1251,6 +1333,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BitsDiff => OpcodeInfo {
                 name: "BITS_DIFF",
@@ -1259,6 +1342,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Balance => OpcodeInfo {
                 name: "BALANCE",
@@ -1267,6 +1351,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Origin => OpcodeInfo {
                 name: "ORIGIN",
@@ -1275,6 +1360,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Caller => OpcodeInfo {
                 name: "CALLER",
@@ -1283,6 +1369,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Blockhash => OpcodeInfo {
                 name: "BLOCKHASH",
@@ -1291,6 +1378,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(5, 1000), (4, 10)],
+                literal_operands: &[],
             },
             Self::Beneficiary => OpcodeInfo {
                 name: "BENEFICIARY",
@@ -1299,6 +1387,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Timestamp => OpcodeInfo {
                 name: "TIMESTAMP",
@@ -1307,6 +1396,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Generation => OpcodeInfo {
                 name: "GENERATION",
@@ -1315,6 +1405,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Microblock => OpcodeInfo {
                 name: "MICROBLOCK",
@@ -1323,6 +1414,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Difficulty => OpcodeInfo {
                 name: "DIFFICULTY",
@@ -1331,6 +1423,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Gaslimit => OpcodeInfo {
                 name: "GASLIMIT",
@@ -1339,6 +1432,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Gas => OpcodeInfo {
                 name: "GAS",
@@ -1347,6 +1441,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Address => OpcodeInfo {
                 name: "ADDRESS",
@@ -1355,6 +1450,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Gasprice => OpcodeInfo {
                 name: "GASPRICE",
@@ -1363,6 +1459,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Log0 => OpcodeInfo {
                 name: "LOG0",
@@ -1371,6 +1468,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1000)],
+                literal_operands: &[],
             },
             Self::Log1 => OpcodeInfo {
                 name: "LOG1",
@@ -1379,6 +1477,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1100)],
+                literal_operands: &[],
             },
             Self::Log2 => OpcodeInfo {
                 name: "LOG2",
@@ -1387,6 +1486,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1200)],
+                literal_operands: &[],
             },
             Self::Log3 => OpcodeInfo {
                 name: "LOG3",
@@ -1395,6 +1495,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1300)],
+                literal_operands: &[],
             },
             Self::Log4 => OpcodeInfo {
                 name: "LOG4",
@@ -1403,6 +1504,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1400)],
+                literal_operands: &[],
             },
             Self::Spend => OpcodeInfo {
                 name: "SPEND",
@@ -1411,6 +1513,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(5, 5000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleRegister => OpcodeInfo {
                 name: "ORACLE_REGISTER",
@@ -1419,6 +1522,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleQuery => OpcodeInfo {
                 name: "ORACLE_QUERY",
@@ -1427,6 +1531,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleRespond => OpcodeInfo {
                 name: "ORACLE_RESPOND",
@@ -1435,6 +1540,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleExtend => OpcodeInfo {
                 name: "ORACLE_EXTEND",
@@ -1443,6 +1549,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleGetAnswer => OpcodeInfo {
                 name: "ORACLE_GET_ANSWER",
@@ -1451,6 +1558,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(5, 2000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleGetQuestion => OpcodeInfo {
                 name: "ORACLE_GET_QUESTION",
@@ -1459,6 +1567,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(5, 2000), (4, 100)],
+                literal_operands: &[],
             },
             Self::OracleQueryFee => OpcodeInfo {
                 name: "ORACLE_QUERY_FEE",
@@ -1467,6 +1576,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(5, 2000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensResolve => OpcodeInfo {
                 name: "AENS_RESOLVE",
@@ -1475,6 +1585,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(5, 2000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensPreclaim => OpcodeInfo {
                 name: "AENS_PRECLAIM",
@@ -1483,6 +1594,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensClaim => OpcodeInfo {
                 name: "AENS_CLAIM",
@@ -1491,6 +1603,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensUpdate => OpcodeInfo {
                 name: "AENS_UPDATE",
@@ -1499,6 +1612,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensTransfer => OpcodeInfo {
                 name: "AENS_TRANSFER",
@@ -1507,6 +1621,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::AensRevoke => OpcodeInfo {
                 name: "AENS_REVOKE",
@@ -1515,6 +1630,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: false,
                 gas_schedule: &[(5, 10000), (4, 100)],
+                literal_operands: &[],
             },
             Self::BalanceOther => OpcodeInfo {
                 name: "BALANCE_OTHER",
@@ -1523,6 +1639,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(5, 2000), (4, 50)],
+                literal_operands: &[],
             },
             Self::VerifySig => OpcodeInfo {
                 name: "VERIFY_SIG",
@@ -1531,6 +1648,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1300)],
+                literal_operands: &[],
             },
             Self::VerifySigSecp256K1 => OpcodeInfo {
                 name: "VERIFY_SIG_SECP256K1",
@@ -1539,6 +1657,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1300)],
+                literal_operands: &[],
             },
             Self::ContractToAddress => OpcodeInfo {
                 name: "CONTRACT_TO_ADDRESS",
@@ -1547,6 +1666,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::AuthTxHash => OpcodeInfo {
                 name: "AUTH_TX_HASH",
@@ -1555,6 +1675,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::OracleCheck => OpcodeInfo {
                 name: "ORACLE_CHECK",
@@ -1563,6 +1684,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::OracleCheckQuery => OpcodeInfo {
                 name: "ORACLE_CHECK_QUERY",
@@ -1571,6 +1693,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::IsOracle => OpcodeInfo {
                 name: "IS_ORACLE",
@@ -1579,6 +1702,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::IsContract => OpcodeInfo {
                 name: "IS_CONTRACT",
@@ -1587,6 +1711,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::IsPayable => OpcodeInfo {
                 name: "IS_PAYABLE",
@@ -1595,6 +1720,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Creator => OpcodeInfo {
                 name: "CREATOR",
@@ -1603,6 +1729,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::EcverifySecp256K1 => OpcodeInfo {
                 name: "ECVERIFY_SECP256K1",
@@ -1611,6 +1738,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1300)],
+                literal_operands: &[],
             },
             Self::EcrecoverSecp256K1 => OpcodeInfo {
                 name: "ECRECOVER_SECP256K1",
@@ -1619,6 +1747,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1300)],
+                literal_operands: &[],
             },
             Self::AddressToContract => OpcodeInfo {
                 name: "ADDRESS_TO_CONTRACT",
@@ -1627,6 +1756,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bls12381G1Neg => OpcodeInfo {
                 name: "BLS12_381_G1_NEG",
@@ -1635,6 +1765,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G1Norm => OpcodeInfo {
                 name: "BLS12_381_G1_NORM",
@@ -1643,6 +1774,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G1Valid => OpcodeInfo {
                 name: "BLS12_381_G1_VALID",
@@ -1651,6 +1783,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 2000)],
+                literal_operands: &[],
             },
             Self::Bls12381G1IsZero => OpcodeInfo {
                 name: "BLS12_381_G1_IS_ZERO",
@@ -1659,6 +1792,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381G1Add => OpcodeInfo {
                 name: "BLS12_381_G1_ADD",
@@ -1667,6 +1801,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G1Mul => OpcodeInfo {
                 name: "BLS12_381_G1_MUL",
@@ -1675,6 +1810,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1000)],
+                literal_operands: &[],
             },
             Self::Bls12381G2Neg => OpcodeInfo {
                 name: "BLS12_381_G2_NEG",
@@ -1683,6 +1819,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G2Norm => OpcodeInfo {
                 name: "BLS12_381_G2_NORM",
@@ -1691,6 +1828,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G2Valid => OpcodeInfo {
                 name: "BLS12_381_G2_VALID",
@@ -1699,6 +1837,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 2000)],
+                literal_operands: &[],
             },
             Self::Bls12381G2IsZero => OpcodeInfo {
                 name: "BLS12_381_G2_IS_ZERO",
@@ -1707,6 +1846,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381G2Add => OpcodeInfo {
                 name: "BLS12_381_G2_ADD",
@@ -1715,6 +1855,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381G2Mul => OpcodeInfo {
                 name: "BLS12_381_G2_MUL",
@@ -1723,6 +1864,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1000)],
+                literal_operands: &[],
             },
             Self::Bls12381GtInv => OpcodeInfo {
                 name: "BLS12_381_GT_INV",
@@ -1731,6 +1873,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381GtAdd => OpcodeInfo {
                 name: "BLS12_381_GT_ADD",
@@ -1739,6 +1882,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381GtMul => OpcodeInfo {
                 name: "BLS12_381_GT_MUL",
@@ -1747,6 +1891,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Bls12381GtPow => OpcodeInfo {
                 name: "BLS12_381_GT_POW",
@@ -1755,6 +1900,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 2000)],
+                literal_operands: &[],
             },
             Self::Bls12381GtIsOne => OpcodeInfo {
                 name: "BLS12_381_GT_IS_ONE",
@@ -1763,6 +1909,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381Pairing => OpcodeInfo {
                 name: "BLS12_381_PAIRING",
@@ -1771,6 +1918,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 12000)],
+                literal_operands: &[],
             },
             Self::Bls12381MillerLoop => OpcodeInfo {
                 name: "BLS12_381_MILLER_LOOP",
@@ -1779,6 +1927,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 5000)],
+                literal_operands: &[],
             },
             Self::Bls12381FinalExp => OpcodeInfo {
                 name: "BLS12_381_FINAL_EXP",
@@ -1787,6 +1936,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 7000)],
+                literal_operands: &[],
             },
             Self::Bls12381IntToFr => OpcodeInfo {
                 name: "BLS12_381_INT_TO_FR",
@@ -1795,6 +1945,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381IntToFp => OpcodeInfo {
                 name: "BLS12_381_INT_TO_FP",
@@ -1803,6 +1954,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381FrToInt => OpcodeInfo {
                 name: "BLS12_381_FR_TO_INT",
@@ -1811,6 +1963,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::Bls12381FpToInt => OpcodeInfo {
                 name: "BLS12_381_FP_TO_INT",
@@ -1819,6 +1972,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 30)],
+                literal_operands: &[],
             },
             Self::AensLookup => OpcodeInfo {
                 name: "AENS_LOOKUP",
@@ -1827,6 +1981,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 2000)],
+                literal_operands: &[],
             },
             Self::OracleExpiry => OpcodeInfo {
                 name: "ORACLE_EXPIRY",
@@ -1835,6 +1990,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 2000)],
+                literal_operands: &[],
             },
             Self::AuthTx => OpcodeInfo {
                 name: "AUTH_TX",
@@ -1843,6 +1999,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrToList => OpcodeInfo {
                 name: "STR_TO_LIST",
@@ -1851,6 +2008,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrFromList => OpcodeInfo {
                 name: "STR_FROM_LIST",
@@ -1859,6 +2017,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrToUpper => OpcodeInfo {
                 name: "STR_TO_UPPER",
@@ -1867,6 +2026,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::StrToLower => OpcodeInfo {
                 name: "STR_TO_LOWER",
@@ -1875,6 +2035,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::CharToInt => OpcodeInfo {
                 name: "CHAR_TO_INT",
@@ -1883,6 +2044,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::CharFromInt => OpcodeInfo {
                 name: "CHAR_FROM_INT",
@@ -1891,6 +2053,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::CallPgr => OpcodeInfo {
                 name: "CALL_PGR",
@@ -1899,6 +2062,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[1],
             },
             Self::Create => OpcodeInfo {
                 name: "CREATE",
@@ -1907,6 +2071,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 10000)],
+                literal_operands: &[],
             },
             Self::Clone => OpcodeInfo {
                 name: "CLONE",
@@ -1915,6 +2080,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 5000)],
+                literal_operands: &[],
             },
             Self::CloneG => OpcodeInfo {
                 name: "CLONE_G",
@@ -1923,6 +2089,7 @@ impl Opcode {
                 in_auth: false,
                 offchain: true,
                 gas_schedule: &[(0, 5000)],
+                literal_operands: &[],
             },
             Self::BytecodeHash => OpcodeInfo {
                 name: "BYTECODE_HASH",
@@ -1931,6 +2098,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 100)],
+                literal_operands: &[],
             },
             Self::Fee => OpcodeInfo {
                 name: "FEE",
@@ -1939,6 +2107,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::AddressToBytes => OpcodeInfo {
                 name: "ADDRESS_TO_BYTES",
@@ -1947,6 +2116,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Poseidon => OpcodeInfo {
                 name: "POSEIDON",
@@ -1955,6 +2125,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 6000)],
+                literal_operands: &[],
             },
             Self::Mulmod => OpcodeInfo {
                 name: "MULMOD",
@@ -1963,6 +2134,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Band => OpcodeInfo {
                 name: "BAND",
@@ -1971,6 +2143,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bor => OpcodeInfo {
                 name: "BOR",
@@ -1979,6 +2152,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bxor => OpcodeInfo {
                 name: "BXOR",
@@ -1987,6 +2161,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bnot => OpcodeInfo {
                 name: "BNOT",
@@ -1995,6 +2170,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bsl => OpcodeInfo {
                 name: "BSL",
@@ -2003,6 +2179,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Bsr => OpcodeInfo {
                 name: "BSR",
@@ -2011,6 +2188,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesSplitAny => OpcodeInfo {
                 name: "BYTES_SPLIT_ANY",
@@ -2019,6 +2197,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesSize => OpcodeInfo {
                 name: "BYTES_SIZE",
@@ -2027,6 +2206,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::BytesToFixedSize => OpcodeInfo {
                 name: "BYTES_TO_FIXED_SIZE",
@@ -2035,6 +2215,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::IntToBytes => OpcodeInfo {
                 name: "INT_TO_BYTES",
@@ -2043,6 +2224,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::StrToBytes => OpcodeInfo {
                 name: "STR_TO_BYTES",
@@ -2051,6 +2233,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::NetworkId => OpcodeInfo {
                 name: "NETWORK_ID",
@@ -2059,6 +2242,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::DbgLoc => OpcodeInfo {
                 name: "DBG_LOC",
@@ -2067,6 +2251,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 0)],
+                literal_operands: &[],
             },
             Self::DbgDef => OpcodeInfo {
                 name: "DBG_DEF",
@@ -2075,6 +2260,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 0)],
+                literal_operands: &[],
             },
             Self::DbgUndef => OpcodeInfo {
                 name: "DBG_UNDEF",
@@ -2083,6 +2269,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 0)],
+                literal_operands: &[],
             },
             Self::DbgContract => OpcodeInfo {
                 name: "DBG_CONTRACT",
@@ -2091,6 +2278,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 0)],
+                literal_operands: &[],
             },
             Self::Deactivate => OpcodeInfo {
                 name: "DEACTIVATE",
@@ -2099,6 +2287,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Abort => OpcodeInfo {
                 name: "ABORT",
@@ -2107,6 +2296,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Exit => OpcodeInfo {
                 name: "EXIT",
@@ -2115,6 +2305,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 10)],
+                literal_operands: &[],
             },
             Self::Nop => OpcodeInfo {
                 name: "NOP",
@@ -2123,6 +2314,7 @@ impl Opcode {
                 in_auth: true,
                 offchain: true,
                 gas_schedule: &[(0, 1)],
+                literal_operands: &[],
             },
         }
     }

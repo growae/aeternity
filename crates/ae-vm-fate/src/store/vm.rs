@@ -193,7 +193,7 @@ impl<S: Backend> Scope<'_, S> {
         gas: BigInt,
         limits: Limits,
     ) -> Result<Outcome<Option<Value>>, StoreError<S::Error>> {
-        if let Some(value) = cache.get(key) {
+        if let Some(value) = cache.get(key).filter(|v| **v != Value::Void) {
             return Ok(Outcome {
                 value: (value != &Value::Tombstone).then(|| value.clone()),
                 gas,
@@ -219,7 +219,7 @@ impl<S: Backend> Scope<'_, S> {
         gas: BigInt,
         limits: Limits,
     ) -> Result<Outcome<bool>, StoreError<S::Error>> {
-        if let Some(value) = cache.get(key) {
+        if let Some(value) = cache.get(key).filter(|v| **v != Value::Void) {
             return Ok(Outcome {
                 value: value != &Value::Tombstone,
                 gas,

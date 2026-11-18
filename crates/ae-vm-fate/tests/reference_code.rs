@@ -146,6 +146,16 @@ fn all_opcode_metadata_and_historical_base_gas_match_erlang() {
         assert_eq!(i.end_block, row["end_bb"]);
         assert_eq!(i.in_auth, row["in_auth"]);
         assert_eq!(i.offchain, row["offchain"]);
+        assert_eq!(
+            i.literal_operands,
+            row["format"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| (f != "a").then_some(i))
+                .collect::<Vec<_>>()
+        );
         for p in 1..=8 {
             assert_eq!(
                 op.gas_at_protocol(p),

@@ -55,6 +55,7 @@ dependencies = [
  "ae-vm-aevm",
  "ae-vm-fate",
  "hex",
+ "num-bigint",
  "serde_json",
 ]
 
