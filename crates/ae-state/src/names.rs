@@ -36,71 +36,10 @@ impl From<ae_trie::Error> for Error {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PointerValue {
-    Id(Id),
-    Data(Vec<u8>),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pointer {
-    pub key: Vec<u8>,
-    pub value: PointerValue,
-}
-impl Pointer {
-    fn validate(&self) -> Result<(), Error> {
-        match &self.value {
-            PointerValue::Id(id)
-                if matches!(
-                    id.tag,
-                    IdTag::Account | IdTag::Oracle | IdTag::Contract | IdTag::Channel
-                ) =>
-            {
-                Ok(())
-            }
-            PointerValue::Data(bytes) if bytes.len() <= 1024 => Ok(()),
-            _ => Err(Error::InvalidPointer),
-        }
-    }
-    fn encode(&self, version: u64) -> Result<Value, Error> {
-        self.validate()?;
-        let value = match (&self.value, version) {
-            (PointerValue::Id(id), 1) => Value::Id(*id),
-            (PointerValue::Id(id), 2) => {
-                let mut bytes = vec![1];
-                bytes.extend_from_slice(&id.to_bytes());
-                Value::Binary(bytes)
-            }
-            (PointerValue::Data(data), 2) => {
-                let mut bytes = vec![2];
-                bytes.extend_from_slice(data);
-                Value::Binary(bytes)
-            }
-            _ => return Err(Error::InvalidPointer),
-        };
-        Ok(Value::Tuple(vec![Value::Binary(self.key.clone()), value]))
-    }
-    fn decode(value: Value, version: u64) -> Result<Self, Error> {
-        let Value::Tuple(mut fields) = value else {
-            return Err(Error::InvalidPointer);
-        };
-        let data = fields.pop().ok_or(Error::InvalidPointer)?;
-        let Some(Value::Binary(key)) = fields.pop() else {
-            return Err(Error::InvalidPointer);
-        };
-        let value = match (data, version) {
-            (Value::Id(id), 1) => PointerValue::Id(id),
-            (Value::Binary(bytes), 2) => match bytes.split_first() {
-                Some((1, id)) => {
-                    PointerValue::Id(Id::from_bytes(id).map_err(|_| Error::InvalidPointer)?)
-                }
-                Some((2, data)) => PointerValue::Data(data.to_vec()),
-                _ => return Err(Error::InvalidPointer),
-            },
-            _ => return Err(Error::InvalidPointer),
-        };
-        let pointer = Self { key, value };
-        pointer.validate()?;
-        Ok(pointer)
+pub use ae_codec::name_pointer::{Pointer, PointerValue};
+impl From<ae_codec::name_pointer::PointerError> for Error {
+    fn from(_: ae_codec::name_pointer::PointerError) -> Self {
+        Self::InvalidPointer
     }
 }
 

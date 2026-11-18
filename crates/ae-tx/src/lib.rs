@@ -4,9 +4,11 @@ use ae_codec::object::{self, ObjectError, Value};
 use ae_types::TypeError;
 use std::fmt;
 
+mod names;
 mod schema;
 mod signed;
 mod spend;
+pub use names::{NameOperation, NameTransaction};
 pub use schema::TransactionKind;
 pub use signed::SignedTransaction;
 pub use spend::Spend;
@@ -19,6 +21,8 @@ pub enum Error {
     UnsupportedVersion,
     WrongTransactionKind,
     InvalidIdType,
+    InvalidPointer,
+    InvalidSerializationVersion,
     SignatureVerificationFailed,
 }
 impl fmt::Display for Error {

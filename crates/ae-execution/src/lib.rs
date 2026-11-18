@@ -53,6 +53,9 @@ pub enum Error {
     State(AccountError),
     Name(name_state::Error),
     Signature(ae_tx::Error),
+    Naming(names::Failure),
+    InvalidAtProtocol,
+    BadTransaction,
     TooLowFee,
     TtlExpired,
     AccountNotFound,
@@ -100,6 +103,14 @@ impl From<ae_tx::Error> for Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    NameDebit {
+        account: AccountPublicKey,
+        amount: Unsigned,
+    },
+    NameRefund {
+        account: AccountPublicKey,
+        amount: Unsigned,
+    },
     NameFeeLocked {
         amount: Unsigned,
     },
@@ -121,18 +132,42 @@ pub struct Receipt {
     // New events in aetx_env order (most recent first).
     pub events: Vec<Event>,
 }
+fn simple_gas(size: usize) -> Unsigned {
+    Unsigned::from(size as u64).mul_u64(20).add(&15000.into())
+}
+fn simple_minimum_fee(size: usize, context: &Context) -> Unsigned {
+    let size = if context.origin == Origin::Generalized && context.protocol < Protocol::Iris {
+        0
+    } else {
+        size
+    };
+    simple_gas(size).mul_u64(context.protocol.minimum_gas_price())
+}
 pub fn spend_gas(tx: &Spend) -> Unsigned {
-    Unsigned::from(tx.wire_size() as u64)
-        .mul_u64(20)
-        .add(&15000.into())
+    simple_gas(tx.wire_size())
 }
 pub fn spend_minimum_fee(tx: &Spend, context: &Context) -> Unsigned {
-    let gas = if context.origin == Origin::Generalized && context.protocol < Protocol::Iris {
-        15000.into()
-    } else {
-        spend_gas(tx)
-    };
-    gas.mul_u64(context.protocol.minimum_gas_price())
+    simple_minimum_fee(tx.wire_size(), context)
+}
+fn check_simple(
+    size: usize,
+    fee: &Unsigned,
+    ttl: &Unsigned,
+    valid_at_protocol: bool,
+    context: &Context,
+) -> Result<(), Error> {
+    if context.origin != Origin::Contract {
+        if fee < &simple_minimum_fee(size, context) {
+            return Err(Error::TooLowFee);
+        }
+        if ttl != &0.into() && ttl < &context.height.into() {
+            return Err(Error::TtlExpired);
+        }
+        if !valid_at_protocol {
+            return Err(Error::InvalidAtProtocol);
+        }
+    }
+    Ok(())
 }
 
 pub fn execute_signed_spend<S: NodeWriter, N: NameResolver>(
@@ -165,49 +200,10 @@ pub fn process_spend<S: NodeWriter, N: NameResolver>(
     names: &N,
     context: &Context,
 ) -> Result<Receipt, Error> {
-    if context.origin != Origin::Contract {
-        if tx.fee() < &spend_minimum_fee(tx, context) {
-            return Err(Error::TooLowFee);
-        }
-        if tx.ttl() != &0.into() && tx.ttl() < &context.height.into() {
-            return Err(Error::TtlExpired);
-        }
-    }
+    check_simple(tx.wire_size(), tx.fee(), tx.ttl(), true, context)?;
     let mut changes = BTreeMap::new();
     let sender = tx.sender();
-    let mut account = load(accounts, &mut changes, sender, context.payer.is_some())?;
-    if context.ga_authenticated.contains(&sender) {
-        if context.protocol < Protocol::Fortuna {
-            return Err(Error::GeneralizedAccountsUnavailable);
-        }
-        if account.authorization().is_none() {
-            return Err(Error::NotGeneralizedAccount);
-        }
-        if tx.nonce() != &0.into() {
-            return Err(Error::GaNonceMustBeZero);
-        }
-        if !context.ga_nonces.contains_key(&sender) {
-            return Err(Error::BadGaEnvironment);
-        }
-    } else if context.dry_run && account.authorization().is_some() {
-        if tx.nonce() != &0.into() {
-            return Err(Error::GaNonceMustBeZero);
-        }
-    } else {
-        if account.authorization().is_some() {
-            return Err(Error::NotBasicAccount);
-        }
-        if tx.nonce() <= account.nonce() {
-            return Err(Error::NonceAlreadyUsed);
-        }
-        if tx.nonce() != &account.nonce().add(&1.into()) {
-            return Err(Error::NonceTooHigh);
-        }
-        if context.origin != Origin::Contract || context.protocol == Protocol::Roma {
-            account.set_nonce(tx.nonce().clone());
-        }
-    }
-    changes.insert(sender, account);
+    prepare_sender(accounts, &mut changes, sender, tx.nonce(), context)?;
     let recipient = if tx.recipient().tag == ae_types::IdTag::Name {
         names.resolve_account(tx.recipient().value)?
     } else {
@@ -239,6 +235,48 @@ pub fn process_spend<S: NodeWriter, N: NameResolver>(
             },
         ],
     })
+}
+fn prepare_sender<S: NodeReader>(
+    accounts: &Accounts<S>,
+    changes: &mut BTreeMap<AccountPublicKey, Account>,
+    sender: AccountPublicKey,
+    nonce: &Unsigned,
+    context: &Context,
+) -> Result<(), Error> {
+    let mut account = load(accounts, changes, sender, context.payer.is_some())?;
+    if context.ga_authenticated.contains(&sender) {
+        if context.protocol < Protocol::Fortuna {
+            return Err(Error::GeneralizedAccountsUnavailable);
+        }
+        if account.authorization().is_none() {
+            return Err(Error::NotGeneralizedAccount);
+        }
+        if nonce != &0.into() {
+            return Err(Error::GaNonceMustBeZero);
+        }
+        if !context.ga_nonces.contains_key(&sender) {
+            return Err(Error::BadGaEnvironment);
+        }
+    } else if context.dry_run && account.authorization().is_some() {
+        if nonce != &0.into() {
+            return Err(Error::GaNonceMustBeZero);
+        }
+    } else {
+        if account.authorization().is_some() {
+            return Err(Error::NotBasicAccount);
+        }
+        if nonce <= account.nonce() {
+            return Err(Error::NonceAlreadyUsed);
+        }
+        if nonce != &account.nonce().add(&1.into()) {
+            return Err(Error::NonceTooHigh);
+        }
+        if context.origin != Origin::Contract || context.protocol == Protocol::Roma {
+            account.set_nonce(nonce.clone());
+        }
+    }
+    changes.insert(sender, account);
+    Ok(())
 }
 fn load<S: NodeReader>(
     accounts: &Accounts<S>,
