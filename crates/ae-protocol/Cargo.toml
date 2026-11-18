@@ -1,0 +1,12 @@
+[package]
+name = "ae-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ae-types.workspace = true
+
+[lints]
+workspace = true
