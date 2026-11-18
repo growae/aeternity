@@ -14,6 +14,7 @@ use crate::{
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 mod binary;
+mod bls;
 mod compare;
 mod crypto;
 mod numbers;

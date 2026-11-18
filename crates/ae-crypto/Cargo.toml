@@ -12,6 +12,7 @@ sha2.workspace = true
 ed25519-dalek.workspace = true
 tiny-keccak.workspace = true
 secp256k1.workspace = true
+num-bigint.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

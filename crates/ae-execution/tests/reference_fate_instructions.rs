@@ -45,6 +45,12 @@ static BINARY_LIMITS: LazyLock<J> = LazyLock::new(|| {
 static CRYPTO: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_crypto.json")).unwrap()
 });
+static POSEIDON: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_poseidon.json")).unwrap()
+});
+static BLS_FIELDS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_bls_fields.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -500,6 +506,21 @@ fn hash_unfolding_fetches_and_native_gas_boundaries_match_original_runtime() {
 #[test]
 fn hash_unfolding_work_limits_leave_inputs_retryable() {
     check_unfold_work(&CRYPTO, "SHA3");
+}
+
+#[test]
+fn poseidon_field_boundaries_and_gas_checkpoints_match_original_dispatcher() {
+    check_runs(&POSEIDON);
+    check_sequences(&POSEIDON);
+    check_fetches(&POSEIDON);
+}
+
+#[test]
+fn bls_integer_to_field_gates_and_store_writes_match_original_dispatcher() {
+    check_runs(&BLS_FIELDS);
+    check_sequences(&BLS_FIELDS);
+    check_fetches(&BLS_FIELDS);
+    check_native_cases(&BLS_FIELDS["native"]);
 }
 
 #[test]

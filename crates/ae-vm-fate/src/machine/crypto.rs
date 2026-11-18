@@ -13,6 +13,7 @@ pub(super) fn supported(op: Opcode) -> bool {
         op,
         Sha3 | Sha256
             | Blake2B
+            | Poseidon
             | VerifySig
             | VerifySigSecp256K1
             | EcverifySecp256K1
@@ -38,7 +39,46 @@ fn bytes<const N: usize>(v: &Value) -> Option<&[u8; N]> {
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     pub(super) fn crypto(&mut self, op: Opcode, a: &[Operand]) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
+        if op == Poseidon && self.executor.context.vm_version < VmVersion::Three {
+            return Err(Fault::Abort(Reason::Unavailable("poseidon")));
+        }
         let x = self.read(&a[1])?;
+        if op == Poseidon {
+            let y = self.read(&a[2])?;
+            // Original MAX_FR is q - 1, and the guard uses strict inequality.
+            // Keep this admission rule even though q - 1 is a field element.
+            static LIMIT: std::sync::LazyLock<BigInt> = std::sync::LazyLock::new(|| {
+                BigInt::from_bytes_be(
+                    Sign::Plus,
+                    &[
+                        0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08,
+                        0x09, 0xa1, 0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe,
+                        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+                    ],
+                )
+            });
+            let scalar = |v: &Value| -> Option<[u8; 32]> {
+                let Value::Integer(n) = v else {
+                    return None;
+                };
+                if n.sign() == Sign::Minus || n >= &*LIMIT {
+                    return None;
+                }
+                let (_, bytes) = n.to_bytes_be();
+                let mut result = [0; 32];
+                result[32 - bytes.len()..].copy_from_slice(&bytes);
+                Some(result)
+            };
+            let (Some(left), Some(right)) = (scalar(&x), scalar(&y)) else {
+                return Err(self.type_error("poseidon", vec![x, y]));
+            };
+            let hash = ae_crypto::poseidon_bls12_381(&left, &right)
+                .expect("FATE admits only canonical scalar-field inputs");
+            return self.write(
+                &a[0],
+                Value::Integer(BigInt::from_bytes_be(Sign::Plus, &hash)),
+            );
+        }
         if matches!(op, Sha3 | Sha256 | Blake2B) {
             let value = self.unfold(x, CostModel::UnfoldSerial)?;
             let input = match value {

@@ -4,8 +4,12 @@ use ae_types::Hash256;
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use sha2::Sha256;
 
+mod bls_field;
+mod poseidon;
 mod secp;
 mod signature;
+pub use bls_field::BlsField;
+pub use poseidon::poseidon_bls12_381;
 pub use secp::{InvalidSecp256k1PublicKey, recover_secp256k1_address, verify_secp256k1};
 pub use signature::{Ed25519SecretKey, verify_ed25519};
 
