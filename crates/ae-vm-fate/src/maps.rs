@@ -9,11 +9,25 @@ pub type Map = BTreeMap<Value, Value>;
 pub type RefCounts = BTreeMap<BigInt, BigInt>;
 pub const STORE_MAP_THRESHOLD: usize = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Traversal {
+    Fold,
+    // The runtime's maps:to_list order, which can differ from maps:fold.
+    ToList,
+    // Erlang term comparison (lists:keysort), not FATE value comparison.
+    TermSorted,
+}
+
 // Allocation IDs and lookup order depend on Erlang map traversal, which is
 // distinct from FATE comparison and serialization order. A compatibility
 // profile must supply it explicitly; there is intentionally no default sort.
 pub trait MapOrder {
-    fn indices(&self, keys: &[&Value], limits: Limits) -> Result<Vec<usize>, Error>;
+    fn indices(
+        &self,
+        keys: &[&Value],
+        traversal: Traversal,
+        limits: Limits,
+    ) -> Result<Vec<usize>, Error>;
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapError<E = Infallible> {
@@ -32,9 +46,10 @@ pub struct Allocation {
     pub maps: BTreeMap<BigInt, Value>,
 }
 
-fn ordered<E>(
+pub(crate) fn ordered<E>(
     map: Map,
     order: &impl MapOrder,
+    traversal: Traversal,
     budget: &mut Budget,
 ) -> Result<Vec<(Value, Value)>, MapError<E>> {
     if map.len() > budget.limits.max_nodes.saturating_sub(budget.nodes) {
@@ -43,6 +58,7 @@ fn ordered<E>(
     let keys: Vec<_> = map.keys().collect();
     let indices = order.indices(
         &keys,
+        traversal,
         Limits {
             max_nodes: budget.limits.max_nodes.saturating_sub(budget.nodes),
             ..budget.limits
@@ -110,7 +126,7 @@ impl<O: MapOrder> Allocator<'_, O> {
         Ok(id)
     }
     fn map(&mut self, map: Map, depth: usize) -> Result<Map, MapError> {
-        ordered(map, self.order, &mut self.budget)?
+        ordered(map, self.order, Traversal::Fold, &mut self.budget)?
             .into_iter()
             .map(|(k, v)| Ok((k, self.value(v, depth)?)))
             .collect()
@@ -183,7 +199,7 @@ pub fn refcount(value: &Value, limits: Limits) -> Result<RefCounts, Error> {
 pub fn has_store_maps(value: &Value, limits: Limits) -> Result<bool, Error> {
     Ok(!refcount(value, limits)?.is_empty())
 }
-fn count(
+pub(crate) fn count(
     value: &Value,
     counts: &mut RefCounts,
     budget: &mut Budget,
@@ -247,7 +263,7 @@ fn unfold_map<E>(
     budget: &mut Budget,
     depth: usize,
 ) -> Result<Map, MapError<E>> {
-    ordered(map, order, budget)?
+    ordered(map, order, Traversal::Fold, budget)?
         .into_iter()
         .map(|(k, v)| Ok((k, unfold_value(v, order, lookup, budget, depth)?)))
         .collect()

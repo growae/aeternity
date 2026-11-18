@@ -5,6 +5,8 @@ use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
 use std::collections::BTreeMap;
 
+pub mod write;
+
 // Backends keep their byte-read cache separate from FATE's decoded term cache.
 // Cloning must isolate cache changes; reads must not publish persistent writes.
 pub trait Backend: Clone {
@@ -38,6 +40,7 @@ pub enum StoreError<E> {
     MissingContract,
     MissingMetadata,
     InvalidMetadata,
+    InvalidOrder,
     MissingMap,
     OutOfGas,
 }
@@ -290,12 +293,12 @@ pub fn store_key(position: &BigInt) -> Result<Vec<u8>, Error> {
 }
 pub fn map_prefix(raw_id: &BigInt) -> [u8; 5] {
     // Erlang's fixed-width bit syntax retains the low 32 bits, even for negatives.
-    let bytes = raw_id.to_signed_bytes_le();
-    let fill = if raw_id.sign() == Sign::Minus { 255 } else { 0 };
-    let mut prefix = [1, fill, fill, fill, fill];
-    for (i, byte) in bytes.into_iter().take(4).enumerate() {
-        prefix[4 - i] = byte;
+    let mut low = raw_id.magnitude().iter_u32_digits().next().unwrap_or(0);
+    if raw_id.sign() == Sign::Minus {
+        low = low.wrapping_neg();
     }
+    let mut prefix = [1, 0, 0, 0, 0];
+    prefix[1..].copy_from_slice(&low.to_be_bytes());
     prefix
 }
 pub fn map_data_key(raw_id: &BigInt, key: &Value, limits: Limits) -> Result<Vec<u8>, Error> {

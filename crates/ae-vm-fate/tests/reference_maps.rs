@@ -1,6 +1,6 @@
 use ae_vm_fate::{
     Error, Limits, encoding,
-    maps::{self, MapError, MapOrder, RefCounts},
+    maps::{self, MapError, MapOrder, RefCounts, Traversal},
     types,
     value::Value,
 };
@@ -29,7 +29,13 @@ impl RecordedOrder {
     }
 }
 impl MapOrder for RecordedOrder {
-    fn indices(&self, keys: &[&Value], _: Limits) -> Result<Vec<usize>, Error> {
+    fn indices(
+        &self,
+        keys: &[&Value],
+        traversal: Traversal,
+        _: Limits,
+    ) -> Result<Vec<usize>, Error> {
+        assert_eq!(traversal, Traversal::Fold);
         let set: BTreeSet<_> = keys.iter().copied().collect();
         let expected = self
             .0
@@ -192,7 +198,13 @@ fn unfold_preserves_overwrites_tombstones_and_original_lookup_order() {
 fn map_budgets_order_validation_and_cyclic_lookups_abort_distinctly() {
     struct Order(bool);
     impl MapOrder for Order {
-        fn indices(&self, keys: &[&Value], _: Limits) -> Result<Vec<usize>, Error> {
+        fn indices(
+            &self,
+            keys: &[&Value],
+            traversal: Traversal,
+            _: Limits,
+        ) -> Result<Vec<usize>, Error> {
+            assert_eq!(traversal, Traversal::Fold);
             Ok(if self.0 {
                 (0..keys.len()).collect()
             } else {

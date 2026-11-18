@@ -16,3 +16,17 @@ impl<S: NodeReader + Clone> ae_vm_fate::store::Backend for Backend<S> {
         self.0.put(key, value);
     }
 }
+
+impl<S: NodeReader + Clone> ae_vm_fate::store::write::SubtreeBackend for Backend<S> {
+    fn subtree(
+        &self,
+        prefix: &[u8],
+        maximum_bytes: usize,
+    ) -> Result<Option<(ae_vm_fate::store::write::RawMap, usize)>, Error> {
+        match self.0.subtree_within_bytes(prefix, maximum_bytes) {
+            Ok(found) => Ok(Some(found)),
+            Err(Error::ResourceLimit) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
