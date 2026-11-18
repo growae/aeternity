@@ -1,10 +1,11 @@
 // Historical aefa_stores_lima / aefa_stores_ceres / aefa_stores, fa2a6d7.
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
-use crate::{Error, Limits, encoding, value::Value};
+use crate::{Budget, Error, Limits, encoding, value::Value};
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
 use std::collections::BTreeMap;
 
+pub mod plan;
 pub mod write;
 
 // Backends keep their byte-read cache separate from FATE's decoded term cache.
@@ -104,6 +105,151 @@ impl<S> Entry<S> {
 pub struct Stores<S> {
     version: Version,
     contracts: BTreeMap<[u8; 32], Entry<S>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Finalized<S> {
+    // Same reverse-fold order as the original finalize_stores publication list.
+    pub stores: Vec<([u8; 32], S)>,
+    pub gas: BigInt,
+    pub remaining_limits: Limits,
+}
+
+impl<S: write::SubtreeBackend> Stores<S> {
+    // Consumes VM-local caches. The caller retains its VM checkpoint for an
+    // operational retry; no backend writes are published on any error.
+    pub fn finalize(
+        self,
+        mut gas: BigInt,
+        order: &impl crate::maps::MapOrder,
+        limits: Limits,
+    ) -> Result<Finalized<S>, StoreError<S::Error>> {
+        use crate::maps::{self, MapError, Traversal};
+        let mut budget = Budget::new(limits);
+        let key_bytes = self
+            .contracts
+            .len()
+            .checked_mul(32)
+            .ok_or(Error::ResourceLimit)?;
+        if key_bytes > limits.max_bytes || self.contracts.len() > limits.max_nodes {
+            return Err(Error::ResourceLimit.into());
+        }
+        let keys: Vec<_> = self
+            .contracts
+            .keys()
+            .map(|k| Value::String(k.to_vec()))
+            .collect();
+        let indices = maps::ordered_indices::<std::convert::Infallible>(
+            &keys.iter().collect::<Vec<_>>(),
+            order,
+            Traversal::Fold,
+            &mut budget,
+        )
+        .map_err(|e| match e {
+            MapError::Data(e) => StoreError::Data(e),
+            MapError::InvalidOrder => StoreError::InvalidOrder,
+            MapError::Lookup(never) => match never {},
+        })?;
+        let mut remaining = Limits {
+            max_nodes: limits.max_nodes - budget.nodes,
+            max_bytes: limits.max_bytes - key_bytes,
+            ..limits
+        };
+        let mut entries: Vec<_> = self.contracts.into_iter().map(Some).collect();
+        let mut stores = Vec::new();
+        for i in indices {
+            let (key, mut entry) = entries[i].take().unwrap();
+            if !entry.dirty {
+                continue;
+            }
+            let decoded;
+            let metadata = if let Some((v, _)) = entry.terms.get(&BigInt::zero()) {
+                v
+            } else {
+                // Last metadata access; original find_meta_data_no_cache drops
+                // both the decoded and byte-cache changes from this lookup.
+                let mut reader = entry.store.clone();
+                let bytes = read_bytes(&mut reader, self.version, &[0, 0])?;
+                if bytes.is_empty() {
+                    return Err(StoreError::MissingMetadata);
+                }
+                let (v, rest, nodes) = encoding::decode_one_counted(&bytes, remaining)?;
+                if !rest.is_empty() {
+                    return Err(Error::TrailingBytes.into());
+                }
+                remaining.max_nodes -= nodes;
+                remaining.max_bytes -= bytes.len();
+                decoded = v;
+                &decoded
+            };
+            let (metadata, next_limits) = integer_metadata(metadata, remaining)?;
+            let planned = plan::plan(
+                self.version,
+                metadata,
+                std::mem::take(&mut entry.terms),
+                &entry.store,
+                gas,
+                order,
+                next_limits,
+            )?;
+            let written = planned.write(self.version, &entry.store, order)?;
+            gas = written.gas;
+            remaining = written.remaining_limits;
+            stores.push((key, written.store));
+        }
+        stores.reverse();
+        Ok(Finalized {
+            stores,
+            gas,
+            remaining_limits: remaining,
+        })
+    }
+}
+
+// Canonical store metadata has integer IDs and three integer fields. Runtime
+// planner placeholders are introduced after this boundary, never decoded here.
+fn integer_metadata<E>(
+    value: &Value,
+    mut limits: Limits,
+) -> Result<(write::Metadata, Limits), StoreError<E>> {
+    let Value::Map(map) = value else {
+        return Err(StoreError::InvalidMetadata);
+    };
+    let mut meta = write::Metadata::new();
+    for (id, value) in map {
+        if limits.max_nodes < 5 {
+            return Err(Error::ResourceLimit.into());
+        }
+        limits.max_nodes -= 5;
+        let (Value::Integer(id), Value::Tuple(fields)) = (id, value) else {
+            return Err(StoreError::InvalidMetadata);
+        };
+        let [
+            Value::Integer(raw),
+            Value::Integer(count),
+            Value::Integer(size),
+        ] = fields.as_slice()
+        else {
+            return Err(StoreError::InvalidMetadata);
+        };
+        for field in [id, raw, count, size] {
+            let bytes = usize::try_from(field.magnitude().bits().div_ceil(8))
+                .map_err(|_| Error::ResourceLimit)?;
+            limits.max_bytes = limits
+                .max_bytes
+                .checked_sub(bytes)
+                .ok_or(Error::ResourceLimit)?;
+        }
+        meta.insert(
+            id.clone(),
+            write::MapMetadata {
+                raw_id: Some(raw.clone()),
+                refcount: count.clone(),
+                size: Some(size.clone()),
+            },
+        );
+    }
+    Ok((meta, limits))
 }
 impl<S: Backend> Stores<S> {
     pub fn new(version: Version) -> Self {

@@ -56,8 +56,24 @@ pub(crate) fn ordered<E>(
         return Err(Error::ResourceLimit.into());
     }
     let keys: Vec<_> = map.keys().collect();
+    let indices = ordered_indices(&keys, order, traversal, budget)?;
+    let mut entries: Vec<_> = map.into_iter().map(Some).collect();
+    Ok(indices
+        .into_iter()
+        .map(|i| entries[i].take().unwrap())
+        .collect())
+}
+pub(crate) fn ordered_indices<E>(
+    keys: &[&Value],
+    order: &impl MapOrder,
+    traversal: Traversal,
+    budget: &mut Budget,
+) -> Result<Vec<usize>, MapError<E>> {
+    if keys.len() > budget.limits.max_nodes.saturating_sub(budget.nodes) {
+        return Err(Error::ResourceLimit.into());
+    }
     let indices = order.indices(
-        &keys,
+        keys,
         traversal,
         Limits {
             max_nodes: budget.limits.max_nodes.saturating_sub(budget.nodes),
@@ -67,18 +83,16 @@ pub(crate) fn ordered<E>(
     if indices.len() != keys.len() {
         return Err(MapError::InvalidOrder);
     }
-    let mut entries: Vec<_> = map.into_iter().map(Some).collect();
-    let mut result = Vec::with_capacity(indices.len());
-    for i in indices {
+    let mut seen = vec![false; keys.len()];
+    for &i in &indices {
         budget.visit(0)?;
-        result.push(
-            entries
-                .get_mut(i)
-                .and_then(Option::take)
-                .ok_or(MapError::InvalidOrder)?,
-        );
+        let slot = seen.get_mut(i).ok_or(MapError::InvalidOrder)?;
+        if *slot {
+            return Err(MapError::InvalidOrder);
+        }
+        *slot = true;
     }
-    Ok(result)
+    Ok(indices)
 }
 pub fn allocate(
     used_ids: Vec<BigInt>,
@@ -86,10 +100,20 @@ pub fn allocate(
     order: &impl MapOrder,
     limits: Limits,
 ) -> Result<Allocation, MapError> {
+    allocate_budgeted(used_ids, values, order, &mut Budget::new(limits), &mut 0)
+}
+pub(crate) fn allocate_budgeted(
+    used_ids: Vec<BigInt>,
+    values: Vec<Value>,
+    order: &impl MapOrder,
+    budget: &mut Budget,
+    bytes: &mut usize,
+) -> Result<Allocation, MapError> {
     let mut state = Allocator {
         used_ids,
         maps: BTreeMap::new(),
-        budget: Budget::new(limits),
+        budget,
+        bytes,
         order,
     };
     let values = values
@@ -104,7 +128,8 @@ pub fn allocate(
 struct Allocator<'a, O> {
     used_ids: Vec<BigInt>,
     maps: BTreeMap<BigInt, Value>,
-    budget: Budget,
+    budget: &'a mut Budget,
+    bytes: &'a mut usize,
     order: &'a O,
 }
 impl<O: MapOrder> Allocator<'_, O> {
@@ -126,7 +151,7 @@ impl<O: MapOrder> Allocator<'_, O> {
         Ok(id)
     }
     fn map(&mut self, map: Map, depth: usize) -> Result<Map, MapError> {
-        ordered(map, self.order, Traversal::Fold, &mut self.budget)?
+        ordered(map, self.order, Traversal::Fold, self.budget)?
             .into_iter()
             .map(|(k, v)| Ok((k, self.value(v, depth)?)))
             .collect()
@@ -150,6 +175,7 @@ impl<O: MapOrder> Allocator<'_, O> {
                 let (bytes, nodes) = encoding::encode_counted(
                     &value,
                     Limits {
+                        max_bytes: self.budget.limits.max_bytes.saturating_sub(*self.bytes),
                         max_nodes: self
                             .budget
                             .limits
@@ -159,6 +185,7 @@ impl<O: MapOrder> Allocator<'_, O> {
                     },
                 )?;
                 self.budget.nodes += nodes;
+                *self.bytes += bytes.len();
                 if bytes.len() < STORE_MAP_THRESHOLD {
                     value
                 } else {

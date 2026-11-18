@@ -54,6 +54,7 @@ pub struct WritePlan {
 pub struct Written<S> {
     pub store: S,
     pub gas: BigInt,
+    pub remaining_limits: Limits,
 }
 
 impl WritePlan {
@@ -97,26 +98,28 @@ impl WritePlan {
         }
         let bytes = work.push(0.into(), Value::Map(meta))?;
         work.charge(bytes * 5)?;
+        let remaining_limits = work.limits();
         Ok(Written {
             store: work.store,
             gas: work.gas,
+            remaining_limits,
         })
     }
 }
 
-struct Writer<'a, S, O> {
-    version: Version,
-    store: S,
-    metadata: Metadata,
-    gas: BigInt,
-    order: &'a O,
-    budget: Budget,
-    bytes: usize,
+pub(super) struct Writer<'a, S, O> {
+    pub(super) version: Version,
+    pub(super) store: S,
+    pub(super) metadata: Metadata,
+    pub(super) gas: BigInt,
+    pub(super) order: &'a O,
+    pub(super) budget: Budget,
+    pub(super) bytes: usize,
 }
 type BinData = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 impl<S: SubtreeBackend, O: MapOrder> Writer<'_, S, O> {
-    fn limits(&self) -> Limits {
+    pub(super) fn limits(&self) -> Limits {
         Limits {
             max_nodes: self
                 .budget
@@ -127,20 +130,20 @@ impl<S: SubtreeBackend, O: MapOrder> Writer<'_, S, O> {
             ..self.budget.limits
         }
     }
-    fn add_bytes(&mut self, bytes: usize) -> Result<(), Error> {
+    pub(super) fn add_bytes(&mut self, bytes: usize) -> Result<(), Error> {
         self.bytes = self.bytes.checked_add(bytes).ok_or(Error::ResourceLimit)?;
         if self.bytes > self.budget.limits.max_bytes {
             return Err(Error::ResourceLimit);
         }
         Ok(())
     }
-    fn encode(&mut self, value: &Value) -> Result<Vec<u8>, Error> {
+    pub(super) fn encode(&mut self, value: &Value) -> Result<Vec<u8>, Error> {
         let (bytes, nodes) = encoding::encode_counted(value, self.limits())?;
         self.budget.nodes += nodes;
         self.add_bytes(bytes.len())?;
         Ok(bytes)
     }
-    fn decode(&mut self, bytes: &[u8]) -> Result<Value, Error> {
+    pub(super) fn decode(&mut self, bytes: &[u8]) -> Result<Value, Error> {
         let (value, rest, nodes) = encoding::decode_one_counted(bytes, self.limits())?;
         if !rest.is_empty() {
             return Err(Error::TrailingBytes);
@@ -149,7 +152,7 @@ impl<S: SubtreeBackend, O: MapOrder> Writer<'_, S, O> {
         self.add_bytes(bytes.len())?;
         Ok(value)
     }
-    fn charge(&mut self, cost: BigInt) -> Result<(), StoreError<S::Error>> {
+    pub(super) fn charge(&mut self, cost: BigInt) -> Result<(), StoreError<S::Error>> {
         self.gas -= cost;
         if self.gas.sign() == Sign::Minus {
             Err(StoreError::OutOfGas)
@@ -157,13 +160,13 @@ impl<S: SubtreeBackend, O: MapOrder> Writer<'_, S, O> {
             Ok(())
         }
     }
-    fn read_charge(&mut self, bytes: usize) -> Result<(), StoreError<S::Error>> {
+    pub(super) fn read_charge(&mut self, bytes: usize) -> Result<(), StoreError<S::Error>> {
         if self.version == Version::Arcus {
             self.charge(read_gas_cost(bytes))?;
         }
         Ok(())
     }
-    fn subtree(&mut self, raw_id: &BigInt) -> Result<RawMap, StoreError<S::Error>> {
+    pub(super) fn subtree(&mut self, raw_id: &BigInt) -> Result<RawMap, StoreError<S::Error>> {
         let operational = self.limits().max_bytes;
         let gas_cap = if self.version == Version::Arcus {
             if self.gas < BigInt::from(100) {
