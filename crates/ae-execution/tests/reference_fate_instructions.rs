@@ -30,6 +30,8 @@ mod auth_tests;
 mod context_tests;
 #[path = "support/fate_create.rs"]
 mod create_tests;
+#[path = "support/fate_debug.rs"]
+mod debug_tests;
 #[path = "support/fate_deployment.rs"]
 mod deployment_tests;
 #[path = "support/fate_hosts.rs"]

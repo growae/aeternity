@@ -318,6 +318,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     // solely to obtain its length; that read's effects vanish.
                     let mut probe = Step {
                         defer_program_jumps: self.defer_program_jumps,
+                        reset_debug_on_jump: self.reset_debug_on_jump,
                         context: self.context.clone(),
                         reserved_gas: self.reserved_gas.clone(),
                         state: self.entry.clone(),

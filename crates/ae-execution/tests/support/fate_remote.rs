@@ -669,6 +669,7 @@ pub(super) fn assert_remote<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWrit
             "pc"
         );
     }
+    debug_tests::assert_info(&c.debug, &expected["debug"]);
     assert_eq!(c.returned, expected["returned"].as_bool().unwrap());
     assert_eq!(c.call_value, number(&expected["call_value"]));
     assert_eq!(c.bindings, program_tests::bindings(&expected["bindings"]));
@@ -763,6 +764,15 @@ pub(super) fn check<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clo
     e: &J,
 ) -> Option<(ChainState<A, C>, Limits)> {
     match out {
+        remote::Outcome::Break {
+            state,
+            remaining_limits,
+        } => {
+            assert_eq!(e["kind"], "break");
+            assert!(state.program.cursor.suspended);
+            assert_remote(&state, &e["state"], true);
+            Some((state, remaining_limits))
+        }
         remote::Outcome::Continue {
             state,
             remaining_limits,
@@ -793,6 +803,7 @@ pub(super) fn check<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clo
         remote::Outcome::Exception(exception) => {
             assert_eq!(e["kind"], "exception");
             match exception {
+                Exception::UnknownInstruction => assert_eq!(e["reason"], "unknown_instruction"),
                 Exception::Native(s) => assert_eq!(s, string(&e["reason"])),
                 Exception::Host { .. } => {}
                 Exception::Exit(s) => {

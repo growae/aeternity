@@ -8,6 +8,7 @@ use crate::{
 };
 use num_traits::ToPrimitive;
 use std::collections::VecDeque;
+pub mod debug;
 pub mod remote;
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,8 @@ pub struct Cursor {
     pub frames: Vec<Frame>,
     pub call_value: BigInt,
     pub returned: bool,
+    pub debug: Option<debug::Info>,
+    pub suspended: bool,
 }
 #[derive(Debug, Clone)]
 pub struct State<S> {
@@ -45,6 +48,10 @@ pub struct State<S> {
 }
 #[derive(Debug, Clone)]
 pub enum Outcome<S> {
+    Break {
+        state: State<S>,
+        remaining_limits: Limits,
+    },
     Continue {
         state: State<S>,
         remaining_limits: Limits,
@@ -118,6 +125,9 @@ fn integer_budget(n: &BigInt, mut limits: Limits) -> Result<Limits, DataError> {
 }
 impl Cursor {
     fn budget(&self, mut limits: Limits) -> Result<Limits, DataError> {
+        if let Some(info) = &self.debug {
+            limits = info.budget(limits)?;
+        }
         if self.frames.len() > limits.max_depth {
             return Err(DataError::ResourceLimit);
         }
@@ -172,7 +182,12 @@ fn outcome<S>(result: InstructionOutcome<S, ()>, cursor: Cursor) -> Outcome<S> {
                 machine: state,
                 cursor,
             };
-            if returned {
+            if state.cursor.suspended {
+                Outcome::Break {
+                    state,
+                    remaining_limits,
+                }
+            } else if returned {
                 Outcome::Returned {
                     state,
                     remaining_limits,
@@ -235,6 +250,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             frames: vec![],
             call_value: entry.call_value.clone(),
             returned: false,
+            debug: None,
+            suspended: false,
         };
         // Reserved gas in the instruction executor's context models an outer
         // gas_store. Local execution retains that reservation until return.
@@ -302,10 +319,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             contracts: self.contracts,
         };
         let instructions = block(code, &cursor);
-        let result = if cursor.returned {
+        let result = if cursor.returned || cursor.suspended {
             executor.action(&input.machine, &[], limits, |_| Ok(()))?
         } else if let Some(ins) = instructions.and_then(|is| is.get(cursor.instruction)) {
             let supported = ops::supported(ins.opcode)
+                || debug::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
                     Opcode::Call
@@ -314,11 +332,20 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                         | Opcode::Returnr
                         | Opcode::CallValue
                 );
-            executor.step_with(&input.machine, ins, limits, supported, |step| {
-                let result = step.program_instruction(code, &mut cursor, ins);
-                step.reserved_gas = cursor.reserved();
-                result
-            })?
+            executor.step_with(
+                &input.machine,
+                ins,
+                limits,
+                supported,
+                cursor.debug.is_some(),
+                |step| {
+                    let result = step
+                        .program_instruction(code, &mut cursor, ins)
+                        .and_then(|()| step.debug_after_instruction(&mut cursor));
+                    step.reserved_gas = cursor.reserved();
+                    result
+                },
+            )?
         } else {
             executor.action(&input.machine, &[], limits, |step| {
                 if instructions.is_none() {
@@ -394,6 +421,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     ) -> Result<(), Fault<S::Error>> {
         cursor.block = target;
         cursor.instruction = 0;
+        if self.reset_debug_on_jump {
+            cursor.debug_reset();
+        }
         if !self.defer_program_jumps && block(code, cursor).is_none() {
             return Err(Fault::Abort(Reason::MissingBlock(cursor.block.clone())));
         }
@@ -413,6 +443,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         match ins.opcode {
+            op if debug::supported(op) => self.debug_instruction(code, cursor, ins),
             Opcode::Call | Opcode::CallT => {
                 let name = self.read(&ins.operands[0])?;
                 let n = self.program_function(code, &name)?.arguments.len();
@@ -443,6 +474,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     if acc != Value::Void {
                         stack.push_front(acc);
                     }
+                    cursor.debug_push();
                     cursor.frames.push(Frame::Local(Box::new(LocalFrame {
                         function: cursor.function.clone(),
                         bindings: cursor.bindings.clone(),
@@ -473,6 +505,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                                 self.native_integer(&self.state.meter.gas + n)?;
                         }
                         Frame::Local(frame) => {
+                            cursor.debug_pop();
                             self.state.accumulator.rest = frame.stack;
                             self.state.memory = frame.memory;
                             cursor.call_value = frame.call_value;

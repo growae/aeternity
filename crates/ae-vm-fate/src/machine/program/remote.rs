@@ -172,6 +172,10 @@ pub struct State<S, H> {
 }
 #[derive(Debug, Clone)]
 pub enum Outcome<S, H> {
+    Break {
+        state: State<S, H>,
+        remaining_limits: Limits,
+    },
     Continue {
         state: State<S, H>,
         remaining_limits: Limits,
@@ -194,6 +198,16 @@ pub enum Outcome<S, H> {
 }
 fn outcome<S, H>(out: super::Outcome<S>, session: Session<S, H>) -> Outcome<S, H> {
     match out {
+        super::Outcome::Break {
+            state,
+            remaining_limits,
+        } => Outcome::Break {
+            state: State {
+                program: state,
+                session,
+            },
+            remaining_limits,
+        },
         super::Outcome::Continue {
             state,
             remaining_limits,
@@ -354,10 +368,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         let instructions = block(&code, &cursor);
         let instruction = instructions.and_then(|is| is.get(cursor.instruction));
         let dispatched = instruction.is_some() && !cursor.returned;
-        let result = if cursor.returned {
+        let result = if cursor.returned || cursor.suspended {
             executor.action(&input.program.machine, &[], limits, |_| Ok(()))?
         } else if let Some(ins) = instruction {
             let supported = ops::supported(ins.opcode)
+                || debug::supported(ins.opcode)
                 || context::supported(ins.opcode)
                 || hosts::supported(ins.opcode)
                 || oracle_write::supported(ins.opcode)
@@ -378,14 +393,23 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                         | Opcode::Address
                         | Opcode::Caller
                 );
-            executor.step_with(&input.program.machine, ins, limits, supported, |step| {
-                step.defer_program_jumps = true;
-                let result = step.remote_instruction(&code, &mut cursor, &mut session, ins);
-                session.current_contract = step.context.current_contract;
-                session.vm_version = step.context.vm_version;
-                step.reserved_gas = cursor.reserved();
-                result
-            })?
+            executor.step_with(
+                &input.program.machine,
+                ins,
+                limits,
+                supported,
+                cursor.debug.is_some(),
+                |step| {
+                    step.defer_program_jumps = true;
+                    let result = step
+                        .remote_instruction(&code, &mut cursor, &mut session, ins)
+                        .and_then(|()| step.debug_after_instruction(&mut cursor));
+                    session.current_contract = step.context.current_contract;
+                    session.vm_version = step.context.vm_version;
+                    step.reserved_gas = cursor.reserved();
+                    result
+                },
+            )?
         } else {
             executor.action(&input.program.machine, &[], limits, |step| {
                 if instructions.is_none() {
@@ -419,6 +443,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             let mut caught = false;
             let unwound = executor.action(&input.program.machine, &[], failed_limits, |step| {
                 step.defer_program_jumps = true;
+                step.reset_debug_on_jump = false;
                 let r = step
                     .unwind_protected(&mut cursor, &mut session)
                     .map(|handled| caught = handled);
@@ -460,6 +485,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 };
                 let target = state.program.cursor.block.clone();
                 let out = ex.action(&state.program.machine, &[], remaining_limits, |step| {
+                    step.reset_debug_on_jump = false;
                     step.jump_program(&code, &mut state.program.cursor, target)
                 })?;
                 return Ok(outcome(
@@ -688,6 +714,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             if acc != Value::Void {
                 stack.push_front(acc);
             }
+            cursor.debug_push();
             cursor.frames.push(Frame::Remote(Box::new(RemoteFrame {
                 local: LocalFrame {
                     function: cursor.function.clone(),
@@ -969,6 +996,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         session: &Session<S, H>,
         frame: LocalFrame,
     ) -> Result<(), Fault<S::Error>> {
+        cursor.debug_pop();
         self.state.accumulator.rest = frame.stack;
         self.state.memory = frame.memory;
         cursor.call_value = frame.call_value;
@@ -1007,6 +1035,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         returning: bool,
     ) -> Result<(), Fault<S::Error>> {
         let callee = self.context.current_contract;
+        cursor.debug_pop();
         let remote = self.pop_remote(session, &frame)?;
         self.state.accumulator.rest = frame.local.stack;
         self.state.memory = frame.local.memory;
@@ -1054,6 +1083,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     self.state.meter.gas = self.native_integer(&self.state.meter.gas + n)?
                 }
                 Frame::Local(frame) => {
+                    cursor.debug_pop();
                     self.state.accumulator.rest = frame.stack;
                     self.state.memory = frame.memory;
                     cursor.call_value = frame.call_value;

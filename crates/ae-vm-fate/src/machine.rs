@@ -201,6 +201,7 @@ struct Step<'a, 'b, S, O> {
     reserved_gas: BigInt,
     context: Context,
     defer_program_jumps: bool,
+    reset_debug_on_jump: bool,
 }
 impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
     // An unimplemented opcode is an operational stop, never an invented VM
@@ -216,6 +217,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             instruction,
             limits,
             ops::supported(instruction.opcode),
+            false,
             |step| step.eval(instruction),
         )
     }
@@ -225,6 +227,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         instruction: &Instruction,
         limits: Limits,
         supported: bool,
+        debug_enabled: bool,
         eval: impl FnOnce(&mut Step<'_, '_, S, O>) -> Result<C, Fault<S::Error>>,
     ) -> Result<Outcome<S, C>, Error<S::Error>> {
         let info = instruction.opcode.info();
@@ -236,10 +239,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         {
             return Ok(Outcome::Exception(Exception::UnknownInstruction));
         }
-        if matches!(
-            instruction.opcode,
-            Opcode::DbgLoc | Opcode::DbgDef | Opcode::DbgUndef | Opcode::DbgContract
-        ) {
+        if program::debug::supported(instruction.opcode) && !debug_enabled {
             return Ok(Outcome::Exception(Exception::UnknownInstruction));
         }
         self.action(state, &instruction.operands, limits, |step| {
@@ -285,6 +285,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         }
         let mut step = Step {
             defer_program_jumps: false,
+            reset_debug_on_jump: true,
             context: self.context.clone(),
             state: state.clone(),
             entry: state.clone(),

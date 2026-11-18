@@ -96,6 +96,7 @@ fn assert_cursor(cursor: &program::Cursor, expected: &J, check_pc: bool) {
 }
 fn check(out: program::Outcome<Backend>, e: &J) -> Option<program::State<Backend>> {
     match out {
+        program::Outcome::Break { .. } => panic!("debugger disabled in local reference"),
         program::Outcome::Continue { state, .. } => {
             assert_eq!(e["kind"], "next");
             assert_state(&state.machine, &e["state"]);

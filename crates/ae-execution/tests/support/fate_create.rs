@@ -24,7 +24,7 @@ fn chain(row: &J) -> Chain {
     }
     host
 }
-fn fetch_pending<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
+pub(super) fn fetch_pending<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     state: &remote::State<RemoteStore, Chain<A, C>>,
     key: [u8; 32],
     sources: &mut BTreeMap<[u8; 32], RemoteStore>,
