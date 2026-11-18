@@ -54,6 +54,9 @@ static BLS_FIELDS: LazyLock<J> = LazyLock::new(|| {
 static BLS_POINTS: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_bls_points.json")).unwrap()
 });
+static BLS_SCALARS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_fate_bls_scalars.json")).unwrap()
+});
 const KEY: [u8; 32] = [1; 32];
 fn number(j: &J) -> BigInt {
     string(j).parse().unwrap()
@@ -532,6 +535,13 @@ fn bls_point_and_target_operations_gates_and_store_effects_match_original_dispat
     check_runs(&BLS_POINTS);
     check_sequences(&BLS_POINTS);
     check_fetches(&BLS_POINTS);
+}
+
+#[test]
+fn bls_scalar_multiplication_gates_and_store_effects_match_original_dispatcher() {
+    check_runs(&BLS_SCALARS);
+    check_sequences(&BLS_SCALARS);
+    check_fetches(&BLS_SCALARS);
 }
 
 #[test]

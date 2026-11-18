@@ -9,7 +9,7 @@ pub(super) struct Point<F> {
     pub(super) z: F,
 }
 impl<F: Field> Point<F> {
-    fn zero() -> Self {
+    pub(super) fn zero() -> Self {
         Self {
             x: F::zero(),
             y: F::zero(),
@@ -52,7 +52,7 @@ impl<F: Field> Point<F> {
         let t = z4.mul(&F::zero()).add(&x2).mul(&self.x);
         y2 == t.add(&z4.mul(&z2).mul(&F::curve_b()))
     }
-    fn double(&self) -> Self {
+    pub(super) fn double(&self) -> Self {
         if self.is_zero() {
             return Self::zero();
         }

@@ -14,11 +14,13 @@ pub(super) fn supported(op: Opcode) -> bool {
             | Bls12381G1Valid
             | Bls12381G1IsZero
             | Bls12381G1Add
+            | Bls12381G1Mul
             | Bls12381G2Neg
             | Bls12381G2Norm
             | Bls12381G2Valid
             | Bls12381G2IsZero
             | Bls12381G2Add
+            | Bls12381G2Mul
             | Bls12381GtInv
             | Bls12381GtIsOne
             | Bls12381GtAdd
@@ -34,22 +36,27 @@ fn name(op: Opcode) -> &'static str {
         Bls12381G1Valid => "bls12_381_g1_valid",
         Bls12381G1IsZero => "bls12_381_g1_is_zero",
         Bls12381G1Add => "bls12_381_g1_add",
+        Bls12381G1Mul => "bls12_381_g1_mul",
         Bls12381G2Neg => "bls12_381_g2_neg",
         Bls12381G2Norm => "bls12_381_g2_norm",
         Bls12381G2Valid => "bls12_381_g2_valid",
         Bls12381G2IsZero => "bls12_381_g2_is_zero",
         Bls12381G2Add => "bls12_381_g2_add",
+        Bls12381G2Mul => "bls12_381_g2_mul",
         Bls12381GtInv => "bls12_381_gt_inv",
         Bls12381GtIsOne => "bls12_381_gt_is_one",
         Bls12381GtAdd => "bls12_381_gt_add",
         _ => unreachable!(),
     }
 }
-fn fp(v: &Value) -> Option<[u8; 48]> {
+fn field<const N: usize>(v: &Value) -> Option<[u8; N]> {
     let Value::Bytes(bytes) = v else {
         return None;
     };
     bytes.as_slice().try_into().ok()
+}
+fn fp(v: &Value) -> Option<[u8; 48]> {
+    field(v)
 }
 fn tuple<const N: usize>(v: &Value) -> Option<&[Value; N]> {
     let Value::Tuple(values) = v else {
@@ -95,9 +102,24 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         let x = self.read(&a[1])?;
         let profile = self.executor.context.bls_profile;
-        if matches!(op, Bls12381G1Add | Bls12381G2Add | Bls12381GtAdd) {
+        if matches!(
+            op,
+            Bls12381G1Add | Bls12381G2Add | Bls12381GtAdd | Bls12381G1Mul | Bls12381G2Mul
+        ) {
             let y = self.read(&a[2])?;
             let result = match op {
+                Bls12381G1Mul => {
+                    let (Some(k), Some(p)) = (field(&x), g1(&y)) else {
+                        return Err(self.type_error(name, vec![x, y]));
+                    };
+                    value1(bls::g1_multiply(profile, &k, &p))
+                }
+                Bls12381G2Mul => {
+                    let (Some(k), Some(p)) = (field(&x), g2(&y)) else {
+                        return Err(self.type_error(name, vec![x, y]));
+                    };
+                    value2(bls::g2_multiply(profile, &k, &p))
+                }
                 Bls12381G1Add => {
                     let (Some(p), Some(q)) = (g1(&x), g1(&y)) else {
                         return Err(self.type_error(name, vec![x, y]));

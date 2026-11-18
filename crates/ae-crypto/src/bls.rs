@@ -3,6 +3,7 @@
 // MCL 11976be. Copyright (c) 2015 MITSUNARI Shigeo. See LICENSE-MCL.
 mod field;
 mod point;
+mod scalar;
 use field::{Field, Fp, Fp2};
 use point::Point;
 
@@ -14,6 +15,7 @@ pub enum Profile {
 pub type G1 = [[u8; 48]; 3];
 pub type G2 = [[[u8; 48]; 2]; 3];
 pub type Gt = [[u8; 48]; 12];
+pub type Fr = [u8; 32];
 
 fn read_g1(p: &G1) -> Point<Fp> {
     let [x, y, z] = p.each_ref().map(Fp::read);
@@ -45,6 +47,9 @@ pub fn g1_zero(_: Profile, p: &G1) -> bool {
 pub fn g1_add(_: Profile, p: &G1, q: &G1) -> G1 {
     write_g1(read_g1(p).add(&read_g1(q)))
 }
+pub fn g1_multiply(_: Profile, scalar: &Fr, p: &G1) -> G1 {
+    write_g1(scalar::multiply(&read_g1(p), scalar))
+}
 pub fn g2_negate(_: Profile, p: &G2) -> G2 {
     write_g2(read_g2(p).negate())
 }
@@ -59,6 +64,9 @@ pub fn g2_zero(_: Profile, p: &G2) -> bool {
 }
 pub fn g2_add(_: Profile, p: &G2, q: &G2) -> G2 {
     write_g2(read_g2(p).add(&read_g2(q)))
+}
+pub fn g2_multiply(_: Profile, scalar: &Fr, p: &G2) -> G2 {
+    write_g2(scalar::multiply(&read_g2(p), scalar))
 }
 
 // MCL's mclBnGT_inv is unitaryInv, not generic Fp12 inversion. It conjugates
