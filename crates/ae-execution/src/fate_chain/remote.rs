@@ -1,5 +1,6 @@
 use super::*;
 use ae_trie::{MemoryStore, Nibbles};
+use ae_vm_fate::value::Value;
 use ae_vm_fate::{
     machine::{
         Exception,
@@ -27,6 +28,8 @@ pub struct Authentication {
 
 #[derive(Debug, Clone)]
 pub struct State<A = MemoryStore, C = MemoryStore> {
+    // Trusted invocation input; wire shape alone does not authenticate/admit a transaction.
+    pub auth_tx: Option<Arc<ae_tx::WireTransaction>>,
     pub accounts: Accounts<A>,
     pub contracts: Contracts<C>,
     pub height: u64,
@@ -77,6 +80,13 @@ fn failure(error: Error) -> HostFailure<Error> {
     }
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
+    fn auth_transaction(
+        &mut self,
+        vm: Version,
+        limits: Limits,
+    ) -> Result<(BigInt, Value), HostFailure<Error>> {
+        super::auth_transaction::project(self, vm, limits)
+    }
     fn code(
         &mut self,
         key: &[u8],

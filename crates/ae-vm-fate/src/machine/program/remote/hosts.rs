@@ -37,6 +37,7 @@ pub(super) fn supported(op: Opcode) -> bool {
     matches!(
         op,
         Spend
+            | AuthTx
             | AuthTxHash
             | BytecodeHash
             | OracleGetQuestion
@@ -78,6 +79,18 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     .host
                     .spend(self.context.current_contract, &to, &amount)
                     .map_err(Self::host_fault)
+            }
+            AuthTx => {
+                if self.context.vm_version < VmVersion::Two {
+                    return Err(Fault::Abort(Reason::Unavailable("auth_tx")));
+                }
+                let (cells, result) = session
+                    .host
+                    .auth_transaction(self.context.vm_version, self.remaining)
+                    .map_err(Self::host_fault)?;
+                self.cells(cells)?;
+                self.check(&result)?;
+                self.write(&a[0], result)
             }
             AuthTxHash => {
                 let hash = session.host.environment().auth_tx_hash.clone();

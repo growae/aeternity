@@ -71,7 +71,13 @@ impl WireTransaction {
         })
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let envelope = object::decode_envelope(bytes)?;
+        Self::decode_with_limits(bytes, ae_codec::rlp::DecodeLimits::default())
+    }
+    pub fn decode_with_limits(
+        bytes: &[u8],
+        limits: ae_codec::rlp::DecodeLimits,
+    ) -> Result<Self, Error> {
+        let envelope = object::decode_envelope_with_limits(bytes, limits)?;
         let kind = TransactionKind::from_tag(envelope.tag).ok_or(Error::NotTransaction)?;
         let version = envelope
             .version

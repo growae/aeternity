@@ -33,7 +33,7 @@ pub struct Cache {
     pub auctions: BTreeMap<[u8; 33], Auction>,
 }
 impl Cache {
-    fn budget(&self, mut limits: Limits) -> Result<(), HostFailure<Error>> {
+    pub(super) fn budget(&self, mut limits: Limits) -> Result<(), HostFailure<Error>> {
         let mut take = |n: usize| {
             limits.max_bytes = limits
                 .max_bytes
@@ -133,6 +133,16 @@ pub fn read<S: NodeReader, C: NodeReader>(
         name,
         limits,
     )?;
+    read_hash(names, cache, key, pointer, limits)
+}
+pub(super) fn read_hash<S: NodeReader, C: NodeReader>(
+    names: &Names<S, C>,
+    cache: &mut Cache,
+    key: [u8; 32],
+    pointer: Option<&[u8]>,
+    limits: Limits,
+) -> Result<Option<Read>, HostFailure<Error>> {
+    cache.budget(limits)?;
     let found = match cache.names.get(&key) {
         Some(n) => Some(n.clone()),
         None => names.name(key).map_err(backend)?,

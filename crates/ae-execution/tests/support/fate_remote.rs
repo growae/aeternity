@@ -152,6 +152,13 @@ struct FailingHost {
     transfer_failure: bool,
 }
 impl Host<ae_execution::fate_chain::Error> for FailingHost {
+    fn auth_transaction(
+        &mut self,
+        vm: VmVersion,
+        limits: Limits,
+    ) -> Result<(BigInt, Value), remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.auth_transaction(vm, limits)
+    }
     fn code(
         &mut self,
         key: &[u8],
@@ -349,6 +356,8 @@ pub(super) fn chain(row: &J) -> Chain {
     let a = tree(&row["initial"]["chain"]["accounts"]);
     let c = tree(&row["contracts"]);
     Chain {
+        auth_tx: None,
+
         accounts: Accounts::from_root(a.root_hash(), a.into_store()).unwrap(),
         contracts: Contracts::from_root(c.root_hash(), c.into_store()).unwrap(),
         authentication: Default::default(),

@@ -84,6 +84,7 @@ pub enum Reason {
     BadVariantSize(usize),
     BadVariantTag(usize),
     Unavailable(&'static str),
+    AuthTransactionType(&'static str),
     Disabled(Opcode),
     NotAllowedInAuth(Opcode),
     NotAllowedOffchain(Opcode),

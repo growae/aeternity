@@ -72,6 +72,8 @@ pub enum Value {
     // Runtime-only empty accumulator marker. Pre-Iris stack underflow can
     // expose it inside the engine; it has no canonical FATE wire encoding.
     Void,
+    // Runtime atom emitted by AUTH_TX for a zero transaction TTL.
+    MaxTtl,
     Variant {
         // Runtime constructors historically accept negative, unselected
         // arities. Only the wire encoding requires bytes.

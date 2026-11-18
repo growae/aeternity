@@ -263,7 +263,9 @@ impl<H: UnfoldHost, O: MapOrder> Walk<'_, H, O> {
                 let gas = self.value(gas, &unfolded, depth + 1)?;
                 self.map(gas, cache, depth + 1)
             }
-            Value::ContractBytearray(_) | Value::Void => Err(DataError::InvalidValue.into()),
+            Value::ContractBytearray(_) | Value::Void | Value::MaxTtl => {
+                Err(DataError::InvalidValue.into())
+            }
         }
     }
     fn list(

@@ -8,7 +8,7 @@ static HOSTS: LazyLock<J> = LazyLock::new(|| {
     let pool = rows(&packed["values"]);
     expand(&packed["root"], pool, pool.len())
 });
-fn expand(value: &J, pool: &[J], ceiling: usize) -> J {
+pub(super) fn expand(value: &J, pool: &[J], ceiling: usize) -> J {
     match value {
         J::Object(fields) => {
             if let Some(index) = fields.get("$ref") {

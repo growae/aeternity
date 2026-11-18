@@ -211,7 +211,9 @@ impl<O: MapOrder> Allocator<'_, O> {
                     cache: Map::new(),
                 }
             }
-            Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue.into()),
+            Value::ContractBytearray(_) | Value::Void | Value::MaxTtl => {
+                return Err(Error::InvalidValue.into());
+            }
             other => other,
         })
     }
@@ -255,7 +257,9 @@ pub(crate) fn count(
                 count(value, counts, budget, depth + 1)?;
             }
         }
-        Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue),
+        Value::ContractBytearray(_) | Value::Void | Value::MaxTtl => {
+            return Err(Error::InvalidValue);
+        }
         _ => {}
     }
     Ok(())
@@ -356,7 +360,9 @@ fn unfold_value<E>(
             }
             Value::Map(stored)
         }
-        Value::ContractBytearray(_) | Value::Void => return Err(Error::InvalidValue.into()),
+        Value::ContractBytearray(_) | Value::Void | Value::MaxTtl => {
+            return Err(Error::InvalidValue.into());
+        }
         other => other,
     })
 }

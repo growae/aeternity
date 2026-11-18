@@ -24,6 +24,8 @@ mod otp_order;
 #[path = "../../ae-vm-fate/tests/support/values.rs"]
 mod values;
 use values::{bytes, rows, string, value};
+#[path = "support/fate_auth.rs"]
+mod auth_tests;
 #[path = "support/fate_context.rs"]
 mod context_tests;
 #[path = "support/fate_hosts.rs"]
@@ -347,6 +349,10 @@ fn assert_reason(actual: &Reason, expected: &J) {
         Reason::BadVariantTag(n) => {
             assert_eq!(*n, expected[1].as_u64().unwrap() as usize);
             "bad_variant_tag"
+        }
+        Reason::AuthTransactionType(kind) => {
+            assert_eq!(*kind, string(&expected[1]));
+            "auth_tx_type"
         }
         Reason::Unavailable(op) => {
             assert_eq!(*op, string(&expected[1]));

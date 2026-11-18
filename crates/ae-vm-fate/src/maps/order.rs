@@ -42,9 +42,10 @@ pub enum Atom {
     TypeRep,
     Variant,
     Void,
+    MaxTtl,
 }
 impl Atom {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Deleted,
         Self::Address,
         Self::Any,
@@ -68,6 +69,7 @@ impl Atom {
         Self::TypeRep,
         Self::Variant,
         Self::Void,
+        Self::MaxTtl,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -94,6 +96,7 @@ impl Atom {
             Self::TypeRep => "typerep",
             Self::Variant => "variant",
             Self::Void => "void",
+            Self::MaxTtl => "max_ttl",
         }
     }
     pub fn from_name(name: &str) -> Option<Self> {
@@ -124,12 +127,12 @@ impl Otp26 {
         mixing: Mixing,
         atoms: BTreeMap<Atom, u32>,
     ) -> Result<Self, Error> {
-        // Earlier value-only captures omit the empty accumulator atom. Such
-        // profiles remain usable for those values, but hashing Void requires
-        // an explicit index and reports InvalidOrderProfile if it is absent.
+        // Earlier captures omit runtime-only void/max_ttl atoms. They remain
+        // usable for their original values; hashing a new atom requires its
+        // explicit index and reports InvalidOrderProfile if it is absent.
         if Atom::ALL
             .iter()
-            .any(|a| *a != Atom::Void && !atoms.contains_key(a))
+            .any(|a| !matches!(a, Atom::Void | Atom::MaxTtl) && !atoms.contains_key(a))
             || atoms.values().copied().collect::<BTreeSet<_>>().len() != atoms.len()
             || (word_size == WordSize::Bits32 && atoms.values().any(|&i| i >= (1 << 26)))
         {
@@ -420,6 +423,7 @@ fn value_term<'a>(
         Value::Boolean(b) => Term::Atom(if *b { Atom::True } else { Atom::False }),
         Value::Tombstone => Term::Atom(Atom::Deleted),
         Value::Void => Term::Atom(Atom::Void),
+        Value::MaxTtl => Term::Atom(Atom::MaxTtl),
         Value::Bits(n) => Term::Tuple(vec![
             Term::Atom(Atom::Bits),
             integer(n, budget, bytes, depth + 1)?,

@@ -19,6 +19,8 @@ pub struct LoadedCode {
 }
 #[derive(Debug)]
 pub enum HostFailure<E> {
+    Unavailable(&'static str),
+    AuthTransactionType(&'static str),
     Backend(E),
     ResourceLimit,
     Exception(Exception),
@@ -35,6 +37,11 @@ pub enum HostFailure<E> {
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
 // be shared, but later mutations must not change an earlier snapshot's roots.
 pub trait Host<E>: Clone {
+    fn auth_transaction(
+        &mut self,
+        vm: VmVersion,
+        limits: Limits,
+    ) -> Result<(BigInt, Value), HostFailure<E>>;
     fn code(
         &mut self,
         contract: &[u8],
@@ -470,6 +477,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
 impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     fn host_fault(error: HostFailure<S::Error>) -> Fault<S::Error> {
         match error {
+            HostFailure::Unavailable(op) => Fault::Abort(Reason::Unavailable(op)),
+            HostFailure::AuthTransactionType(kind) => {
+                Fault::Abort(Reason::AuthTransactionType(kind))
+            }
             HostFailure::NameEncoding { operation, error } => {
                 Fault::Abort(Reason::NameEncoding { operation, error })
             }

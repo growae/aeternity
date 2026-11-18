@@ -127,6 +127,8 @@ pub(super) fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, Faul
         faults: faults.clone(),
     };
     Chain {
+        auth_tx: host.auth_tx.clone(),
+
         accounts: Accounts::from_root(
             host.accounts.root_hash(),
             wrap(host.accounts.tree().store()),

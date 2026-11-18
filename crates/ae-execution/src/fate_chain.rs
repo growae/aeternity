@@ -13,6 +13,7 @@ use ae_vm_fate::{
     code::{Code, CodeError},
     types::Version,
 };
+pub mod auth_transaction;
 pub mod history;
 pub mod names;
 pub mod oracle;
@@ -21,6 +22,7 @@ pub mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    AuthenticationTransaction(ae_tx::Error),
     Accounts(AccountError),
     Contracts(contracts::Error),
     ResourceLimit,

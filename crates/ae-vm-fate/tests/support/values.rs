@@ -68,6 +68,7 @@ pub fn value(v: &Json) -> Value {
     match string(&vs[0]) {
         "tombstone" => Value::Tombstone,
         "void" => Value::Void,
+        "max_ttl" => Value::MaxTtl,
         "integer" => Value::Integer(string(&vs[1]).parse().unwrap()),
         "bits" => Value::Bits(string(&vs[1]).parse().unwrap()),
         "bits_nil" => Value::BitsNil,

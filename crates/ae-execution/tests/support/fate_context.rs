@@ -65,6 +65,9 @@ pub(super) fn chain_base(row: &J) -> Chain {
         .unwrap();
     }
     let e = &row["environment"];
+    c.auth_tx = e["auth_tx"]
+        .as_str()
+        .map(|raw| Arc::new(ae_tx::WireTransaction::decode(&hex::decode(raw).unwrap()).unwrap()));
     c.authentication.dry_run = e["dry_run"] == true;
     c.authentication.payer = e["payer"]
         .as_str()
@@ -372,6 +375,8 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
     let fail = Rc::new(Cell::new(false));
     let v = view(&c, &fail);
     let mut host = ae_execution::fate_chain::remote::State {
+        auth_tx: c.auth_tx.clone(),
+
         accounts: v.accounts,
         contracts: v.contracts,
         oracles: v.oracles,

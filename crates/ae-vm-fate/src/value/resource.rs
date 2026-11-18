@@ -62,7 +62,8 @@ impl Walk {
         self.budget.visit(depth)?;
         match value {
             Value::Integer(n) | Value::Bits(n) => self.number(n.magnitude().bits())?,
-            Value::Boolean(_) | Value::Tombstone | Value::Void | Value::BitsNil => {}
+            Value::Boolean(_) | Value::Tombstone | Value::Void | Value::MaxTtl | Value::BitsNil => {
+            }
             Value::String(s) | Value::Bytes(s) | Value::ContractBytearray(s) => {
                 self.bytes(s.len())?
             }
