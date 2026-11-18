@@ -21,6 +21,7 @@ pub struct LocalFrame {
 }
 #[derive(Debug, Clone)]
 pub enum Frame {
+    Init(Box<remote::deployment::InitFrame>),
     Local(Box<LocalFrame>),
     Gas(BigInt),
     Remote(Box<remote::RemoteFrame>),
@@ -126,6 +127,10 @@ impl Cursor {
         limits = integer_budget(&self.call_value, limits)?;
         for frame in &self.frames {
             match frame {
+                Frame::Init(f) => {
+                    limits = value::check_limits(&f.source, limits)?;
+                    limits = value::check_limits(&f.amount, limits)?;
+                }
                 Frame::Gas(n) => limits = integer_budget(n, limits)?,
                 Frame::Local(f) => {
                     limits = value::check_limits(&f.function, limits)?;
@@ -475,7 +480,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                             cursor.bindings = frame.bindings;
                             return self.jump_program(code, cursor, frame.return_block);
                         }
-                        Frame::Remote(_) | Frame::ReturnCheck(_) => {
+                        Frame::Remote(_) | Frame::ReturnCheck(_) | Frame::Init(_) => {
                             return Err(Fault::Operational(Error::Unsupported(ins.opcode)));
                         }
                     }

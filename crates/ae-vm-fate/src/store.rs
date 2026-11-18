@@ -275,6 +275,9 @@ impl<S: Backend> Stores<S> {
     pub fn has_contract(&self, key: &[u8; 32]) -> bool {
         self.contracts.contains_key(key)
     }
+    pub fn keys(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.contracts.keys()
+    }
     pub fn entry(&self, key: &[u8; 32]) -> Option<&Entry<S>> {
         self.contracts.get(key)
     }

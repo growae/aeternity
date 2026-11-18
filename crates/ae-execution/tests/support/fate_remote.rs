@@ -152,6 +152,29 @@ struct FailingHost {
     transfer_failure: bool,
 }
 impl Host<ae_execution::fate_chain::Error> for FailingHost {
+    fn deploy(
+        &mut self,
+        creator: [u8; 32],
+        source: &Value,
+        amount: &Value,
+        vm: VmVersion,
+        protocol: u32,
+        limits: Limits,
+    ) -> Result<[u8; 32], remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner
+            .deploy(creator, source, amount, vm, protocol, limits)
+    }
+    fn remove_deployment(
+        &mut self,
+        contract: [u8; 32],
+        current: [u8; 32],
+        amount: &Value,
+        limits: Limits,
+    ) -> Result<(), remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner
+            .remove_deployment(contract, current, amount, limits)
+    }
+
     fn auth_transaction(
         &mut self,
         vm: VmVersion,
@@ -447,10 +470,18 @@ pub(super) fn tree_entries<S: ae_trie::NodeReader>(tree: &Trie<S>) -> J {
             .collect::<Vec<_>>()
     )
 }
-pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
+pub(super) fn assert_chain<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     actual: &Chain<A, C>,
     expected: &J,
 ) {
+    if expected.get("base_contracts").is_some() {
+        assert_eq!(
+            deployment_tests::snapshot(actual),
+            *expected,
+            "deployment chain"
+        );
+        return;
+    }
     if expected.get("name_objects").is_some() {
         assert_eq!(
             tree_entries(actual.names.tree()),
@@ -560,26 +591,31 @@ pub(super) fn assert_chain<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
 }
 pub(super) fn assert_stores(actual: &Stores<RemoteStore>, expected: &J) {
     let entries: BTreeMap<_, _> = rows(expected).iter().map(|e| (key(&e[0]), &e[1])).collect();
-    for n in 1..=3 {
-        let a = actual.entry(&small(n));
-        let e = entries.get(&small(n));
-        assert_eq!(a.is_some(), e.is_some(), "contract store {n}");
+    assert_eq!(
+        actual.keys().collect::<Vec<_>>(),
+        entries.keys().collect::<Vec<_>>(),
+        "store keys"
+    );
+    for n in entries.keys() {
+        let a = actual.entry(n);
+        let e = entries.get(n);
+        assert_eq!(a.is_some(), e.is_some(), "contract store {n:?}");
         if let (Some(a), Some(e)) = (a, e) {
             assert_eq!(a.dirty(), e["dirty"].as_bool().unwrap());
             let terms: BTreeMap<_, _> = rows(&e["terms"])
                 .iter()
                 .map(|t| (number(&t[0]), (value(&t[1]), t[2].as_bool().unwrap())))
                 .collect();
-            assert_eq!(a.terms(), &terms, "store terms {n}");
+            assert_eq!(a.terms(), &terms, "store terms {n:?}");
             assert_eq!(
                 a.backend().0.0.read_cache(),
                 &pairs(&e["reads"]),
-                "read cache {n}"
+                "read cache {n:?}"
             );
             assert_eq!(
                 a.backend().0.0.write_cache(),
                 &pairs(&e["writes"]),
-                "write cache {n}"
+                "write cache {n:?}"
             );
             assert_eq!(
                 a.backend().0.0.cached_subtrees(),
@@ -682,6 +718,13 @@ pub(super) fn assert_remote<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWrit
     let (mut caller, mut contract, mut vm) = (s.caller.clone(), s.current_contract, s.vm_version);
     for (f, e) in c.frames.iter().rev().zip(rows(&expected["frames"])) {
         match f {
+            Frame::Init(f) => {
+                assert_eq!(e[0], "init");
+                assert_eq!(f.contract, key(&e[1]));
+                assert_eq!(f.source, value(&e[2]));
+                assert_eq!(f.amount, value(&e[3]));
+                assert_eq!(f.protected, e[4].as_bool().unwrap());
+            }
             Frame::Gas(n) => {
                 assert_eq!(e[0], "gas");
                 assert_eq!(*n, number(&e[1]));

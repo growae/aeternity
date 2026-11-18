@@ -82,6 +82,38 @@ fn failure(error: Error) -> HostFailure<Error> {
     }
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
+    fn deploy(
+        &mut self,
+        creator: [u8; 32],
+        source: &Value,
+        amount: &Value,
+        vm: Version,
+        protocol: u32,
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<Error>> {
+        use ae_vm_fate::value::{ObjectKind, ObjectPayload};
+        let source = match source {
+            Value::ContractBytearray(b) => super::deployment::Source::Inline(b),
+            Value::Object(ObjectKind::Contract, ObjectPayload::Bytes(b)) => {
+                super::deployment::Source::Reference(b)
+            }
+            _ => return Err(HostFailure::Exception(Exception::Native("function_clause"))),
+        };
+        let key =
+            super::deployment::put(self, creator, source, amount, vm as u16, protocol, limits)?;
+        self.events.insert(0, source.event());
+        Ok(key)
+    }
+    fn remove_deployment(
+        &mut self,
+        contract: [u8; 32],
+        current: [u8; 32],
+        amount: &Value,
+        limits: Limits,
+    ) -> Result<(), HostFailure<Error>> {
+        super::deployment::remove(self, contract, current, amount, limits)
+    }
+
     fn auth_transaction(
         &mut self,
         vm: Version,

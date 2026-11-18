@@ -28,6 +28,8 @@ use values::{bytes, rows, string, value};
 mod auth_tests;
 #[path = "support/fate_context.rs"]
 mod context_tests;
+#[path = "support/fate_create.rs"]
+mod create_tests;
 #[path = "support/fate_deployment.rs"]
 mod deployment_tests;
 #[path = "support/fate_hosts.rs"]

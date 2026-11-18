@@ -47,6 +47,22 @@ pub struct Cache {
     pub pending: BTreeMap<[u8; 32], Pending>,
 }
 impl Cache {
+    // Load a pending contract only when the VM requests its store. Keep the
+    // initial metadata in the write cache, as in initial_contract_store/0.
+    pub fn initial_store<S: NodeReader>(
+        &self,
+        key: &[u8; 32],
+        backend: S,
+        limits: Limits,
+    ) -> Result<Option<ae_state::contracts::store::Store<S>>, Failure> {
+        self.budget(limits)?;
+        let Some(pending) = self.pending.get(key) else {
+            return Ok(None);
+        };
+        let mut store = ae_state::contracts::store::Store::new(ae_trie::Trie::new(backend));
+        store.put_map(pending.writes.clone());
+        Ok(Some(store))
+    }
     pub fn budget(&self, mut limits: Limits) -> Result<Limits, Failure> {
         for entry in self.pending.values() {
             let c = &entry.contract;

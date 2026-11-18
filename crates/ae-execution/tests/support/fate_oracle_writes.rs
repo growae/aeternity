@@ -127,7 +127,7 @@ pub(super) fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, Faul
         faults: faults.clone(),
     };
     Chain {
-        contract_cache: Default::default(),
+        contract_cache: host.contract_cache.clone(),
         auth_tx: host.auth_tx.clone(),
 
         accounts: Accounts::from_root(

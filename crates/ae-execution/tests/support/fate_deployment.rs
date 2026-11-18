@@ -58,7 +58,7 @@ fn exception(e: HostFailure<ae_execution::fate_chain::Error>) -> J {
         other => panic!("unexpected failure {other:?}"),
     }
 }
-fn snapshot<A: NodeWriter + Clone, C: NodeWriter + Clone>(s: &Chain<A, C>) -> J {
+pub(super) fn snapshot<A: NodeWriter + Clone, C: NodeWriter + Clone>(s: &Chain<A, C>) -> J {
     let cache:Vec<_>=s.contract_cache.pending.values().map(|p|{
  let c=&p.contract;
  json!({"key":hex::encode(c.public_key),"owner":hex::encode(c.owner.0),"vm":c.version.vm,"abi":c.version.abi,

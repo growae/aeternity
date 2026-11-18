@@ -7,6 +7,7 @@ use crate::{
 };
 use std::sync::Arc;
 pub mod context;
+pub mod deployment;
 pub mod hosts;
 pub mod names;
 pub mod oracle_write;
@@ -37,6 +38,22 @@ pub enum HostFailure<E> {
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
 // be shared, but later mutations must not change an earlier snapshot's roots.
 pub trait Host<E>: Clone {
+    fn deploy(
+        &mut self,
+        creator: [u8; 32],
+        source: &Value,
+        amount: &Value,
+        vm: VmVersion,
+        protocol: u32,
+        limits: Limits,
+    ) -> Result<[u8; 32], HostFailure<E>>;
+    fn remove_deployment(
+        &mut self,
+        contract: [u8; 32],
+        current: [u8; 32],
+        amount: &Value,
+        limits: Limits,
+    ) -> Result<(), HostFailure<E>>;
     fn auth_transaction(
         &mut self,
         vm: VmVersion,
@@ -347,7 +364,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 || names::supported(ins.opcode)
                 || matches!(
                     ins.opcode,
-                    Opcode::Call
+                    Opcode::Create
+                        | Opcode::Clone
+                        | Opcode::CloneG
+                        | Opcode::Call
                         | Opcode::CallT
                         | Opcode::Return
                         | Opcode::Returnr
@@ -390,26 +410,30 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         };
         let result = if dispatched
             && let Some(failed_limits) = failed_limits
-            && input
-                .program
-                .cursor
-                .frames
-                .iter()
-                .any(|f| matches!(f,Frame::ReturnCheck(c) if c.protected))
+            && !input.program.cursor.frames.is_empty()
         {
             // aefa_fate:step unwinds from the instruction-entry engine state,
             // not the state (or consumed gas) carried by the thrown error.
             let mut cursor = input.program.cursor.clone();
             let mut session = input.session.clone();
-            let result = executor.action(&input.program.machine, &[], failed_limits, |step| {
+            let mut caught = false;
+            let unwound = executor.action(&input.program.machine, &[], failed_limits, |step| {
                 step.defer_program_jumps = true;
-                let r = step.unwind_protected(&mut cursor, &mut session);
+                let r = step
+                    .unwind_protected(&mut cursor, &mut session)
+                    .map(|handled| caught = handled);
                 session.current_contract = step.context.current_contract;
                 session.vm_version = step.context.vm_version;
                 step.reserved_gas = cursor.reserved();
                 r
             })?;
-            outcome(super::outcome(result, cursor), session)
+            if !caught && matches!(unwound, crate::machine::Outcome::Continue { .. }) {
+                // Reaching the end rethrows the original error with its original
+                // state. An init continuation may instead throw a replacement.
+                result
+            } else {
+                outcome(super::outcome(unwound, cursor), session)
+            }
         } else {
             result
         };
@@ -528,6 +552,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 cursor.instruction += 1;
                 Ok(())
             }
+            Opcode::Create | Opcode::Clone | Opcode::CloneG => {
+                self.deploy_contract(cursor, session, ins)
+            }
             Opcode::CallR | Opcode::CallGr | Opcode::CallPgr => {
                 self.remote_call(cursor, session, ins)
             }
@@ -583,6 +610,41 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         } else {
             false
         };
+        let Operand::Immediate(function) = &ins.operands[1] else {
+            unreachable!()
+        };
+        if !self.remote_call_common(
+            cursor,
+            session,
+            contract,
+            function.clone(),
+            arg_types,
+            ret_type,
+            value,
+            cap,
+            protected,
+            None,
+        )? {
+            self.write(&Operand::Stack, option(None))?;
+            cursor.instruction += 1;
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn remote_call_common<H: Host<S::Error>>(
+        &mut self,
+        cursor: &mut Cursor,
+        session: &mut Session<S, H>,
+        contract: Value,
+        function: Value,
+        arg_types: Value,
+        ret_type: Value,
+        value: Value,
+        cap: Option<Value>,
+        protected: bool,
+        continuation: Option<deployment::InitFrame>,
+    ) -> Result<bool, Fault<S::Error>> {
+        let allow_init = continuation.is_some();
         let (Value::TypeRep(Type::Tuple(arg_types)), Value::TypeRep(ret_type)) =
             (arg_types, ret_type)
         else {
@@ -615,9 +677,6 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 self.context.clone(),
             )
         });
-        let Operand::Immediate(function) = &ins.operands[1] else {
-            unreachable!()
-        };
         let result = (|| {
             self.frame_room(cursor)?;
             let Value::Integer(bb) = &cursor.block else {
@@ -686,10 +745,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 address(from),
                 payable,
                 true,
-                false,
+                allow_init,
             )?;
             let code = session.code().map_err(Fault::Operational)?;
-            let f = self.program_function(&code, function)?;
+            let f = self.program_function(&code, &function)?;
             if args.len() != f.arguments.len() {
                 return Err(Fault::Abort(Reason::FunctionArity {
                     given: args.len(),
@@ -709,6 +768,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     expected: f.arguments.clone(),
                 })
             })?;
+            if let Some(continuation) = continuation {
+                self.frame_room(cursor)?;
+                cursor.frames.push(Frame::Init(Box::new(continuation)));
+            }
             let callee = Type::Tuple(
                 std::iter::once(f.returns.clone())
                     .chain(f.arguments.iter().cloned())
@@ -762,11 +825,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 *cursor = old_cursor;
                 *session = old_session;
                 self.context = context;
-                self.write(&Operand::Stack, option(None))?;
-                cursor.instruction += 1;
-                Ok(())
+                Ok(false)
             }
-            (result, _) => result,
+            (result, _) => result.map(|()| true),
         }
     }
     fn code_fetch_gas(&mut self) -> Result<(), Fault<S::Error>> {
@@ -865,6 +926,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     ) -> Result<(), Fault<S::Error>> {
         while let Some(frame) = cursor.frames.pop() {
             match frame {
+                Frame::Init(frame) => self.finish_init(session, &frame)?,
                 Frame::Gas(n) => {
                     self.state.meter.gas = self.native_integer(&self.state.meter.gas + n)?
                 }
@@ -980,9 +1042,14 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
-    ) -> Result<(), Fault<S::Error>> {
+    ) -> Result<bool, Fault<S::Error>> {
         while let Some(frame) = cursor.frames.pop() {
             match frame {
+                Frame::Init(frame) => {
+                    if self.context.vm_version < VmVersion::Three {
+                        self.finish_init(session, &frame)?;
+                    }
+                }
                 Frame::Gas(n) => {
                     self.state.meter.gas = self.native_integer(&self.state.meter.gas + n)?
                 }
@@ -1001,11 +1068,11 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         self.state.stores = snapshot.stores;
                         session.host = snapshot.host;
                         self.state.accumulator.top = option(None);
-                        return self.remote_return(cursor, session);
+                        return self.remote_return(cursor, session).map(|()| true);
                     }
                 }
             }
         }
-        Err(Fault::Operational(Error::Data(DataError::InvalidValue)))
+        Ok(false)
     }
 }
