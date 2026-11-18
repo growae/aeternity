@@ -319,3 +319,51 @@ fn operational_abort_and_backend_failure_leave_caches_retryable() {
         Ok(RegisterRead::Cached(Value::Boolean(true)))
     );
 }
+
+#[test]
+fn activated_protocol_floor_applies_only_to_loaded_arcus_registers() {
+    let fixture: J =
+        serde_json::from_str(include_str!("fixtures/erlang_fate_store_floors.json")).unwrap();
+    for case in fixture["cases"].as_array().unwrap() {
+        for run in case["runs"].as_array().unwrap() {
+            let mut stores = Stores::new(Version::for_protocol(
+                case["protocol"].as_u64().unwrap() as u32
+            ));
+            stores.put_contract(KEY, raw(&case["base"], case["mode"].as_str().unwrap()));
+            for (gas, expected, state) in [
+                (gas(&run["gas"]), &run["result"], &run["state"]),
+                (
+                    Gas::Metered((-1).into()),
+                    &run["retry"],
+                    &run["retry_state"],
+                ),
+            ] {
+                let result = stores
+                    .load_register_with_floor(
+                        &KEY,
+                        &1.into(),
+                        gas,
+                        case["floor"].as_u64().map(|n| n as u32),
+                        Limits::default(),
+                    )
+                    .map(|read| match read {
+                        RegisterRead::Missing => json!({"missing":true}),
+                        RegisterRead::Cached(v) => json!({"cached":encode(&v)}),
+                        RegisterRead::Loaded { value, gas, .. } => {
+                            json!({"value":encode(&value),"gas":gas_json(&gas)})
+                        }
+                    });
+                assert_eq!(
+                    outcome(result),
+                    *expected,
+                    "protocol={} floor={} kind={} gas={}",
+                    case["protocol"],
+                    case["floor"],
+                    case["kind"],
+                    run["gas"]
+                );
+                assert_eq!(snapshot(&stores), *state);
+            }
+        }
+    }
+}

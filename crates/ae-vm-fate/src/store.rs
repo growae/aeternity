@@ -6,6 +6,7 @@ use num_traits::Zero;
 use std::collections::BTreeMap;
 
 pub mod plan;
+pub mod read;
 pub mod write;
 
 // Backends keep their byte-read cache separate from FATE's decoded term cache.
@@ -324,6 +325,18 @@ impl<S: Backend> Stores<S> {
         gas: Gas,
         limits: Limits,
     ) -> Result<RegisterRead, StoreError<S::Error>> {
+        self.load_register_with_floor(key, position, gas, None, limits)
+    }
+    // Dry-run's activated-protocol floor applies only to an Arcus register
+    // loaded from storage. Cached terms and map reads do not receive it.
+    pub fn load_register_with_floor(
+        &mut self,
+        key: &[u8; 32],
+        position: &BigInt,
+        gas: Gas,
+        metering_floor: Option<u32>,
+        limits: Limits,
+    ) -> Result<RegisterRead, StoreError<S::Error>> {
         valid_position(position)?;
         self.staged(key, |entry, version| {
             let result = find_term(entry, version, position, gas, limits)?;
@@ -334,6 +347,16 @@ impl<S: Backend> Stores<S> {
                         bytes,
                         gas: gas.charge(if version == Version::Ceres { 2000 } else { 0 }.into())?,
                     })
+                }
+                RegisterRead::Loaded { value, bytes, gas } => {
+                    let extra =
+                        crate::gas::store_read_floor_cost(metering_floor, read_gas_cost(bytes));
+                    let gas = if extra > BigInt::zero() {
+                        gas.charge(extra)?
+                    } else {
+                        gas
+                    };
+                    Ok(RegisterRead::Loaded { value, bytes, gas })
                 }
                 other => Ok(other),
             }

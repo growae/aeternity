@@ -34,6 +34,9 @@ impl<S: NodeReader> Store<S> {
     pub fn read_cache(&self) -> &Contents {
         &self.reads
     }
+    pub fn cached_subtrees(&self) -> &BTreeSet<Vec<u8>> {
+        &self.subtrees
+    }
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.writes.insert(key, value);
     }
@@ -97,6 +100,76 @@ impl<S: NodeReader> Store<S> {
         }
         values.extend(from_cache(prefix, &self.writes));
         Ok(values)
+    }
+    // Operational bound for cache-building reads: both the base subtree and
+    // merged result must fit. A masked large base must not bypass the bound.
+    // No read entries or complete-subtree marker are published on failure.
+    pub fn subtree_cached_within_bytes(
+        &mut self,
+        prefix: &[u8],
+        maximum: usize,
+    ) -> Result<(Contents, usize), Error> {
+        let mut base = Contents::new();
+        let mut base_bytes = 0usize;
+        let mut insert = |key: Vec<u8>, value: Vec<u8>| -> Result<(), Error> {
+            base_bytes = base_bytes
+                .checked_add(key.len())
+                .and_then(|n| n.checked_add(value.len()))
+                .ok_or(Error::ResourceLimit)?;
+            if base_bytes > maximum {
+                return Err(Error::ResourceLimit);
+            }
+            base.insert(key, value);
+            Ok(())
+        };
+        if self.subtrees.contains(prefix) {
+            for (key, value) in &self.reads {
+                if let Some(key) = key.strip_prefix(prefix).filter(|k| !k.is_empty()) {
+                    if key.len().saturating_add(value.len()) > maximum {
+                        return Err(Error::ResourceLimit);
+                    }
+                    insert(key.to_vec(), value.clone())?;
+                }
+            }
+        } else {
+            match self.tree.read_only_subtree(&Nibbles::from_bytes(prefix)) {
+                Ok(tree) => {
+                    for row in tree.iter() {
+                        let (key, value) = row?;
+                        let key = byte_key(&key)?;
+                        if !key.is_empty() {
+                            insert(key, value_bytes(value)?)?;
+                        }
+                    }
+                }
+                Err(ae_trie::Error::NoSuchSubtree) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let mut merged_bytes = base_bytes;
+        for (key, value) in &self.writes {
+            if let Some(key) = key.strip_prefix(prefix).filter(|k| !k.is_empty()) {
+                if let Some(old) = base.get(key) {
+                    merged_bytes -= key.len() + old.len();
+                }
+                merged_bytes = merged_bytes
+                    .checked_add(key.len())
+                    .and_then(|n| n.checked_add(value.len()))
+                    .ok_or(Error::ResourceLimit)?;
+            }
+        }
+        if merged_bytes > maximum {
+            return Err(Error::ResourceLimit);
+        }
+        let mut merged = base.clone();
+        merged.extend(from_cache(prefix, &self.writes));
+        if !self.subtrees.contains(prefix) {
+            for (key, value) in base {
+                self.reads.insert([prefix, &key].concat(), value);
+            }
+            self.subtrees.insert(prefix.to_vec());
+        }
+        Ok((merged, merged_bytes))
     }
     pub fn contents(&self) -> Result<Contents, Error> {
         self.subtree(&[])
