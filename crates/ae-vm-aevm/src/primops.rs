@@ -16,11 +16,13 @@ use num_traits::ToPrimitive;
 use std::sync::Arc;
 mod chain;
 mod oracle;
+mod oracle_write;
 mod pure;
 pub(crate) use chain::call_inner;
 pub use chain::{AddressKind, ChainHost, HostResult, call};
 pub use oracle::OracleRequest;
 pub(crate) use oracle::format as oracle_format;
+pub use oracle_write::{OracleTtl, OracleWrite};
 pub use pure::call_local;
 pub(crate) use pure::call_local_inner;
 
@@ -29,6 +31,11 @@ pub enum Error {
     IllegalCall,
     OutOfGas,
     BaseGas {
+        op: Word,
+        required: BigUint,
+        state: Box<State>,
+    },
+    DynamicGas {
         op: Word,
         required: BigUint,
         state: Box<State>,

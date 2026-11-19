@@ -11,6 +11,7 @@ static EDGES: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("../fixtures/erlang_chain_call_edges.json")));
 impl ChainHost for Source<'_> {
     type Spend = J;
+    type Oracle = ();
     fn get_store(&self, _: &J) -> Result<Store, runtime::Fault<Self::Error>> {
         self.event(atom("store"));
         self.check("store").map_err(runtime::Fault::Host)?;

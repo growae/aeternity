@@ -16,6 +16,33 @@ pub enum AddressKind {
 pub type HostResult<T, E> = Result<Result<T, String>, Fault<E>>;
 pub trait ChainHost: StoreHost {
     type Spend;
+    type Oracle;
+    fn oracle_height(
+        &self,
+        op: Word,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> Result<BigUint, Fault<Self::Error>> {
+        Err(Stop::UnimplementedPrimop(op).into())
+    }
+    fn prepare_oracle(
+        &self,
+        request: OracleWrite<'_>,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> HostResult<(Self::Oracle, usize), Self::Error> {
+        Err(Stop::UnimplementedPrimop(request.operation()).into())
+    }
+    fn apply_oracle(
+        &self,
+        op: Word,
+        _transaction: Self::Oracle,
+        _signature: Option<[u8; 64]>,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> HostResult<(crate::heap::Value, Self::Chain), Self::Error> {
+        Err(Stop::UnimplementedPrimop(op).into())
+    }
     fn oracle(
         &self,
         request: OracleRequest<'_>,
@@ -75,6 +102,9 @@ fn run<H: ChainHost>(
     }
     if matches!(id, Some(104..=106 | 110 | 111)) {
         return oracle::call(s, allowance, data, chain, host, b);
+    }
+    if matches!(id, Some(100..=103)) {
+        return oracle_write::call(s, allowance, value, data, chain, host, b);
     }
     let error = |e| Ok((Outcome::Error(e), chain.clone()));
     let base: BigUint = match id {

@@ -36,6 +36,7 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
     pub onchain: Option<Arc<Trees<A, C>>>,
     pub account: AccountPublicKey,
     pub vm_version: ae_vm_aevm::opcode::Version,
+    pub network_id: Arc<[u8]>,
     pub context: Arc<crate::Context>,
     pub event_context: EventContext,
     pub events: Arc<Vec<EnvironmentEvent>>,
@@ -61,13 +62,13 @@ impl<A, C> Default for Host<A, C> {
         Self(PhantomData)
     }
 }
-fn native(reason: &'static str) -> Fault<Error> {
+pub(super) fn native(reason: &'static str) -> Fault<Error> {
     Fault::Native(Native::ChainException {
         class: "error",
         reason,
     })
 }
-fn result<T>(e: crate::Error) -> HostResult<T, Error> {
+pub(super) fn result<T>(e: crate::Error) -> HostResult<T, Error> {
     use crate::Error as E;
     let reason = match e {
         E::InvalidAtProtocol => "invalid_at_protocol",
@@ -160,44 +161,45 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<A, C> {
             Ok(r) => r,
             Err(e) => return result(e),
         };
-        let event_size = |e: &crate::Event| match e {
-            crate::Event::Spend { amount, .. }
-            | crate::Event::FeeDebit { amount, .. }
-            | crate::Event::OracleQueryFee { amount, .. }
-            | crate::Event::OracleRefund { amount, .. }
-            | crate::Event::NameDebit { amount, .. }
-            | crate::Event::NameRefund { amount, .. }
-            | crate::Event::NameFeeLocked { amount } => {
-                128usize.saturating_add(amount.as_bytes().len())
-            }
-        };
-        budget.work(
-            chain
-                .events
-                .len()
-                .checked_add(receipt.events.len())
-                .ok_or(Stop::ResourceLimit)?,
-        )?;
-        for e in chain
-            .events
-            .iter()
-            .map(|e| &e.event)
-            .chain(receipt.events.iter())
-        {
-            budget.bytes(event_size(e))?;
-        }
-        let mut events: Vec<_> = receipt
-            .events
-            .into_iter()
-            .map(|event| EnvironmentEvent {
-                event,
-                context: chain.event_context.clone(),
-            })
-            .collect();
-        events.extend(chain.events.iter().cloned());
-        next.events = Arc::new(events);
+        next.events = append_events(chain, receipt.events, budget)?;
         Ok(Ok(next))
     }
+}
+pub(super) fn append_events<A, C>(
+    chain: &State<A, C>,
+    added: Vec<crate::Event>,
+    budget: &mut Budget,
+) -> Result<Arc<Vec<EnvironmentEvent>>, Fault<Error>> {
+    let event_size = |e: &crate::Event| match e {
+        crate::Event::Spend { amount, .. }
+        | crate::Event::FeeDebit { amount, .. }
+        | crate::Event::OracleQueryFee { amount, .. }
+        | crate::Event::OracleRefund { amount, .. }
+        | crate::Event::NameDebit { amount, .. }
+        | crate::Event::NameRefund { amount, .. }
+        | crate::Event::NameFeeLocked { amount } => {
+            128usize.saturating_add(amount.as_bytes().len())
+        }
+    };
+    budget.work(
+        chain
+            .events
+            .len()
+            .checked_add(added.len())
+            .ok_or(Stop::ResourceLimit)?,
+    )?;
+    for e in chain.events.iter().map(|e| &e.event).chain(added.iter()) {
+        budget.bytes(event_size(e))?;
+    }
+    let mut events: Vec<_> = added
+        .into_iter()
+        .map(|event| EnvironmentEvent {
+            event,
+            context: chain.event_context.clone(),
+        })
+        .collect();
+    events.extend(chain.events.iter().cloned());
+    Ok(Arc::new(events))
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Host<A, C> {
     type Chain = State<A, C>;
@@ -222,6 +224,34 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Host<A, C> {
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Host<A, C> {
     type Spend = Spend;
+    type Oracle = ae_tx::OracleTransaction;
+    fn oracle_height(
+        &self,
+        _: Word,
+        chain: &Self::Chain,
+        budget: &mut Budget,
+    ) -> Result<num_bigint::BigUint, Fault<Error>> {
+        budget.work(1)?;
+        Ok(chain.context.height.into())
+    }
+    fn prepare_oracle(
+        &self,
+        r: ae_vm_aevm::primops::OracleWrite<'_>,
+        chain: &Self::Chain,
+        b: &mut Budget,
+    ) -> HostResult<(Self::Oracle, usize), Error> {
+        self.prepare_oracle_write(r, chain, b)
+    }
+    fn apply_oracle(
+        &self,
+        _: Word,
+        tx: Self::Oracle,
+        signature: Option<[u8; 64]>,
+        chain: &Self::Chain,
+        b: &mut Budget,
+    ) -> HostResult<(ae_vm_aevm::heap::Value, Self::Chain), Error> {
+        self.apply_oracle_write(&tx, signature, chain, b)
+    }
     fn oracle(
         &self,
         request: OracleRequest<'_>,

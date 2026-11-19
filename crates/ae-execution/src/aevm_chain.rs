@@ -18,6 +18,7 @@ pub enum Error {
     Primitive(Box<crate::Error>),
 }
 mod oracle;
+mod oracle_write;
 mod state;
 pub use state::{EnvironmentEvent, EventContext, Host, State};
 pub struct View<'a, A = MemoryStore, C = MemoryStore> {

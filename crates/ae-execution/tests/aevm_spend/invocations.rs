@@ -11,7 +11,7 @@ use ae_vm_aevm::{
     runtime_heap::TypeRef,
     store::OrderProfile,
 };
-mod failures;
+pub(super) mod failures;
 #[path = "../../../ae-vm-aevm/tests/support/mod.rs"]
 mod heap_support;
 static DATA: LazyLock<J> = LazyLock::new(|| {
@@ -40,6 +40,7 @@ fn base(row: &J, snap: &J) -> State {
         account: AccountPublicKey(Word::from(1).0),
         vm_version: ae_vm_aevm::opcode::Version::from_id(row["vm"].as_u64().unwrap() as u32)
             .unwrap(),
+        network_id: Arc::from(b"ae_mainnet".as_slice()),
         context: Arc::new(context(row)),
         event_context: EventContext::None,
         events: Arc::new(vec![]),
@@ -109,6 +110,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for VmHost<A, C> {
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for VmHost<A, C> {
     type Spend = ae_tx::Spend;
+    type Oracle = ae_tx::OracleTransaction;
     fn oracle(
         &self,
         r: ae_vm_aevm::primops::OracleRequest<'_>,
@@ -180,6 +182,7 @@ pub(super) fn vm(row: &J, snap: &J) -> execution::State {
         FloatProfile::Otp26Word64,
     );
     s.protocol = uint(field(snap, "protocol_version")).try_into().unwrap();
+    s.abi_version = uint(field(snap, "abi_version")).try_into().unwrap();
     s.cp = uint(field(snap, "cp")).try_into().unwrap();
     s.data = bytes(field(snap, "data"));
     s.out_type = Some(heap_support::ty(field(snap, "out_type")));
@@ -215,7 +218,8 @@ pub(super) fn vm(row: &J, snap: &J) -> execution::State {
     for k in ["call_stack", "callcreates", "logs"] {
         assert_eq!(field(snap, k), &list(vec![]));
     }
-    assert_eq!(field(snap, "auth_tx_hash"), &atom("undefined"));
+    s.auth_tx_hash = (field(snap, "auth_tx_hash") != &atom("undefined"))
+        .then(|| bytes(field(snap, "auth_tx_hash")));
     assert_eq!(field(snap, "no_recursion"), &atom("false"));
     if let Some(p) = snap[1]
         .as_array()

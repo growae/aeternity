@@ -55,6 +55,7 @@ fn state(row: &J) -> State {
         onchain,
         account: AccountPublicKey(Word::from(1).0),
         vm_version: Version::from_id(row["vm"].as_u64().unwrap() as u32).unwrap(),
+        network_id: Arc::from(b"ae_mainnet".as_slice()),
         context: Arc::new(context(row)),
         events: Arc::new(vec![]),
         event_context: EventContext::None,

@@ -52,6 +52,7 @@ impl StoreHost for OracleSource<'_> {
 }
 impl ChainHost for OracleSource<'_> {
     type Spend = J;
+    type Oracle = ();
     fn get_store(&self, _: &J) -> Result<Store, runtime::Fault<Self::Error>> {
         panic!("no map reads")
     }

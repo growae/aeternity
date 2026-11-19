@@ -4,10 +4,10 @@ use ae_types::Hash256;
 use ae_vm_aevm::execution::Stop;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
-struct Control {
-    read_error: AtomicBool,
-    remaining: AtomicUsize,
-    writes: AtomicUsize,
+pub(crate) struct Control {
+    pub(crate) read_error: AtomicBool,
+    pub(crate) remaining: AtomicUsize,
+    pub(crate) writes: AtomicUsize,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -19,7 +19,7 @@ impl Default for Control {
     }
 }
 #[derive(Clone)]
-struct Backend {
+pub(crate) struct Backend {
     store: MemoryStore,
     control: Arc<Control>,
 }
@@ -42,7 +42,7 @@ impl NodeWriter for Backend {
         self.store.put_node(h, bytes)
     }
 }
-fn wrapped(t: &Trees, a: &Arc<Control>, c: &Arc<Control>) -> Trees<Backend, Backend> {
+pub(crate) fn wrapped(t: &Trees, a: &Arc<Control>, c: &Arc<Control>) -> Trees<Backend, Backend> {
     let wrap = |t: &Trie<MemoryStore>, control: &Arc<Control>| Backend {
         store: t.store().clone(),
         control: control.clone(),
@@ -158,6 +158,7 @@ fn real_account_and_contract_backend_failures_discard_partial_vm_changes() {
         onchain: input.onchain.as_ref().map(|t| Arc::new(wrapped(t, &a, &c))),
         account: input.account,
         vm_version: input.vm_version,
+        network_id: input.network_id,
         context: input.context,
         event_context: input.event_context,
         events: input.events,

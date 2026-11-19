@@ -21,6 +21,7 @@ static SPENDS: LazyLock<J> = LazyLock::new(|| {
 });
 mod invocations;
 mod oracle;
+mod oracle_write;
 fn field<'a>(v: &'a J, k: &str) -> &'a J {
     &v[1]
         .as_array()
@@ -117,6 +118,7 @@ fn state(row: &J) -> State {
         account: AccountPublicKey(Word::from(1).0),
         vm_version: ae_vm_aevm::opcode::Version::from_id(row["vm"].as_u64().unwrap() as u32)
             .unwrap(),
+        network_id: Arc::from(b"ae_mainnet".as_slice()),
         context: Arc::new(context(row)),
         event_context: EventContext::None,
         events: Arc::new(vec![]),

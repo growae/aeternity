@@ -202,6 +202,9 @@ fn state(row: &J, snap: &J) -> State {
     if size != 0u8.into() {
         s.memory.load(&(size * 32u8 - 32u8));
     }
+    if let Some(abi) = optional(snap, "abi_version") {
+        s.abi_version = uint(abi).try_into().unwrap();
+    }
     s.cp = uint(field(snap, "cp")).try_into().unwrap();
     s.stack = field(snap, "stack")[1]
         .as_array()

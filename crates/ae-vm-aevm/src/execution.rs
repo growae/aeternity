@@ -92,6 +92,7 @@ pub struct CallCreate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub version: Version,
+    pub abi_version: u32,
     pub protocol: u32,
     pub call_stack: Vec<BigInt>,
     pub no_recursion: bool,
@@ -125,6 +126,7 @@ impl State {
     ) -> Self {
         Self {
             version,
+            abi_version: 1,
             protocol: 4,
             call_stack: Vec::new(),
             no_recursion: false,
@@ -204,6 +206,14 @@ pub struct Budget {
     active_calls: usize,
 }
 impl Budget {
+    pub fn remaining(&self) -> Limits {
+        Limits {
+            max_work: self.work,
+            max_bytes: self.bytes,
+            max_memory_words: self.words,
+            max_depth: self.depth,
+        }
+    }
     pub fn new(limits: Limits) -> Self {
         Self {
             work: limits.max_work,
@@ -480,6 +490,7 @@ pub(crate) fn snapshot(
             BTreeSet::new()
         },
         version: state.version,
+        abi_version: state.abi_version,
         protocol: state.protocol,
         call_stack: state.call_stack.clone(),
         no_recursion: state.no_recursion,
