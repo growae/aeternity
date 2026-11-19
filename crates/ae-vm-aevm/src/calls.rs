@@ -125,6 +125,19 @@ pub fn return_result(
     return_inner(state, result, &mut Budget::new(limits))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContractVersion {
+    pub vm: Version,
+    pub abi: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeError {
+    NoSuchContract(Word),
+    WrongVmVersion { vm: u16, abi: u16 },
+    UnknownFunction,
+    BadTypeData,
+}
+pub type FunctionTypes<E> = Result<Result<(TypeRef, TypeRef), TypeError>, Fault<E>>;
 pub trait InputHost {
     type Error;
     fn oracle_format(
@@ -138,9 +151,10 @@ pub trait InputHost {
     fn function_types(
         &self,
         target: Word,
-        version: Version,
+        version: ContractVersion,
         function: Word,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error>;
+        budget: &mut Budget,
+    ) -> FunctionTypes<Self::Error>;
 }
 pub struct Input {
     pub target: Word,
@@ -388,9 +402,16 @@ pub(crate) fn input_inner<H: InputHost>(
         }
         let function = argument_word(s, &offset)?;
         let (argument, out) = host
-            .function_types(input.target, s.version, function)
-            .map_err(Fault::Host)?
-            .ok_or(Fault::Native(Native::OutOfGas))?;
+            .function_types(
+                input.target,
+                ContractVersion {
+                    vm: s.version,
+                    abi: s.abi_version,
+                },
+                function,
+                b,
+            )?
+            .map_err(|_| Fault::Native(Native::OutOfGas))?;
         (vec![argument], out)
     };
     b.bytes(

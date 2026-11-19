@@ -24,7 +24,7 @@ pub(crate) use chain::call_inner;
 pub use chain::{AddressKind, ChainHost, HostResult, call};
 pub use name_write::NameWrite;
 pub use oracle::OracleRequest;
-pub(crate) use oracle::format as oracle_format;
+pub use oracle::format as oracle_format;
 pub use oracle_write::{OracleTtl, OracleWrite};
 pub use pure::call_local;
 pub(crate) use pure::call_local_inner;

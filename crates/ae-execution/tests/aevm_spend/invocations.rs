@@ -8,12 +8,11 @@ use ae_vm_aevm::{
     outer_call,
     primops::{ChainHost, HostResult},
     runtime::{self, Outcome, StoreHost},
-    runtime_heap::TypeRef,
     store::OrderProfile,
 };
 pub(super) mod failures;
 #[path = "../../../ae-vm-aevm/tests/support/mod.rs"]
-mod heap_support;
+pub(super) mod heap_support;
 static DATA: LazyLock<J> = LazyLock::new(|| {
     let p: J =
         serde_json::from_str(include_str!("../fixtures/erlang_aevm_account_adapter.json")).unwrap();
@@ -154,10 +153,11 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for VmHost<A
     fn function_types(
         &self,
         _: Word,
-        _: VmVersion,
+        _: ae_vm_aevm::calls::ContractVersion,
         _: Word,
         _: &Self::Chain,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         panic!("local primitive only")
     }
     fn balance(&self, a: Word, c: &Self::Chain) -> Result<BigInt, Self::Error> {

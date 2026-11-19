@@ -1,7 +1,7 @@
 // aevm_eeevm recursive_call and aevm_eeevm_state call_contract, fa2a6d7.
 // Copyright (c) 2017-2018, Aeternity Anstalt. ISC: repository LICENSE.
 use crate::{
-    calls::{self, InputHost},
+    calls::{self, ContractVersion, FunctionTypes, InputHost},
     execution::{self, Budget, CallCreate, CallStep, Failure, Limits, State, Stop},
     gas,
     opcode::Version,
@@ -34,10 +34,11 @@ pub trait Host: ChainHost {
     fn function_types(
         &self,
         target: Word,
-        version: Version,
+        version: ContractVersion,
         function: Word,
         chain: &Self::Chain,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error>;
+        budget: &mut Budget,
+    ) -> FunctionTypes<Self::Error>;
     fn balance(&self, address: Word, chain: &Self::Chain) -> Result<BigInt, Self::Error>;
     fn call(
         &self,
@@ -86,11 +87,12 @@ impl<H: Host> InputHost for Bound<'_, H> {
     fn function_types(
         &self,
         target: Word,
-        version: Version,
+        version: ContractVersion,
         function: Word,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        budget: &mut Budget,
+    ) -> FunctionTypes<Self::Error> {
         self.host
-            .function_types(target, version, function, self.chain)
+            .function_types(target, version, function, self.chain, budget)
     }
 }
 enum Problem<E, C> {

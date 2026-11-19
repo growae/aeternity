@@ -608,7 +608,7 @@ use std::cell::RefCell;
 static INPUTS: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_call_inputs.json")));
 struct TypesHost {
-    calls: RefCell<Vec<(Word, Version, Word)>>,
+    calls: RefCell<Vec<(Word, ae_vm_aevm::calls::ContractVersion, Word)>>,
     argument: Option<TypeRef>,
     fail: Cell<bool>,
 }
@@ -617,14 +617,19 @@ impl InputHost for TypesHost {
     fn function_types(
         &self,
         target: Word,
-        version: Version,
+        version: ae_vm_aevm::calls::ContractVersion,
         function: Word,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         self.calls.borrow_mut().push((target, version, function));
         if self.fail.get() {
-            Err("type lookup failed")
+            Err(Fault::Host("type lookup failed"))
         } else {
-            Ok(self.argument.clone().map(|t| (t, ty(&atom("word")))))
+            Ok(self
+                .argument
+                .clone()
+                .map(|t| (t, ty(&atom("word"))))
+                .ok_or(ae_vm_aevm::calls::TypeError::UnknownFunction))
         }
     }
 }
@@ -710,7 +715,11 @@ fn remote_and_solidity_input_preserve_auth_gas_and_host_order() {
                         assert_eq!(field(&a[1], "abi"), &int(1));
                         (
                             Word(bytes(&a[0]).try_into().unwrap()),
-                            Version::from_id(uint(field(&a[1], "vm")).try_into().unwrap()).unwrap(),
+                            ae_vm_aevm::calls::ContractVersion {
+                                vm: Version::from_id(uint(field(&a[1], "vm")).try_into().unwrap())
+                                    .unwrap(),
+                                abi: 1,
+                            },
                             Word(bytes(&a[2]).try_into().unwrap()),
                         )
                     })

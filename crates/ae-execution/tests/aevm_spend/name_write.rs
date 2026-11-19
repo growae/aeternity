@@ -8,7 +8,6 @@ use ae_vm_aevm::{
     outer_call,
     primops::{self, ChainHost, HostResult, NameWrite},
     runtime::{self, StoreHost},
-    runtime_heap::TypeRef,
 };
 use std::cell::{Cell, RefCell};
 static PREPARATION: LazyLock<J> = LazyLock::new(|| {
@@ -236,10 +235,11 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Traced<A
     fn function_types(
         &self,
         _: Word,
-        _: VM,
+        _: ae_vm_aevm::calls::ContractVersion,
         _: Word,
         _: &Self::Chain,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         panic!("no remote calls")
     }
     fn balance(&self, k: Word, c: &Self::Chain) -> Result<BigInt, Self::Error> {

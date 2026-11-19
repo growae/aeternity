@@ -18,6 +18,7 @@ pub enum Error {
     Names(ae_state::names::Error),
     Primitive(Box<crate::Error>),
 }
+mod contract_types;
 mod name;
 mod name_write;
 mod oracle;

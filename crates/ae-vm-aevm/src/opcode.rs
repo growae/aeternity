@@ -9,6 +9,15 @@ pub enum Version {
     Sophia4,
 }
 impl Version {
+    pub fn id(self) -> u32 {
+        match self {
+            Self::Sophia1 => 1,
+            Self::Solidity1 => 2,
+            Self::Sophia2 => 3,
+            Self::Sophia3 => 4,
+            Self::Sophia4 => 6,
+        }
+    }
     pub fn from_id(id: u32) -> Option<Self> {
         Some(match id {
             1 => Self::Sophia1,

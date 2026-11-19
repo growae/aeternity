@@ -190,6 +190,10 @@ pub(crate) fn parse_type(
 pub fn state_type(store: &Store, limits: Limits) -> Result<Option<TypeRef>, Error> {
     state_type_inner(store, &mut Budget::new(limits))
 }
+pub fn decode_type(bytes: &[u8], b: &mut Budget) -> Result<TypeRef, Error> {
+    b.bytes(bytes.len())?;
+    parse_type(bytes, word(bytes, &BigUint::zero())?, None, b)
+}
 pub(crate) fn state_type_inner(store: &Store, b: &mut Budget) -> Result<Option<TypeRef>, Error> {
     let Some(bytes) = store.get([1].as_slice()).filter(|b| !b.is_empty()) else {
         return Ok(None);

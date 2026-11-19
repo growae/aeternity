@@ -144,10 +144,11 @@ impl Host for OracleSource<'_> {
     fn function_types(
         &self,
         _: Word,
-        _: Version,
+        _: ae_vm_aevm::calls::ContractVersion,
         _: Word,
         _: &J,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         panic!("no remote types")
     }
     fn balance(&self, k: Word, _: &J) -> Result<BigInt, Self::Error> {
@@ -169,9 +170,10 @@ impl InputHost for OracleSource<'_> {
     fn function_types(
         &self,
         _: Word,
-        _: Version,
+        _: ae_vm_aevm::calls::ContractVersion,
         _: Word,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         panic!("no remote types")
     }
     fn oracle_format(

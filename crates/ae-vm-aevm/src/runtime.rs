@@ -16,6 +16,7 @@ use std::{collections::BTreeMap, convert::Infallible};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Native {
     BadMatchNone,
+    BadMatchCodeReference(ae_types::Id),
     BadMatchChainError(String),
     CaseClauseNone,
     ChainException {

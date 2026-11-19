@@ -270,21 +270,24 @@ impl Host for Source<'_> {
     fn function_types(
         &self,
         target: Word,
-        version: Version,
+        version: ae_vm_aevm::calls::ContractVersion,
         function: Word,
         _: &J,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         self.event(tuple(vec![
             atom("types"),
             binary(target.0),
             map(vec![
-                (atom("vm"), int(vm_id(version))),
-                (atom("abi"), int(1)),
+                (atom("vm"), int(vm_id(version.vm))),
+                (atom("abi"), int(version.abi)),
             ]),
             binary(function.0),
         ]));
-        self.check("types")?;
-        Ok((self.mode != "missing_function").then(|| (ty(&atom("word")), ty(&atom("word")))))
+        self.check("types").map_err(runtime::Fault::Host)?;
+        Ok((self.mode != "missing_function")
+            .then(|| (ty(&atom("word")), ty(&atom("word"))))
+            .ok_or(ae_vm_aevm::calls::TypeError::UnknownFunction))
     }
     fn balance(&self, address: Word, chain: &J) -> Result<BigInt, Self::Error> {
         self.event(tuple(vec![atom("balance"), binary(address.0)]));

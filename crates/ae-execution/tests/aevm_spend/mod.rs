@@ -19,6 +19,7 @@ static SPENDS: LazyLock<J> = LazyLock::new(|| {
         serde_json::from_str(include_str!("../fixtures/erlang_aevm_chain_spends.json")).unwrap();
     expand(&p["root"], p["values"].as_array().unwrap())
 });
+mod contract_types;
 mod invocations;
 mod name;
 mod name_write;

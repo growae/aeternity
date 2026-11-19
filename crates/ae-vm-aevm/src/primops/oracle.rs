@@ -27,7 +27,7 @@ impl OracleRequest<'_> {
         })
     }
 }
-pub(crate) fn format<H: ChainHost>(
+pub fn format<H: ChainHost>(
     host: &H,
     chain: &H::Chain,
     key: Word,

@@ -9,7 +9,6 @@ use ae_vm_aevm::{
     outer_call,
     primops::{self, ChainHost, HostResult},
     runtime::{self, StoreHost},
-    runtime_heap::TypeRef,
 };
 use std::cell::RefCell;
 static READS: LazyLock<J> = LazyLock::new(|| {
@@ -192,10 +191,11 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Traced<A
     fn function_types(
         &self,
         _: Word,
-        _: Version,
+        _: ae_vm_aevm::calls::ContractVersion,
         _: Word,
         _: &Self::Chain,
-    ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
+        _budget: &mut ae_vm_aevm::execution::Budget,
+    ) -> ae_vm_aevm::calls::FunctionTypes<Self::Error> {
         panic!("local primitive only")
     }
     fn balance(&self, a: Word, c: &Self::Chain) -> Result<BigInt, Self::Error> {
