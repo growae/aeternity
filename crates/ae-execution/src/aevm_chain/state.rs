@@ -8,7 +8,7 @@ use ae_types::{Hash256, Id};
 use ae_vm_aevm::{
     execution::{Budget, Stop},
     maps::Store,
-    primops::{ChainHost, HostResult},
+    primops::{ChainHost, HostResult, OracleRequest},
     runtime::{Fault, Native, StoreHost},
 };
 use num_bigint::{BigInt, Sign};
@@ -35,6 +35,7 @@ pub struct State<A = MemoryStore, C = MemoryStore> {
     pub trees: Trees<A, C>,
     pub onchain: Option<Arc<Trees<A, C>>>,
     pub account: AccountPublicKey,
+    pub vm_version: ae_vm_aevm::opcode::Version,
     pub context: Arc<crate::Context>,
     pub event_context: EventContext,
     pub events: Arc<Vec<EnvironmentEvent>>,
@@ -221,6 +222,14 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Host<A, C> {
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Host<A, C> {
     type Spend = Spend;
+    fn oracle(
+        &self,
+        request: OracleRequest<'_>,
+        chain: &Self::Chain,
+        budget: &mut Budget,
+    ) -> HostResult<ae_vm_aevm::heap::Value, Error> {
+        chain.reads().oracle(request, chain.vm_version, budget)
+    }
     fn get_store(&self, chain: &Self::Chain) -> Result<Store, Fault<Error>> {
         self.store(chain)?.ok_or_else(|| native("function_clause"))
     }

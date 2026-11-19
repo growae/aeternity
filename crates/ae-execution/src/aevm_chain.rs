@@ -14,8 +14,10 @@ pub enum Error {
     Accounts(AccountError),
     Contracts(contracts::Error),
     Oracles(ae_trie::Error),
+    OracleState(ae_state::oracles::Error),
     Primitive(Box<crate::Error>),
 }
+mod oracle;
 mod state;
 pub use state::{EnvironmentEvent, EventContext, Host, State};
 pub struct View<'a, A = MemoryStore, C = MemoryStore> {

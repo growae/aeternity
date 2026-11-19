@@ -16,6 +16,7 @@ use std::{
     sync::LazyLock,
 };
 mod outer_chain;
+mod outer_oracle;
 mod support;
 use support::*;
 static DATA: LazyLock<J> =

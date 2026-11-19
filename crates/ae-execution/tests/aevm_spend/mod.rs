@@ -20,6 +20,7 @@ static SPENDS: LazyLock<J> = LazyLock::new(|| {
     expand(&p["root"], p["values"].as_array().unwrap())
 });
 mod invocations;
+mod oracle;
 fn field<'a>(v: &'a J, k: &str) -> &'a J {
     &v[1]
         .as_array()
@@ -114,6 +115,8 @@ fn state(row: &J) -> State {
         trees: trees_from(&row["before"]),
         onchain: inner,
         account: AccountPublicKey(Word::from(1).0),
+        vm_version: ae_vm_aevm::opcode::Version::from_id(row["vm"].as_u64().unwrap() as u32)
+            .unwrap(),
         context: Arc::new(context(row)),
         event_context: EventContext::None,
         events: Arc::new(vec![]),

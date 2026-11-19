@@ -75,7 +75,7 @@ fn host(row: &J) -> Source<'_> {
         fail: Cell::new(None),
     }
 }
-fn expected(row: &J) -> (primops::Outcome, J) {
+pub(super) fn expected(row: &J) -> (primops::Outcome, J) {
     let r = &row["result"];
     assert_eq!(r["kind"], "ok");
     let v = &r["value"][1];
@@ -92,6 +92,14 @@ fn expected(row: &J) -> (primops::Outcome, J) {
     assert_eq!(v[0], atom("primop_error"));
     let error = if v[1][0] == "tuple" {
         let p = &v[1][1];
+        if p[0] == atom("illegal_oracle_primop_call") {
+            return (
+                primops::Outcome::Error(primops::Error::IllegalOracle(Word::from_unsigned(&uint(
+                    &p[1],
+                )))),
+                logical(field(&row["before"], "chain_state").clone()),
+            );
+        }
         assert_eq!(p[0], atom("out_of_gas"));
         let charge = &p[1][1];
         let resource = &charge[0][1];

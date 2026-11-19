@@ -16,6 +16,14 @@ pub enum AddressKind {
 pub type HostResult<T, E> = Result<Result<T, String>, Fault<E>>;
 pub trait ChainHost: StoreHost {
     type Spend;
+    fn oracle(
+        &self,
+        request: OracleRequest<'_>,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> HostResult<crate::heap::Value, Self::Error> {
+        Err(Stop::UnimplementedPrimop(request.operation()).into())
+    }
     fn get_store(&self, chain: &Self::Chain) -> Result<maps::Store, Fault<Self::Error>>;
     fn prepare_spend(
         &self,
@@ -64,6 +72,9 @@ fn run<H: ChainHost>(
             call_local_inner(s, allowance, data, &Bound { host, chain }, b)?,
             chain.clone(),
         ));
+    }
+    if matches!(id, Some(104..=106 | 110 | 111)) {
+        return oracle::call(s, allowance, data, chain, host, b);
     }
     let error = |e| Ok((Outcome::Error(e), chain.clone()));
     let base: BigUint = match id {

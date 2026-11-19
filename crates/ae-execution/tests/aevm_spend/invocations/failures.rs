@@ -157,6 +157,7 @@ fn real_account_and_contract_backend_failures_discard_partial_vm_changes() {
         trees: wrapped(&input.trees, &a, &c),
         onchain: input.onchain.as_ref().map(|t| Arc::new(wrapped(t, &a, &c))),
         account: input.account,
+        vm_version: input.vm_version,
         context: input.context,
         event_context: input.event_context,
         events: input.events,

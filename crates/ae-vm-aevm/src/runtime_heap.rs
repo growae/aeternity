@@ -268,6 +268,16 @@ pub(crate) fn serialize(
     maximum: &BigUint,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, Error> {
+    serialize_limit(ty, ptr, memory, context, Some(maximum.clone()), budget)
+}
+pub(crate) fn serialize_limit(
+    ty: &TypeRef,
+    ptr: Word,
+    memory: &Memory,
+    context: MapContext<'_>,
+    maximum: Option<BigUint>,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
     let h = convert::run(
         ty,
         ptr.unsigned(),
@@ -278,7 +288,7 @@ pub(crate) fn serialize(
         Format::Binary,
         context.profile,
         32u8.into(),
-        Some(maximum.clone()),
+        maximum,
         budget,
     )?;
     join(h, budget)

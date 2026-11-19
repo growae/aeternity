@@ -75,6 +75,14 @@ struct Bound<'a, H: Host> {
 }
 impl<H: Host> InputHost for Bound<'_, H> {
     type Error = H::Error;
+    fn oracle_format(
+        &self,
+        oracle: Word,
+        response: bool,
+        b: &mut Budget,
+    ) -> crate::primops::HostResult<TypeRef, Self::Error> {
+        crate::primops::oracle_format(self.host, self.chain, oracle, response, b)
+    }
     fn function_types(
         &self,
         target: Word,

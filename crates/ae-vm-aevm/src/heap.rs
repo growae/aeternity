@@ -63,20 +63,37 @@ impl Default for Limits {
         }
     }
 }
-struct Budget {
+struct Budget<'a> {
     limits: Limits,
     nodes: usize,
     bytes: usize,
+    execution: Option<&'a mut crate::execution::Budget>,
 }
-impl Budget {
+impl<'a> Budget<'a> {
     fn new(limits: Limits) -> Self {
         Self {
             limits,
             nodes: 0,
             bytes: 0,
+            execution: None,
+        }
+    }
+    fn shared(execution: &'a mut crate::execution::Budget) -> Self {
+        Self {
+            limits: Limits {
+                max_depth: execution.depth,
+                max_nodes: usize::MAX,
+                max_bytes: usize::MAX,
+            },
+            nodes: 0,
+            bytes: 0,
+            execution: Some(execution),
         }
     }
     fn node(&mut self, depth: usize) -> Result<(), Error> {
+        if let Some(b) = &mut self.execution {
+            b.work(1).map_err(|_| Error::ResourceLimit)?;
+        }
         self.nodes = self.nodes.checked_add(1).ok_or(Error::ResourceLimit)?;
         if depth > self.limits.max_depth || self.nodes > self.limits.max_nodes {
             return Err(Error::ResourceLimit);
@@ -84,12 +101,45 @@ impl Budget {
         Ok(())
     }
     fn bytes(&mut self, n: usize) -> Result<(), Error> {
+        if let Some(b) = &mut self.execution {
+            b.bytes(n).map_err(|_| Error::ResourceLimit)?;
+        }
         self.bytes = self.bytes.checked_add(n).ok_or(Error::ResourceLimit)?;
         if self.bytes > self.limits.max_bytes {
             return Err(Error::ResourceLimit);
         }
         Ok(())
     }
+}
+
+// Host decoding and marshalling spend the same operational allowance as the VM.
+pub fn decode_with_budget(
+    ty: &Type,
+    heap: &[u8],
+    budget: &mut crate::execution::Budget,
+) -> Result<Value, Error> {
+    if heap.len() < 32 {
+        return Err(Error::BinaryTooShort);
+    }
+    decode_value(
+        ty,
+        heap,
+        &BigUint::from_bytes_be(&heap[..32]),
+        &mut BTreeSet::new(),
+        &mut Budget::shared(budget),
+        0,
+    )
+}
+pub fn encode_with_budget(
+    value: &Value,
+    budget: &mut crate::execution::Budget,
+) -> Result<Vec<u8>, Error> {
+    let mut b = Budget::shared(budget);
+    b.bytes(32)?;
+    let (head, body) = encode_value(value, &32u8.into(), &mut b, 0)?;
+    let mut out = head.to_vec();
+    out.extend(body);
+    Ok(out)
 }
 
 pub fn decode(ty: &Type, heap: &[u8], limits: Limits) -> Result<Value, Error> {

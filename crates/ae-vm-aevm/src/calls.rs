@@ -127,6 +127,14 @@ pub fn return_result(
 
 pub trait InputHost {
     type Error;
+    fn oracle_format(
+        &self,
+        _oracle: Word,
+        response: bool,
+        _b: &mut Budget,
+    ) -> crate::primops::HostResult<TypeRef, Self::Error> {
+        Err(Stop::UnimplementedPrimop(Word::from(if response { 102 } else { 101 })).into())
+    }
     fn function_types(
         &self,
         target: Word,
@@ -151,14 +159,124 @@ fn argument_word<E>(s: &State, offset: &BigUint) -> Result<Word, Fault<E>> {
     }
     Ok(s.memory.words().get(offset).copied().unwrap_or(Word::ZERO))
 }
-fn primitive_types<E>(
+fn primitive_types<H: InputHost>(
     op: Word,
     s: &State,
     offset: &BigUint,
+    host: &H,
     b: &mut Budget,
-) -> Result<(Vec<TypeRef>, TypeRef), Fault<E>> {
+) -> Result<(Vec<TypeRef>, TypeRef), Fault<H::Error>> {
     let word = Arc::new(Type::Word);
+    let unit = || Arc::new(Type::Tuple(vec![]));
+    let sign = || Arc::new(Type::Tuple(vec![word.clone(); 2]));
+    let ttl = || Arc::new(Type::Variant(vec![vec![word.clone()]; 2]));
     let types = match op.unsigned().to_u16() {
+        Some(100) => (
+            vec![
+                word.clone(),
+                sign(),
+                word.clone(),
+                ttl(),
+                Arc::new(Type::TypeRep),
+                Arc::new(Type::TypeRep),
+            ],
+            word,
+        ),
+        Some(103) => (vec![word.clone(), sign(), ttl()], unit()),
+        Some(106) => (vec![word.clone()], word),
+        Some(110) => (
+            vec![
+                word.clone(),
+                Arc::new(Type::TypeRep),
+                Arc::new(Type::TypeRep),
+            ],
+            word,
+        ),
+        Some(111) => (
+            vec![
+                word.clone(),
+                word.clone(),
+                Arc::new(Type::TypeRep),
+                Arc::new(Type::TypeRep),
+            ],
+            word,
+        ),
+        Some(id @ (101 | 102 | 104 | 105)) => {
+            let oracle = argument_word(s, &(offset + 32u8))?;
+            match host.oracle_format(oracle, matches!(id, 102 | 104), b)? {
+                Err(_) => (vec![], unit()),
+                Ok(t) => match id {
+                    101 => (vec![word.clone(), t, ttl(), ttl()], word),
+                    102 => (vec![word.clone(), word.clone(), sign(), t], unit()),
+                    104 => (
+                        vec![word.clone(); 2],
+                        Arc::new(Type::Variant(vec![vec![], vec![t]])),
+                    ),
+                    _ => (vec![word; 2], t),
+                },
+            }
+        }
+        Some(200) => {
+            let t = Arc::new(Type::Tuple(vec![
+                word.clone(),
+                word.clone(),
+                word.clone(),
+                Arc::new(Type::TypeRep),
+            ]));
+            let bytes = runtime_heap::serialize_limit(
+                &t,
+                Word::from_unsigned(offset),
+                &s.memory,
+                MapContext {
+                    maps: &s.maps,
+                    store: &s.map_store,
+                    profile: if s.version == Version::Sophia4 {
+                        MapSerialization::Corrected
+                    } else {
+                        MapSerialization::Legacy
+                    },
+                },
+                None,
+                b,
+            )?;
+            let args = words(&bytes, 4, b).map_err(Fault::widen)?;
+            let out = crate::store::parse_type(
+                &bytes,
+                args[3].unsigned(),
+                Some(BigUint::from_bytes_be(&bytes[..32])),
+                b,
+            )?;
+            (
+                vec![
+                    Arc::new(Type::String),
+                    Arc::new(Type::String),
+                    Arc::new(Type::TypeRep),
+                ],
+                Arc::new(Type::Variant(vec![vec![], vec![out]])),
+            )
+        }
+        Some(201) => (vec![word.clone(), word.clone(), sign()], unit()),
+        Some(202) => {
+            let mut ts = vec![word.clone(), Arc::new(Type::String), word.clone()];
+            if s.version == Version::Sophia4 {
+                ts.push(word.clone());
+            }
+            ts.push(sign());
+            (ts, unit())
+        }
+        Some(204 | 205) => {
+            let mut ts = vec![word.clone()];
+            if op == Word::from(204) {
+                ts.push(word.clone());
+            }
+            ts.push(if s.version == Version::Sophia4 {
+                Arc::new(Type::String)
+            } else {
+                word.clone()
+            });
+            ts.push(sign());
+            (ts, unit())
+        }
         Some(1) => (vec![word], Arc::new(Type::Tuple(vec![]))),
         Some(600 | 601 | 610) => (vec![word.clone()], word),
         Some(600..=699) => (vec![], Arc::new(Type::Tuple(vec![]))),
@@ -216,7 +334,7 @@ fn primitive_types<E>(
         ),
         Some(500) => (vec![], Arc::new(Type::Variant(vec![vec![], vec![word]]))),
         Some(400..=599) => (vec![], Arc::new(Type::Tuple(vec![]))),
-        _ => return Err(Fault::Stop(Stop::UnimplementedPrimop(op))),
+        _ => (vec![], unit()),
     };
     b.bytes(256)?;
     Ok(types)
@@ -246,8 +364,24 @@ pub(crate) fn input_inner<H: InputHost>(
     let offset = input.offset.unsigned();
     let (types, out) = if input.target.is_zero() {
         let op = argument_word(s, &offset)?;
-        // These static types and local map types skip dynamic type-hash checks.
-        primitive_types(op, s, &offset, b)?
+        let (types, out) = primitive_types(op, s, &offset, host, b)?;
+        if matches!(op.unsigned().to_u16(), Some(101 | 102 | 104 | 105 | 200)) {
+            let arg = crate::store::encode_type(&Arc::new(Type::Tuple(types.clone())), b)?;
+            let ret = crate::store::encode_type(&out, b)?;
+            b.bytes(
+                arg.len()
+                    .checked_add(ret.len())
+                    .and_then(|n| n.checked_add(32))
+                    .ok_or(Stop::ResourceLimit)?,
+            )?;
+            let mut bytes = op.unsigned().to_bytes_be();
+            bytes.extend(arg);
+            bytes.extend(ret);
+            if ae_crypto::blake2b_256(&bytes).0 != input.size.0 {
+                return Err(Fault::Native(Native::OutOfGas));
+            }
+        }
+        (types, out)
     } else {
         if s.auth_tx_hash.is_some() {
             return Err(Fault::Native(Native::OutOfGas));

@@ -38,6 +38,8 @@ fn base(row: &J, snap: &J) -> State {
         trees,
         onchain: None,
         account: AccountPublicKey(Word::from(1).0),
+        vm_version: ae_vm_aevm::opcode::Version::from_id(row["vm"].as_u64().unwrap() as u32)
+            .unwrap(),
         context: Arc::new(context(row)),
         event_context: EventContext::None,
         events: Arc::new(vec![]),
@@ -97,7 +99,7 @@ fn chain_snapshot<A: NodeReader, C: NodeReader>(s: &State<A, C>) -> J {
         ("store", logical(store)),
     ])
 }
-struct VmHost<A = MemoryStore, C = MemoryStore>(Host<A, C>);
+pub(super) struct VmHost<A = MemoryStore, C = MemoryStore>(pub(super) Host<A, C>);
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for VmHost<A, C> {
     type Chain = State<A, C>;
     type Error = aevm_chain::Error;
@@ -107,6 +109,14 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for VmHost<A, C> {
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for VmHost<A, C> {
     type Spend = ae_tx::Spend;
+    fn oracle(
+        &self,
+        r: ae_vm_aevm::primops::OracleRequest<'_>,
+        c: &Self::Chain,
+        b: &mut Budget,
+    ) -> HostResult<ae_vm_aevm::heap::Value, Self::Error> {
+        self.0.oracle(r, c, b)
+    }
     fn get_store(&self, c: &Self::Chain) -> Result<Store, Fault<Self::Error>> {
         self.0.get_store(c)
     }
@@ -161,7 +171,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for VmHost<A
         panic!("local primitive only")
     }
 }
-fn vm(row: &J, snap: &J) -> execution::State {
+pub(super) fn vm(row: &J, snap: &J) -> execution::State {
     use heap_support::{number, uint};
     let mut s = execution::State::new(
         VmVersion::from_id(row["vm"].as_u64().unwrap() as u32).unwrap(),
