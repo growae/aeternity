@@ -267,7 +267,7 @@ fn assert_reason(actual: &Reason, expected: &J) {
     let name = match actual {
         Reason::NameEncoding { operation, error } => {
             assert_eq!(*operation, string(&expected[1]));
-            let label = match error {
+            let label = match &error.category() {
                 ae_codec::idna::Error::NoRegistrar => "no_registrar",
                 ae_codec::idna::Error::RegistrarUnknown => "registrar_unknown",
                 ae_codec::idna::Error::MultipleNamespaces => "multiple_namespaces",

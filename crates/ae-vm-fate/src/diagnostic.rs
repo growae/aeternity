@@ -8,9 +8,11 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::borrow::Cow;
 mod abort;
+mod idna;
 mod pretty;
 mod reason;
 pub use abort::native_abort;
+pub use idna::idna_error;
 pub use reason::reason;
 
 // Map entries are already in the selected runtime's maps:iterator order.

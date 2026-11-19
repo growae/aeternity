@@ -7,6 +7,17 @@ use contract_call_tests::{chain, check, failure, transaction, trees, tx_context,
 fn contract_error_records_match_original_release_and_test_builds() {
     let packed: J =
         serde_json::from_str(include_str!("../fixtures/erlang_contract_diagnostics.json")).unwrap();
+    check_profiles(packed, 648);
+}
+#[test]
+fn name_error_records_match_original_release_and_test_builds() {
+    let packed: J = serde_json::from_str(include_str!(
+        "../fixtures/erlang_idna_contract_diagnostics.json"
+    ))
+    .unwrap();
+    check_profiles(packed, 1536);
+}
+fn check_profiles(packed: J, expected_cases: usize) {
     let pool = rows(&packed["values"]);
     let data = name_tests::expand(&packed["root"], pool, pool.len());
     let overrides = Overrides::default();
@@ -17,7 +28,7 @@ fn contract_error_records_match_original_release_and_test_builds() {
             Profile::Test
         };
         let order = otp_order::profile(&profile["profile"]);
-        assert_eq!(rows(&profile["cases"]).len(), 648);
+        assert_eq!(rows(&profile["cases"]).len(), expected_cases);
         for row in rows(&profile["cases"]) {
             let host = chain(row);
             let mut t = trees(row, &host);

@@ -14,6 +14,13 @@ fn term(v: &J) -> Term<'static> {
         )),
         "atom" => Term::Atom(Cow::Owned(v[1].as_str().unwrap().to_owned())),
         "binary" => Term::Binary(Cow::Owned(hex::decode(v[1].as_str().unwrap()).unwrap())),
+        "latin1" => Term::List(
+            hex::decode(v[1].as_str().unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|c| Term::Integer(Cow::Owned(c.into())))
+                .collect(),
+        ),
         "tuple" => Term::Tuple(rows().iter().map(term).collect()),
         "list" => Term::List(rows().iter().map(term).collect()),
         "map" => {
@@ -195,4 +202,103 @@ fn diagnostic_work_limits_are_retryable_and_runtime_map_order_is_validated() {
         diagnostic::reason(&reason, &Invalid, Profile::Release, Limits::default()),
         Err(Error::InvalidOrderProfile)
     ));
+}
+
+#[test]
+fn full_idna_native_error_terms_match_original_normalization() {
+    let data: J =
+        serde_json::from_str(include_str!("fixtures/erlang_idna_diagnostics.json")).unwrap();
+    check_idna(data, [10267, 17621, 8]);
+    let edges: J =
+        serde_json::from_str(include_str!("fixtures/erlang_idna_diagnostic_edges.json")).unwrap();
+    check_idna(edges, [2, 40, 0]);
+}
+fn check_idna(data: J, expected_counts: [usize; 3]) {
+    use ae_codec::idna;
+    let pool = data["values"].as_array().unwrap();
+    let data = expand(&data["root"], pool, pool.len());
+    let rows = data["cases"].as_array().unwrap();
+    assert_eq!(rows.len(), expected_counts.iter().sum::<usize>());
+    let mut counts = [0; 3];
+    let mut failures = Vec::new();
+    for row in rows {
+        let input = hex::decode(row["input"].as_str().unwrap()).unwrap();
+        match idna::to_ascii_detailed(&input) {
+            Ok(ascii) => {
+                counts[0] += 1;
+                assert_eq!(row["kind"], "ok");
+                assert_eq!(hex::encode(ascii), row["ascii"]);
+            }
+            Err(error) if row["kind"] == "exception" => {
+                counts[2] += 1;
+                let idna::Error::ReferenceException { class, .. } = error.category() else {
+                    panic!("{error:?}");
+                };
+                assert_eq!(class, row["class"]);
+            }
+            Err(error) => {
+                counts[1] += 1;
+                assert_eq!(row["kind"], "error");
+                let actual = diagnostic::idna_error(&error, Limits::default())
+                    .unwrap()
+                    .unwrap()
+                    .0;
+                let expected = term(&row["reason"]);
+                if actual != expected && failures.len() < 10 {
+                    failures.push(format!(
+                        "{}: {error:?}\nactual {actual:?}\nexpected {expected:?}",
+                        String::from_utf8_lossy(&input)
+                    ));
+                }
+            }
+        }
+    }
+    assert_eq!(counts, expected_counts);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn nested_idna_error_formatting_is_bounded_and_retryable() {
+    let error = ae_codec::idna::to_ascii_detailed(b"xn--abc--.chain").unwrap_err();
+    let expected = diagnostic::idna_error(&error, Limits::default())
+        .unwrap()
+        .unwrap()
+        .0;
+    for bytes in [false, true] {
+        let mut success = false;
+        for allowance in 0..50000 {
+            let limits = if bytes {
+                Limits {
+                    max_bytes: allowance,
+                    ..Limits::default()
+                }
+            } else {
+                Limits {
+                    max_nodes: allowance,
+                    ..Limits::default()
+                }
+            };
+            match diagnostic::idna_error(&error, limits) {
+                Ok(Some((actual, _))) => {
+                    assert_eq!(actual, expected);
+                    success = true;
+                    break;
+                }
+                Err(e) => assert_eq!(e, ae_vm_fate::Error::ResourceLimit),
+                _ => panic!("missing retained IDNA error"),
+            }
+        }
+        assert!(success);
+    }
+    assert_eq!(
+        diagnostic::idna_error(
+            &error,
+            Limits {
+                max_depth: 0,
+                ..Limits::default()
+            }
+        )
+        .unwrap_err(),
+        ae_vm_fate::Error::ResourceLimit
+    );
 }

@@ -134,16 +134,15 @@ pub fn reason(
             tuple("primop_error", vec![atom(operation), atom(reason)])
         }
         Reason::NameEncoding { operation, error } => {
-            use ae_codec::idna::Error as N;
-            let r = match error {
-                N::NoRegistrar => atom("no_registrar"),
-                N::RegistrarUnknown => atom("registrar_unknown"),
-                N::MultipleNamespaces => atom("multiple_namespaces"),
-                N::NoLabelInRegistrar => atom("no_label_in_registrar"),
-                N::InvalidCodepoint(n) => tuple("invalid_codepoint", vec![number(*n)]),
-                _ => return Ok(None),
+            let Some((r, limits)) = idna_error(error, c.work.remaining())? else {
+                return Ok(None);
             };
-            tuple("primop_error", vec![atom(operation), r])
+            return native_abort(
+                &tuple("primop_error", vec![atom(operation), r]),
+                profile,
+                limits,
+            )
+            .map(Some);
         }
         Reason::BadReturnType { value: v, expected } => {
             let v = value(v)?;

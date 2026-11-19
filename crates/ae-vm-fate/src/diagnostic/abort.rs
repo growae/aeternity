@@ -2,7 +2,7 @@
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use super::*;
 
-enum Part<'t, 'a> {
+pub(super) enum Part<'t, 'a> {
     Text(&'static [u8]),
     Term(&'t Term<'a>, Style, i32),
 }
@@ -106,13 +106,17 @@ pub fn native_abort(
     };
     let mut work = Work::new(limits);
     work.input(reason, 0)?;
+    let out = render_parts(parts, &mut work)?;
+    Ok((out, work.remaining()))
+}
+pub(super) fn render_parts(parts: Vec<Part<'_, '_>>, work: &mut Work) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut indent = 0;
     for part in parts {
         let start = out.len();
         match part {
-            S(s) => work.push(&mut out, s)?,
-            T(t, style, d) => render(t, style, d, indent + 1, &mut work, &mut out)?,
+            Part::Term(t, style, d) => render(t, style, d, indent + 1, work, &mut out)?,
+            Part::Text(s) => work.push(&mut out, s)?,
         }
         for &c in &out[start..] {
             indent = match c {
@@ -122,5 +126,5 @@ pub fn native_abort(
             };
         }
     }
-    Ok((out, work.remaining()))
+    Ok(out)
 }

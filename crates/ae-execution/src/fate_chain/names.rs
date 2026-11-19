@@ -78,16 +78,16 @@ fn native(s: &'static str) -> HostFailure<Error> {
 fn backend(e: ae_state::names::Error) -> HostFailure<Error> {
     HostFailure::Backend(Error::Names(e))
 }
-fn encoding(op: &'static str, e: idna::Error) -> HostFailure<Error> {
-    match e {
+fn encoding(op: &'static str, e: idna::DetailedError) -> HostFailure<Error> {
+    match e.category() {
         idna::Error::ReferenceException {
             class: "exit",
             reason,
         } => HostFailure::Exception(Exception::Exit(reason)),
         idna::Error::ReferenceException { reason, .. } => native(reason),
-        error => HostFailure::NameEncoding {
+        _ => HostFailure::NameEncoding {
             operation: op,
-            error,
+            error: e,
         },
     }
 }
@@ -95,11 +95,11 @@ pub fn hash(op: &'static str, name: &[u8], limits: Limits) -> Result<[u8; 32], H
     if name.len() > limits.max_bytes || name.len() > limits.max_nodes {
         return Err(HostFailure::ResourceLimit);
     }
-    let ascii = idna::to_ascii(name).map_err(|e| {
+    let ascii = idna::to_ascii_detailed(name).map_err(|e| {
         // Claim uses aens:get_name_hash, which hides these two IDNA errors.
         if op == "aens_claim"
             && matches!(
-                e,
+                e.category(),
                 idna::Error::BadLabel(_) | idna::Error::InvalidCodepoint(_)
             )
         {
@@ -196,7 +196,7 @@ fn fixed(b: &[u8]) -> Result<[u8; 32], HostFailure<Error>> {
 fn fail(op: &'static str, e: crate::Error) -> HostFailure<Error> {
     use crate::{Error as E, names::Failure as F};
     let reason = match e {
-        E::Naming(F::Encoding(e)) => return encoding(op, e),
+        E::Naming(F::Encoding(e)) => return encoding(op, e.into()),
         E::Naming(f) => match f {
             F::CommitmentAlreadyPresent => "commitment_already_present",
             F::CommitmentNotOwned => "commitment_not_owned",
@@ -360,7 +360,7 @@ pub fn write<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                     },
                 );
             }
-            let ascii = idna::to_ascii(name).map_err(|e| encoding(op, e))?;
+            let ascii = idna::to_ascii_detailed(name).map_err(|e| encoding(op, e))?;
             let hash = hashing::name_hash(&ascii).0;
             if let Some(n) = next.names.name(hash).map_err(backend)? {
                 next.name_cache.names.insert(hash, n);

@@ -110,7 +110,7 @@ pub enum Reason {
     CallError(&'static str),
     NameEncoding {
         operation: &'static str,
-        error: ae_codec::idna::Error,
+        error: ae_codec::idna::DetailedError,
     },
     Primop {
         operation: &'static str,

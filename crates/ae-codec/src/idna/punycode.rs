@@ -85,7 +85,7 @@ pub(super) fn encode(input: &[u32]) -> Result<Vec<u8>, ()> {
     }
     Ok(output)
 }
-pub(super) fn decode(input: &[u8]) -> Result<Vec<u32>, ()> {
+pub(super) fn decode(input: &[u8]) -> Result<Vec<u32>, (&'static str, &'static str)> {
     let (mut output, mut rest) = match input.iter().rposition(|b| *b == b'-') {
         None => (vec![], input),
         Some(i) => (
@@ -97,11 +97,11 @@ pub(super) fn decode(input: &[u8]) -> Result<Vec<u32>, ()> {
     while !rest.is_empty() {
         let (old_i, mut weight, mut k) = (i, 1u64, 36u64);
         loop {
-            let (&c, tail) = rest.split_first().ok_or(())?;
+            let (&c, tail) = rest.split_first().ok_or(("error", "function_clause"))?;
             rest = tail;
-            let d = digit(c)?;
+            let d = digit(c).map_err(|_| ("exit", "badarg"))?;
             if d > (MAX - i) / weight {
-                return Err(());
+                return Err(("exit", "overflow"));
             }
             i += d * weight;
             let t = threshold(k, bias);
@@ -109,7 +109,7 @@ pub(super) fn decode(input: &[u8]) -> Result<Vec<u32>, ()> {
                 break;
             }
             if weight > MAX / (36 - t) {
-                return Err(());
+                return Err(("exit", "overflow"));
             }
             weight *= 36 - t;
             k += 36;
@@ -117,7 +117,7 @@ pub(super) fn decode(input: &[u8]) -> Result<Vec<u32>, ()> {
         let len = output.len() as u64 + 1;
         bias = adapt(i - old_i, len, old_i == 0);
         if i / len > MAX - n {
-            return Err(());
+            return Err(("exit", "overflow"));
         }
         n += i / len;
         i %= len;

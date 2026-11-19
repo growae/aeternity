@@ -2,9 +2,13 @@
 // 6cff72747821110169ecfac871b0c69e5064afff. Unicode 11 mapping/validity.
 // IDNA portions: Copyright the authors and contributors. MIT: LICENSE-IDNA.
 // AENS wrapper: Copyright (c) 2018 Aeternity Anstalt. ISC: repository LICENSE.
+mod error;
+mod grapheme;
+mod grapheme_tables;
 mod normalize;
 mod punycode;
 mod tables;
+pub use error::{BidiError, DetailedError, JoinerKind, LabelError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BadLabel {
@@ -31,13 +35,13 @@ pub enum Error {
         reason: &'static str,
     },
 }
-fn bad(reason: BadLabel) -> Error {
-    Error::BadLabel(reason)
-}
-fn exception(class: &'static str, reason: &'static str) -> Error {
-    Error::ReferenceException { class, reason }
+fn exception(class: &'static str, reason: &'static str) -> DetailedError {
+    Error::ReferenceException { class, reason }.into()
 }
 pub fn to_ascii(name: &[u8]) -> Result<Vec<u8>, Error> {
+    to_ascii_detailed(name).map_err(|e| e.category())
+}
+pub fn to_ascii_detailed(name: &[u8]) -> Result<Vec<u8>, DetailedError> {
     let parts = name.split(|c| *c == b'.').collect::<Vec<_>>();
     let count = parts
         .iter()
@@ -45,10 +49,10 @@ pub fn to_ascii(name: &[u8]) -> Result<Vec<u8>, Error> {
         .map_or(0, |i| i + 1);
     match &parts[..count] {
         [] => return Err(exception("error", "case_clause")),
-        [_] => return Err(Error::NoRegistrar),
+        [_] => return Err(Error::NoRegistrar.into()),
         [_, registrar] if *registrar == b"chain" || *registrar == b"test" => {}
-        [_, _] => return Err(Error::RegistrarUnknown),
-        _ => return Err(Error::MultipleNamespaces),
+        [_, _] => return Err(Error::RegistrarUnknown.into()),
+        _ => return Err(Error::MultipleNamespaces.into()),
     }
     let utf8 = std::str::from_utf8(name).map_err(|_| exception("error", "function_clause"))?;
     let mut mapped = Vec::new();
@@ -59,7 +63,7 @@ pub fn to_ascii(name: &[u8]) -> Result<Vec<u8>, Error> {
             0 => mapped.push(cp),
             1 => mapped.extend_from_slice(row.2),
             2 => {}
-            _ => return Err(Error::InvalidCodepoint(cp)),
+            _ => return Err(Error::InvalidCodepoint(cp).into()),
         }
     }
     let normalized = normalize::nfc(&mapped);
@@ -73,23 +77,29 @@ pub fn to_ascii(name: &[u8]) -> Result<Vec<u8>, Error> {
         output.extend(label);
     }
     if !output.contains(&b'.') {
-        return Err(Error::NoLabelInRegistrar);
+        return Err(Error::NoLabelInRegistrar.into());
     }
     Ok(output)
 }
-fn alabel(label: &[u32]) -> Result<Vec<u8>, Error> {
+fn alabel(label: &[u32]) -> Result<Vec<u8>, DetailedError> {
     let result = if label.iter().all(|cp| *cp < 128) {
         if !label.is_empty() {
             let ascii = label
                 .iter()
                 .map(|cp| (*cp as u8).to_ascii_lowercase())
                 .collect::<Vec<_>>();
-            let decoded = if let Some(tail) = ascii.strip_prefix(b"xn--") {
-                punycode::decode(tail).map_err(|_| bad(BadLabel::Alabel))?
-            } else {
-                ascii.iter().map(|b| u32::from(*b)).collect()
+            let validate = || {
+                let decoded = if let Some(tail) = ascii.strip_prefix(b"xn--") {
+                    punycode::decode(tail).map_err(|e| exception(e.0, e.1))?
+                } else {
+                    ascii.iter().map(|b| u32::from(*b)).collect()
+                };
+                check_label(&decoded)
             };
-            check_label(&decoded).map_err(|_| bad(BadLabel::Alabel))?;
+            validate().map_err(|error| LabelError::Alabel {
+                label: label.to_vec(),
+                error: Box::new(error),
+            })?;
         }
         label.iter().map(|cp| *cp as u8).collect()
     } else {
@@ -99,7 +109,7 @@ fn alabel(label: &[u32]) -> Result<Vec<u8>, Error> {
         result
     };
     if result.len() > 63 {
-        return Err(bad(BadLabel::TooLong));
+        return Err(LabelError::TooLong(result.iter().map(|b| u32::from(*b)).collect()).into());
     }
     Ok(result)
 }
@@ -108,28 +118,54 @@ fn properties(cp: u32) -> u32 {
         .get(tables::PROPERTIES.partition_point(|r| r.0 < cp))
         .map_or(4, |r| r.1)
 }
-fn check_label(label: &[u32]) -> Result<(), Error> {
+fn check_label(label: &[u32]) -> Result<(), DetailedError> {
+    if label.iter().any(|cp| *cp > 0x10ffff) {
+        return Err(exception("error", "function_clause"));
+    }
     if normalize::nfc(label) != label {
-        return Err(bad(BadLabel::Nfc));
+        return Err(LabelError::Nfc.into());
     }
     if label.is_empty() {
         return Err(exception("error", "function_clause"));
     }
     if label.first() == Some(&45) || label.last() == Some(&45) || label.get(2..4) == Some(&[45, 45])
     {
-        return Err(bad(BadLabel::Hyphen));
+        return Err(LabelError::Hyphen {
+            label: label.to_vec(),
+            third_fourth: label.get(2..4) == Some(&[45, 45]),
+        }
+        .into());
     }
     if properties(label[0]) & 8 != 0 {
-        return Err(bad(BadLabel::InitialCombiner));
+        return Err(LabelError::InitialCombiner.into());
     }
     for (pos, &cp) in label.iter().enumerate() {
         match properties(cp) & 7 {
             1 => {}
             2 if context_j(cp, label, pos) => {}
             3 if context_o(cp, label, pos) => {}
-            2 => return Err(bad(BadLabel::ContextJ)),
-            3 => return Err(bad(BadLabel::ContextO)),
-            _ => return Err(bad(BadLabel::Context)),
+            status @ (2 | 3) => {
+                return Err(LabelError::Joiner {
+                    label: label.to_vec(),
+                    codepoint: cp,
+                    position: pos,
+                    kind: if status == 2 {
+                        JoinerKind::J
+                    } else {
+                        JoinerKind::O
+                    },
+                }
+                .into());
+            }
+            status => {
+                return Err(LabelError::Context {
+                    label: label.to_vec(),
+                    codepoint: cp,
+                    position: pos,
+                    unassigned: status == 4,
+                }
+                .into());
+            }
         }
     }
     bidi(label)
@@ -164,15 +200,30 @@ fn context_o(cp: u32, label: &[u32], pos: usize) -> bool {
         _ => false,
     }
 }
-fn bidi(label: &[u32]) -> Result<(), Error> {
+fn bidi(label: &[u32]) -> Result<(), DetailedError> {
     let dir = |c: u32| (properties(c) >> 4) & 15;
-    if !label.iter().any(|c| matches!(dir(*c), 1..=3)) {
+    let mut has_rtl = false;
+    for &cp in label {
+        let d = dir(cp);
+        if d == 11 {
+            return Err(LabelError::Bidi(BidiError::UnknownDirection {
+                label: label.to_vec(),
+                codepoint: cp,
+            })
+            .into());
+        }
+        if matches!(d, 1..=3) {
+            has_rtl = true;
+            break;
+        }
+    }
+    if !has_rtl {
         return Ok(());
     }
     let rtl = match dir(label[0]) {
         1 | 2 => true,
         0 => false,
-        _ => return Err(bad(BadLabel::Bidi)),
+        _ => return Err(LabelError::Bidi(BidiError::FirstDirection(label.to_vec())).into()),
     };
     let mut ending = false;
     let mut number = None;
@@ -183,7 +234,12 @@ fn bidi(label: &[u32]) -> Result<(), Error> {
         } else {
             !matches!(d, 0 | 4..=10)
         } {
-            return Err(bad(BadLabel::Bidi));
+            return Err(LabelError::Bidi(if rtl {
+                BidiError::InvalidRight
+            } else {
+                BidiError::InvalidLeft
+            })
+            .into());
         }
         if if rtl {
             (1..=4).contains(&d)
@@ -196,7 +252,7 @@ fn bidi(label: &[u32]) -> Result<(), Error> {
         }
         if rtl && matches!(d, 3 | 4) {
             if number.is_some_and(|n| n != d) {
-                return Err(bad(BadLabel::Bidi));
+                return Err(LabelError::Bidi(BidiError::MixedNumerals).into());
             }
             number = Some(d);
         }
@@ -204,6 +260,6 @@ fn bidi(label: &[u32]) -> Result<(), Error> {
     if ending {
         Ok(())
     } else {
-        Err(bad(BadLabel::Bidi))
+        Err(LabelError::Bidi(BidiError::IllegalEnding).into())
     }
 }

@@ -34,7 +34,7 @@ pub enum HostFailure<E> {
     },
     NameEncoding {
         operation: &'static str,
-        error: ae_codec::idna::Error,
+        error: ae_codec::idna::DetailedError,
     },
 }
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
