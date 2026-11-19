@@ -122,6 +122,7 @@ fn name(k: TransactionKind) -> &'static str {
         TransactionKind::ChannelSnapshotSolo => "channel_snapshot_solo_tx",
         TransactionKind::ChannelSetDelegates => "channel_set_delegates_tx",
         TransactionKind::PayingFor => "paying_for_tx",
+        TransactionKind::HcVote => "hc_vote_tx",
         _ => panic!("{k:?}"),
     }
 }
@@ -241,6 +242,9 @@ fn snapshot<A: NodeReader, C: NodeReader>(
 }
 fn primitive(e: &ae_execution::Error) -> &'static str {
     match e {
+        ae_execution::Error::OracleTransaction(
+            ae_execution::oracles::Failure::TooLowAbsoluteTtl,
+        ) => "too_low_abs_ttl",
         ae_execution::Error::InvalidAtProtocol => "invalid_at_protocol",
         ae_execution::Error::TooLowFee => "too_low_fee",
         ae_execution::Error::TtlExpired => "ttl_expired",
@@ -516,3 +520,6 @@ mod offchain;
 
 #[path = "channels/force_progress.rs"]
 mod force_progress;
+
+#[path = "channels/hc_votes.rs"]
+mod hc_votes;

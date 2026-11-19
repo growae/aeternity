@@ -28,7 +28,10 @@ pub(super) fn inner_failure<A, C>(e: &Error<A, C>, p: Protocol) -> bool {
             }
         }
         Error::Signature(e) if e.is_operational() => false,
-        Error::Signature(_) | Error::RecursivePayer | Error::NotAllowedToPayFor(_) => true,
+        Error::Signature(_)
+        | Error::RecursivePayer
+        | Error::NotAllowedToPayFor(_)
+        | Error::HcVoteCannotBeProcessed => true,
         Error::MinimumFeeCaseClause(_) | Error::ContractCallContextCase(_) => p >= Protocol::Lima,
         _ => false,
     }

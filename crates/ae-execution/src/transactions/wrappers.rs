@@ -140,7 +140,7 @@ fn payer<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     let Some(Wrapper::PayingFor(payer)) = tx.layer().map(|l| l.wrapper()) else {
         unreachable!()
     };
-    check_wrapper(tx, &env.context)?;
+    check_wrapper(tx, &env.context, config.consensus)?;
     let inner = tx.inner().expect("payer inner");
     if inner
         .layers()
@@ -262,7 +262,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
                 Err(e) => break Err(e),
             },
             Wrapper::GaMeta(meta) => {
-                if let Err(e) = check_wrapper(current, &env.context) {
+                if let Err(e) = check_wrapper(current, &env.context, config.consensus) {
                     break Err(e);
                 }
                 if let Err(e) = budget.authentication::<A, C>(current, &mut env, config.network) {

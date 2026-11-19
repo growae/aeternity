@@ -2,7 +2,7 @@
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use crate::{
     CanonicalTransaction, ChannelTransaction, ContractTransaction, Error, GaAttachTransaction,
-    NameTransaction, OracleTransaction, Spend, TransactionKind, WireTransaction,
+    HcVote, NameTransaction, OracleTransaction, Spend, TransactionKind, WireTransaction,
     ga::{account, binary, int},
     signed,
 };
@@ -11,7 +11,7 @@ use ae_codec::{
     rlp::{DecodeLimits, Rlp},
 };
 use ae_crypto::blake2b_256;
-use ae_protocol::{NetworkProfile, Protocol};
+use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_types::{AccountPublicKey, Hash256, Id, IdTag, Signature, Unsigned};
 
 mod pricing;
@@ -144,6 +144,7 @@ pub enum TransactionLeaf {
     Contract(ContractTransaction),
     GaAttach(GaAttachTransaction),
     Channel(Box<ChannelTransaction>),
+    HcVote(HcVote),
 }
 impl TransactionLeaf {
     pub fn kind(&self) -> TransactionKind {
@@ -153,6 +154,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.operation().kind(),
             Self::Contract(t) => t.operation().kind(),
             Self::GaAttach(_) => TransactionKind::GaAttach,
+            Self::HcVote(_) => TransactionKind::HcVote,
             Self::Channel(t) => t.kind(),
         }
     }
@@ -163,6 +165,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.wire_size(),
             Self::Contract(t) => t.wire_size(),
             Self::GaAttach(t) => t.wire_size(),
+            Self::HcVote(t) => t.wire_size(),
             Self::Channel(t) => t.wire_size(),
         }
     }
@@ -173,6 +176,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.account(),
             Self::Contract(t) => t.signer(),
             Self::GaAttach(t) => t.owner(),
+            Self::HcVote(t) => t.voter(),
             Self::Channel(t) => return t.origin(),
         })
     }
@@ -183,6 +187,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.fee(),
             Self::Contract(t) => t.fee(),
             Self::GaAttach(t) => t.fee(),
+            Self::HcVote(t) => t.fee(),
             Self::Channel(t) => t.fee(),
         }
     }
@@ -193,6 +198,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.nonce(),
             Self::Contract(t) => t.nonce(),
             Self::GaAttach(t) => t.nonce(),
+            Self::HcVote(t) => t.nonce(),
             Self::Channel(t) => t.nonce(),
         }
     }
@@ -203,16 +209,21 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.ttl(),
             Self::Contract(t) => t.ttl(),
             Self::GaAttach(t) => t.ttl(),
+            Self::HcVote(t) => t.ttl(),
             Self::Channel(t) => t.ttl(),
         }
     }
     pub fn valid_at_protocol(&self, p: Protocol) -> Result<bool, Error> {
+        self.valid_at_consensus(p, ConsensusType::Pow)
+    }
+    pub fn valid_at_consensus(&self, p: Protocol, consensus: ConsensusType) -> Result<bool, Error> {
         Ok(match self {
             Self::Spend(_) => true,
             Self::Name(t) => t.valid_at_protocol(p),
             Self::Oracle(t) => t.valid_at_protocol(p),
             Self::Contract(t) => t.valid_at_protocol(p),
             Self::GaAttach(t) => t.valid_at_protocol(p),
+            Self::HcVote(t) => t.valid_at_consensus(consensus),
             Self::Channel(t) => return t.valid_at_protocol(p),
         })
     }
@@ -233,6 +244,14 @@ impl TransactionLeaf {
         .tag;
         let kind = TransactionKind::from_tag(tag).ok_or(Error::NotTransaction)?;
         Ok(match kind {
+            TransactionKind::HcVote => Self::HcVote(HcVote::decode_with_limits(
+                bytes,
+                DecodeLimits {
+                    max_input_bytes: config.limits.max_input_bytes,
+                    max_items: config.limits.max_items,
+                    max_depth: config.limits.max_depth,
+                },
+            )?),
             TransactionKind::Spend => Self::Spend(Spend::decode(bytes)?),
             TransactionKind::NamePreclaim
             | TransactionKind::NameClaim
@@ -275,13 +294,14 @@ impl CanonicalTransaction for TransactionLeaf {
             Self::Oracle(t) => t.encode(),
             Self::Contract(t) => t.encode(),
             Self::GaAttach(t) => t.encode(),
+            Self::HcVote(t) => t.encode(),
             Self::Channel(t) => t.encode(),
         }
     }
 }
 
 // Layers are stored innermost first. Decode, traversal, encoding and Drop never
-// recurse through the Rust stack. Unsupported HC leaves stay explicit.
+// recurse through the Rust stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
     leaf: TransactionLeaf,
@@ -526,6 +546,23 @@ impl<'a> TransactionRef<'a> {
         limits: TransactionLimits,
         config: ae_state::transport::Config<'_>,
     ) -> Result<bool, Error> {
+        self.valid_at_consensus_with_state_config(p, ConsensusType::Pow, limits, config)
+    }
+    pub fn valid_at_consensus(self, p: Protocol, consensus: ConsensusType) -> Result<bool, Error> {
+        self.valid_at_consensus_with_state_config(
+            p,
+            consensus,
+            TransactionLimits::default(),
+            ae_state::transport::Config::default(),
+        )
+    }
+    pub fn valid_at_consensus_with_state_config(
+        self,
+        p: Protocol,
+        consensus: ConsensusType,
+        limits: TransactionLimits,
+        config: ae_state::transport::Config<'_>,
+    ) -> Result<bool, Error> {
         let valid = self.layers.iter().all(|l| match &l.wrapper {
             Wrapper::GaMeta(m) => {
                 p >= Protocol::Fortuna && (m.ttl.is_some() == (p < Protocol::Iris))
@@ -535,7 +572,7 @@ impl<'a> TransactionRef<'a> {
         if valid {
             match self.leaf {
                 TransactionLeaf::Channel(t) => t.valid_at_protocol_with_config(p, limits, config),
-                _ => self.leaf.valid_at_protocol(p),
+                _ => self.leaf.valid_at_consensus(p, consensus),
             }
         } else {
             Ok(false)

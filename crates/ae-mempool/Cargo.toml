@@ -1,0 +1,23 @@
+[package]
+name = "ae-mempool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ae-types.workspace = true
+ae-protocol.workspace = true
+ae-tx.workspace = true
+ae-execution.workspace = true
+ae-crypto.workspace = true
+
+[dev-dependencies]
+num-bigint.workspace = true
+ae-codec.workspace = true
+ae-state.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

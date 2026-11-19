@@ -69,6 +69,7 @@ fn execute_budgets<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clon
         fate: Some(&f),
         aevm: Some(&a),
         channel_limits: budgets.channel,
+        consensus: ae_protocol::ConsensusType::Pow,
         channel_state_atoms: budgets.atoms.then_some(&*NAME_ATOMS),
         signature_limits: budgets.signature,
         oracle_limits: Default::default(),

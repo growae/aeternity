@@ -37,6 +37,7 @@ impl TransactionRef<'_> {
         let base = match self.leaf {
             TransactionLeaf::Contract(t) => t.base_gas(),
             TransactionLeaf::GaAttach(_) => 75_000,
+            TransactionLeaf::HcVote(_) => 0,
             TransactionLeaf::Channel(t) => t.base_gas(protocol),
             _ => 15_000,
         };

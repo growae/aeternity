@@ -63,6 +63,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-mempool"
+version = "0.1.0"
+dependencies = [
+ "ae-codec",
+ "ae-crypto",
+ "ae-execution",
+ "ae-protocol",
+ "ae-state",
+ "ae-tx",
+ "ae-types",
+ "hex",
+ "num-bigint",
+ "serde_json",
+]
+
+[[package]]
 name = "ae-protocol"
 version = "0.1.0"
 dependencies = [

@@ -7,6 +7,14 @@ pub mod contracts;
 pub mod names;
 pub mod oracles;
 
+// The configured consensus family is independent of the fork version or network ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsensusType {
+    #[default]
+    Pow,
+    Pos,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 pub enum Protocol {

@@ -1,7 +1,7 @@
 // aetx/aetx_sign/aec_paying_for_tx/aeprimop, aeternity fa2a6d7.
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use crate::{Context, Origin, contracts, names, oracles};
-use ae_protocol::{NetworkProfile, Protocol};
+use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_state::{Trees, calls::Call};
 use ae_trie::{MemoryStore, NodeWriter};
 use ae_tx::{
@@ -23,6 +23,7 @@ pub use signatures::{
 
 pub struct Config<'a, O = Otp26> {
     pub network: &'a NetworkProfile,
+    pub consensus: ConsensusType,
     pub fate: Option<&'a contracts::fate::Config<'a, O>>,
     pub aevm: Option<&'a contracts::aevm::Config>,
     pub signature_limits: SignatureLimits,
@@ -37,6 +38,7 @@ impl<'a> Config<'a> {
     pub fn primitives(network: &'a NetworkProfile) -> Self {
         Self {
             network,
+            consensus: ConsensusType::Pow,
             fate: None,
             aevm: None,
             signature_limits: SignatureLimits::default(),
@@ -62,6 +64,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     MinimumFeeCaseClause(BigInt),
     ContractCallContextCase(Origin),
     InvalidGas,
+    HcVoteCannotBeProcessed,
     MissingVmConfiguration,
     UnsupportedTransaction(TransactionKind),
 }
@@ -175,7 +178,11 @@ pub fn process_with_signed_source<A: NodeWriter + Clone, C: NodeWriter + Clone, 
     wrappers::process(tx, trees, context, config, source)
 }
 
-fn check_wrapper<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), Error<A, C>> {
+fn check_wrapper<A, C>(
+    tx: TransactionRef<'_>,
+    context: &Context,
+    consensus: ConsensusType,
+) -> Result<(), Error<A, C>> {
     if context.origin == Origin::Contract {
         return Ok(());
     }
@@ -205,7 +212,7 @@ fn check_wrapper<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), 
         return Err(crate::Error::TtlExpired.into());
     }
     if !tx
-        .valid_at_protocol(context.protocol)
+        .valid_at_consensus(context.protocol, consensus)
         .map_err(Error::AuthenticationTransaction)?
     {
         return Err(crate::Error::InvalidAtProtocol.into());
@@ -241,6 +248,15 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             config.oracle_limits,
         )?),
         TransactionLeaf::Contract(_) => None,
+        TransactionLeaf::HcVote(_) => {
+            // aetx checks fee before protocol validity; the transport-only vote
+            // has zero fee gas even when the GA context removes its wire size.
+            return Err(if context.origin == Origin::Contract {
+                Error::HcVoteCannotBeProcessed
+            } else {
+                crate::Error::OracleTransaction(oracles::Failure::TooLowAbsoluteTtl).into()
+            });
+        }
         TransactionLeaf::Channel(t) => {
             if matches!(t.operation(), ae_tx::channels::Operation::Offchain { .. }) {
                 return Err(if context.origin == Origin::Contract {
