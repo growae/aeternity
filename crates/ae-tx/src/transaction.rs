@@ -1,8 +1,8 @@
 // aetx, aega_meta_tx and aec_paying_for_tx, aeternity fa2a6d7.
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use crate::{
-    CanonicalTransaction, ContractTransaction, Error, GaAttachTransaction, NameTransaction,
-    OracleTransaction, Spend, TransactionKind, WireTransaction,
+    CanonicalTransaction, ChannelTransaction, ContractTransaction, Error, GaAttachTransaction,
+    NameTransaction, OracleTransaction, Spend, TransactionKind, WireTransaction,
     ga::{account, binary, int},
     signed,
 };
@@ -143,6 +143,7 @@ pub enum TransactionLeaf {
     Oracle(OracleTransaction),
     Contract(ContractTransaction),
     GaAttach(GaAttachTransaction),
+    Channel(Box<ChannelTransaction>),
 }
 impl TransactionLeaf {
     pub fn kind(&self) -> TransactionKind {
@@ -152,6 +153,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.operation().kind(),
             Self::Contract(t) => t.operation().kind(),
             Self::GaAttach(_) => TransactionKind::GaAttach,
+            Self::Channel(t) => t.kind(),
         }
     }
     pub fn wire_size(&self) -> usize {
@@ -161,16 +163,18 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.wire_size(),
             Self::Contract(t) => t.wire_size(),
             Self::GaAttach(t) => t.wire_size(),
+            Self::Channel(t) => t.wire_size(),
         }
     }
-    pub fn origin(&self) -> AccountPublicKey {
-        match self {
+    pub fn origin(&self) -> Result<AccountPublicKey, Error> {
+        Ok(match self {
             Self::Spend(t) => t.sender(),
             Self::Name(t) => t.account(),
             Self::Oracle(t) => t.account(),
             Self::Contract(t) => t.signer(),
             Self::GaAttach(t) => t.owner(),
-        }
+            Self::Channel(t) => return t.origin(),
+        })
     }
     pub fn fee(&self) -> &Unsigned {
         match self {
@@ -179,6 +183,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.fee(),
             Self::Contract(t) => t.fee(),
             Self::GaAttach(t) => t.fee(),
+            Self::Channel(t) => t.fee(),
         }
     }
     pub fn nonce(&self) -> &Unsigned {
@@ -188,6 +193,7 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.nonce(),
             Self::Contract(t) => t.nonce(),
             Self::GaAttach(t) => t.nonce(),
+            Self::Channel(t) => t.nonce(),
         }
     }
     pub fn ttl(&self) -> &Unsigned {
@@ -197,21 +203,34 @@ impl TransactionLeaf {
             Self::Oracle(t) => t.ttl(),
             Self::Contract(t) => t.ttl(),
             Self::GaAttach(t) => t.ttl(),
+            Self::Channel(t) => t.ttl(),
         }
     }
-    pub fn valid_at_protocol(&self, p: Protocol) -> bool {
-        match self {
+    pub fn valid_at_protocol(&self, p: Protocol) -> Result<bool, Error> {
+        Ok(match self {
             Self::Spend(_) => true,
             Self::Name(t) => t.valid_at_protocol(p),
             Self::Oracle(t) => t.valid_at_protocol(p),
             Self::Contract(t) => t.valid_at_protocol(p),
             Self::GaAttach(t) => t.valid_at_protocol(p),
-        }
+            Self::Channel(t) => return t.valid_at_protocol(p),
+        })
     }
 }
-impl CanonicalTransaction for TransactionLeaf {
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let tag = object::decode_envelope(bytes)?.tag;
+impl TransactionLeaf {
+    pub fn decode_with_state_config(
+        bytes: &[u8],
+        config: ae_state::transport::Config<'_>,
+    ) -> Result<Self, Error> {
+        let tag = object::decode_envelope_with_limits(
+            bytes,
+            ae_codec::rlp::DecodeLimits {
+                max_input_bytes: config.limits.max_input_bytes,
+                max_items: config.limits.max_items,
+                max_depth: config.limits.max_depth,
+            },
+        )?
+        .tag;
         let kind = TransactionKind::from_tag(tag).ok_or(Error::NotTransaction)?;
         Ok(match kind {
             TransactionKind::Spend => Self::Spend(Spend::decode(bytes)?),
@@ -228,8 +247,26 @@ impl CanonicalTransaction for TransactionLeaf {
                 Self::Contract(ContractTransaction::decode(bytes)?)
             }
             TransactionKind::GaAttach => Self::GaAttach(GaAttachTransaction::decode(bytes)?),
+            TransactionKind::ChannelCreate
+            | TransactionKind::ChannelDeposit
+            | TransactionKind::ChannelWithdraw
+            | TransactionKind::ChannelCloseMutual
+            | TransactionKind::ChannelCloseSolo
+            | TransactionKind::ChannelSlash
+            | TransactionKind::ChannelSettle
+            | TransactionKind::ChannelSnapshotSolo
+            | TransactionKind::ChannelSetDelegates
+            | TransactionKind::ChannelForceProgress
+            | TransactionKind::ChannelOffchain => Self::Channel(Box::new(
+                ChannelTransaction::decode_with_config(bytes, config)?,
+            )),
             _ => return Err(Error::UnsupportedTransaction(kind)),
         })
+    }
+}
+impl CanonicalTransaction for TransactionLeaf {
+    fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        Self::decode_with_state_config(bytes, ae_state::transport::Config::default())
     }
     fn encode(&self) -> Vec<u8> {
         match self {
@@ -238,12 +275,13 @@ impl CanonicalTransaction for TransactionLeaf {
             Self::Oracle(t) => t.encode(),
             Self::Contract(t) => t.encode(),
             Self::GaAttach(t) => t.encode(),
+            Self::Channel(t) => t.encode(),
         }
     }
 }
 
 // Layers are stored innermost first. Decode, traversal, encoding and Drop never
-// recurse through the Rust stack. Unsupported channel/HC leaves stay explicit.
+// recurse through the Rust stack. Unsupported HC leaves stay explicit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
     leaf: TransactionLeaf,
@@ -310,12 +348,27 @@ impl Transaction {
                 if payer {
                     return Err(Error::RecursivePayer);
                 }
+                if self.leaf.kind() == TransactionKind::ChannelOffchain {
+                    return Err(Error::NotAllowedToPayFor(TransactionKind::ChannelOffchain));
+                }
                 payer = true;
             }
         }
         Ok(())
     }
     pub fn decode_with_limits(bytes: &[u8], limits: TransactionLimits) -> Result<Self, Error> {
+        let mut config = ae_state::transport::Config::default();
+        config.limits.max_input_bytes = limits.rlp.max_input_bytes;
+        config.limits.max_items = limits.rlp.max_items;
+        config.limits.max_depth = limits.rlp.max_depth;
+        config.limits.max_work_bytes = limits.max_total_bytes;
+        Self::decode_with_state_config(bytes, limits, config)
+    }
+    pub fn decode_with_state_config(
+        bytes: &[u8],
+        limits: TransactionLimits,
+        config: ae_state::transport::Config<'_>,
+    ) -> Result<Self, Error> {
         let mut current = bytes;
         let mut layers = Vec::new();
         let mut remaining = limits.max_total_bytes;
@@ -326,7 +379,7 @@ impl Transaction {
             let e = object::decode_envelope_with_limits(current, limits.rlp)?;
             let kind = TransactionKind::from_tag(e.tag).ok_or(Error::NotTransaction)?;
             if !matches!(kind, TransactionKind::GaMeta | TransactionKind::PayingFor) {
-                let leaf = TransactionLeaf::decode(current)?;
+                let leaf = TransactionLeaf::decode_with_state_config(current, config)?;
                 layers.reverse();
                 let tx = Self { leaf, layers };
                 tx.validate_payer_nesting()?;
@@ -417,12 +470,12 @@ impl<'a> TransactionRef<'a> {
         self.layer()
             .map_or_else(|| self.leaf.wire_size(), |l| l.wire_size)
     }
-    pub fn origin(self) -> AccountPublicKey {
-        match self.layer().map(|l| &l.wrapper) {
+    pub fn origin(self) -> Result<AccountPublicKey, Error> {
+        Ok(match self.layer().map(|l| &l.wrapper) {
             Some(Wrapper::GaMeta(m)) => m.account,
             Some(Wrapper::PayingFor(p)) => p.payer,
-            None => self.leaf.origin(),
-        }
+            None => return self.leaf.origin(),
+        })
     }
     pub fn nonce(self) -> Unsigned {
         match self.layer().map(|l| &l.wrapper) {
@@ -455,17 +508,38 @@ impl<'a> TransactionRef<'a> {
             None => match self.leaf {
                 TransactionLeaf::Contract(t) => Some(t.gas_price()),
                 TransactionLeaf::GaAttach(t) => Some(t.gas_price()),
+                TransactionLeaf::Channel(t) => t.gas_price(),
                 _ => None,
             },
         }
     }
-    pub fn valid_at_protocol(self, p: Protocol) -> bool {
-        self.layers.iter().all(|l| match &l.wrapper {
+    pub fn valid_at_protocol(self, p: Protocol) -> Result<bool, Error> {
+        self.valid_at_protocol_with_state_config(
+            p,
+            TransactionLimits::default(),
+            ae_state::transport::Config::default(),
+        )
+    }
+    pub fn valid_at_protocol_with_state_config(
+        self,
+        p: Protocol,
+        limits: TransactionLimits,
+        config: ae_state::transport::Config<'_>,
+    ) -> Result<bool, Error> {
+        let valid = self.layers.iter().all(|l| match &l.wrapper {
             Wrapper::GaMeta(m) => {
                 p >= Protocol::Fortuna && (m.ttl.is_some() == (p < Protocol::Iris))
             }
             Wrapper::PayingFor(_) => p >= Protocol::Iris,
-        }) && self.leaf.valid_at_protocol(p)
+        });
+        if valid {
+            match self.leaf {
+                TransactionLeaf::Channel(t) => t.valid_at_protocol_with_config(p, limits, config),
+                _ => self.leaf.valid_at_protocol(p),
+            }
+        } else {
+            Ok(false)
+        }
     }
     pub fn encode(self) -> Vec<u8> {
         let mut bytes = self.leaf.encode();

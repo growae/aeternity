@@ -4,6 +4,7 @@ use ae_codec::object::{self, ObjectError, Value};
 use ae_types::TypeError;
 use std::fmt;
 
+pub mod channels;
 mod contracts;
 mod ga;
 mod names;
@@ -12,6 +13,7 @@ mod schema;
 mod signed;
 mod spend;
 mod transaction;
+pub use channels::ChannelTransaction;
 pub use contracts::{ContractOperation, ContractTransaction};
 pub use ga::GaAttachTransaction;
 pub use names::{NameOperation, NameTransaction};
@@ -32,11 +34,15 @@ pub enum Error {
     UnsupportedVersion,
     WrongTransactionKind,
     InvalidIdType,
+    InvalidStateHash,
+    OriginUnavailable,
+    StateTransport(ae_state::transport::Error),
     InvalidPointer,
     InvalidSerializationVersion,
     InvalidTtlType,
     SignatureVerificationFailed,
     RecursivePayer,
+    NotAllowedToPayFor(TransactionKind),
     UnsupportedTransaction(TransactionKind),
     ResourceLimit,
 }
@@ -136,4 +142,23 @@ impl WireTransaction {
 pub trait CanonicalTransaction: Sized {
     fn decode(bytes: &[u8]) -> Result<Self, Error>;
     fn encode(&self) -> Vec<u8>;
+}
+
+impl From<ae_state::transport::Error> for Error {
+    fn from(e: ae_state::transport::Error) -> Self {
+        match e {
+            ae_state::transport::Error::ResourceLimit => Self::ResourceLimit,
+            e => Self::StateTransport(e),
+        }
+    }
+}
+impl Error {
+    pub fn is_operational(&self) -> bool {
+        matches!(
+            self,
+            Self::ResourceLimit
+                | Self::Object(ObjectError::Rlp(ae_codec::rlp::DecodeError::ResourceLimit))
+                | Self::StateTransport(ae_state::transport::Error::MissingAtomProfile(_))
+        )
+    }
 }

@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 mod failures;
 mod signatures;
 mod wrappers;
-pub use signatures::{SignatureError, SignatureLimits, verify, verify_with_context};
+pub use signatures::{
+    SignatureError, SignatureLimits, signer_keys, verify, verify_with_authenticated_ids,
+    verify_with_channel_state, verify_with_context, verify_with_trees,
+};
 
 pub struct Config<'a, O = Otp26> {
     pub network: &'a NetworkProfile,
@@ -50,6 +53,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     Signature(SignatureError),
     AuthenticationTransaction(ae_tx::Error),
     RecursivePayer,
+    NotAllowedToPayFor(TransactionKind),
     MinimumFeeCaseClause(BigInt),
     ContractCallContextCase(Origin),
     InvalidGas,
@@ -99,13 +103,14 @@ pub fn execute_signed<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
-    verify(
+    verify_with_channel_state(
         signed.transaction().view(),
         signed.signatures(),
         config.network,
         context.protocol,
         context.payer.is_some(),
         config.signature_limits,
+        &trees.channels,
     )?;
     let mut receipt = process(signed.transaction(), trees, context, config)?;
     receipt.transaction_hash = Some(signed.hash());
@@ -119,12 +124,13 @@ pub fn execute_signed_with_context<A: NodeWriter + Clone, C: NodeWriter + Clone,
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
-    verify_with_context(
+    verify_with_trees(
         signed.transaction().view(),
         signed.signatures(),
         config.network,
         context,
         config.signature_limits,
+        &trees.channels,
     )?;
     let mut receipt = process(signed.transaction(), trees, context, config)?;
     receipt.transaction_hash = Some(signed.hash());
@@ -172,7 +178,10 @@ fn check_wrapper<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), 
     if tx.ttl().is_some_and(|ttl| ttl < &context.height.into()) {
         return Err(crate::Error::TtlExpired.into());
     }
-    if !tx.valid_at_protocol(context.protocol) {
+    if !tx
+        .valid_at_protocol(context.protocol)
+        .map_err(Error::AuthenticationTransaction)?
+    {
         return Err(crate::Error::InvalidAtProtocol.into());
     }
     Ok(())
@@ -205,6 +214,7 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             config.oracle_limits,
         )?),
         TransactionLeaf::Contract(_) => None,
+        TransactionLeaf::Channel(t) => return Err(Error::UnsupportedTransaction(t.kind())),
         TransactionLeaf::GaAttach(t) => {
             let r = if t.version().abi == 1 {
                 contracts::aevm::process_attach(

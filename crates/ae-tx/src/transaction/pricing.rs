@@ -37,10 +37,15 @@ impl TransactionRef<'_> {
         let base = match self.leaf {
             TransactionLeaf::Contract(t) => t.base_gas(),
             TransactionLeaf::GaAttach(_) => 75_000,
+            TransactionLeaf::Channel(t) => t.base_gas(protocol),
             _ => 15_000,
         };
         let size = self.leaf.wire_size();
-        let base_and_size = BigInt::from(base) + size_gas(size);
+        let base_and_size = if base == 0 {
+            BigInt::ZERO
+        } else {
+            BigInt::from(base) + size_gas(size)
+        };
         let (gas_limit, fee_gas, gas_price) = match self.leaf {
             TransactionLeaf::Contract(t) => (
                 &base_and_size + number(t.gas()),
@@ -51,6 +56,11 @@ impl TransactionRef<'_> {
                 &base_and_size + number(t.gas()),
                 base_and_size.clone(),
                 Some(t.gas_price()),
+            ),
+            TransactionLeaf::Channel(t) => (
+                &base_and_size + number(&t.gas()),
+                base_and_size.clone(),
+                t.gas_price(),
             ),
             TransactionLeaf::Oracle(t) => {
                 let gas = t

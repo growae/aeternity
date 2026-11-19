@@ -80,7 +80,7 @@ fn check(tx: TransactionRef<'_>, row: &J) {
         tx.ttl().map(uint).unwrap_or(json!(["atom", "max_ttl"])),
         row["ttl"]
     );
-    assert_eq!(tx.origin().0.to_vec(), bytes(&row["origin"]));
+    assert_eq!(tx.origin().unwrap().0.to_vec(), bytes(&row["origin"]));
     assert_eq!(
         tx.gas_price()
             .map(uint)
@@ -90,7 +90,7 @@ fn check(tx: TransactionRef<'_>, row: &J) {
     for p in row["prices"].as_array().unwrap() {
         let protocol = Protocol::try_from(p["protocol"].as_u64().unwrap() as u32).unwrap();
         assert_eq!(
-            tx.valid_at_protocol(protocol),
+            tx.valid_at_protocol(protocol).unwrap(),
             p["valid"].as_bool().unwrap()
         );
         let costs = tx.pricing(&50.into(), protocol);

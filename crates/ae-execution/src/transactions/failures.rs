@@ -21,8 +21,8 @@ pub(super) fn inner_failure<A, C>(e: &Error<A, C>, p: Protocol) -> bool {
                 _ => false,
             }
         }
-        Error::Signature(SignatureError::ResourceLimit) => false,
-        Error::Signature(_) | Error::RecursivePayer => true,
+        Error::Signature(e) if e.is_operational() => false,
+        Error::Signature(_) | Error::RecursivePayer | Error::NotAllowedToPayFor(_) => true,
         Error::MinimumFeeCaseClause(_) | Error::ContractCallContextCase(_) => p >= Protocol::Lima,
         _ => false,
     }

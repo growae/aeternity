@@ -32,6 +32,7 @@ pub mod fate;
 pub enum Error {
     Primitive(crate::Error),
     State(ae_state::contracts::Error),
+    ChannelState(ae_state::channels::Error),
     Host(ae_vm_fate::machine::program::remote::HostFailure<fate_chain::Error>),
     Vm(ae_vm_fate::machine::Error<fate_chain::Error>),
     Exception(Exception),

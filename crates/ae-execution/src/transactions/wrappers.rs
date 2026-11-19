@@ -93,14 +93,17 @@ fn authenticate<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     let Some(Wrapper::GaMeta(meta)) = tx.layer().map(|l| l.wrapper()) else {
         unreachable!()
     };
+    let channels = trees.channels.clone();
     let relevant = || match signatures::relevant(
         tx.inner().expect("meta inner"),
         meta.account,
         config.network,
         config.signature_limits,
+        &channels,
     ) {
         Ok(true) => Ok(()),
         Ok(false) => Err(contracts::Error::Rejected("non_relevant_signature")),
+        Err(SignatureError::Channel(e)) => Err(contracts::Error::ChannelState(e)),
         Err(_) => Err(contracts::Error::ResourceLimit),
     };
     if meta.abi_version == 1.into() {
@@ -146,6 +149,9 @@ fn payer<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     {
         return Err(Error::RecursivePayer);
     }
+    if inner.leaf().kind() == TransactionKind::ChannelOffchain {
+        return Err(Error::NotAllowedToPayFor(TransactionKind::ChannelOffchain));
+    }
     let mut changes = BTreeMap::new();
     crate::prepare_sender(
         &next.accounts,
@@ -160,12 +166,14 @@ fn payer<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .apply(&changes.into_values().collect::<Vec<_>>())
         .map_err(crate::Error::from)?;
     env.context.payer = Some(payer.payer);
-    verify_with_context(
+    verify_with_authenticated_ids(
         inner,
         tx.layer().unwrap().inner_signatures(),
         config.network,
         &env.context,
+        &env.ids,
         config.signature_limits,
+        &next.channels,
     )?;
     Ok(Frame::Payer {
         gas: BigInt::from(3_000) + size_gas(tx.wire_size()) - size_gas(inner.wire_size()),
@@ -267,12 +275,14 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
                 let origin = env.context.origin;
                 env.add(meta);
                 let inner = current.inner().expect("meta inner");
-                let verified = verify_with_context(
+                let verified = verify_with_authenticated_ids(
                     inner,
                     layer.inner_signatures(),
                     config.network,
                     &env.context,
+                    &env.ids,
                     config.signature_limits,
+                    &next.channels,
                 );
                 let failure_env = if verified.is_err() {
                     before
