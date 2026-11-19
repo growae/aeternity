@@ -22,6 +22,7 @@ pub mod fate_compat;
 pub mod fate_store;
 pub mod names;
 pub mod oracles;
+pub mod transactions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {

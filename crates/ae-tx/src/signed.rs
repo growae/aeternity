@@ -124,22 +124,14 @@ impl<T: CanonicalTransaction> SignedTransaction<T> {
         if signers.is_empty() {
             return Ok(());
         }
-        let (plain, hashed) = self.payloads(network, protocol, sponsored_inner);
-        let mut remaining = self.signatures.clone();
-        for signer in signers {
-            let Some(index) = remaining.iter().position(|s| {
-                verify_ed25519(signer, &plain, s)
-                    || hashed
-                        .as_ref()
-                        .is_some_and(|p| verify_ed25519(signer, p, s))
-            }) else {
-                return Err(Error::SignatureVerificationFailed);
-            };
-            remaining.remove(index);
-            // The Erlang search accumulates earlier failures in reverse order.
-            remaining[..index].reverse();
-        }
-        Ok(())
+        verify_signatures(
+            &self.transaction.encode(),
+            &self.signatures,
+            signers,
+            network,
+            protocol,
+            sponsored_inner,
+        )
     }
     pub fn verify_one(
         &self,
@@ -165,18 +157,63 @@ impl<T: CanonicalTransaction> SignedTransaction<T> {
         protocol: Protocol,
         sponsored_inner: bool,
     ) -> (Vec<u8>, Option<Vec<u8>>) {
-        let tx_bytes = self.transaction.encode();
-        let prefix = network.signing_prefix(sponsored_inner);
-        let mut plain = prefix.clone();
-        plain.extend_from_slice(&tx_bytes);
-        let hashed = (protocol >= Protocol::Lima).then(|| {
-            let mut payload = prefix;
-            payload.extend_from_slice(blake2b_256(&tx_bytes).as_ref());
-            payload
-        });
-        (plain, hashed)
+        payloads(
+            &self.transaction.encode(),
+            network,
+            protocol,
+            sponsored_inner,
+        )
     }
 }
+// `bytes` must be the callback-normalized unsigned transaction encoding.
+pub fn verify_signatures(
+    bytes: &[u8],
+    signatures: &[Signature],
+    signers: &[AccountPublicKey],
+    network: &NetworkProfile,
+    protocol: Protocol,
+    sponsored_inner: bool,
+) -> Result<(), Error> {
+    if signers.len() != signatures.len() {
+        return Err(Error::SignatureVerificationFailed);
+    }
+    if signers.is_empty() {
+        return Ok(());
+    }
+    let (plain, hashed) = payloads(bytes, network, protocol, sponsored_inner);
+    let mut remaining = signatures.to_vec();
+    for signer in signers {
+        let Some(index) = remaining.iter().position(|s| {
+            verify_ed25519(signer, &plain, s)
+                || hashed
+                    .as_ref()
+                    .is_some_and(|p| verify_ed25519(signer, p, s))
+        }) else {
+            return Err(Error::SignatureVerificationFailed);
+        };
+        remaining.remove(index);
+        // The Erlang search accumulates earlier failures in reverse order.
+        remaining[..index].reverse();
+    }
+    Ok(())
+}
+fn payloads(
+    bytes: &[u8],
+    network: &NetworkProfile,
+    protocol: Protocol,
+    sponsored_inner: bool,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    let prefix = network.signing_prefix(sponsored_inner);
+    let mut plain = prefix.clone();
+    plain.extend_from_slice(bytes);
+    let hashed = (protocol >= Protocol::Lima).then(|| {
+        let mut payload = prefix;
+        payload.extend_from_slice(blake2b_256(bytes).as_ref());
+        payload
+    });
+    (plain, hashed)
+}
+
 impl SignedTransaction<Spend> {
     pub fn verify(
         &self,

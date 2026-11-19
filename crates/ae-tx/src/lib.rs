@@ -17,7 +17,7 @@ pub use ga::GaAttachTransaction;
 pub use names::{NameOperation, NameTransaction};
 pub use oracles::{OracleOperation, OracleTransaction};
 pub use schema::TransactionKind;
-pub use signed::SignedTransaction;
+pub use signed::{SignedTransaction, verify_signatures};
 pub use spend::Spend;
 pub use transaction::{
     GaMeta, Layer, PayingFor, Pricing, Transaction, TransactionLeaf, TransactionLimits,
