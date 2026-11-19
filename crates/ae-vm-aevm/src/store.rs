@@ -48,7 +48,7 @@ fn pop_type(v: &mut Vec<Value>) -> Result<TypeRef, Error> {
         _ => Err(Error::InvalidValue),
     }
 }
-fn parse_type(
+pub(crate) fn parse_type(
     bytes: &[u8],
     ptr: BigUint,
     parent: Option<BigUint>,

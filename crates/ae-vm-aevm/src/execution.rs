@@ -87,6 +87,7 @@ pub struct State {
     pub version: Version,
     pub protocol: u32,
     pub call_stack: Vec<BigInt>,
+    pub auth_tx_hash: Option<Word>,
     pub solidity_storage: BTreeMap<BigUint, BigUint>,
     pub code: Vec<u8>,
     pub cp: usize,
@@ -117,6 +118,7 @@ impl State {
             version,
             protocol: 4,
             call_stack: Vec::new(),
+            auth_tx_hash: None,
             solidity_storage: BTreeMap::new(),
             code,
             cp: 0,
@@ -163,6 +165,7 @@ pub enum Stop {
     InvalidInitialState,
     UnimplementedInstruction(u8),
     UnimplementedPrimitiveEntry,
+    UnimplementedPrimop(Word),
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -425,6 +428,7 @@ pub(crate) fn snapshot(
         version: state.version,
         protocol: state.protocol,
         call_stack: state.call_stack.clone(),
+        auth_tx_hash: state.auth_tx_hash,
         solidity_storage: state.solidity_storage.clone(),
         code: state.code.clone(),
         cp: state.cp,

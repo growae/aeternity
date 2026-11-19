@@ -17,16 +17,31 @@ use std::{collections::BTreeMap, convert::Infallible};
 pub enum Native {
     MissingCallDataType,
     ReentrantCall,
+    MapNotFound,
     BadCallData,
     Heap(HeapError),
     Gas(gas::Error),
     OutOfGas,
+    BadMatchBinary(Vec<u8>),
+    BadPrimopData {
+        reason: crate::heap::Error,
+        data: Vec<u8>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault<E = Infallible> {
     Stop(Stop),
     Native(Native),
     Host(E),
+}
+impl Fault {
+    pub(crate) fn widen<E>(self) -> Fault<E> {
+        match self {
+            Self::Stop(e) => Fault::Stop(e),
+            Self::Native(e) => Fault::Native(e),
+            Self::Host(e) => match e {},
+        }
+    }
 }
 impl<E> From<Stop> for Fault<E> {
     fn from(e: Stop) -> Self {
@@ -60,7 +75,11 @@ pub trait StoreHost {
     type Error;
     fn set_store(&self, store: Store, chain: &Self::Chain) -> Result<Self::Chain, Self::Error>;
 }
-fn write_heap<E>(s: &mut State, heap: Heap, b: &mut Budget) -> Result<BigUint, Fault<E>> {
+pub(crate) fn write_heap<E>(
+    s: &mut State,
+    heap: Heap,
+    b: &mut Budget,
+) -> Result<BigUint, Fault<E>> {
     b.memory(&s.memory, &heap.offset, heap.memory.len())?;
     b.work(heap.memory.len().div_ceil(32))?;
     maps::reserve_maps(&heap.maps, b)?;

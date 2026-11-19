@@ -157,19 +157,41 @@ pub fn heap_to_heap(
     limits: Limits,
 ) -> Result<Heap, Error> {
     let mut budget = Budget::new(limits);
-    check_type(ty, &mut budget)?;
-    convert::run(
+    copy_binary(
         ty,
         heap.pointer.clone(),
-        convert::Source::binary(&heap.memory, 0, heap.offset.clone()),
+        &heap.memory,
         &heap.maps,
+        heap.offset.clone(),
+        offset,
+        maximum,
+        &mut budget,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn copy_binary(
+    ty: &TypeRef,
+    pointer: BigUint,
+    memory: &[u8],
+    maps: &Maps,
+    source_offset: BigUint,
+    offset: BigUint,
+    maximum: Option<BigUint>,
+    budget: &mut Budget,
+) -> Result<Heap, Error> {
+    check_type(ty, budget)?;
+    convert::run(
+        ty,
+        pointer,
+        convert::Source::binary(memory, 0, source_offset),
+        maps,
         &Store::new(),
         Format::Heap,
         Format::Heap,
         MapSerialization::Corrected,
         offset,
         maximum,
-        &mut budget,
+        budget,
     )
 }
 pub fn heap_to_binary(

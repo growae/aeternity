@@ -158,7 +158,7 @@ impl Maps {
     pub fn size(&self, id: &BigUint) -> Result<&BigInt, Error> {
         Ok(&self.get_map(id)?.size)
     }
-    fn get_inner<'a>(
+    pub(crate) fn get_inner<'a>(
         &'a self,
         id: &BigUint,
         key: &[u8],
@@ -203,10 +203,17 @@ impl Maps {
         value_type: TypeRef,
         limits: Limits,
     ) -> Result<(BigUint, Self), Error> {
-        let mut b = Budget::new(limits);
-        reserve_maps(self, &mut b)?;
-        runtime_heap::check_type(&key_type, &mut b)?;
-        runtime_heap::check_type(&value_type, &mut b)?;
+        self.empty_inner(key_type, value_type, &mut Budget::new(limits))
+    }
+    pub(crate) fn empty_inner(
+        &self,
+        key_type: TypeRef,
+        value_type: TypeRef,
+        b: &mut Budget,
+    ) -> Result<(BigUint, Self), Error> {
+        reserve_maps(self, b)?;
+        runtime_heap::check_type(&key_type, b)?;
+        runtime_heap::check_type(&value_type, b)?;
         let mut next = self.clone();
         let id = next.next_id.clone();
         next.next_id += 1u8;
@@ -230,11 +237,20 @@ impl Maps {
         store: &Store,
         limits: Limits,
     ) -> Result<(BigUint, Self), Error> {
-        let mut b = Budget::new(limits);
-        reserve_maps(self, &mut b)?;
+        self.update_inner(id, key, value, store, &mut Budget::new(limits))
+    }
+    pub(crate) fn update_inner(
+        &self,
+        id: &BigUint,
+        key: Bytes,
+        value: Option<Bytes>,
+        store: &Store,
+        b: &mut Budget,
+    ) -> Result<(BigUint, Self), Error> {
+        reserve_maps(self, b)?;
         b.bytes(key.len())?;
         b.bytes(value.as_ref().map_or(0, |v| v.len()))?;
-        let old = self.get_inner(id, &key, store, &mut b)?.is_some();
+        let old = self.get_inner(id, &key, store, b)?.is_some();
         let mut map = self.get_map(id)?.clone();
         map.size += i32::from(value.is_some()) - i32::from(old);
         let mut data = match map.data {
