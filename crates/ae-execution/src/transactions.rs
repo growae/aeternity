@@ -49,6 +49,7 @@ impl<'a> Config<'a> {
 pub enum Error<A = MemoryStore, C = MemoryStore> {
     Primitive(crate::Error),
     Contract(Box<contracts::Error>),
+    Channel(Box<crate::channels::Error>),
     Aevm(Box<contracts::aevm::Error<A, C>>),
     Signature(SignatureError),
     AuthenticationTransaction(ae_tx::Error),
@@ -74,6 +75,11 @@ impl<A, C> From<SignatureError> for Error<A, C> {
 pub enum Event {
     Primitive(crate::Event),
     Contract(contracts::Event),
+    Channel {
+        channel: [u8; 32],
+        transaction_hash: Hash256,
+        transaction_type: TransactionKind,
+    },
 }
 #[derive(Debug, Clone)]
 pub struct Receipt {
@@ -112,7 +118,8 @@ pub fn execute_signed<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         config.signature_limits,
         &trees.channels,
     )?;
-    let mut receipt = process(signed.transaction(), trees, context, config)?;
+    let mut receipt =
+        process_with_signed_source(signed.transaction(), trees, context, config, Some(signed))?;
     receipt.transaction_hash = Some(signed.hash());
     Ok(receipt)
 }
@@ -132,7 +139,8 @@ pub fn execute_signed_with_context<A: NodeWriter + Clone, C: NodeWriter + Clone,
         config.signature_limits,
         &trees.channels,
     )?;
-    let mut receipt = process(signed.transaction(), trees, context, config)?;
+    let mut receipt =
+        process_with_signed_source(signed.transaction(), trees, context, config, Some(signed))?;
     receipt.transaction_hash = Some(signed.hash());
     Ok(receipt)
 }
@@ -146,7 +154,16 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
-    wrappers::process(tx, trees, context, config)
+    process_with_signed_source(tx, trees, context, config, None)
+}
+pub fn process_with_signed_source<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    tx: &Transaction,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config<'_, O>,
+    source: Option<&SignedTransaction<Transaction>>,
+) -> Result<Receipt, Error<A, C>> {
+    wrappers::process(tx, trees, context, config, source)
 }
 
 fn check_wrapper<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), Error<A, C>> {
@@ -191,6 +208,7 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     trees: &mut Trees<A, C>,
     context: &Context,
     config: &Config<'_, O>,
+    source: Option<&SignedTransaction<Transaction>>,
 ) -> Result<Receipt, Error<A, C>> {
     let primitive = match leaf {
         TransactionLeaf::Spend(t) => Some(crate::process_spend(
@@ -214,7 +232,19 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             config.oracle_limits,
         )?),
         TransactionLeaf::Contract(_) => None,
-        TransactionLeaf::Channel(t) => return Err(Error::UnsupportedTransaction(t.kind())),
+        TransactionLeaf::Channel(t) => {
+            return crate::channels::process(
+                t,
+                trees,
+                context,
+                source,
+                config.signature_limits.max_encoded_bytes,
+            )
+            .map_err(|e| match e {
+                crate::channels::Error::Unsupported(kind) => Error::UnsupportedTransaction(kind),
+                e => Error::Channel(Box::new(e)),
+            });
+        }
         TransactionLeaf::GaAttach(t) => {
             let r = if t.version().abi == 1 {
                 contracts::aevm::process_attach(

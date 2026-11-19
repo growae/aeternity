@@ -237,6 +237,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     trees: &mut Trees<A, C>,
     context: &Context,
     config: &Config<'_, O>,
+    source: Option<&SignedTransaction<Transaction>>,
 ) -> Result<Receipt, Error<A, C>> {
     if tx.layers().len() > config.signature_limits.max_layers {
         return Err(SignatureError::ResourceLimit.into());
@@ -253,7 +254,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     let mut stack = Vec::new();
     let mut result = loop {
         let Some(layer) = current.layer() else {
-            break process_leaf(current.leaf(), &mut next, &env.context, config);
+            break process_leaf(current.leaf(), &mut next, &env.context, config, source);
         };
         match layer.wrapper() {
             Wrapper::PayingFor(_) => match payer(current, &mut next, &mut env, config) {

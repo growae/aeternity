@@ -6,6 +6,12 @@ pub(super) fn inner_failure<A, C>(e: &Error<A, C>, p: Protocol) -> bool {
     match e {
         Error::Primitive(e) => primitive(e, p),
         Error::Contract(e) => contract(e, p),
+        Error::Channel(e) => match e.as_ref() {
+            crate::channels::Error::Primitive(e) => primitive(e, p),
+            crate::channels::Error::Rejected(_) => true,
+            crate::channels::Error::Native(_) => p >= Protocol::Lima,
+            _ => false,
+        },
         Error::Aevm(e) => {
             use ae_vm_aevm::{outer_call::Fault, runtime::Fault as Runtime};
             match e.as_ref() {

@@ -16,6 +16,7 @@ use std::{
 
 pub mod aevm_chain;
 pub mod chain_history;
+pub mod channels;
 pub mod contracts;
 pub mod fate_chain;
 pub mod fate_compat;
