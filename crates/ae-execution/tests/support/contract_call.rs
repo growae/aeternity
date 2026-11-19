@@ -152,6 +152,13 @@ pub(super) fn failure(e: &contracts::Error) -> J {
         contracts::Error::Primitive(P::ReferenceException { class, reason }) => {
             return json!({"kind":"exception","class":class,"reason":reason});
         }
+        contracts::Error::NativeException(exception) => {
+            let class = match exception.class {
+                ae_vm_fate::native::Class::Error => "error",
+                ae_vm_fate::native::Class::Exit => "exit",
+            };
+            return json!({"kind":"exception","class":class,"reason":exception.reason.category().unwrap()});
+        }
         contracts::Error::Exception(Exception::Native(reason)) => {
             return json!({"kind":"exception","class":"error","reason":reason});
         }

@@ -29,6 +29,7 @@ pub enum Error {
     Host(ae_vm_fate::machine::program::remote::HostFailure<fate_chain::Error>),
     Vm(ae_vm_fate::machine::Error<fate_chain::Error>),
     Exception(Exception),
+    NativeException(Box<ae_vm_fate::native::Exception>),
     Rejected(&'static str),
     ResourceLimit,
     UnsupportedVm(u16),

@@ -1,6 +1,13 @@
 // aeb_fate_code.erl, aebytecode 009e036.
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
-use crate::{Error, Limits, encoding, opcodes::Opcode, types::Type, value::Value};
+use crate::{
+    Error, Limits, encoding,
+    maps::{MapOrder, Traversal},
+    native::{self, Term as NativeTerm},
+    opcodes::Opcode,
+    types::Type,
+    value::Value,
+};
 use ae_codec::rlp::{self, Rlp};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -33,6 +40,7 @@ impl From<Error> for CodeError {
         Self::Data(e)
     }
 }
+pub type NativeFailure = native::Failure<CodeError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attribute {
     Payable,
@@ -144,7 +152,39 @@ impl Code {
     }
     pub fn encode(&self, limits: Limits) -> Result<Vec<u8>, CodeError> {
         self.validate()?;
+        self.encode_inner(&mut Meter::new(limits))
+    }
+    // Native preparation re-encodes values admitted by the bytecode decoder.
+    pub fn encode_native(
+        &self,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Vec<u8>, NativeFailure> {
+        self.encode_native_bounded(order, limits)
+            .map(|(bytes, _)| bytes)
+    }
+    pub fn encode_native_bounded(
+        &self,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<(Vec<u8>, Limits), NativeFailure> {
         let mut meter = Meter::new(limits);
+        let result = self
+            .validate_native(order, &mut meter)
+            .and_then(|_| self.encode_inner(&mut meter));
+        result
+            .map(|bytes| {
+                let remaining = Limits {
+                    max_nodes: meter.remaining(),
+                    max_bytes: limits.max_bytes - bytes.len(),
+                    ..limits
+                };
+                (bytes, remaining)
+            })
+            .map_err(|e| meter.failure(e))
+    }
+    fn encode_inner(&self, meter: &mut Meter) -> Result<Vec<u8>, CodeError> {
+        let limits = meter.limits;
         let mut functions = vec![];
         for (id, f) in &self.functions {
             meter.nodes(1)?;
@@ -216,39 +256,166 @@ impl Code {
     }
     // Carry shared invocation work/byte budgets across code and calldata.
     pub fn decode_bounded(bytes: &[u8], limits: Limits) -> Result<(Self, Limits), CodeError> {
-        if bytes.len() > limits.max_bytes {
+        Self::decode_using(bytes, limits, |code, _| code.validate()).map_err(|e| e.error)
+    }
+    pub fn decode_native_bounded(
+        bytes: &[u8],
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<(Self, Limits), NativeFailure> {
+        Self::decode_using(bytes, limits, |code, meter| {
+            code.validate_native(order, meter)
+        })
+    }
+    fn decode_using(
+        bytes: &[u8],
+        limits: Limits,
+        validate: impl FnOnce(&Self, &mut Meter) -> Result<(), CodeError>,
+    ) -> Result<(Self, Limits), NativeFailure> {
+        let mut meter = Meter::new(limits);
+        let result = (|| {
+            if bytes.len() > limits.max_bytes {
+                return Err(Error::ResourceLimit.into());
+            }
+            let (functions, rest) = section(bytes, &mut meter)?;
+            let (symbols, rest) = section(rest, &mut meter)?;
+            let (annotations, rest) = section(rest, &mut meter)?;
+            if !rest.is_empty() {
+                return meter.fail(
+                    Error::TrailingBytes.into(),
+                    NativeTerm::tagged(
+                        "badmatch",
+                        vec![NativeTerm::Tuple(vec![
+                            encoding::rlp_term(annotations),
+                            NativeTerm::Binary(rest.to_vec()),
+                        ])],
+                    ),
+                );
+            }
+            let Rlp::Bytes(functions) = functions else {
+                return Err(CodeError::InvalidContainer);
+            };
+            let functions = decode_functions(functions, &mut meter)?;
+            // Record declaration order wins over the constructor's field order.
+            let symbols = meter.whole(symbols)?;
+            let annotations = meter.whole(annotations)?;
+            let code = Self {
+                functions,
+                symbols,
+                annotations,
+            };
+            validate(&code, &mut meter)?;
+            Ok((
+                code,
+                Limits {
+                    max_nodes: meter.remaining(),
+                    max_bytes: limits.max_bytes - bytes.len(),
+                    ..limits
+                },
+            ))
+        })();
+        result.map_err(|e| meter.failure(e))
+    }
+    pub fn strip_init_native(&mut self, limits: Limits) -> Result<Limits, NativeFailure> {
+        let mut meter = Meter::new(limits);
+        if !matches!(&self.symbols, Value::Map(_)) {
+            crate::value::check_limits(&self.symbols, limits)
+                .map_err(|e| meter.failure(e.into()))?;
+            meter.exception = Some(native::Exception::error(NativeTerm::tagged(
+                "badmap",
+                vec![NativeTerm::Data(Box::new(self.symbols.clone()))],
+            )));
+            return Err(meter.failure(CodeError::InvalidContainer));
+        }
+        meter.nodes(2).map_err(|e| meter.failure(e))?;
+        self.strip_init().map_err(|e| meter.failure(e))?;
+        Ok(Limits {
+            max_nodes: meter.remaining(),
+            ..limits
+        })
+    }
+    fn validate_native(&self, order: &impl MapOrder, meter: &mut Meter) -> Result<(), CodeError> {
+        meter.nodes(self.functions.len())?;
+        let bytes = self.functions.keys().try_fold(0usize, |n, id| {
+            n.checked_add(id.len()).ok_or(Error::ResourceLimit)
+        })?;
+        if bytes > meter.limits.max_bytes {
             return Err(Error::ResourceLimit.into());
         }
-        let mut meter = Meter::new(limits);
-        let (functions, rest) = section(bytes, &mut meter)?;
-        let (symbols, rest) = section(rest, &mut meter)?;
-        let (annotations, rest) = section(rest, &mut meter)?;
-        if !rest.is_empty() {
-            return Err(Error::TrailingBytes.into());
+        let keys: Vec<_> = self
+            .functions
+            .keys()
+            .map(|id| Value::String(id.clone()))
+            .collect();
+        let refs: Vec<_> = keys.iter().collect();
+        let mut budget = crate::Budget::new(meter.limits());
+        let indices = crate::maps::ordered_indices::<std::convert::Infallible>(
+            &refs,
+            order,
+            Traversal::ToList,
+            &mut budget,
+        )
+        .map_err(|e| {
+            meter.exception = None;
+            match e {
+                crate::maps::MapError::Data(e) => CodeError::Data(e),
+                _ => CodeError::Data(Error::InvalidOrderProfile),
+            }
+        })?;
+        meter.nodes(budget.nodes)?;
+        let functions: Vec<_> = self.functions.iter().collect();
+        for i in indices {
+            let (id, f) = functions[i];
+            if id.len() != 4 {
+                return meter.fail(
+                    CodeError::InvalidFunctionId,
+                    NativeTerm::tagged("illegal_function_id", vec![NativeTerm::Binary(id.clone())]),
+                );
+            }
+            for (expected, (label, block)) in f.blocks.iter().enumerate() {
+                meter.nodes(1)?;
+                if *label != expected {
+                    return meter.fail(
+                        CodeError::NoncontiguousBlocks,
+                        NativeTerm::tagged(
+                            "not_contiguous_labels",
+                            vec![NativeTerm::List(
+                                f.blocks.keys().map(|n| NativeTerm::number(*n)).collect(),
+                            )],
+                        ),
+                    );
+                }
+                if block.is_empty() {
+                    return meter.fail(
+                        CodeError::EmptyBlock,
+                        NativeTerm::tagged("empty_code_block", vec![NativeTerm::number(*label)]),
+                    );
+                }
+                for (n, op) in block.iter().enumerate() {
+                    meter.nodes(1)?;
+                    let info = op.opcode.info();
+                    if op.operands.len() != info.arity {
+                        return meter.fail(
+                            CodeError::WrongArity,
+                            NativeTerm::tagged(
+                                "wrong_nr_args_opcode",
+                                vec![NativeTerm::number(op.opcode as u8)],
+                            ),
+                        );
+                    }
+                    if info.end_block != (n + 1 == block.len()) {
+                        return meter.fail(
+                            CodeError::WrongTerminator,
+                            NativeTerm::tagged(
+                                "wrong_opcode_in_bb",
+                                vec![NativeTerm::number(op.opcode as u8)],
+                            ),
+                        );
+                    }
+                }
+            }
         }
-        let functions = decode_functions(functions, &mut meter)?;
-        let (symbols, rest) = meter.value(symbols)?;
-        if !rest.is_empty() {
-            return Err(Error::TrailingBytes.into());
-        }
-        let (annotations, rest) = meter.value(annotations)?;
-        if !rest.is_empty() {
-            return Err(Error::TrailingBytes.into());
-        }
-        let code = Self {
-            functions,
-            symbols,
-            annotations,
-        };
-        code.validate()?;
-        Ok((
-            code,
-            Limits {
-                max_nodes: meter.remaining(),
-                max_bytes: limits.max_bytes - bytes.len(),
-                ..limits
-            },
-        ))
+        Ok(())
     }
 }
 fn append(out: &mut Vec<u8>, bytes: &[u8], limits: Limits) -> Result<(), CodeError> {
@@ -265,10 +432,62 @@ fn append(out: &mut Vec<u8>, bytes: &[u8], limits: Limits) -> Result<(), CodeErr
 struct Meter {
     limits: Limits,
     nodes: usize,
+    exception: Option<native::Exception>,
 }
 impl Meter {
     fn new(limits: Limits) -> Self {
-        Self { limits, nodes: 0 }
+        Self {
+            limits,
+            nodes: 0,
+            exception: Some(native::Exception::error(NativeTerm::Atom(
+                "function_clause",
+            ))),
+        }
+    }
+    fn fail<T>(&mut self, error: CodeError, reason: NativeTerm) -> Result<T, CodeError> {
+        self.exception = Some(native::Exception::error(reason));
+        Err(error)
+    }
+    fn failure(&mut self, error: CodeError) -> NativeFailure {
+        if error == CodeError::Data(Error::ResourceLimit) {
+            return NativeFailure {
+                error,
+                exception: None,
+            };
+        }
+        if self
+            .exception
+            .as_ref()
+            .is_some_and(|e| e.reason.check_limits(self.limits()).is_err())
+        {
+            return NativeFailure {
+                error: CodeError::Data(Error::ResourceLimit),
+                exception: None,
+            };
+        }
+        NativeFailure {
+            error,
+            exception: self.exception.take(),
+        }
+    }
+    fn whole(&mut self, rlp: Rlp<'_>) -> Result<Value, CodeError> {
+        let Rlp::Bytes(bytes) = rlp else {
+            return Err(CodeError::InvalidContainer);
+        };
+        let (v, rest) = self.value(bytes)?;
+        if !rest.is_empty() {
+            return self.fail(
+                Error::TrailingBytes.into(),
+                NativeTerm::tagged(
+                    "badmatch",
+                    vec![NativeTerm::Tuple(vec![
+                        NativeTerm::Data(Box::new(v)),
+                        NativeTerm::Binary(rest.to_vec()),
+                    ])],
+                ),
+            );
+        }
+        Ok(v)
     }
     fn remaining(&self) -> usize {
         self.limits.max_nodes.saturating_sub(self.nodes)
@@ -287,17 +506,29 @@ impl Meter {
         Ok(())
     }
     fn value<'a>(&mut self, bytes: &'a [u8]) -> Result<(Value, &'a [u8]), CodeError> {
-        let (v, rest, n) = encoding::decode_one_counted(bytes, self.limits())?;
+        let (v, rest, n) =
+            encoding::decode_one_detailed_counted(bytes, self.limits()).map_err(|e| {
+                self.exception = e.exception;
+                CodeError::Data(e.error)
+            })?;
         self.nodes(n)?;
         Ok((v, rest))
     }
     fn ty<'a>(&mut self, bytes: &'a [u8]) -> Result<(Type, &'a [u8]), CodeError> {
-        let (v, rest, n) = encoding::decode_type_one_counted(bytes, self.limits())?;
+        let (v, rest, n) =
+            encoding::decode_type_detailed_counted(bytes, self.limits()).map_err(|e| {
+                self.exception = e.exception;
+                CodeError::Data(e.error)
+            })?;
         self.nodes(n)?;
         Ok((v, rest))
     }
     fn encode_value(&mut self, v: &Value) -> Result<Vec<u8>, CodeError> {
-        let (bytes, n) = encoding::encode_counted(v, self.limits())?;
+        let (bytes, n) = encoding::encode_vm_counted(v, self.limits()).map_err(|e| {
+            self.exception = (e.native_exception == "function_clause")
+                .then(|| native::Exception::error(NativeTerm::Atom("function_clause")));
+            CodeError::Data(e.error)
+        })?;
         self.nodes(n)?;
         Ok(bytes)
     }
@@ -312,9 +543,8 @@ impl Meter {
         Ok(bytes)
     }
 }
-fn section<'a>(bytes: &'a [u8], meter: &mut Meter) -> Result<(&'a [u8], &'a [u8]), CodeError> {
-    meter.nodes(1)?;
-    let (value, rest) = rlp::decode_one_with_limits(
+fn section<'a>(bytes: &'a [u8], meter: &mut Meter) -> Result<(Rlp<'a>, &'a [u8]), CodeError> {
+    let decoded = rlp::decode_one_detailed(
         bytes,
         rlp::DecodeLimits {
             max_input_bytes: meter.limits.max_bytes,
@@ -322,15 +552,26 @@ fn section<'a>(bytes: &'a [u8], meter: &mut Meter) -> Result<(&'a [u8], &'a [u8]
             max_depth: meter.limits.max_depth,
         },
     )
-    .map_err(|e| match e {
-        rlp::DecodeError::ResourceLimit => CodeError::Data(Error::ResourceLimit),
-        _ => CodeError::InvalidContainer,
+    .map_err(|e| {
+        let reason = match e.error {
+            rlp::DecodeError::EmptyInput => NativeTerm::Atom("function_clause"),
+            rlp::DecodeError::LeadingZeroLength => NativeTerm::Atom("leading_zeroes_in_size"),
+            _ => NativeTerm::tagged(
+                "badmatch",
+                vec![NativeTerm::Binary(e.remainder.unwrap_or_default().to_vec())],
+            ),
+        };
+        meter.exception = Some(native::Exception::error(reason));
+        if e.error == rlp::DecodeError::ResourceLimit {
+            CodeError::Data(Error::ResourceLimit)
+        } else {
+            CodeError::InvalidContainer
+        }
     })?;
-    let Rlp::Bytes(bytes) = value else {
-        return Err(CodeError::InvalidContainer);
-    };
-    Ok((bytes, rest))
+    meter.nodes(decoded.items)?;
+    Ok((decoded.value, decoded.tail))
 }
+
 fn finish(
     current: &mut Option<(Vec<u8>, Function)>,
     block: &mut Vec<Instruction>,
@@ -356,12 +597,12 @@ fn decode_functions(
         let byte = bytes[0];
         bytes = &bytes[1..];
         meter.nodes(1)?;
-        if byte == 0xfe {
+        if byte == 0xfe && bytes.len() >= 4 {
             let id = bytes.get(..4).ok_or(Error::Truncated)?.to_vec();
             bytes = &bytes[4..];
             let (attrs, rest) = meter.value(bytes)?;
             let Value::Integer(attrs) = attrs else {
-                return Err(CodeError::InvalidAttributes);
+                return meter.fail(CodeError::InvalidAttributes, NativeTerm::Atom("badarith"));
             };
             let n = attrs
                 .magnitude()
@@ -377,7 +618,16 @@ fn decode_functions(
             }
             let (args, rest) = meter.ty(rest)?;
             let Type::Tuple(arguments) = args else {
-                return Err(CodeError::InvalidSignature);
+                return meter.fail(
+                    CodeError::InvalidSignature,
+                    NativeTerm::tagged(
+                        "badmatch",
+                        vec![NativeTerm::Tuple(vec![
+                            NativeTerm::Type(Box::new(args)),
+                            NativeTerm::Binary(rest.to_vec()),
+                        ])],
+                    ),
+                );
             };
             let (returns, rest) = meter.ty(rest)?;
             bytes = rest;
@@ -394,9 +644,21 @@ fn decode_functions(
             continue;
         }
         let Some((_, function)) = &mut current else {
-            return Err(CodeError::CodeWithoutFunction);
+            return meter.fail(
+                CodeError::CodeWithoutFunction,
+                NativeTerm::tagged("code_without_function", vec![]),
+            );
         };
-        let opcode = Opcode::from_byte(byte).ok_or(CodeError::UnknownOpcode(byte))?;
+        let opcode = match Opcode::from_byte(byte) {
+            Some(op) => op,
+            None => {
+                meter.exception = Some(native::Exception::exit(NativeTerm::tagged(
+                    "bad_opcode",
+                    vec![NativeTerm::number(byte)],
+                )));
+                return Err(CodeError::UnknownOpcode(byte));
+            }
+        };
         let info = opcode.info();
         let mut operands = vec![];
         if info.arity > 0 {
@@ -405,7 +667,10 @@ fn decode_functions(
             let bits = mods.iter().fold(0u16, |n, b| (n << 8) | u16::from(*b));
             bytes = &bytes[count..];
             if info.arity < 8 && bits >> (info.arity * 2) != 0 {
-                return Err(CodeError::InvalidModifier);
+                return meter.fail(
+                    CodeError::InvalidModifier,
+                    NativeTerm::Atom("argument_defined_outside_range"),
+                );
             }
             for i in 0..info.arity {
                 let modifier = (bits >> (2 * i)) & 3;

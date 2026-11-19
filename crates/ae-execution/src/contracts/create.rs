@@ -9,7 +9,7 @@ use ae_state::{
 };
 use ae_vm_fate::{
     abi,
-    code::{Code, CodeError},
+    code::{Code, CodeError, NativeFailure},
     encoding,
     value::Value,
 };
@@ -149,17 +149,17 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         "Contract.amount",
     );
 
-    let (mut bytecode, mut remaining) = decode_for_preparation(&code.byte_code, limits)?;
+    let (mut bytecode, mut remaining) =
+        Code::decode_native_bounded(&code.byte_code, vm.order, limits)
+            .map_err(preparation_error)?;
     if version.vm == 5 {
-        bytecode
-            .strip_init()
-            .map_err(|_| Error::Exception(Exception::Native("badmap")))?;
+        remaining = bytecode
+            .strip_init_native(remaining)
+            .map_err(preparation_error)?;
     }
-    code.byte_code = bytecode.encode(remaining).map_err(preparation_error)?;
-    remaining.max_bytes = remaining
-        .max_bytes
-        .checked_sub(code.byte_code.len())
-        .ok_or(Error::ResourceLimit)?;
+    (code.byte_code, remaining) = bytecode
+        .encode_native_bounded(vm.order, remaining)
+        .map_err(preparation_error)?;
     code.version = 3;
     if context.protocol <= Protocol::Lima {
         code.compiler_version = Some(b"unknown".to_vec());
@@ -211,40 +211,17 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     settle(tx, trees, rollback, context, completed, events)
 }
 
-fn preparation_error(e: CodeError) -> Error {
-    match e {
-        CodeError::Data(ae_vm_fate::Error::ResourceLimit) => Error::ResourceLimit,
-        e => Error::BytecodePreparation(e),
+fn preparation_error(failure: NativeFailure) -> Error {
+    use ae_vm_fate::native::{Class, Term};
+    match failure.exception {
+        Some(exception) => match (&exception.class, &exception.reason) {
+            (Class::Error, Term::Atom(reason)) => Error::Exception(Exception::Native(reason)),
+            (Class::Exit, Term::Atom(reason)) => Error::Exception(Exception::Exit(reason)),
+            _ => Error::NativeException(Box::new(exception)),
+        },
+        None => match failure.error {
+            CodeError::Data(ae_vm_fate::Error::ResourceLimit) => Error::ResourceLimit,
+            e => Error::BytecodePreparation(e),
+        },
     }
-}
-fn decode_for_preparation(bytes: &[u8], limits: Limits) -> Result<(Code, Limits), Error> {
-    // The original reads all three RLP sections before interpreting code. Keep
-    // native RLP failures distinct from unsupported deeper diagnostic payloads.
-    let mut rest = bytes;
-    for _ in 0..3 {
-        let (_, next) = rlp::decode_one_with_limits(
-            rest,
-            rlp::DecodeLimits {
-                max_input_bytes: limits.max_bytes,
-                max_items: limits.max_nodes,
-                max_depth: limits.max_depth,
-            },
-        )
-        .map_err(|e| match e {
-            rlp::DecodeError::ResourceLimit | rlp::DecodeError::LengthOverflow => {
-                Error::ResourceLimit
-            }
-            rlp::DecodeError::EmptyInput => Error::Exception(Exception::Native("function_clause")),
-            rlp::DecodeError::Truncated => Error::Exception(Exception::Native("badmatch")),
-            rlp::DecodeError::LeadingZeroLength => {
-                Error::Exception(Exception::Native("leading_zeroes_in_size"))
-            }
-            rlp::DecodeError::TrailingBytes => Error::Exception(Exception::Native("trailing")),
-        })?;
-        rest = next;
-    }
-    if !rest.is_empty() {
-        return Err(Error::Exception(Exception::Native("badmatch")));
-    }
-    Code::decode_bounded(bytes, limits).map_err(preparation_error)
 }

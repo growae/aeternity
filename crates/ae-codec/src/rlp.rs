@@ -57,15 +57,41 @@ pub fn decode_one(bytes: &[u8]) -> Result<(Rlp<'_>, &[u8]), DecodeError> {
     decode_one_with_limits(bytes, DecodeLimits::default())
 }
 
+// Retain the exact binary rejected by the original RLP pattern match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeFailure<'a> {
+    pub error: DecodeError,
+    pub remainder: Option<&'a [u8]>,
+}
+impl<'a> DecodeFailure<'a> {
+    fn new(error: DecodeError, remainder: Option<&'a [u8]>) -> Self {
+        Self { error, remainder }
+    }
+}
+pub struct Decoded<'a> {
+    pub value: Rlp<'a>,
+    pub tail: &'a [u8],
+    pub items: usize,
+}
+
 pub fn decode_one_with_limits(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<(Rlp<'_>, &[u8]), DecodeError> {
+    decode_one_detailed(bytes, limits)
+        .map(|v| (v.value, v.tail))
+        .map_err(|e| e.error)
+}
+
+pub fn decode_one_detailed(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<Decoded<'_>, DecodeFailure<'_>> {
     if bytes.is_empty() {
-        return Err(DecodeError::EmptyInput);
+        return Err(DecodeFailure::new(DecodeError::EmptyInput, None));
     }
     if bytes.len() > limits.max_input_bytes {
-        return Err(DecodeError::ResourceLimit);
+        return Err(DecodeFailure::new(DecodeError::ResourceLimit, None));
     }
     struct Frame<'a> {
         end: usize,
@@ -75,12 +101,16 @@ pub fn decode_one_with_limits(
     let mut position = 0usize;
     let mut items = 0usize;
     loop {
-        items = items.checked_add(1).ok_or(DecodeError::ResourceLimit)?;
+        items = items
+            .checked_add(1)
+            .ok_or_else(|| DecodeFailure::new(DecodeError::ResourceLimit, None))?;
         if items > limits.max_items {
-            return Err(DecodeError::ResourceLimit);
+            return Err(DecodeFailure::new(DecodeError::ResourceLimit, None));
         }
         let boundary = frames.last().map_or(bytes.len(), |f| f.end);
-        let prefix = *bytes.get(position).ok_or(DecodeError::Truncated)?;
+        let prefix = *bytes.get(position).ok_or_else(|| {
+            DecodeFailure::new(DecodeError::Truncated, Some(&bytes[position..boundary]))
+        })?;
         let (list, start, length) = match prefix {
             0..=0x7f => (false, position, 1),
             0x80..=0xb7 => (false, position + 1, usize::from(prefix - 0x80)),
@@ -88,33 +118,47 @@ pub fn decode_one_with_limits(
             _ => {
                 let list = prefix >= 0xf8;
                 let length_bytes = usize::from(prefix - if list { 0xf7 } else { 0xb7 });
-                let start = position
-                    .checked_add(1 + length_bytes)
-                    .ok_or(DecodeError::LengthOverflow)?;
+                let start = position.checked_add(1 + length_bytes).ok_or_else(|| {
+                    DecodeFailure::new(
+                        DecodeError::LengthOverflow,
+                        Some(&bytes[position + 1..boundary]),
+                    )
+                })?;
                 if bytes.get(position + 1).filter(|_| position + 1 < boundary) == Some(&0) {
-                    return Err(DecodeError::LeadingZeroLength);
+                    return Err(DecodeFailure::new(DecodeError::LeadingZeroLength, None));
                 }
                 if start > boundary {
-                    return Err(DecodeError::Truncated);
+                    return Err(DecodeFailure::new(
+                        DecodeError::Truncated,
+                        Some(&bytes[position + 1..boundary]),
+                    ));
                 }
                 let raw = &bytes[position + 1..start];
                 let length = raw.iter().try_fold(0usize, |n, b| {
                     n.checked_mul(256)
                         .and_then(|n| n.checked_add(usize::from(*b)))
-                        .ok_or(DecodeError::LengthOverflow)
+                        .ok_or_else(|| {
+                            DecodeFailure::new(
+                                DecodeError::LengthOverflow,
+                                Some(&bytes[start..boundary]),
+                            )
+                        })
                 })?;
                 (list, start, length)
             }
         };
-        let end = start
-            .checked_add(length)
-            .ok_or(DecodeError::LengthOverflow)?;
+        let end = start.checked_add(length).ok_or_else(|| {
+            DecodeFailure::new(DecodeError::LengthOverflow, Some(&bytes[start..boundary]))
+        })?;
         if end > boundary {
-            return Err(DecodeError::Truncated);
+            return Err(DecodeFailure::new(
+                DecodeError::Truncated,
+                Some(&bytes[start..boundary]),
+            ));
         }
         if list && length != 0 {
             if frames.len() >= limits.max_depth {
-                return Err(DecodeError::ResourceLimit);
+                return Err(DecodeFailure::new(DecodeError::ResourceLimit, None));
             }
             frames.push(Frame {
                 end,
@@ -131,7 +175,11 @@ pub fn decode_one_with_limits(
         };
         loop {
             let Some(frame) = frames.last_mut() else {
-                return Ok((value, &bytes[position..]));
+                return Ok(Decoded {
+                    value,
+                    tail: &bytes[position..],
+                    items,
+                });
             };
             frame.items.push(value);
             if position != frame.end {

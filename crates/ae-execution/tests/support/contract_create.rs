@@ -13,7 +13,7 @@ static CREATES: LazyLock<J> = LazyLock::new(|| {
     let pool = rows(&packed["values"]);
     name_tests::expand(&packed["root"], pool, pool.len())
 });
-fn tx_context(row: &J) -> TxContext {
+pub(super) fn tx_context(row: &J) -> TxContext {
     let mut context = TxContext::transaction(
         50,
         ae_protocol::Protocol::try_from(row["protocol"].as_u64().unwrap() as u32).unwrap(),

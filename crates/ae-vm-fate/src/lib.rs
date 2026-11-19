@@ -6,6 +6,7 @@ pub mod encoding;
 pub mod gas;
 pub mod machine;
 pub mod maps;
+pub mod native;
 pub mod opcodes;
 pub mod stack;
 pub mod store;

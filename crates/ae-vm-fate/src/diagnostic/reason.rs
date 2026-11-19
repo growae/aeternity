@@ -160,7 +160,40 @@ struct Convert<'a, O> {
     order: &'a O,
     work: Work,
 }
+pub fn native_term<'a>(
+    term: &'a crate::native::Term,
+    order: &impl MapOrder,
+    limits: Limits,
+) -> Result<(Term<'a>, Limits), Error> {
+    let mut c = Convert {
+        order,
+        work: Work::new(limits),
+    };
+    let term = c.native(term, 0)?;
+    Ok((term, c.work.remaining()))
+}
 impl<O: MapOrder> Convert<'_, O> {
+    fn native<'a>(&mut self, t: &'a crate::native::Term, d: usize) -> Result<Term<'a>, Error> {
+        use crate::native::Term as N;
+        self.work.visit(d)?;
+        Ok(match t {
+            N::Atom(s) => atom(s),
+            N::Integer(n) => Term::Integer(Cow::Borrowed(n)),
+            N::Binary(b) => Term::Binary(Cow::Borrowed(b)),
+            N::Tuple(v) => Term::Tuple(
+                v.iter()
+                    .map(|t| self.native(t, d + 1))
+                    .collect::<Result<_, _>>()?,
+            ),
+            N::List(v) => Term::List(
+                v.iter()
+                    .map(|t| self.native(t, d + 1))
+                    .collect::<Result<_, _>>()?,
+            ),
+            N::Data(v) => self.value(v, d + 1)?,
+            N::Type(v) => self.ty(v, d + 1)?,
+        })
+    }
     fn values<'a>(&mut self, vs: &'a [Value], d: usize) -> Result<Vec<Term<'a>>, Error> {
         vs.iter().map(|v| self.value(v, d)).collect()
     }

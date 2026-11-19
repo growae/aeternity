@@ -13,7 +13,7 @@ mod pretty;
 mod reason;
 pub use abort::native_abort;
 pub use idna::idna_error;
-pub use reason::reason;
+pub use reason::{native_term, reason};
 
 // Map entries are already in the selected runtime's maps:iterator order.
 // They must not be sorted by Rust's ordering or by FATE value comparison.

@@ -2,6 +2,7 @@
 // Copyright (c) 2017, aeternity developers. ISC notice in repository LICENSE.
 use crate::{
     Budget, Error, Limits,
+    native::{self, Term as NativeTerm},
     types::Type,
     value::{self, ObjectKind, ObjectPayload, Value},
 };
@@ -154,6 +155,7 @@ struct Decoder<'a> {
     pos: usize,
     budget: Budget,
     native_exception: DecodeException,
+    native_payload: Option<NativeTerm>,
 }
 impl<'a> Decoder<'a> {
     fn new(bytes: &'a [u8], limits: Limits) -> Result<Self, Error> {
@@ -165,6 +167,7 @@ impl<'a> Decoder<'a> {
             pos: 0,
             budget: Budget::new(limits),
             native_exception: DecodeException::Error("function_clause"),
+            native_payload: None,
         })
     }
     fn failure(&self, error: Error) -> DecodingFailure {
@@ -173,13 +176,53 @@ impl<'a> Decoder<'a> {
             exception: (error != Error::ResourceLimit).then_some(self.native_exception),
         }
     }
+    fn detailed_failure(self, error: Error) -> native::Failure<Error> {
+        if error == Error::ResourceLimit {
+            return native::Failure {
+                error,
+                exception: None,
+            };
+        }
+        let (class, category) = match self.native_exception {
+            DecodeException::Error(s) => (native::Class::Error, s),
+            DecodeException::Exit(s) => (native::Class::Exit, s),
+        };
+        let reason = self.native_payload.unwrap_or(NativeTerm::Atom(category));
+        if reason
+            .check_limits(Limits {
+                max_nodes: self
+                    .budget
+                    .limits
+                    .max_nodes
+                    .saturating_sub(self.budget.nodes),
+                ..self.budget.limits
+            })
+            .is_err()
+        {
+            return native::Failure {
+                error: Error::ResourceLimit,
+                exception: None,
+            };
+        }
+        native::Failure {
+            error,
+            exception: Some(native::Exception { class, reason }),
+        }
+    }
+    fn payload<T>(&mut self, error: Error, reason: NativeTerm) -> Result<T, Error> {
+        self.native_exception =
+            DecodeException::Error(reason.category().expect("native error tag"));
+        self.native_payload = Some(reason);
+        Err(error)
+    }
+    fn exit_payload<T>(&mut self, reason: NativeTerm) -> Result<T, Error> {
+        self.native_exception = DecodeException::Exit(reason.category().expect("native exit tag"));
+        self.native_payload = Some(reason);
+        Err(Error::InvalidEncoding)
+    }
     fn fail<T>(&mut self, error: Error, reason: &'static str) -> Result<T, Error> {
         self.native_exception = DecodeException::Error(reason);
         Err(error)
-    }
-    fn exit<T>(&mut self, reason: &'static str) -> Result<T, Error> {
-        self.native_exception = DecodeException::Exit(reason);
-        Err(Error::InvalidEncoding)
     }
     fn string(&mut self, n: &BigUint) -> Result<Vec<u8>, Error> {
         let Some(n) = n.to_usize().filter(|n| *n <= self.bytes.len() - self.pos) else {
@@ -207,36 +250,63 @@ impl<'a> Decoder<'a> {
                 .max_nodes
                 .saturating_sub(self.budget.nodes),
         };
-        let (value, rest) =
-            rlp::decode_one_with_limits(&self.bytes[self.pos..], limits).map_err(|e| {
-                self.native_exception = DecodeException::Error(match e {
-                    rlp::DecodeError::EmptyInput => "function_clause",
-                    rlp::DecodeError::LeadingZeroLength => "leading_zeroes_in_size",
-                    _ => "badmatch",
-                });
-                match e {
-                    rlp::DecodeError::ResourceLimit => Error::ResourceLimit,
-                    _ => Error::InvalidEncoding,
-                }
-            })?;
-        self.pos = self.bytes.len() - rest.len();
-        Ok(value)
+        let decoded = rlp::decode_one_detailed(&self.bytes[self.pos..], limits).map_err(|e| {
+            let reason = match e.error {
+                rlp::DecodeError::EmptyInput => NativeTerm::Atom("function_clause"),
+                rlp::DecodeError::LeadingZeroLength => NativeTerm::Atom("leading_zeroes_in_size"),
+                _ => NativeTerm::tagged(
+                    "badmatch",
+                    vec![NativeTerm::Binary(e.remainder.unwrap_or_default().to_vec())],
+                ),
+            };
+            self.native_exception = DecodeException::Error(reason.category().unwrap());
+            self.native_payload = Some(reason);
+            if e.error == rlp::DecodeError::ResourceLimit {
+                Error::ResourceLimit
+            } else {
+                Error::InvalidEncoding
+            }
+        })?;
+        self.budget.nodes = self
+            .budget
+            .nodes
+            .checked_add(decoded.items)
+            .ok_or(Error::ResourceLimit)?;
+        if self.budget.nodes > self.budget.limits.max_nodes {
+            return Err(Error::ResourceLimit);
+        }
+        self.pos = self.bytes.len() - decoded.tail.len();
+        Ok(decoded.value)
     }
+
     fn rlp_integer(&mut self, depth: usize) -> Result<BigUint, Error> {
         let start = self.pos;
         let Rlp::Bytes(bytes) = self.rlp(depth)? else {
             return self.fail(Error::InvalidEncoding, "badarg");
         };
         let n = BigUint::from_bytes_be(bytes);
-        if rlp::encode(&Rlp::Bytes(&n.to_bytes_be())) != self.bytes[start..self.pos] {
-            return self.fail(Error::NonCanonical, "none_unique_encoding");
+        let encoded = rlp::encode(&Rlp::Bytes(&n.to_bytes_be()));
+        if encoded != self.bytes[start..self.pos] {
+            return self.payload(
+                Error::NonCanonical,
+                NativeTerm::tagged(
+                    "none_unique_encoding",
+                    vec![
+                        NativeTerm::Binary(bytes.to_vec()),
+                        NativeTerm::Binary(encoded),
+                    ],
+                ),
+            );
         }
         Ok(n)
     }
     fn integer(&mut self, depth: usize) -> Result<BigInt, Error> {
         match self.value(depth)? {
             Value::Integer(n) => Ok(n),
-            _ => self.fail(Error::InvalidEncoding, "badmatch"),
+            _ => self.payload(
+                Error::InvalidEncoding,
+                NativeTerm::tagged("badmatch", vec![NativeTerm::Atom("false")]),
+            ),
         }
     }
     fn count(&self, n: &BigUint) -> usize {
@@ -257,7 +327,10 @@ impl<'a> Decoder<'a> {
         let tag = self.byte()?;
         if tag & 1 == 0 {
             if tag == 0x80 {
-                return self.fail(Error::InvalidEncoding, "illegal_sign");
+                return self.payload(
+                    Error::InvalidEncoding,
+                    NativeTerm::tagged("illegal_sign", vec![NativeTerm::number(0)]),
+                );
             }
             let n = BigInt::from((tag & 0x7f) >> 1);
             return Ok(Value::Integer(if tag & 0x80 == 0 { n } else { -n }));
@@ -266,7 +339,13 @@ impl<'a> Decoder<'a> {
             0x6f | 0xef | 0x4f | 0xcf => {
                 let n = self.rlp_integer(depth + 1)?;
                 if tag == 0xcf && n.is_zero() {
-                    return self.fail(Error::InvalidEncoding, "illegal_parameter");
+                    return self.payload(
+                        Error::InvalidEncoding,
+                        NativeTerm::tagged(
+                            "illegal_parameter",
+                            vec![NativeTerm::Atom("neg_bits"), NativeTerm::number(0)],
+                        ),
+                    );
                 }
                 let n = BigInt::from(n);
                 match tag {
@@ -278,7 +357,10 @@ impl<'a> Decoder<'a> {
             }
             0x01 | 0x8f => {
                 let Some(n) = self.integer(depth + 1)?.to_biguint() else {
-                    return self.fail(Error::InvalidEncoding, "badmatch");
+                    return self.payload(
+                        Error::InvalidEncoding,
+                        NativeTerm::tagged("badmatch", vec![NativeTerm::Atom("false")]),
+                    );
                 };
                 let n = if tag == 1 { n + 64u8 } else { n };
                 let bytes = self.string(&n)?;
@@ -292,21 +374,7 @@ impl<'a> Decoder<'a> {
             0x3f => Value::Tuple(vec![]),
             0x7f => Value::Boolean(false),
             0xff => Value::Boolean(true),
-            0x9f => {
-                let object = self.byte()?;
-                if object == 1 {
-                    match self.value(depth + 1)? {
-                        Value::String(bytes) => Value::Bytes(bytes),
-                        _ => return self.fail(Error::InvalidEncoding, "badmatch"),
-                    }
-                } else {
-                    let rlp = self.rlp(depth + 1)?;
-                    let kind = ObjectKind::from_tag(object).inspect_err(|_| {
-                        self.native_exception = DecodeException::Error("case_clause");
-                    })?;
-                    Value::Object(kind, own_payload(rlp, &mut self.budget, depth + 1)?)
-                }
-            }
+            0x9f => self.object_value(depth)?,
             0x0b | 0x1f => {
                 let n = self.rlp_integer(depth + 1)? + 16u8;
                 let n = self.count(&n);
@@ -317,70 +385,12 @@ impl<'a> Decoder<'a> {
                     Value::List(values)
                 }
             }
-            0x2f => {
-                let n = self.rlp_integer(depth + 1)? * 2u8;
-                let n = self.count(&n);
-                let values = self.elements(n, depth + 1)?;
-                let mut map = BTreeMap::new();
-                let mut keys = Vec::new();
-                let mut values = values.into_iter();
-                while let Some(k) = values.next() {
-                    value::valid_key(&k, &mut self.budget, depth + 1).inspect_err(|_| {
-                        self.native_exception = DecodeException::Error("map_as_key_in_map");
-                    })?;
-                    keys.push(k.clone());
-                    map.insert(k, values.next().ok_or(Error::InvalidEncoding)?);
-                }
-                let rows = value::sorted(&map, &mut self.budget, depth + 1).inspect_err(|_| {
-                    self.native_exception = DecodeException::Error("function_clause");
-                })?;
-                if rows.iter().map(|(k, _)| *k).ne(keys.iter()) {
-                    return self.fail(Error::NonCanonical, "unknown_map_serialization_format");
-                }
-                Value::Map(map)
-            }
+            0x2f => self.map_value(depth)?,
             0xbf => Value::StoreMap {
                 id: self.rlp_integer(depth + 1)?.into(),
                 cache: BTreeMap::new(),
             },
-            0xaf => {
-                let arities = self.rlp(depth + 1)?;
-                let Some(&tag) = self.bytes.get(self.pos) else {
-                    return self.fail(Error::Truncated, "badmatch");
-                };
-                self.pos += 1;
-                let Rlp::Bytes(arities) = arities else {
-                    return self.fail(Error::InvalidEncoding, "badarg");
-                };
-                let tag = usize::from(tag);
-                if tag > arities.len() {
-                    return self.exit("too_large_tag_in_variant");
-                }
-                let Value::Tuple(values) = self.value(depth + 1)? else {
-                    return self.fail(Error::InvalidEncoding, "badmatch");
-                };
-                if tag == arities.len() {
-                    return self.fail(Error::InvalidEncoding, "function_clause");
-                }
-                if arities.get(tag).map(|n| usize::from(*n)) != Some(values.len()) {
-                    return self.exit("tag_does_not_match_type_in_variant");
-                }
-                if arities.len()
-                    > self
-                        .budget
-                        .limits
-                        .max_nodes
-                        .saturating_sub(self.budget.nodes)
-                {
-                    return Err(Error::ResourceLimit);
-                }
-                self.budget.nodes += arities.len();
-                Value::Variant {
-                    arities: arities.iter().map(|n| BigInt::from(*n)).collect(),
-                    tag,
-                    values,
-                }
-            }
+            0xaf => self.variant_value(depth)?,
             t if t & 3 == 1 => {
                 let n = usize::from(t >> 2);
                 Value::String(self.string(&n.into())?)
@@ -392,6 +402,147 @@ impl<'a> Decoder<'a> {
                 Value::TypeRep(self.ty(depth + 1)?)
             }
             _ => return Err(Error::InvalidEncoding),
+        })
+    }
+    fn object_value(&mut self, depth: usize) -> Result<Value, Error> {
+        Ok({
+            let object = self.byte()?;
+            if object == 1 {
+                match self.value(depth + 1)? {
+                    Value::String(bytes) => Value::Bytes(bytes),
+                    _ => {
+                        return self.payload(
+                            Error::InvalidEncoding,
+                            NativeTerm::tagged("badmatch", vec![NativeTerm::Atom("false")]),
+                        );
+                    }
+                }
+            } else {
+                let rlp = self.rlp(depth + 1)?;
+                let kind = ObjectKind::from_tag(object).inspect_err(|_| {
+                    self.native_exception = DecodeException::Error("case_clause");
+                    self.native_payload = Some(NativeTerm::tagged(
+                        "case_clause",
+                        vec![NativeTerm::number(object)],
+                    ));
+                })?;
+                Value::Object(kind, own_payload(rlp, &mut self.budget, depth + 1)?)
+            }
+        })
+    }
+    fn map_value(&mut self, depth: usize) -> Result<Value, Error> {
+        Ok({
+            let n = self.rlp_integer(depth + 1)? * 2u8;
+            let n = self.count(&n);
+            let values = self.elements(n, depth + 1)?;
+            for pair in values.chunks_exact(2).rev() {
+                if let Err(e) = value::valid_key(&pair[0], &mut self.budget, depth + 1) {
+                    if e == Error::ResourceLimit {
+                        return Err(e);
+                    }
+                    let k = invalid_key(&pair[0]).expect("invalid map key");
+                    return self.payload(
+                        e,
+                        NativeTerm::tagged(
+                            "map_as_key_in_map",
+                            vec![NativeTerm::Data(Box::new(k.clone()))],
+                        ),
+                    );
+                }
+            }
+            let mut map = BTreeMap::new();
+            let mut keys = Vec::new();
+            for pair in values.chunks_exact(2) {
+                keys.push(&pair[0]);
+                map.insert(pair[0].clone(), pair[1].clone());
+            }
+            let rows = value::sorted(&map, &mut self.budget, depth + 1).inspect_err(|_| {
+                self.native_exception = DecodeException::Error("function_clause");
+            })?;
+            if rows.iter().map(|(k, _)| *k).ne(keys) {
+                let pairs = values
+                    .chunks_exact(2)
+                    .map(|p| {
+                        NativeTerm::Tuple(vec![
+                            NativeTerm::Data(Box::new(p[0].clone())),
+                            NativeTerm::Data(Box::new(p[1].clone())),
+                        ])
+                    })
+                    .collect();
+                return self.payload(
+                    Error::NonCanonical,
+                    NativeTerm::tagged(
+                        "unknown_map_serialization_format",
+                        vec![NativeTerm::List(pairs)],
+                    ),
+                );
+            }
+            Value::Map(map)
+        })
+    }
+    fn variant_value(&mut self, depth: usize) -> Result<Value, Error> {
+        Ok({
+            let arities = self.rlp(depth + 1)?;
+            let Some(&tag) = self.bytes.get(self.pos) else {
+                return self.payload(
+                    Error::Truncated,
+                    NativeTerm::tagged(
+                        "badmatch",
+                        vec![NativeTerm::Tuple(vec![
+                            rlp_term(arities),
+                            NativeTerm::Binary(vec![]),
+                        ])],
+                    ),
+                );
+            };
+            self.pos += 1;
+            let Rlp::Bytes(arities) = arities else {
+                return self.fail(Error::InvalidEncoding, "badarg");
+            };
+            let tag = usize::from(tag);
+            if tag > arities.len() {
+                return self.exit_payload(NativeTerm::tagged(
+                    "too_large_tag_in_variant",
+                    vec![NativeTerm::number(tag), NativeTerm::number(arities.len())],
+                ));
+            }
+            let decoded = self.value(depth + 1)?;
+            let Value::Tuple(values) = decoded else {
+                return self.payload(
+                    Error::InvalidEncoding,
+                    NativeTerm::tagged(
+                        "badmatch",
+                        vec![NativeTerm::Tuple(vec![
+                            NativeTerm::Data(Box::new(decoded)),
+                            NativeTerm::Binary(self.bytes[self.pos..].to_vec()),
+                        ])],
+                    ),
+                );
+            };
+            if tag == arities.len() {
+                return self.fail(Error::InvalidEncoding, "function_clause");
+            }
+            if arities.get(tag).map(|n| usize::from(*n)) != Some(values.len()) {
+                return self.exit_payload(NativeTerm::tagged(
+                    "tag_does_not_match_type_in_variant",
+                    vec![NativeTerm::number(tag), NativeTerm::number(arities[tag])],
+                ));
+            }
+            if arities.len()
+                > self
+                    .budget
+                    .limits
+                    .max_nodes
+                    .saturating_sub(self.budget.nodes)
+            {
+                return Err(Error::ResourceLimit);
+            }
+            self.budget.nodes += arities.len();
+            Value::Variant {
+                arities: arities.iter().map(|n| BigInt::from(*n)).collect(),
+                tag,
+                values,
+            }
         })
     }
     fn ty(&mut self, depth: usize) -> Result<Type, Error> {
@@ -421,6 +572,10 @@ impl<'a> Decoder<'a> {
                 let tag = self.byte()?;
                 Type::Object(ObjectKind::from_tag(tag).inspect_err(|_| {
                     self.native_exception = DecodeException::Error("case_clause");
+                    self.native_payload = Some(NativeTerm::tagged(
+                        "case_clause",
+                        vec![NativeTerm::number(tag)],
+                    ));
                 })?)
             }
             0x67 => Type::Map(Box::new(self.ty(depth + 1)?), Box::new(self.ty(depth + 1)?)),
@@ -437,6 +592,47 @@ impl<'a> Decoder<'a> {
             }
             _ => return Err(Error::InvalidEncoding),
         })
+    }
+}
+pub(crate) fn rlp_term(value: Rlp<'_>) -> NativeTerm {
+    match value {
+        Rlp::Bytes(b) => NativeTerm::Binary(b.to_vec()),
+        Rlp::List(v) => NativeTerm::List(v.into_iter().map(rlp_term).collect()),
+    }
+}
+fn invalid_key(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Map(_) | Value::StoreMap { .. } => Some(value),
+        Value::List(v) | Value::Tuple(v) | Value::Variant { values: v, .. } => {
+            v.iter().find_map(invalid_key)
+        }
+        _ => None,
+    }
+}
+pub(crate) fn decode_one_detailed_counted(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Value, &[u8], usize), native::Failure<Error>> {
+    let mut decoder = Decoder::new(bytes, limits).map_err(|error| native::Failure {
+        error,
+        exception: None,
+    })?;
+    match decoder.value(0) {
+        Ok(value) => Ok((value, &bytes[decoder.pos..], decoder.budget.nodes)),
+        Err(error) => Err(decoder.detailed_failure(error)),
+    }
+}
+pub(crate) fn decode_type_detailed_counted(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Type, &[u8], usize), native::Failure<Error>> {
+    let mut decoder = Decoder::new(bytes, limits).map_err(|error| native::Failure {
+        error,
+        exception: None,
+    })?;
+    match decoder.ty(0) {
+        Ok(value) => Ok((value, &bytes[decoder.pos..], decoder.budget.nodes)),
+        Err(error) => Err(decoder.detailed_failure(error)),
     }
 }
 fn own_payload(rlp: Rlp<'_>, budget: &mut Budget, depth: usize) -> Result<ObjectPayload, Error> {
