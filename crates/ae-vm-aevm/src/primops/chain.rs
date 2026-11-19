@@ -16,7 +16,7 @@ pub enum AddressKind {
 pub type HostResult<T, E> = Result<Result<T, String>, Fault<E>>;
 pub trait ChainHost: StoreHost {
     type Spend;
-    fn get_store(&self, chain: &Self::Chain) -> Result<maps::Store, Self::Error>;
+    fn get_store(&self, chain: &Self::Chain) -> Result<maps::Store, Fault<Self::Error>>;
     fn prepare_spend(
         &self,
         recipient: Id,
@@ -44,7 +44,7 @@ struct Bound<'a, H: ChainHost> {
 }
 impl<H: ChainHost> MapHost for Bound<'_, H> {
     type Error = H::Error;
-    fn get_store(&self) -> Result<maps::Store, Self::Error> {
+    fn get_store(&self) -> Result<maps::Store, Fault<Self::Error>> {
         self.host.get_store(self.chain)
     }
 }

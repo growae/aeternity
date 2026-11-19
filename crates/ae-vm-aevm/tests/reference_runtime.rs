@@ -103,12 +103,16 @@ struct Host {
 impl StoreHost for Host {
     type Chain = Vec<Store>;
     type Error = &'static str;
-    fn set_store(&self, store: Store, chain: &Self::Chain) -> Result<Self::Chain, Self::Error> {
+    fn set_store(
+        &self,
+        store: Store,
+        chain: &Self::Chain,
+    ) -> Result<Self::Chain, Fault<Self::Error>> {
         self.calls.borrow_mut().push(store.clone());
         let mut staged = chain.clone();
         staged.push(store);
         if self.fail.get() {
-            Err("write failed")
+            Err(Fault::Host("write failed"))
         } else {
             Ok(staged)
         }

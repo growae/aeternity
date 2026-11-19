@@ -252,8 +252,8 @@ impl Source<'_> {
 impl StoreHost for Source<'_> {
     type Chain = J;
     type Error = &'static str;
-    fn set_store(&self, store: Store, chain: &J) -> Result<J, Self::Error> {
-        self.check("set_store")?;
+    fn set_store(&self, store: Store, chain: &J) -> Result<J, runtime::Fault<Self::Error>> {
+        self.check("set_store").map_err(runtime::Fault::Host)?;
         let contents = map(store
             .into_iter()
             .map(|(k, v)| (binary(k), binary(v)))

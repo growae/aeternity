@@ -355,10 +355,10 @@ struct MapSource<'a> {
 }
 impl MapHost for MapSource<'_> {
     type Error = &'static str;
-    fn get_store(&self) -> Result<Store, Self::Error> {
+    fn get_store(&self) -> Result<Store, Fault<Self::Error>> {
         self.calls.set(self.calls.get() + 1);
         if self.fail.get() {
-            Err("store read failed")
+            Err(Fault::Host("store read failed"))
         } else {
             Ok(self.store.clone())
         }
@@ -544,6 +544,60 @@ fn map_primop_limits_and_host_failures_are_operational_and_retryable() {
             );
         }
     }
+}
+
+#[test]
+fn map_store_native_failures_are_caught_but_operational_failures_escape() {
+    struct FailedStore(Fault<&'static str>);
+    impl MapHost for FailedStore {
+        type Error = &'static str;
+        fn get_store(&self) -> Result<Store, Fault<Self::Error>> {
+            Err(self.0.clone())
+        }
+    }
+    let row = PRIMOPS["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["kind"] == "nested"
+                && r["stored"] == true
+                && r["call_gas"] == 100
+                && r["op"] == "tolist"
+                && uint(field(&r["before"], "gas")) == 1000u16.into()
+        })
+        .unwrap();
+    let s = map_state(row, &row["before"]);
+    let before = s.clone();
+    let data = bytes(&row["data"]);
+    for fault in [
+        Fault::Native(Native::ChainException {
+            class: "error",
+            reason: "function_clause",
+        }),
+        Fault::Host("store read failed"),
+        Fault::Stop(Stop::ResourceLimit),
+    ] {
+        let expected = match &fault {
+            Fault::Native(_) => Ok(primops::Outcome::Error(primops::Error::IllegalCall)),
+            _ => Err(fault.clone()),
+        };
+        assert_eq!(
+            primops::call_map(&s, &data, &FailedStore(fault), Limits::default()),
+            expected
+        );
+        assert_eq!(s, before);
+    }
+    let host = MapSource {
+        store: &s.map_store,
+        calls: Cell::new(0),
+        fail: Cell::new(false),
+    };
+    assert_eq!(
+        primops::call_map(&s, &data, &host, Limits::default()),
+        Ok(primop_expected(row))
+    );
+    assert_eq!(host.calls.get(), 1);
 }
 
 use ae_vm_aevm::{

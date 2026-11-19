@@ -9,6 +9,7 @@ use ae_state::{
 use ae_types::AccountPublicKey;
 use ae_vm_aevm::{primops::AddressKind, word::Word};
 use serde_json::{Value as J, json};
+mod aevm_spend;
 fn expand(v: &J, pool: &[J]) -> J {
     if let Some(i) = v.get("$ref") {
         return expand(&pool[i.as_u64().unwrap() as usize], pool);

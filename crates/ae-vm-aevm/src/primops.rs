@@ -44,12 +44,19 @@ pub enum Outcome {
 }
 pub trait MapHost {
     type Error;
-    fn get_store(&self) -> Result<maps::Store, Self::Error>;
+    fn get_store(&self) -> Result<maps::Store, Fault<Self::Error>>;
 }
 enum Problem<E> {
     Fault(Fault),
     Returned(Error),
     Host(E),
+}
+fn host_fault<E>(fault: Fault<E>) -> Problem<E> {
+    match fault {
+        Fault::Host(e) => Problem::Host(e),
+        Fault::Native(e) => Problem::Fault(Fault::Native(e)),
+        Fault::Stop(e) => Problem::Fault(Fault::Stop(e)),
+    }
 }
 impl<E> From<Fault> for Problem<E> {
     fn from(e: Fault) -> Self {
@@ -124,7 +131,7 @@ fn list<H: MapHost>(
     b: &mut Budget,
 ) -> Result<Vec<u8>, Problem<H::Error>> {
     let map = s.maps.get_map(id)?;
-    let store = host.get_store().map_err(Problem::Host)?;
+    let store = host.get_store().map_err(host_fault)?;
     maps::reserve_store(&store, b)?;
     let flat = maps::flatten_inner(id, map, &store, b)?;
     let Data::Local(data) = flat.data else {

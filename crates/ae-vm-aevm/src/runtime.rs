@@ -15,6 +15,13 @@ use std::{collections::BTreeMap, convert::Infallible};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Native {
+    BadMatchNone,
+    CaseClauseNone,
+    ChainException {
+        class: &'static str,
+        reason: &'static str,
+    },
+    IllegalStore(Store),
     MissingCallDataType,
     ReentrantCall,
     MapNotFound,
@@ -77,7 +84,11 @@ pub enum Outcome<C> {
 pub trait StoreHost {
     type Chain: Clone;
     type Error;
-    fn set_store(&self, store: Store, chain: &Self::Chain) -> Result<Self::Chain, Self::Error>;
+    fn set_store(
+        &self,
+        store: Store,
+        chain: &Self::Chain,
+    ) -> Result<Self::Chain, Fault<Self::Error>>;
 }
 pub(crate) fn write_heap<E>(
     s: &mut State,
@@ -211,7 +222,7 @@ pub(crate) fn finalize_inner<H: StoreHost>(
                 output.insert(unsigned(key), unsigned(value));
             }
         }
-        let chain = host.set_store(output, chain).map_err(Fault::Host)?;
+        let chain = host.set_store(output, chain)?;
         return Ok(Outcome::Complete {
             state: Box::new(s),
             chain,
@@ -248,7 +259,7 @@ pub(crate) fn finalize_inner<H: StoreHost>(
     };
     let total = memory_gas + store_gas;
     let store = store::publish_inner(s.version, profile, &heap, &s.map_store, b)?;
-    let chain = host.set_store(store, chain).map_err(Fault::Host)?;
+    let chain = host.set_store(store, chain)?;
     if s.gas < total {
         if matches!(s.version, Version::Sophia1 | Version::Sophia2) {
             return Err(Fault::Native(Native::OutOfGas));
