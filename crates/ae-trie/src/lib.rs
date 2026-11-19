@@ -20,6 +20,7 @@ pub enum Error {
     MissingNode(Hash256),
     HashMismatch(Hash256),
     Backend(String),
+    ResourceLimit,
     Decode(rlp::DecodeError),
     WrongValue,
     NoSuchSubtree,
@@ -71,7 +72,7 @@ impl Value {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         Ok(Self::from_rlp(&rlp::decode(bytes)?))
     }
-    fn from_rlp(node: &Rlp<'_>) -> Self {
+    pub fn from_rlp(node: &Rlp<'_>) -> Self {
         match node {
             Rlp::Bytes(b) => Self::Bytes(b.to_vec()),
             Rlp::List(items) => Self::List(items.iter().map(Self::from_rlp).collect()),
@@ -87,6 +88,14 @@ impl Value {
 
 pub trait NodeReader {
     fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error>;
+    // Historical contract PoI store traversal reads supplied nodes without
+    // rechecking their hashes. Normal state backends keep this enabled.
+    fn verify_node_hashes(&self) -> bool {
+        true
+    }
+    fn decode_limits(&self) -> rlp::DecodeLimits {
+        rlp::DecodeLimits::default()
+    }
 }
 pub trait NodeWriter: NodeReader {
     fn put_node(&mut self, hash: Hash256, bytes: Vec<u8>) -> Result<(), Error>;
@@ -192,13 +201,13 @@ fn read_node<S: NodeReader>(reference: &Reference, store: &S) -> Result<Node, Er
         Reference::Inline(b) => b.clone(),
         Reference::Hash(hash) => {
             let bytes = store.node(hash)?.ok_or(Error::MissingNode(*hash))?;
-            if blake2b_256(&bytes) != *hash {
+            if store.verify_node_hashes() && blake2b_256(&bytes) != *hash {
                 return Err(Error::HashMismatch(*hash));
             }
             bytes
         }
     };
-    let Rlp::List(items) = rlp::decode(&raw)? else {
+    let Rlp::List(items) = rlp::decode_with_limits(&raw, store.decode_limits())? else {
         return Err(Error::InvalidNode);
     };
     match items.as_slice() {

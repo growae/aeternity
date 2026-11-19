@@ -95,6 +95,59 @@ impl<S: NodeReader, C: NodeReader> NamePointerResolver for Names<S, C> {
     }
 }
 impl<S: NodeWriter, C: NodeWriter> Names<S, C> {
+    pub(crate) fn from_transport(
+        tree: Trie<S>,
+        cache_store: C,
+        config: crate::transport::Config<'_>,
+        budget: &crate::transport::Budget,
+    ) -> Result<Self, crate::transport::Error> {
+        use crate::transport::Error as E;
+        use ae_codec::object::ObjectTag;
+        let mut cache_tree = Trie::new(cache_store);
+        for row in tree.iter() {
+            let (key, value) = row?;
+            let key = crate::transport::byte_key(&key)?;
+            budget.entry(&key)?;
+            // Import reads TTL only; the original ID constructor accepts arbitrary binary keys.
+            let hash = [0; 32];
+            let Value::Bytes(bytes) = value else {
+                return Err(E::InvalidValue);
+            };
+            let (ttl, kind) = match budget.envelope(&bytes)?.tag {
+                ObjectTag::Name => {
+                    let n = Name::deserialize(hash, &bytes).map_err(E::from)?;
+                    if std::str::from_utf8(&n.status).map_or(true, |s| s.chars().count() > 255) {
+                        return Err(E::InvalidExistingAtom(n.status));
+                    }
+                    if !matches!(n.status.as_slice(), b"claimed" | b"revoked") {
+                        let atoms = config
+                            .existing_name_status_atoms
+                            .ok_or_else(|| E::MissingAtomProfile(n.status.clone()))?;
+                        if !atoms.contains(&n.status) {
+                            return Err(E::InvalidExistingAtom(n.status));
+                        }
+                    }
+                    (n.expires_by, Kind::Name)
+                }
+                ObjectTag::NameCommitment => (
+                    Commitment::deserialize(hash, &bytes)
+                        .map_err(E::from)?
+                        .expires_by,
+                    Kind::Commitment,
+                ),
+                // The original import does not recognize name_auction.
+                _ => return Err(E::InvalidValue),
+            };
+            let index = cache::encode(&ttl, &key, kind);
+            budget.entry(&index)?;
+            budget.charge(index.len())?;
+            cache_tree.put(&Nibbles::from_bytes(&index), Value::Bytes(vec![0]))?;
+        }
+        Ok(Self {
+            tree,
+            cache: cache_tree,
+        })
+    }
     // Compose with the account transaction when applying auction fee locks.
     // Failed operations retain old roots; unreachable writes can later be GC'd.
     pub fn transaction<T, E>(

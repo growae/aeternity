@@ -104,6 +104,13 @@ impl<S> OwnedReadView<S> {
     }
 }
 impl<S: NodeReader> NodeReader for OwnedReadView<S> {
+    fn verify_node_hashes(&self) -> bool {
+        self.backing.verify_node_hashes()
+    }
+    fn decode_limits(&self) -> rlp::DecodeLimits {
+        self.backing.decode_limits()
+    }
+
     fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error> {
         match self.overlay.node(hash)? {
             Some(bytes) => Ok(Some(bytes)),
@@ -127,6 +134,12 @@ impl<S: NodeReader + Clone> Trie<S> {
     }
 }
 impl<S: NodeReader> NodeReader for ReadView<'_, S> {
+    fn verify_node_hashes(&self) -> bool {
+        self.backing.verify_node_hashes()
+    }
+    fn decode_limits(&self) -> rlp::DecodeLimits {
+        self.backing.decode_limits()
+    }
     fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error> {
         match self.overlay.node(hash)? {
             Some(bytes) => Ok(Some(bytes)),

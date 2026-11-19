@@ -151,6 +151,50 @@ impl<S: NodeReader, C: NodeReader> Oracles<S, C> {
     }
 }
 impl<S: NodeWriter, C: NodeWriter> Oracles<S, C> {
+    pub(crate) fn from_transport(
+        tree: Trie<S>,
+        cache_store: C,
+        budget: &crate::transport::Budget,
+    ) -> Result<Self, crate::transport::Error> {
+        use crate::transport::Error as E;
+        use ae_codec::object::ObjectTag;
+        let mut cache_tree = Trie::new(cache_store);
+        for row in tree.iter() {
+            let (key, value) = row?;
+            let key = crate::transport::byte_key(&key)?;
+            budget.entry(&key)?;
+            let Value::Bytes(bytes) = value else {
+                return Err(E::InvalidValue);
+            };
+            let ttl = match budget.envelope(&bytes)?.tag {
+                ObjectTag::Oracle => {
+                    Oracle::deserialize([0; 32], &bytes)
+                        .map_err(E::from)?
+                        .expires_by
+                }
+                // Import reads only TTL; the original query decoder stores
+                // the whole tree key as its ID without checking its length.
+                ObjectTag::OracleQuery => {
+                    Query::deserialize([0; 32], &bytes)
+                        .map_err(E::from)?
+                        .expires_by
+                }
+                _ => return Err(E::InvalidValue),
+            };
+            // create_cache_from_mtree passes TTL,Key to cache_push(Id,TTL).
+            // Preserve its {binary key, integer TTL}, not the live index shape.
+            let mut index = vec![16, 0, 0, 0, 2, 18];
+            crate::sext::encode_binary(&key, &mut index);
+            crate::sext::encode_integer(&ttl, &mut index);
+            budget.entry(&index)?;
+            budget.charge(index.len())?;
+            cache_tree.put(&Nibbles::from_bytes(&index), Value::Bytes(vec![0]))?;
+        }
+        Ok(Self {
+            tree,
+            cache: cache_tree,
+        })
+    }
     pub fn transaction<T, E>(
         &mut self,
         action: impl FnOnce(&mut Self) -> Result<T, E>,
