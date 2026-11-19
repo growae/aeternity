@@ -452,7 +452,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_
                 }
                 let available = self.state.accumulator.rest.len().saturating_add(1);
                 if n > available && self.state.meter.protocol >= 5 {
-                    return Err(Fault::Abort(Reason::EmptyStack));
+                    return Err(Fault::Abort(Reason::EmptyStack(n)));
                 }
                 let args: Vec<_> = std::iter::once(&self.state.accumulator.top)
                     .chain(self.state.accumulator.rest.iter())

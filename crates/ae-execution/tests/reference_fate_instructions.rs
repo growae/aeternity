@@ -34,6 +34,8 @@ mod context_tests;
 mod contract_call_tests;
 #[path = "support/contract_create.rs"]
 mod contract_create_tests;
+#[path = "support/contract_diagnostic.rs"]
+mod contract_diagnostic_tests;
 #[path = "support/fate_create.rs"]
 mod create_tests;
 #[path = "support/fate_debug.rs"]
@@ -309,7 +311,7 @@ fn assert_reason(actual: &Reason, expected: &J) {
             "disabled_name"
         }
         Reason::OutOfGas => "out_of_gas",
-        Reason::EmptyStack => "empty_stack",
+        Reason::EmptyStack(_) => "empty_stack",
         Reason::MissingMapKey => "missing_map_key",
         Reason::HeadEmpty => "head_empty",
         Reason::TailEmpty => "tail_empty",

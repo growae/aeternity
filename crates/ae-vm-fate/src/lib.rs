@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 pub mod abi;
 pub mod code;
+pub mod diagnostic;
 pub mod encoding;
 pub mod gas;
 pub mod machine;

@@ -711,7 +711,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O,
         }
         if n > self.state.accumulator.rest.len().saturating_add(1) && self.state.meter.protocol >= 5
         {
-            return Err(Fault::Abort(Reason::EmptyStack));
+            return Err(Fault::Abort(Reason::EmptyStack(n)));
         }
         let args: Vec<_> = std::iter::once(&self.state.accumulator.top)
             .chain(self.state.accumulator.rest.iter())

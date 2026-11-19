@@ -34,7 +34,7 @@ pub(super) fn trees<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clo
         channels,
     }
 }
-fn tx_context(row: &J) -> TxContext {
+pub(super) fn tx_context(row: &J) -> TxContext {
     let mut context = TxContext::transaction(
         50,
         ae_protocol::Protocol::try_from(row["protocol"].as_u64().unwrap() as u32).unwrap(),
@@ -159,7 +159,7 @@ pub(super) fn failure(e: &contracts::Error) -> J {
     };
     json!({"kind":"error","reason":reason})
 }
-fn transaction(row: &J) -> ContractTransaction {
+pub(super) fn transaction(row: &J) -> ContractTransaction {
     let mut tx = ContractTransaction::decode(&bytes(&row["transaction"])).unwrap();
     if let Some(stack) = row["stack"].as_array() {
         tx.set_call_context(
@@ -182,6 +182,7 @@ fn contract_calls_match_original_transaction_processing() {
         let context = tx_context(row);
         let vm = vm_context(row);
         let config = Config {
+            diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
             overrides: &overrides,
@@ -245,6 +246,7 @@ fn contract_call_operational_failures_preserve_input_and_allow_retry() {
         let context = tx_context(row);
         let vm = vm_context(row);
         let config = Config {
+            diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
             overrides: &overrides,
@@ -358,6 +360,7 @@ fn signed_contract_calls_enforce_domains_before_state_changes() {
         base.accounts.enter(&account).unwrap();
         let vm = vm_context(row);
         let config = Config {
+            diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
             overrides: &overrides,
@@ -476,6 +479,7 @@ fn signed_contract_calls_enforce_domains_before_state_changes() {
         let vm = vm_context(row);
         let context = tx_context(row);
         let config = Config {
+            diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
             overrides: &overrides,

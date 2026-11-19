@@ -17,7 +17,7 @@ use ae_tx::ContractTransaction;
 use ae_vm_fate::{
     Limits, abi, encoding,
     machine::{
-        self, Executor, Reason,
+        self, Executor,
         program::remote::{self, invocation},
     },
     maps::{MapOrder, listing::Overrides},
@@ -34,6 +34,7 @@ pub struct Config<'a, O> {
     pub history: Arc<fate_chain::history::Snapshot>,
     pub auth_tx: Option<Arc<ae_tx::WireTransaction>>,
     pub metering_floor: Option<u32>,
+    pub diagnostic_profile: ae_vm_fate::diagnostic::Profile,
 }
 pub(crate) struct Completion<A, C> {
     pub call: Call,
@@ -195,10 +196,17 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
             reason,
             remaining_limits,
         } => {
-            let output = if sanitize(context, allow_init) {
-                vec![]
+            let (output, remaining_limits) = if sanitize(context, allow_init) {
+                (vec![], remaining_limits)
             } else {
-                diagnostic(&reason).ok_or(Error::UnformattedDiagnostic(reason))?
+                ae_vm_fate::diagnostic::reason(
+                    &reason,
+                    config.order,
+                    config.diagnostic_profile,
+                    remaining_limits,
+                )
+                .map_err(|e| Error::Vm(machine::Error::Data(e)))?
+                .ok_or(Error::UnformattedDiagnostic(reason))?
             };
             (state, ReturnType::Error, output, remaining_limits)
         }
@@ -333,46 +341,4 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         }
     }
     Err(Error::ResourceLimit)
-}
-// Only byte-exact diagnostic forms are exposed. Other dry-run diagnostics
-// remain explicit operational stops until the Erlang term printer is ported.
-fn diagnostic(reason: &Reason) -> Option<Vec<u8>> {
-    let literal = match reason {
-        Reason::OutOfGas => "Out of gas",
-        Reason::MissingMapKey => "Maps: Key does not exist",
-        Reason::HeadEmpty => "Head on empty list",
-        Reason::TailEmpty => "Tail on empty list",
-        Reason::DivisionByZero => "Arithmetic error: division by zero",
-        Reason::ModuloByZero => "Arithmetic error: mod by zero",
-        Reason::InvalidInitCall => "Calling init is not allowed in this context",
-        Reason::ReentrantCall => "Reentrant call",
-        Reason::RemoteTypeMismatch => "Type of remote function does not match expected type",
-        Reason::LogIllegalBits => "Illegal bits in log",
-        Reason::UserExit(bytes) => return Some(bytes.clone()),
-        Reason::FunctionArity { given, expected } => {
-            return Some(format!("Expected {expected} arguments, got {given}").into_bytes());
-        }
-        Reason::NonPayableFunction(Value::String(hash))
-        | Reason::PrivateFunction(Value::String(hash))
-        | Reason::MissingFunction(Value::String(hash))
-            if hash.len() <= 4 =>
-        {
-            let term = format!(
-                "<<{}>>",
-                hash.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
-            );
-            return Some(
-                match reason {
-                    Reason::NonPayableFunction(_) => {
-                        format!("Function with hash {term} is not payable")
-                    }
-                    Reason::PrivateFunction(_) => format!("Function with hash {term} is private"),
-                    _ => format!("Trying to call undefined function: {term}"),
-                }
-                .into_bytes(),
-            );
-        }
-        _ => return None,
-    };
-    Some(literal.as_bytes().to_vec())
 }

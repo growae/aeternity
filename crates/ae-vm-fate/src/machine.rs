@@ -60,7 +60,7 @@ pub struct Executor<'a, S, O> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     OutOfGas,
-    EmptyStack,
+    EmptyStack(usize),
     MissingMapKey,
     HeadEmpty,
     TailEmpty,
@@ -435,7 +435,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_
     fn stack_fault(e: stack::Error) -> Fault<S::Error> {
         match e {
             stack::Error::Data(e) => e.into(),
-            stack::Error::EmptyStack => Fault::Abort(Reason::EmptyStack),
+            stack::Error::EmptyStack => Fault::Abort(Reason::EmptyStack(1)),
             stack::Error::OutOfGas => Fault::Abort(Reason::OutOfGas),
             stack::Error::InvalidDuplicateIndex => {
                 Fault::Exception(Exception::DetachedDuplicateIndex)
