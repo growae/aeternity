@@ -68,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "ae-codec",
  "ae-crypto",
+ "ae-execution",
  "ae-mempool",
  "ae-protocol",
  "ae-state",
