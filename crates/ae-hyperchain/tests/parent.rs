@@ -9,6 +9,8 @@ use serde_json::{Value as J, json};
 use std::sync::LazyLock;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
+#[path = "parent/runtime.rs"]
+mod runtime;
 
 fn unpack(s: &str) -> J {
     fn visit(v: &J, values: &[J]) -> J {

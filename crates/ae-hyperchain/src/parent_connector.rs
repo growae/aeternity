@@ -2,6 +2,8 @@
 // Copyright (c) 2022, Aeternity. ISC notice in repository LICENSE.
 use crate::parent_block::ParentBlock;
 use std::collections::BTreeMap;
+pub mod fetch;
+pub mod runtime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response<N> {
