@@ -83,10 +83,19 @@ pub struct Log {
     pub data: Vec<u8>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallCreate {
+    pub data: Vec<u8>,
+    pub destination: BigInt,
+    pub gas_limit: BigUint,
+    pub value: BigInt,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub version: Version,
     pub protocol: u32,
     pub call_stack: Vec<BigInt>,
+    pub no_recursion: bool,
+    pub call_creates: Vec<CallCreate>,
     pub auth_tx_hash: Option<Word>,
     pub solidity_storage: BTreeMap<BigUint, BigUint>,
     pub code: Vec<u8>,
@@ -118,6 +127,8 @@ impl State {
             version,
             protocol: 4,
             call_stack: Vec::new(),
+            no_recursion: false,
+            call_creates: Vec::new(),
             auth_tx_hash: None,
             solidity_storage: BTreeMap::new(),
             code,
@@ -151,6 +162,7 @@ pub enum Failure {
     SwapTooSmall,
     IllegalInstruction(u8),
     InvalidJumpDestination(Word),
+    Call(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -184,24 +196,36 @@ impl Default for Limits {
         }
     }
 }
-pub(crate) struct Budget {
+pub struct Budget {
     work: usize,
     bytes: usize,
     words: usize,
     pub(crate) depth: usize,
+    active_calls: usize,
 }
 impl Budget {
-    pub(crate) fn new(limits: Limits) -> Self {
+    pub fn new(limits: Limits) -> Self {
         Self {
             work: limits.max_work,
             bytes: limits.max_bytes,
             words: limits.max_memory_words,
             depth: limits.max_depth,
+            active_calls: 0,
         }
     }
-    pub(crate) fn work(&mut self, n: usize) -> Result<(), Stop> {
+    pub fn work(&mut self, n: usize) -> Result<(), Stop> {
         self.work = self.work.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
+    }
+    pub(crate) fn enter_call(&mut self) -> Result<(), Stop> {
+        if self.active_calls >= self.depth {
+            return Err(Stop::ResourceLimit);
+        }
+        self.active_calls += 1;
+        Ok(())
+    }
+    pub(crate) fn leave_call(&mut self) {
+        self.active_calls -= 1;
     }
     pub(crate) fn memory(
         &mut self,
@@ -234,12 +258,12 @@ impl Budget {
             .ok_or(Stop::ResourceLimit)?;
         self.bytes(count.checked_mul(bytes).ok_or(Stop::ResourceLimit)?)
     }
-    pub(crate) fn bytes(&mut self, n: usize) -> Result<(), Stop> {
+    pub fn bytes(&mut self, n: usize) -> Result<(), Stop> {
         self.bytes = self.bytes.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
     }
 }
-enum Fault {
+pub(crate) enum Fault {
     Stop(Stop),
     Vm(Failure),
     Native(gas::Error),
@@ -291,6 +315,21 @@ fn peek(s: &State, n: usize) -> Result<Word, Fault> {
     // integer gas to that map is false, so spend_op_gas reports out_of_gas.
     s.stack.get(n).copied().ok_or(Failure::OutOfGas.into())
 }
+pub(crate) fn call_gas(s: &State) -> Result<(BigUint, BigUint), Fault> {
+    let requested = peek(s, 0)?.unsigned();
+    let extra = BigUint::from(s.gas_table.call)
+        + if peek(s, 2)?.is_zero() {
+            BigUint::zero()
+        } else {
+            s.gas_table.call_value.into()
+        };
+    let cap = if s.gas >= extra {
+        gas::all_but_one_64th(&(&s.gas - &extra), s.float_profile)?.min(requested)
+    } else {
+        requested
+    };
+    Ok((cap.clone(), cap + extra))
+}
 fn dynamic(op: u8, s: &State) -> Result<BigUint, Fault> {
     Ok(match op {
         10 => BigUint::from(peek(s, 1)?.unsigned().bits().div_ceil(8)) * s.gas_table.exp_byte,
@@ -299,6 +338,7 @@ fn dynamic(op: u8, s: &State) -> Result<BigUint, Fault> {
         }
         0x20 => gas::copy_words(&peek(s, 1)?.unsigned(), s.float_profile)? * s.gas_table.sha3_word,
         0xa0..=0xa4 => peek(s, 1)?.unsigned() * s.gas_table.log_data,
+        0xf4 => call_gas(s)?.1,
         _ => BigUint::zero(),
     })
 }
@@ -397,6 +437,17 @@ pub(crate) fn snapshot(
     if state.memory.words().len() > budget.words {
         return Err(Stop::ResourceLimit);
     }
+    budget.work(state.call_creates.len())?;
+    for call in &state.call_creates {
+        budget.bytes(call.data.len())?;
+        for bits in [
+            call.destination.bits(),
+            call.value.bits(),
+            call.gas_limit.bits(),
+        ] {
+            budget.bytes(usize::try_from(bits.div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
+        }
+    }
     // Evaluation rebuilds jump destinations; runtime finalization preserves them.
     budget.work(state.call_stack.len())?;
     for n in &state.call_stack {
@@ -428,6 +479,8 @@ pub(crate) fn snapshot(
         version: state.version,
         protocol: state.protocol,
         call_stack: state.call_stack.clone(),
+        no_recursion: state.no_recursion,
+        call_creates: state.call_creates.clone(),
         auth_tx_hash: state.auth_tx_hash,
         solidity_storage: state.solidity_storage.clone(),
         code: state.code.clone(),
@@ -447,7 +500,12 @@ pub(crate) fn snapshot(
         map_store: state.map_store.clone(),
     })
 }
-fn run(state: &State, budget: &mut Budget) -> Result<Outcome, Fault> {
+fn run<E>(
+    state: &State,
+    budget: &mut Budget,
+    hosted: bool,
+    call: &mut impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
+) -> Result<Outcome, RunFault<E>> {
     if state.context.address.is_zero() {
         return Err(Stop::UnimplementedPrimitiveEntry.into());
     }
@@ -481,17 +539,28 @@ fn run(state: &State, budget: &mut Budget) -> Result<Outcome, Fault> {
         if !s.version.permits(op) {
             return Err(Failure::IllegalInstruction(op).into());
         }
-        if !implemented(op) {
+        if !implemented(op) && !(hosted && matches!(op, 0xf1 | 0xf2 | 0xf4)) {
             return Err(Stop::UnimplementedInstruction(op).into());
         }
-        let cost = opcode::metadata(op, &s.gas_table)
-            .ok_or(Stop::UnimplementedInstruction(op))?
-            .2
-            + dynamic(op, &s)?;
+        let cost = if matches!(op, 0xf1 | 0xf2) {
+            BigUint::zero()
+        } else {
+            opcode::metadata(op, &s.gas_table)
+                .ok_or(Stop::UnimplementedInstruction(op))?
+                .2
+                + dynamic(op, &s)?
+        };
         spend(&mut s, cost)?;
         let old_size = s.memory.size_in_words().clone();
         let mut next = pc.checked_add(1).ok_or(Stop::ResourceLimit)?;
         match op {
+            0xf1 | 0xf2 | 0xf4 => match call(op, &s, budget).map_err(RunFault::Call)? {
+                CallStep::Continue { value, state } => {
+                    s = *state;
+                    push(&mut s, budget, value)?;
+                }
+                CallStep::Halt(outcome) => return Ok(outcome),
+            },
             0 => {
                 s.cp = pc;
                 return Ok(Outcome::Complete(Box::new(s)));
@@ -707,19 +776,70 @@ fn run(state: &State, budget: &mut Budget) -> Result<Outcome, Fault> {
         pc = next;
     }
 }
+pub(crate) enum CallStep {
+    Continue { value: Word, state: Box<State> },
+    Halt(Outcome),
+}
+enum RunFault<E> {
+    Core(Fault),
+    Call(E),
+}
+impl<E> From<Fault> for RunFault<E> {
+    fn from(e: Fault) -> Self {
+        Self::Core(e)
+    }
+}
+impl<E> From<Stop> for RunFault<E> {
+    fn from(e: Stop) -> Self {
+        Self::Core(e.into())
+    }
+}
+impl<E> From<Failure> for RunFault<E> {
+    fn from(e: Failure) -> Self {
+        Self::Core(e.into())
+    }
+}
+impl<E> From<gas::Error> for RunFault<E> {
+    fn from(e: gas::Error) -> Self {
+        Self::Core(e.into())
+    }
+}
+impl<E> From<word::ArithmeticError> for RunFault<E> {
+    fn from(e: word::ArithmeticError) -> Self {
+        Self::Core(e.into())
+    }
+}
+pub(crate) enum RunError<E> {
+    Stop(Stop),
+    Call(E),
+}
+pub(crate) fn evaluate_calls<E>(
+    state: &State,
+    budget: &mut Budget,
+    hosted: bool,
+    mut call: impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
+) -> Result<Outcome, RunError<E>> {
+    match run(state, budget, hosted, &mut call) {
+        Ok(outcome) => Ok(outcome),
+        Err(RunFault::Core(Fault::Vm(reason))) => Ok(Outcome::Error {
+            reason,
+            gas: BigUint::zero(),
+        }),
+        Err(RunFault::Core(Fault::Native(e))) => Ok(Outcome::Native(e)),
+        Err(RunFault::Core(Fault::Stop(e))) => Err(RunError::Stop(e)),
+        Err(RunFault::Call(e)) => Err(RunError::Call(e)),
+    }
+}
 // Every operational stop leaves the supplied snapshot untouched. Native errors
 // are terminal VM outcomes; unfinished host instructions are operational stops.
 pub fn evaluate(state: &State, limits: Limits) -> Result<Outcome, Stop> {
     evaluate_inner(state, &mut Budget::new(limits))
 }
 pub(crate) fn evaluate_inner(state: &State, budget: &mut Budget) -> Result<Outcome, Stop> {
-    match run(state, budget) {
-        Ok(outcome) => Ok(outcome),
-        Err(Fault::Vm(reason)) => Ok(Outcome::Error {
-            reason,
-            gas: BigUint::zero(),
-        }),
-        Err(Fault::Native(e)) => Ok(Outcome::Native(e)),
-        Err(Fault::Stop(e)) => Err(e),
-    }
+    evaluate_calls(state, budget, false, |op, _, _| {
+        Err(Stop::UnimplementedInstruction(op))
+    })
+    .map_err(|e| match e {
+        RunError::Stop(e) | RunError::Call(e) => e,
+    })
 }

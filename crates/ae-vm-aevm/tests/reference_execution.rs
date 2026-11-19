@@ -112,6 +112,7 @@ fn state(s: &State) -> J {
 }
 fn failure(f: Failure) -> J {
     atom(match f {
+        Failure::Call(name) => return atom(&name),
         Failure::Arithmetic => "arithmetic_error",
         Failure::OutOfGas => "out_of_gas",
         Failure::OutOfStack => "out_of_stack",

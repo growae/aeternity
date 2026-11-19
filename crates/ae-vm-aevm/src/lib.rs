@@ -6,6 +6,7 @@ pub mod heap;
 pub mod maps;
 pub mod memory;
 pub mod opcode;
+pub mod outer_call;
 pub mod primops;
 pub mod runtime;
 pub mod runtime_heap;

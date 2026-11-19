@@ -18,6 +18,10 @@ pub enum Native {
     MissingCallDataType,
     ReentrantCall,
     MapNotFound,
+    BadStackPeek {
+        index: usize,
+        stack: Vec<Word>,
+    },
     BadCallData,
     Heap(HeapError),
     Gas(gas::Error),
@@ -88,7 +92,7 @@ pub(crate) fn write_heap<E>(
     s.maps.next_id = heap.maps.next_id;
     Ok(heap.pointer)
 }
-fn initialize_inner<E>(
+pub(crate) fn initialize_inner<E>(
     state: &State,
     call_data_type: Option<&TypeRef>,
     b: &mut Budget,
@@ -96,6 +100,7 @@ fn initialize_inner<E>(
     let mut s = execution::snapshot(state, b, false)?;
     s.cp = 0;
     s.stack.clear();
+    s.call_creates.clear();
     s.logs.clear();
     s.output.clear();
     s.return_data.clear();
@@ -186,7 +191,7 @@ fn unsigned(n: &BigUint) -> Vec<u8> {
         n.to_bytes_be()
     }
 }
-fn finalize_inner<H: StoreHost>(
+pub(crate) fn finalize_inner<H: StoreHost>(
     state: &State,
     chain: &H::Chain,
     host: &H,
