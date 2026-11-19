@@ -17,6 +17,33 @@ pub type HostResult<T, E> = Result<Result<T, String>, Fault<E>>;
 pub trait ChainHost: StoreHost {
     type Spend;
     type Oracle;
+    type Name;
+    fn name_hash(
+        &self,
+        op: Word,
+        _name: &[u8],
+        _budget: &mut Budget,
+    ) -> HostResult<Word, Self::Error> {
+        Err(Stop::UnimplementedPrimop(op).into())
+    }
+    fn prepare_name(
+        &self,
+        request: NameWrite<'_>,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> HostResult<(Self::Name, usize), Self::Error> {
+        Err(Stop::UnimplementedPrimop(request.operation()).into())
+    }
+    fn apply_name(
+        &self,
+        op: Word,
+        _transaction: Self::Name,
+        _signature: [u8; 64],
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> HostResult<Self::Chain, Self::Error> {
+        Err(Stop::UnimplementedPrimop(op).into())
+    }
     fn resolve_name(
         &self,
         _name: &[u8],
@@ -119,12 +146,14 @@ fn run<H: ChainHost>(
     if id == Some(200) {
         return name::resolve(s, allowance, data, chain, host, b);
     }
+    if matches!(id, Some(201..=205)) {
+        return name_write::call(s, allowance, data, chain, host, b);
+    }
     let error = |e| Ok((Outcome::Error(e), chain.clone()));
     let base: BigUint = match id {
         Some(1) => 12000u16.into(),
         Some(600 | 601) => 5000u16.into(),
         Some(610) => 3000u16.into(),
-        Some(100..=106 | 110 | 111 | 200..=205) => return Err(Stop::UnimplementedPrimop(op).into()),
         _ => return error(Error::IllegalCall),
     };
     let state = Box::new(execution::snapshot(s, b, true)?);

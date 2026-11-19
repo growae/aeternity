@@ -19,6 +19,7 @@ pub enum Error {
     Primitive(Box<crate::Error>),
 }
 mod name;
+mod name_write;
 mod oracle;
 mod oracle_write;
 mod state;

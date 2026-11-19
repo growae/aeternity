@@ -141,6 +141,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Traced<A, C> {
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Traced<A, C> {
     type Spend = ();
     type Oracle = ();
+    type Name = ();
     fn resolve_name(
         &self,
         name: &[u8],

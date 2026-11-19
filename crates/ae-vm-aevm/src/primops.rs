@@ -16,11 +16,13 @@ use num_traits::ToPrimitive;
 use std::sync::Arc;
 mod chain;
 mod name;
+mod name_write;
 mod oracle;
 mod oracle_write;
 mod pure;
 pub(crate) use chain::call_inner;
 pub use chain::{AddressKind, ChainHost, HostResult, call};
+pub use name_write::NameWrite;
 pub use oracle::OracleRequest;
 pub(crate) use oracle::format as oracle_format;
 pub use oracle_write::{OracleTtl, OracleWrite};
@@ -44,6 +46,7 @@ pub enum Error {
     Heap(HeapError),
     Chain(String),
     IllegalOracle(Word),
+    IllegalAens(Word),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {

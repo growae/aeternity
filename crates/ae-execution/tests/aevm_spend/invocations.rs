@@ -111,6 +111,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for VmHost<A, C> {
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for VmHost<A, C> {
     type Spend = ae_tx::Spend;
     type Oracle = ae_tx::OracleTransaction;
+    type Name = ();
     fn oracle(
         &self,
         r: ae_vm_aevm::primops::OracleRequest<'_>,

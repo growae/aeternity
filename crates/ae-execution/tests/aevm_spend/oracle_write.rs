@@ -143,6 +143,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Traced<A, C> {
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Traced<A, C> {
     type Spend = ae_tx::Spend;
     type Oracle = ae_tx::OracleTransaction;
+    type Name = ();
     fn get_store(&self, c: &Self::Chain) -> Result<Store, Fault<Self::Error>> {
         self.host.get_store(c)
     }

@@ -10,7 +10,7 @@ use ae_vm_aevm::{
     execution::{Budget, Stop},
     heap::{self, Value},
     primops::{HostResult, OracleTtl, OracleWrite},
-    runtime::{Fault, Native},
+    runtime::Fault,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 fn uint(n: &BigUint) -> Unsigned {
@@ -76,22 +76,6 @@ fn encode(value: &Value, b: &mut Budget) -> Result<Vec<u8>, Fault<Error>> {
     })
 }
 impl<A: NodeReader, C: NodeReader> Host<A, C> {
-    fn oracle_nonce(
-        &self,
-        key: AccountPublicKey,
-        s: &State<A, C>,
-        b: &mut Budget,
-    ) -> Result<Unsigned, Fault<Error>> {
-        b.work(1)?;
-        let a = s
-            .trees
-            .accounts
-            .lookup(key)
-            .map_err(|e| Fault::Host(Error::Accounts(e)))?
-            .ok_or(Fault::Native(Native::BadMatchNone))?;
-        b.bytes(a.nonce().as_bytes().len())?;
-        Ok(a.nonce().add(&1.into()))
-    }
     fn oracle_content(
         &self,
         key: Word,
@@ -141,7 +125,7 @@ impl<A: NodeReader, C: NodeReader> Host<A, C> {
                 AccountPublicKey(oracle.0)
             }
         };
-        let nonce = self.oracle_nonce(actor, s, b)?;
+        let nonce = self.transaction_nonce(actor, s, b)?;
         let operation = match r {
             OracleWrite::Register {
                 fee,

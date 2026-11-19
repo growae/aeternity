@@ -94,6 +94,22 @@ pub(super) fn result<T>(e: crate::Error) -> HostResult<T, Error> {
     Ok(Err(reason.into()))
 }
 impl<A: NodeReader, C: NodeReader> Host<A, C> {
+    pub(super) fn transaction_nonce(
+        &self,
+        key: AccountPublicKey,
+        s: &State<A, C>,
+        b: &mut Budget,
+    ) -> Result<Unsigned, Fault<Error>> {
+        b.work(1)?;
+        let a = s
+            .trees
+            .accounts
+            .lookup(key)
+            .map_err(|e| Fault::Host(Error::Accounts(e)))?
+            .ok_or(Fault::Native(Native::BadMatchNone))?;
+        b.bytes(a.nonce().as_bytes().len())?;
+        Ok(a.nonce().add(&1.into()))
+    }
     // None preserves aec_vm_chain's missing-contract sentinel, which is not an
     // aect_contracts_store record and must not masquerade as an empty store.
     pub fn store(&self, chain: &State<A, C>) -> Result<Option<Store>, Fault<Error>> {
@@ -225,6 +241,28 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Host<A, C> {
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Host<A, C> {
     type Spend = Spend;
     type Oracle = ae_tx::OracleTransaction;
+    type Name = ae_tx::NameTransaction;
+    fn name_hash(&self, _: Word, name: &[u8], b: &mut Budget) -> HostResult<Word, Error> {
+        self.hash_name(name, b)
+    }
+    fn prepare_name(
+        &self,
+        r: ae_vm_aevm::primops::NameWrite<'_>,
+        c: &Self::Chain,
+        b: &mut Budget,
+    ) -> HostResult<(Self::Name, usize), Error> {
+        self.prepare_name_write(r, c, b)
+    }
+    fn apply_name(
+        &self,
+        _: Word,
+        tx: Self::Name,
+        signature: [u8; 64],
+        c: &Self::Chain,
+        b: &mut Budget,
+    ) -> HostResult<Self::Chain, Error> {
+        self.apply_name_write(&tx, signature, c, b)
+    }
     fn resolve_name(
         &self,
         name: &[u8],

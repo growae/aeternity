@@ -12,6 +12,7 @@ static EDGES: LazyLock<J> =
 impl ChainHost for Source<'_> {
     type Spend = J;
     type Oracle = ();
+    type Name = ();
     fn get_store(&self, _: &J) -> Result<Store, runtime::Fault<Self::Error>> {
         self.event(atom("store"));
         self.check("store").map_err(runtime::Fault::Host)?;
