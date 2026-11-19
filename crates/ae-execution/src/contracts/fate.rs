@@ -68,7 +68,7 @@ pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clon
     tx: Invocation<'_>,
     calldata: &[u8],
     contract: &Contract,
-    mut call: Call,
+    call: Call,
     allow_init: bool,
     trees: Trees<A, C>,
     context: &Context,
@@ -77,6 +77,37 @@ pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clon
     maximum_steps: usize,
     store_key: Option<[u8; 32]>,
 ) -> Result<Completion<A, C>, Error> {
+    execute_with_views(
+        tx,
+        calldata,
+        contract,
+        call,
+        allow_init,
+        trees,
+        context,
+        config,
+        limits,
+        maximum_steps,
+        store_key,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_with_views<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    tx: Invocation<'_>,
+    calldata: &[u8],
+    contract: &Contract,
+    mut call: Call,
+    allow_init: bool,
+    trees: Trees<A, C>,
+    context: &Context,
+    config: &Config<'_, O>,
+    limits: Limits,
+    maximum_steps: usize,
+    store_key: Option<[u8; 32]>,
+    onchain: Option<&Trees<A, C>>,
+) -> Result<Completion<A, C>, Error> {
+    let sanitized = onchain.is_none() && sanitize(context, allow_init);
     let vm = match contract.version.vm {
         5 => Version::One,
         7 => Version::Two,
@@ -101,43 +132,14 @@ pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clon
             Cow::Owned(bytes)
         }
     };
-    let code = SophiaCode::decode_with_limits(
-        &wrapped,
-        rlp::DecodeLimits {
-            max_input_bytes: limits.max_bytes,
-            max_items: limits.max_nodes,
-            max_depth: limits.max_depth,
-        },
-    )
-    .map_err(|e| match e {
-        ae_codec::object::ObjectError::Rlp(rlp::DecodeError::ResourceLimit) => Error::ResourceLimit,
-        ae_codec::object::ObjectError::ExpectedList => {
-            let rlp::Rlp::Bytes(bytes) = rlp::decode_with_limits(
-                &wrapped,
-                rlp::DecodeLimits {
-                    max_input_bytes: limits.max_bytes,
-                    max_items: limits.max_nodes,
-                    max_depth: limits.max_depth,
-                },
-            )
-            .expect("same bounded decoder") else {
-                unreachable!()
-            };
-            use ae_vm_fate::native::{Class, Exception, Term};
-            Error::NativeException(Box::new(Exception {
-                class: Class::Error,
-                reason: Term::tagged("badmatch", vec![Term::Binary(bytes.to_vec())]),
-            }))
-        }
-        e => Error::State(ae_state::contracts::Error::Object(e)),
-    })?;
+    let code = decode_code(&wrapped, limits)?;
     match abi::decode_vm_calldata(calldata, limits) {
         Ok(_) => {}
         Err(ae_vm_fate::Error::ResourceLimit) => return Err(Error::ResourceLimit),
         Err(_) => {
             call.return_type = ReturnType::Error;
             call.gas_used = tx.gas().clone();
-            call.return_value = if sanitize(context, allow_init) {
+            call.return_value = if sanitized {
                 vec![]
             } else {
                 b"bad_call_data".to_vec()
@@ -181,7 +183,16 @@ pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clon
         oracle_reads: Default::default(),
         name_base: None,
         oracle_base: None,
-        onchain: None,
+        onchain: onchain.map(|t| {
+            Box::new(fate_chain::remote::View {
+                accounts: t.accounts.clone(),
+                contracts: t.contracts.clone(),
+                names: t.names.clone(),
+                name_cache: Default::default(),
+                oracles: t.oracles.clone(),
+                oracle_reads: Default::default(),
+            })
+        }),
         environment,
         history: config.history.clone(),
     };
@@ -265,7 +276,7 @@ pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clon
             reason,
             remaining_limits,
         } => {
-            let (output, remaining_limits) = if sanitize(context, allow_init) {
+            let (output, remaining_limits) = if sanitized {
                 (vec![], remaining_limits)
             } else {
                 ae_vm_fate::diagnostic::reason(
@@ -357,9 +368,13 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<remote::Outcome<VmStore<C>, Host<A, C>>, Error> {
+    let mut machine_context = config.context.clone();
+    if host.onchain.is_some() {
+        machine_context.on_chain = false;
+    }
     let mut sources = BTreeMap::new();
     let out = (Executor {
-        context: config.context,
+        context: &machine_context,
         order: config.order,
         overrides: config.overrides,
         contracts: &sources,
@@ -374,7 +389,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     };
     for _ in 0..maximum_steps {
         match (Executor {
-            context: config.context,
+            context: &machine_context,
             order: config.order,
             overrides: config.overrides,
             contracts: &sources,
@@ -405,7 +420,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                 remaining_limits,
             }) => {
                 return Ok((Executor {
-                    context: config.context,
+                    context: &machine_context,
                     order: config.order,
                     overrides: config.overrides,
                     contracts: &sources,
@@ -416,4 +431,37 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         }
     }
     Err(Error::ResourceLimit)
+}
+
+pub(super) fn decode_code(wrapped: &[u8], limits: Limits) -> Result<SophiaCode, Error> {
+    SophiaCode::decode_with_limits(
+        wrapped,
+        rlp::DecodeLimits {
+            max_input_bytes: limits.max_bytes,
+            max_items: limits.max_nodes,
+            max_depth: limits.max_depth,
+        },
+    )
+    .map_err(|e| match e {
+        ae_codec::object::ObjectError::Rlp(rlp::DecodeError::ResourceLimit) => Error::ResourceLimit,
+        ae_codec::object::ObjectError::ExpectedList => {
+            let rlp::Rlp::Bytes(bytes) = rlp::decode_with_limits(
+                wrapped,
+                rlp::DecodeLimits {
+                    max_input_bytes: limits.max_bytes,
+                    max_items: limits.max_nodes,
+                    max_depth: limits.max_depth,
+                },
+            )
+            .expect("same bounded decoder") else {
+                unreachable!()
+            };
+            use ae_vm_fate::native::{Class, Exception, Term};
+            Error::NativeException(Box::new(Exception {
+                class: Class::Error,
+                reason: Term::tagged("badmatch", vec![Term::Binary(bytes.to_vec())]),
+            }))
+        }
+        e => Error::State(ae_state::contracts::Error::Object(e)),
+    })
 }

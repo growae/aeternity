@@ -284,6 +284,20 @@ fn captured_error(e: &Error) -> J {
                     ]),
                     NativeFailure::FunctionClause => atom("function_clause"),
                     NativeFailure::Badarg => atom("badarg"),
+                    NativeFailure::OffchainUpdate(s) => {
+                        tuple(vec![atom("off_chain_update_error"), atom(s)])
+                    }
+                    NativeFailure::IllegalContractVersion(v) => tuple(vec![
+                        atom("illegal"),
+                        atom("ct_version"),
+                        json!([
+                            "map",
+                            [
+                                [atom("vm"), number(&u64::from(v.vm).into())],
+                                [atom("abi"), number(&u64::from(v.abi).into())]
+                            ]
+                        ]),
+                    ]),
                     NativeFailure::ProofAccount { value, error } => {
                         assert_eq!(
                             *error,
@@ -492,3 +506,6 @@ mod authentication;
 
 #[path = "channels/unilateral.rs"]
 mod unilateral;
+
+#[path = "channels/offchain.rs"]
+mod offchain;

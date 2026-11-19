@@ -23,9 +23,11 @@ use ae_vm_aevm::{
 use num_bigint::{BigInt, BigUint, Sign};
 use std::sync::Arc;
 mod abi;
+mod channel;
 mod create;
 mod driver;
 mod host;
+pub(crate) use channel::run as channel;
 pub use create::{execute_signed_create, process_attach, process_create};
 
 #[derive(Debug)]
@@ -177,6 +179,7 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     budget: &mut Budget,
     supplied_store: Option<&ae_state::contracts::store::Contents>,
+    onchain: Option<&Trees<A, C>>,
 ) -> Result<Step<A, C>, Error<A, C>> {
     let Some(version) =
         Version::from_id(u32::from(contract.version.vm)).filter(|v| *v != Version::Solidity1)
@@ -227,11 +230,11 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         };
     let mut child_context = context.clone();
     child_context.origin = Origin::Contract;
-    // aeprimop's run_contract explicitly sets off_chain=false, even when its
-    // call_contract caller uses channel trees. The parent retains its own view.
+    // Channel roots supply the separate on-chain view. Children entered through
+    // aeprimop reset off_chain=false; the suspended parent retains its own view.
     let chain = aevm_chain::State {
         trees,
-        onchain: None,
+        onchain: onchain.map(|t| Arc::new(t.clone())),
         account: AccountPublicKey(contract.public_key),
         vm_version: version,
         network_id: config.network_id.clone(),

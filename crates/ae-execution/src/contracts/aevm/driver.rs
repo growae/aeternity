@@ -43,6 +43,7 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     b: &mut Budget,
     prepared: Option<super::super::PreparedCall<A, C>>,
     supplied_store: Option<&ae_state::contracts::store::Contents>,
+    onchain: Option<&Trees<A, C>>,
 ) -> Begun<A, C> {
     b.work(1)?;
     b.bytes(tx.wire_size())?;
@@ -69,6 +70,7 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         config,
         b,
         supplied_store,
+        onchain,
     )?;
     Ok((
         Frame {
@@ -90,7 +92,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    settled(drive(tx, None, trees, context, config, b, None)?)
+    settled(drive(tx, None, trees, context, config, b, None, None)?)
 }
 pub(super) fn process_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: Invocation<'_>,
@@ -100,13 +102,22 @@ pub(super) fn process_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    settled(drive(tx, Some(prepared), trees, context, config, b, None)?)
+    settled(drive(
+        tx,
+        Some(prepared),
+        trees,
+        context,
+        config,
+        b,
+        None,
+        None,
+    )?)
 }
-enum Output {
+enum Output<A, C> {
     Settled(Receipt),
-    Detached(Call),
+    Detached(Completion<A, C>),
 }
-fn settled<A, C>(output: Output) -> Result<Receipt, Error<A, C>> {
+fn settled<A, C>(output: Output<A, C>) -> Result<Receipt, Error<A, C>> {
     match output {
         Output::Settled(r) => Ok(r),
         Output::Detached(_) => unreachable!(),
@@ -122,8 +133,17 @@ pub(super) fn detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Call, Error<A, C>> {
-    match drive(tx, Some(prepared), trees, context, config, b, Some(store))? {
-        Output::Detached(call) => Ok(call),
+    match drive(
+        tx,
+        Some(prepared),
+        trees,
+        context,
+        config,
+        b,
+        Some(store),
+        None,
+    )? {
+        Output::Detached(completed) => Ok(completed.call),
         Output::Settled(_) => unreachable!(),
     }
 }
@@ -136,16 +156,26 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
     supplied_store: Option<&ae_state::contracts::store::Contents>,
-) -> Result<Output, Error<A, C>> {
+    onchain: Option<&Trees<A, C>>,
+) -> Result<Output<A, C>, Error<A, C>> {
     b.check_call_depth(1)?;
-    let (mut frame, mut step) = begin(tx, trees, context, config, b, prepared, supplied_store)?;
+    let (mut frame, mut step) = begin(
+        tx,
+        trees,
+        context,
+        config,
+        b,
+        prepared,
+        supplied_store,
+        onchain,
+    )?;
     let mut waiting: Vec<Waiting<A, C>> = Vec::new();
     let host = Host::new(config);
     loop {
         match step {
             Step::Complete(completed) => {
-                if waiting.is_empty() && supplied_store.is_some() {
-                    return Ok(Output::Detached(completed.call));
+                if waiting.is_empty() && (supplied_store.is_some() || onchain.is_some()) {
+                    return Ok(Output::Detached(completed));
                 }
                 let completed = match frame.created {
                     Some(contract) => create::finish(contract, completed, config, b)?,
@@ -210,6 +240,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                             b,
                             None,
                             None,
+                            None,
                         ) {
                             Ok((child, child_step)) => {
                                 b.bytes(std::mem::size_of::<Waiting<A, C>>())?;
@@ -240,5 +271,30 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                 )?;
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn channel<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ContractTransaction,
+    prepared: super::super::PreparedCall<A, C>,
+    onchain: &Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    b: &mut Budget,
+) -> Result<Completion<A, C>, Error<A, C>> {
+    let mut trees = prepared.trees.clone();
+    match drive(
+        Invocation::Contract(tx),
+        Some(prepared),
+        &mut trees,
+        context,
+        config,
+        b,
+        None,
+        Some(onchain),
+    )? {
+        Output::Detached(completed) => Ok(completed),
+        Output::Settled(_) => unreachable!(),
     }
 }

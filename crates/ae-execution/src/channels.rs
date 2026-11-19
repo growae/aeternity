@@ -19,6 +19,7 @@ use ae_types::{AccountPublicKey, Id, IdTag, Unsigned};
 use std::collections::BTreeMap;
 
 pub mod authentication;
+pub mod offchain;
 pub mod unilateral;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub enum NativeFailure {
         responder: Vec<Id>,
     },
     Badarg,
+    OffchainUpdate(&'static str),
+    IllegalContractVersion(ae_protocol::contracts::Version),
     ProofAccount {
         value: ae_trie::Value,
         error: ae_state::accounts::AccountError,
