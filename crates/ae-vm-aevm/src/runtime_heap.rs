@@ -33,6 +33,7 @@ pub enum Error {
     BinaryTooShort,
     FunctionClause,
     NativeFunctionClause,
+    NativeBadKey(BigUint),
     ResourceLimit,
     Stop(Stop),
 }
@@ -116,12 +117,20 @@ pub fn binary_to_heap(
     offset: BigUint,
     limits: Limits,
 ) -> Result<Heap, Error> {
+    binary_to_heap_inner(ty, bin, next_id, offset, &mut Budget::new(limits))
+}
+pub(crate) fn binary_to_heap_inner(
+    ty: &TypeRef,
+    bin: &[u8],
+    next_id: BigUint,
+    offset: BigUint,
+    budget: &mut Budget,
+) -> Result<Heap, Error> {
     if bin.is_empty() {
         return Err(Error::BinaryTooShort);
     }
     let pointer = binary_pointer(bin)?;
-    let mut budget = Budget::new(limits);
-    check_type(ty, &mut budget)?;
+    check_type(ty, budget)?;
     let maps = Maps {
         next_id,
         ..Maps::default()
@@ -137,7 +146,7 @@ pub fn binary_to_heap(
         MapSerialization::Corrected,
         offset,
         None,
-        &mut budget,
+        budget,
     )
 }
 pub fn heap_to_heap(

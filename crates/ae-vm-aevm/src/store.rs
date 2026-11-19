@@ -12,6 +12,13 @@ use std::{
     collections::{BTreeSet, VecDeque},
     sync::Arc,
 };
+mod order;
+mod references;
+mod typerep;
+mod write;
+pub use order::OrderProfile;
+pub use references::{has_maps, used_maps};
+pub use write::{Plan, Update, initialize, plan, publish};
 
 fn word(bytes: &[u8], ptr: &BigUint) -> Result<BigUint, Error> {
     let start = ptr.to_usize().ok_or(Error::InvalidValue)?;

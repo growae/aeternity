@@ -35,6 +35,10 @@ static EXECUTION: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_map_execution.json")));
 static BOUNDARIES: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_heap_boundaries.json")));
+static NESTED: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_store_nested.json")));
+static STORE_EXECUTION: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_store_execution.json")));
 fn logical(mut v: J) -> J {
     if let Some(m) = v.as_object_mut() {
         for v in m.values_mut() {
@@ -806,5 +810,439 @@ fn native_store_types_are_decoded_iteratively_with_retryable_limits() {
             assert_eq!(s, before);
         }
         assert!(stopped && reached);
+    }
+}
+
+fn version(row: &J) -> ae_vm_aevm::opcode::Version {
+    ae_vm_aevm::opcode::Version::from_id(row["vm"].as_u64().unwrap() as u32).unwrap()
+}
+const ORDER: store::OrderProfile = store::OrderProfile::Otp26Word64Crc32c;
+fn plan_term(p: &store::Plan, maps: &Maps) -> J {
+    use store::Update;
+    let updates = p
+        .updates
+        .iter()
+        .map(|u| match u {
+            Update::Copy { id } => tuple(vec![atom("new"), int(id), pmap_term(&maps.entries[id])]),
+            Update::Reuse { id, parent, size } => {
+                tuple(vec![atom("new_inplace"), int(id), int(parent), int(size)])
+            }
+            Update::Put {
+                id,
+                value_type,
+                key,
+                value,
+            } => {
+                let mut ts = vec![atom("insert"), int(id)];
+                if p.counts_are_deltas {
+                    ts.push(type_term(value_type));
+                }
+                ts.extend([binary(key), binary(value)]);
+                tuple(ts)
+            }
+            Update::Delete {
+                id,
+                value_type,
+                key,
+            } => {
+                let mut ts = vec![atom("delete"), int(id)];
+                if p.counts_are_deltas {
+                    ts.push(type_term(value_type));
+                }
+                ts.push(binary(key));
+                tuple(ts)
+            }
+            Update::Collect { id } => tuple(vec![atom("gc"), int(id)]),
+        })
+        .collect();
+    map(vec![
+        (
+            atom(if p.counts_are_deltas {
+                "deltas"
+            } else {
+                "counts"
+            }),
+            map(p.counts.iter().map(|(k, v)| (int(k), int(v))).collect()),
+        ),
+        (atom("garbage"), list(p.garbage.iter().map(int).collect())),
+        (atom("updates"), list(updates)),
+    ])
+}
+#[test]
+fn native_nested_store_publication_plans_and_later_gc_match() {
+    let rows = NESTED["cases"].as_array().unwrap();
+    assert_eq!(rows.len(), 44);
+    let mut native_errors = 0;
+    for row in rows {
+        let before = store(&row["before"]);
+        let input = heap(&row["input_heap"]);
+        let v = version(row);
+        let t = ty(&row["type"]);
+        assert_eq!(row["result"]["kind"], "ok");
+        let expected = &row["result"]["value"];
+        let p = store::plan(v, ORDER, &input.maps, &before, Limits::default()).unwrap();
+        assert_eq!(
+            logical(plan_term(&p, &input.maps)),
+            logical(field(expected, "plan").clone()),
+            "{} VM{}",
+            row["scenario"],
+            row["vm"]
+        );
+        let actual = store::publish(v, ORDER, &input, &before, Limits::default()).unwrap();
+        assert_eq!(
+            actual,
+            store(field(expected, "dirty_contents")),
+            "{} VM{}",
+            row["scenario"],
+            row["vm"]
+        );
+        let committed: Store = actual.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+        assert_eq!(committed, store(field(expected, "committed_contents")));
+        let loaded = store::load(&committed, Limits::default()).unwrap();
+        assert_eq!(loaded, heap(field(expected, "reloaded")));
+        for (profile, key) in [
+            (MapSerialization::Legacy, "return_old"),
+            (MapSerialization::Corrected, "return_new"),
+        ] {
+            let actual = runtime_heap::heap_to_binary(
+                &t,
+                &loaded,
+                &committed,
+                profile,
+                None,
+                Limits::default(),
+            );
+            let expected = &field(expected, key)[1];
+            if expected[0] == atom("ok") {
+                assert_eq!(actual.unwrap(), bytes(&expected[1]));
+            } else {
+                if expected[1] == atom("function_clause") {
+                    assert_eq!(actual, Err(Error::FunctionClause));
+                } else {
+                    assert_eq!(expected[1][1][0], atom("badmatch"));
+                    assert_eq!(
+                        logical(expected[1][1][1].clone()),
+                        logical(maps_term(&loaded.maps)[1][1].clone())
+                    );
+                    let Err(Error::MissingMap(id)) = actual else {
+                        panic!("{actual:?}")
+                    };
+                    assert!(!loaded.maps.entries.contains_key(&id));
+                }
+            }
+        }
+        let empty = Heap {
+            pointer: ae_vm_aevm::word::Word([255; 32]).unsigned(),
+            offset: 32u8.into(),
+            memory: vec![],
+            maps: Maps::default(),
+        };
+        let final_store = store::publish(v, ORDER, &empty, &committed, Limits::default());
+        let drop = &field(expected, "drop_result")[1];
+        if drop[0] == atom("ok") {
+            assert_eq!(final_store.unwrap(), store(&drop[1]));
+        } else {
+            native_errors += 1;
+            assert_eq!(drop[0], atom("native"));
+            assert_eq!(drop[1], atom("error"));
+            assert_eq!(drop[2][1][0], atom("badkey"));
+            assert_eq!(final_store, Err(Error::NativeBadKey(uint(&drop[2][1][1]))));
+        }
+        assert_eq!(before, store(&row["before"]));
+        assert_eq!(input, heap(&row["input_heap"]));
+    }
+    assert_eq!(native_errors, 9);
+}
+#[test]
+fn native_flat_store_updates_keep_exact_metadata_and_tombstones() {
+    let rows = STORED["updates"].as_array().unwrap();
+    assert_eq!(rows.len(), 32);
+    for row in rows {
+        let before = store(&row["before"]);
+        let loaded = store::load(&before, Limits::default()).unwrap();
+        let keep = row["keep_parent"].as_bool().unwrap();
+        let id = if keep {
+            BigUint::from_bytes_be(&loaded.memory[..32])
+        } else {
+            loaded.pointer
+        };
+        let op = &row["operation"][1];
+        let key = Arc::from(ae_vm_aevm::word::Word::from_unsigned(&uint(&op[1])).0);
+        let value = if op[0] == atom("put") {
+            Some(Arc::from(
+                ae_vm_aevm::word::Word::from_unsigned(&uint(&op[2])).0,
+            ))
+        } else {
+            None
+        };
+        let (new, mut maps) = loaded
+            .maps
+            .update(&id, key, value, &before, Limits::default())
+            .unwrap();
+        maps.entries.retain(|k, _| k == &new || keep && k == &id);
+        let input = Heap {
+            pointer: if keep { 32u8.into() } else { new.clone() },
+            offset: 32u8.into(),
+            memory: if keep {
+                [
+                    ae_vm_aevm::word::Word::from_unsigned(&id).0,
+                    ae_vm_aevm::word::Word::from_unsigned(&new).0,
+                ]
+                .concat()
+            } else {
+                vec![]
+            },
+            maps,
+        };
+        let actual =
+            store::publish(version(row), ORDER, &input, &before, Limits::default()).unwrap();
+        assert_eq!(
+            actual,
+            store(field(&row["result"]["value"], "contents")),
+            "{row}"
+        );
+    }
+}
+#[test]
+fn store_publication_resource_stops_are_atomic_and_retryable() {
+    for row in NESTED["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["scenario"] == "keep_old" || r["scenario"] == "two_inner_children")
+    {
+        let before = store(&row["before"]);
+        let input = heap(&row["input_heap"]);
+        let v = version(row);
+        let expected = store::publish(v, ORDER, &input, &before, Limits::default()).unwrap();
+        for dimension in 0..3 {
+            let mut stopped = false;
+            let mut reached = false;
+            for limit in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 1_000_000] {
+                let mut limits = Limits::default();
+                match dimension {
+                    0 => limits.max_work = limit,
+                    1 => limits.max_bytes = limit,
+                    _ => limits.max_depth = limit,
+                }
+                match store::publish(v, ORDER, &input, &before, limits) {
+                    Err(Error::ResourceLimit) => stopped = true,
+                    Ok(actual) => {
+                        assert_eq!(actual, expected);
+                        reached = true;
+                        break;
+                    }
+                    other => panic!("{other:?}"),
+                }
+                assert_eq!(before, store(&row["before"]));
+                assert_eq!(input, heap(&row["input_heap"]));
+            }
+            assert!(stopped && reached);
+        }
+    }
+}
+
+#[test]
+fn native_initial_sophia_stores_match_canonical_type_and_map_bytes() {
+    let rows = DATA["stored"].as_array().unwrap();
+    assert_eq!(rows.len(), 32);
+    for row in rows {
+        let bytes = bytes(&row["input"]);
+        let actual = store::initialize(version(row), ORDER, &bytes, Limits::default()).unwrap();
+        assert_eq!(
+            actual,
+            store(&row["store"]),
+            "{} VM{}",
+            row["id"],
+            row["vm"]
+        );
+    }
+}
+
+fn check_publication(row: &J, h: &Heap, before: &Store, expected: &J) {
+    let v = version(row);
+    let p = store::plan(v, ORDER, &h.maps, before, Limits::default()).unwrap();
+    assert_eq!(
+        logical(plan_term(&p, &h.maps)),
+        logical(field(expected, "plan").clone()),
+        "{} VM{}",
+        row["id"],
+        row["vm"]
+    );
+    let actual = store::publish(v, ORDER, h, before, Limits::default()).unwrap();
+    assert_eq!(
+        actual,
+        store(field(expected, "contents")),
+        "{} VM{}",
+        row["id"],
+        row["vm"]
+    );
+}
+#[test]
+fn native_wide_store_gc_order_type_encodings_and_raw_metadata_match() {
+    let rows = STORE_EXECUTION["initial"].as_array().unwrap();
+    assert_eq!(rows.len(), 88);
+    let mut native_errors = 0;
+    for row in rows {
+        assert_eq!(row["result"]["kind"], "ok", "{row}");
+        let expected = &row["result"]["value"];
+        let input = bytes(&row["input"]);
+        let deep = row["id"] == "{deep,300}";
+        if deep {
+            assert_eq!(
+                store::initialize(version(row), ORDER, &input, Limits::default()),
+                Err(Error::ResourceLimit)
+            );
+        }
+        let before = store::initialize(
+            version(row),
+            ORDER,
+            &input,
+            Limits {
+                max_depth: 2048,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            before,
+            store(field(expected, "contents")),
+            "{} VM{}",
+            row["id"],
+            row["vm"]
+        );
+        let h = store::load(&before, Limits::default()).unwrap();
+        assert_eq!(h, heap(field(expected, "heap")));
+        for (op, input) in [
+            ("keep", h),
+            (
+                "drop",
+                Heap {
+                    pointer: 0u8.into(),
+                    offset: 32u8.into(),
+                    memory: vec![],
+                    maps: Maps::default(),
+                },
+            ),
+        ] {
+            let result = &field(expected, op)[1];
+            if result[0] == atom("ok") {
+                check_publication(row, &input, &before, &result[1]);
+            } else {
+                native_errors += 1;
+                assert_eq!(result[0], atom("native"));
+                assert_eq!(result[1], atom("error"));
+                assert_eq!(result[2], atom("function_clause"));
+                assert_eq!(
+                    store::publish(version(row), ORDER, &input, &before, Limits::default()),
+                    Err(Error::NativeFunctionClause)
+                );
+            }
+        }
+    }
+    assert_eq!(native_errors, 12);
+    let rows = STORE_EXECUTION["custom"].as_array().unwrap();
+    assert_eq!(rows.len(), 16);
+    for row in rows {
+        assert_eq!(row["result"]["kind"], "ok");
+        check_publication(
+            row,
+            &heap(&row["input_heap"]),
+            &store(&row["before"]),
+            &row["result"]["value"],
+        );
+        let first = &row["result"]["value"];
+        let before = store(field(first, "contents"));
+        let empty = Heap {
+            pointer: 0u8.into(),
+            offset: 32u8.into(),
+            memory: vec![],
+            maps: Maps::default(),
+        };
+        check_publication(row, &empty, &before, field(first, "drop"));
+    }
+}
+#[test]
+fn native_used_map_unions_cycles_and_type_short_circuiting_match() {
+    let rows = STORE_EXECUTION["used"].as_array().unwrap();
+    assert_eq!(rows.len(), 24);
+    for row in rows {
+        let t = ty(&row["type"]);
+        let b = bytes(&row["input"]);
+        let actual = store::has_maps(&t, Limits::default());
+        let expected = &row["has"];
+        if expected["kind"] == "ok" {
+            assert_eq!(actual.unwrap(), expected["value"] == atom("true"));
+        } else {
+            assert_eq!(expected["class"], "error");
+            assert_eq!(expected["reason"], atom("function_clause"));
+            assert_eq!(actual, Err(Error::NativeFunctionClause));
+        }
+        let actual = store::used_maps(&t, &b, Limits::default());
+        let expected = &row["result"];
+        if expected["kind"] == "ok" {
+            assert_eq!(
+                list(actual.unwrap().iter().map(int).collect()),
+                expected["value"],
+                "{}",
+                row["id"]
+            );
+        } else {
+            let error = match expected["reason"][1].as_str().unwrap() {
+                "function_clause" => {
+                    assert_eq!(expected["class"], "error");
+                    Error::NativeFunctionClause
+                }
+                "circular_references" => {
+                    assert_eq!(expected["class"], "exit");
+                    Error::CircularReferences
+                }
+                "address_before_offset" => {
+                    assert_eq!(expected["class"], "exit");
+                    Error::AddressBeforeOffset
+                }
+                other => panic!("{other}"),
+            };
+            assert_eq!(actual, Err(error), "{}", row["id"]);
+        }
+    }
+}
+
+#[test]
+fn initial_store_construction_limits_stop_and_retry_without_partial_results() {
+    for row in STORE_EXECUTION["initial"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["id"] == "map_tuple" || r["id"] == "{wide,40}")
+    {
+        let input = bytes(&row["input"]);
+        let original = input.clone();
+        let expected = store::initialize(version(row), ORDER, &input, Limits::default()).unwrap();
+        for dimension in 0..3 {
+            let mut stopped = false;
+            let mut reached = false;
+            for allowance in [
+                0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1_000_000, 16_000_000,
+            ] {
+                let mut limits = Limits::default();
+                match dimension {
+                    0 => limits.max_work = allowance,
+                    1 => limits.max_bytes = allowance,
+                    _ => limits.max_depth = allowance,
+                }
+                match store::initialize(version(row), ORDER, &input, limits) {
+                    Err(Error::ResourceLimit) => stopped = true,
+                    Ok(actual) => {
+                        assert_eq!(actual, expected);
+                        reached = true;
+                        break;
+                    }
+                    other => panic!("{other:?}"),
+                }
+                assert_eq!(input, original);
+            }
+            assert!(stopped && reached, "{} dimension{dimension}", row["id"]);
+        }
     }
 }
