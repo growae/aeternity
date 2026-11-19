@@ -1,8 +1,8 @@
 // aefa_chain_api:final_trees / aeprimop_state:cache_write_through, fa2a6d7.
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use super::{Error, remote::State};
-use ae_state::{Trees, calls::Calls};
-use ae_trie::{NodeWriter, Trie};
+use ae_state::{Trees, calls::Calls, channels::Channels};
+use ae_trie::NodeWriter;
 use ae_vm_fate::{
     Limits,
     machine::{Exception, program::remote::HostFailure},
@@ -16,7 +16,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> State<A, C> {
     pub fn final_trees(
         &self,
         calls: &Calls<C>,
-        channels: &Trie<C>,
+        channels: &Channels<C>,
         limits: Limits,
     ) -> Result<(Trees<A, C>, Limits), HostFailure<Error>> {
         let remaining = self.contract_cache.budget(limits)?;

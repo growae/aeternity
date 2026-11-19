@@ -137,7 +137,10 @@ pub(super) fn chain(row: &J) -> Chain {
     }
     s
 }
-pub(super) fn other_trees<S: NodeWriter + Clone>(row: &J, store: S) -> (Calls<S>, Trie<S>) {
+pub(super) fn other_trees<S: NodeWriter + Clone>(
+    row: &J,
+    store: S,
+) -> (Calls<S>, ae_state::channels::Channels<S>) {
     fn build<S: NodeWriter>(rows_json: &J, store: S) -> Trie<S> {
         let mut out = Trie::new(store);
         for item in rows(rows_json) {
@@ -152,11 +155,11 @@ pub(super) fn other_trees<S: NodeWriter + Clone>(row: &J, store: S) -> (Calls<S>
     let calls = build(&row["initial"]["calls"], store.clone());
     (
         Calls::from_root(calls.root_hash(), calls.into_store()).unwrap(),
-        build(&row["initial"]["channels"], store),
+        build(&row["initial"]["channels"], store).into(),
     )
 }
 pub(super) fn snapshot<A: NodeReader, C: NodeReader>(t: &Trees<A, C>) -> J {
-    json!({"accounts":tree_entries(t.accounts.tree()),"contracts":tree_entries(t.contracts.tree()),"names":tree_entries(t.names.tree()),"name_expiry":tree_entries(t.names.cache()),"oracles":tree_entries(t.oracles.tree()),"oracle_expiry":tree_entries(t.oracles.cache()),"calls":tree_entries(t.calls.tree()),"channels":tree_entries(&t.channels),
+    json!({"accounts":tree_entries(t.accounts.tree()),"contracts":tree_entries(t.contracts.tree()),"names":tree_entries(t.names.tree()),"name_expiry":tree_entries(t.names.cache()),"oracles":tree_entries(t.oracles.tree()),"oracle_expiry":tree_entries(t.oracles.cache()),"calls":tree_entries(t.calls.tree()),"channels":tree_entries(t.channels.tree()),
         "account_root":t.accounts.root_hash().map(|h|hex::encode(h.0)),"contract_root":t.contracts.root_hash().map(|h|hex::encode(h.0)),"name_root":t.names.root_hash().map(|h|hex::encode(h.0)),"name_expiry_root":t.names.cache_root_hash().map(|h|hex::encode(h.0)),"oracle_root":t.oracles.root_hash().map(|h|hex::encode(h.0)),"oracle_expiry_root":t.oracles.cache_root_hash().map(|h|hex::encode(h.0)),"call_root":t.calls.root_hash().map(|h|hex::encode(h.0)),"channel_root":t.channels.root_hash().map(|h|hex::encode(h.0)),"state_root":hex::encode(t.roots().hash().0)})
 }
 fn result<A: NodeReader, C: NodeReader>(

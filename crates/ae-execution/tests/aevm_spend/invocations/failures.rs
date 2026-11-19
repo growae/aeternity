@@ -66,7 +66,11 @@ pub(crate) fn wrapped(t: &Trees, a: &Arc<Control>, c: &Arc<Control>) -> Trees<Ba
         )
         .unwrap(),
         calls: Calls::from_root(t.calls.root_hash(), wrap(t.calls.tree(), c)).unwrap(),
-        channels: Trie::from_root(t.channels.root_hash(), wrap(&t.channels, c)).unwrap(),
+        channels: ae_state::channels::Channels::from_root(
+            t.channels.root_hash(),
+            wrap(t.channels.tree(), c),
+        )
+        .unwrap(),
     }
 }
 fn fixture() -> &'static J {

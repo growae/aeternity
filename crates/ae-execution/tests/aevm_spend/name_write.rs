@@ -52,7 +52,7 @@ fn state(row: &J) -> State {
         contracts: Contracts::default(),
         oracles: Default::default(),
         calls: Default::default(),
-        channels: Trie::new(MemoryStore::default()),
+        channels: Default::default(),
     };
     let s = State {
         onchain: if row["mode"] == "offchain" {

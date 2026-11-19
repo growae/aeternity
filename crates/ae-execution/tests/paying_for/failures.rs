@@ -51,7 +51,11 @@ pub(super) fn wrapped(t: &Trees, c: &Rc<Control>) -> Trees<Store, Store> {
         accounts: Accounts::from_root(t.accounts.root_hash(), wrap(t.accounts.tree())).unwrap(),
         contracts: Contracts::from_root(t.contracts.root_hash(), wrap(t.contracts.tree())).unwrap(),
         calls: Calls::from_root(t.calls.root_hash(), wrap(t.calls.tree())).unwrap(),
-        channels: Trie::from_root(t.channels.root_hash(), wrap(&t.channels)).unwrap(),
+        channels: ae_state::channels::Channels::from_root(
+            t.channels.root_hash(),
+            wrap(t.channels.tree()),
+        )
+        .unwrap(),
         names: Names::from_roots(
             t.names.root_hash(),
             t.names.cache_root_hash(),

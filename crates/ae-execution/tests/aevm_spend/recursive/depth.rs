@@ -70,7 +70,11 @@ fn chain(row: &J, control: &Arc<Control>) -> State<Shared, Shared> {
         )
         .unwrap(),
         calls: Calls::from_root(t.calls.root_hash(), wrap(t.calls.tree())).unwrap(),
-        channels: Trie::from_root(t.channels.root_hash(), wrap(&t.channels)).unwrap(),
+        channels: ae_state::channels::Channels::from_root(
+            t.channels.root_hash(),
+            wrap(t.channels.tree()),
+        )
+        .unwrap(),
     };
     let mut context = Context::transaction(
         50,

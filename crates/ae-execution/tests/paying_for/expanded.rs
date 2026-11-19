@@ -24,7 +24,7 @@ fn trees(v: &J) -> Trees {
     let oc = tree(field(v, "oracle_cache"));
     t.contracts = Contracts::from_root(c.root_hash(), c.into_store()).unwrap();
     t.calls = Calls::from_root(calls.root_hash(), calls.into_store()).unwrap();
-    t.channels = tree(field(v, "channels"));
+    t.channels = tree(field(v, "channels")).into();
     t.names = Names::from_roots(
         n.root_hash(),
         nc.root_hash(),
@@ -47,7 +47,7 @@ fn check<A: NodeReader, C: NodeReader>(t: &Trees<A, C>, r: &Receipt, v: &J) {
     for (name, tree) in [
         ("contracts", t.contracts.tree()),
         ("calls", t.calls.tree()),
-        ("channels", &t.channels),
+        ("channels", t.channels.tree()),
         ("names", t.names.tree()),
         ("name_cache", t.names.cache()),
         ("oracles", t.oracles.tree()),

@@ -82,7 +82,7 @@ fn trees_from(snap: &J) -> Trees {
         oracles: Oracles::default(),
         names: Default::default(),
         calls: Default::default(),
-        channels: Trie::new(MemoryStore::default()),
+        channels: Default::default(),
     }
 }
 fn context(row: &J) -> Context {

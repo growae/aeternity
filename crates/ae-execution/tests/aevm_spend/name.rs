@@ -40,7 +40,7 @@ fn trees(snap: &J) -> Trees {
         oracles: Oracles::default(),
         names: Names::from_roots(n.root_hash(), c.root_hash(), n.into_store(), c.into_store())
             .unwrap(),
-        channels: Trie::new(MemoryStore::default()),
+        channels: Default::default(),
     };
     assert_eq!(bin(t.roots().hash().0), *field(snap, "root"));
     t

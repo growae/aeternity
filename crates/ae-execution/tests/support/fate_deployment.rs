@@ -68,7 +68,7 @@ pub(super) fn snapshot<A: NodeWriter + Clone, C: NodeWriter + Clone>(s: &Chain<A
  }).collect();
     let publication = match s.final_trees(
         &Calls::new(s.contracts.tree().store().clone()),
-        &Trie::new(s.contracts.tree().store().clone()),
+        &ae_state::channels::Channels::new(s.contracts.tree().store().clone()),
         Limits::default(),
     ) {
         Ok((trees, _)) => {

@@ -1,8 +1,8 @@
 use crate::{
-    StateRoots, accounts::Accounts, calls::Calls, contracts::Contracts, names::Names,
-    oracles::Oracles,
+    StateRoots, accounts::Accounts, calls::Calls, channels::Channels, contracts::Contracts,
+    names::Names, oracles::Oracles,
 };
-use ae_trie::{MemoryStore, NodeReader, Trie};
+use ae_trie::{MemoryStore, NodeReader};
 
 // A complete logical state includes the auxiliary expiry tries, even though
 // they are excluded from the consensus commitment. Durable publication must
@@ -11,7 +11,7 @@ use ae_trie::{MemoryStore, NodeReader, Trie};
 pub struct Trees<A = MemoryStore, S = MemoryStore> {
     pub accounts: Accounts<A>,
     pub calls: Calls<S>,
-    pub channels: Trie<S>,
+    pub channels: Channels<S>,
     pub contracts: Contracts<S>,
     pub names: Names<S, S>,
     pub oracles: Oracles<S, S>,

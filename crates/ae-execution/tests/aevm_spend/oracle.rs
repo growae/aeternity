@@ -35,7 +35,7 @@ fn trees(snapshot: &J) -> Trees {
         contracts: Contracts::default(),
         calls: Default::default(),
         names: Default::default(),
-        channels: Trie::new(MemoryStore::default()),
+        channels: Default::default(),
         oracles: Oracles::from_roots(t.root_hash(), c.root_hash(), t.into_store(), c.into_store())
             .unwrap(),
     };

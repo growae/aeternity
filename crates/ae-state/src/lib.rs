@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod calls;
+pub mod channels;
 pub mod contracts;
 pub mod genesis;
 pub mod names;
