@@ -89,6 +89,9 @@ fn state(row: &J) -> State {
 fn config() -> aevm::Config {
     aevm::Config {
         environment: aevm::Environment {
+            genesis_height: 0,
+            key_hash: [0; 32],
+            history: Arc::default(),
             beneficiary: AccountPublicKey::ZERO,
             difficulty: 0.into(),
             timestamp_ms: 0.into(),
@@ -399,3 +402,5 @@ mod failures;
 
 mod create;
 mod depth;
+
+mod chain_instructions;

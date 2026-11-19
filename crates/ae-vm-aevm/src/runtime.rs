@@ -19,6 +19,8 @@ pub enum Native {
     BadMatchCodeReference(ae_types::Id),
     BadMatchChainError(String),
     CaseClauseNone,
+    // case_clause {error, not_found} from aec_vm_chain:blockhash/2.
+    BlockHashNoCommonAncestor,
     ChainException {
         class: &'static str,
         reason: &'static str,

@@ -30,12 +30,16 @@ pub use create::{execute_signed_create, process_create};
 #[derive(Debug)]
 pub enum HostError {
     Chain(aevm_chain::Error),
+    History(crate::chain_history::Error),
     Transaction(super::Error),
 }
 pub type Error<A = MemoryStore, C = MemoryStore> =
     outer_call::Fault<HostError, aevm_chain::State<A, C>>;
 #[derive(Debug, Clone)]
 pub struct Environment {
+    pub genesis_height: u64,
+    pub key_hash: [u8; 32],
+    pub history: Arc<crate::chain_history::Snapshot>,
     pub beneficiary: AccountPublicKey,
     pub difficulty: BigInt,
     pub timestamp_ms: BigInt,
@@ -246,6 +250,7 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     state.data = call_data.clone();
     state.out_type = Some(output);
     state.auth_tx_hash = config.environment.auth_tx_hash.clone();
+    state.genesis_height = config.environment.genesis_height.into();
     state.call_stack = if init {
         vec![]
     } else {

@@ -150,6 +150,25 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Host<'_,
             .map(|n| big(&n))
             .map_err(HostError::Chain)
     }
+    fn block_hash(
+        &self,
+        height: Word,
+        _chain: &Self::Chain,
+        budget: &mut Budget,
+    ) -> Result<Word, RuntimeFault<HostError>> {
+        use crate::chain_history::{self, Error as E};
+        let height = u64::try_from(height.unsigned()).map_err(|_| Stop::InvalidInitialState)?;
+        let environment = &self.config.environment;
+        chain_history::select(&environment.history, height, environment.key_hash, || {
+            budget.work(1).map_err(|_| E::ResourceLimit)
+        })
+        .map(|selection| Word(selection.branch))
+        .map_err(|e| match e {
+            E::ResourceLimit => RuntimeFault::Stop(Stop::ResourceLimit),
+            E::NoCommonAncestor => RuntimeFault::Native(Native::BlockHashNoCommonAncestor),
+            e => RuntimeFault::Host(HostError::History(e)),
+        })
+    }
     fn call(
         &self,
         r: Request<'_>,

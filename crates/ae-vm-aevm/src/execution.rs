@@ -90,6 +90,12 @@ pub struct CallCreate {
     pub value: BigInt,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockHashMode {
+    Chain,
+    // The original explicit VM test option, never a missing-history fallback.
+    Sha3,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub version: Version,
     pub abi_version: u32,
@@ -99,6 +105,10 @@ pub struct State {
     pub call_creates: Vec<CallCreate>,
     pub auth_tx_hash: Option<Vec<u8>>,
     pub solidity_storage: BTreeMap<BigUint, BigUint>,
+    pub external_code_sizes: BTreeMap<BigUint, BigUint>,
+    pub external_code_blocks: BTreeMap<BigUint, Vec<u8>>,
+    pub block_hash_mode: BlockHashMode,
+    pub genesis_height: BigInt,
     pub code: Vec<u8>,
     pub cp: usize,
     pub gas: BigUint,
@@ -133,6 +143,10 @@ impl State {
             call_creates: Vec::new(),
             auth_tx_hash: None,
             solidity_storage: BTreeMap::new(),
+            external_code_sizes: BTreeMap::new(),
+            external_code_blocks: BTreeMap::new(),
+            block_hash_mode: BlockHashMode::Chain,
+            genesis_height: 0.into(),
             code,
             cp: 0,
             gas,
@@ -357,6 +371,7 @@ fn dynamic(op: u8, s: &State) -> Result<BigUint, Fault> {
         0x37 | 0x39 => {
             gas::copy_words(&peek(s, 2)?.unsigned(), s.float_profile)? * s.gas_table.copy
         }
+        0x3c => gas::copy_words(&peek(s, 3)?.unsigned(), s.float_profile)? * s.gas_table.copy,
         0x20 => gas::copy_words(&peek(s, 1)?.unsigned(), s.float_profile)? * s.gas_table.sha3_word,
         0xa0..=0xa4 => peek(s, 1)?.unsigned() * s.gas_table.log_data,
         0xf4 => call_gas(s)?.1,
@@ -406,7 +421,24 @@ fn heap_fault(error: runtime_heap::Error) -> Fault {
     }
 }
 fn implemented(op: u8) -> bool {
-    matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3a|0x3d|0x3e|0x41..=0x45|0x50..=0x53|0x56..=0x5b|0x60..=0xa4|0xf3|0xfd)
+    matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3e|0x40..=0x45|0x50..=0x53|0x56..=0x5b|0x60..=0xa4|0xf3|0xfd)
+}
+fn external_address(word: Word) -> BigUint {
+    BigUint::from_bytes_be(&word.0[12..])
+}
+fn local_block_hash(s: &State, budget: &mut Budget) -> Result<Option<Word>, Fault> {
+    let height = s.stack.first().ok_or(Failure::PopEmpty)?.unsigned();
+    let number = BigInt::from(height.clone());
+    if number < s.genesis_height || number >= s.context.number || number < &s.context.number - 256 {
+        return Ok(Some(Word::ZERO));
+    }
+    if s.block_hash_mode == BlockHashMode::Sha3 {
+        let bytes = height.to_string();
+        budget.bytes(bytes.len())?;
+        budget.work(bytes.len())?;
+        return Ok(Some(Word(ae_crypto::keccak256(bytes.as_bytes()).0)));
+    }
+    Ok(None)
 }
 fn reserve_fault(e: runtime_heap::Error) -> Stop {
     match e {
@@ -478,11 +510,25 @@ pub(crate) fn snapshot(
         budget.bytes(usize::try_from(n.bits().div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
     }
     budget.work(state.solidity_storage.len())?;
-    for (k, v) in &state.solidity_storage {
+    budget.work(state.external_code_sizes.len())?;
+    for (k, v) in state
+        .solidity_storage
+        .iter()
+        .chain(&state.external_code_sizes)
+    {
         budget.bytes(
             usize::try_from((k.bits().div_ceil(8)).saturating_add(v.bits().div_ceil(8)))
                 .map_err(|_| Stop::ResourceLimit)?,
         )?;
+    }
+    budget.bytes(
+        usize::try_from(state.genesis_height.bits().div_ceil(8))
+            .map_err(|_| Stop::ResourceLimit)?,
+    )?;
+    budget.work(state.external_code_blocks.len())?;
+    for (k, v) in &state.external_code_blocks {
+        budget.bytes(usize::try_from(k.bits().div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
+        budget.bytes(v.len())?;
     }
     if copy_jumps {
         budget.work(state.jump_destinations.len())?;
@@ -508,6 +554,10 @@ pub(crate) fn snapshot(
         call_creates: state.call_creates.clone(),
         auth_tx_hash: state.auth_tx_hash.clone(),
         solidity_storage: state.solidity_storage.clone(),
+        external_code_sizes: state.external_code_sizes.clone(),
+        external_code_blocks: state.external_code_blocks.clone(),
+        block_hash_mode: state.block_hash_mode.clone(),
+        genesis_height: state.genesis_height.clone(),
         code: state.code.clone(),
         cp: state.cp,
         gas: state.gas.clone(),
@@ -567,7 +617,7 @@ fn run<E>(
         if !s.version.permits(op) {
             return Err(Failure::IllegalInstruction(op).into());
         }
-        if !implemented(op) && !(hosted && matches!(op, 0xf1 | 0xf2 | 0xf4)) {
+        if !implemented(op) && !(hosted && matches!(op, 0x31 | 0xf1 | 0xf2 | 0xf4)) {
             return Err(Stop::UnimplementedInstruction(op).into());
         }
         let cost = if matches!(op, 0xf1 | 0xf2) {
@@ -581,17 +631,29 @@ fn run<E>(
         spend(&mut s, cost)?;
         let old_size = s.memory.size_in_words().clone();
         let mut next = pc.checked_add(1).ok_or(Stop::ResourceLimit)?;
+        let local_hash = if op == 0x40 {
+            local_block_hash(&s, budget)?
+        } else {
+            None
+        };
         match op {
-            0xf1 | 0xf2 | 0xf4 => match call(op, &s, budget).map_err(RunFault::Call)? {
-                CallStep::Continue { value, state } => {
-                    s = *state;
-                    push(&mut s, budget, value)?;
+            0x40 if local_hash.is_some() => {
+                let value = local_hash.expect("local block hash");
+                pop(&mut s)?;
+                push(&mut s, budget, value)?;
+            }
+            0x31 | 0x40 | 0xf1 | 0xf2 | 0xf4 => {
+                match call(op, &s, budget).map_err(RunFault::Call)? {
+                    CallStep::Continue { value, state } => {
+                        s = *state;
+                        push(&mut s, budget, value)?;
+                    }
+                    CallStep::Halt(outcome) => return Ok(Segment::Done(outcome)),
+                    CallStep::Suspend => {
+                        return Ok(Segment::Suspended(Continuation { next, old_size }));
+                    }
                 }
-                CallStep::Halt(outcome) => return Ok(Segment::Done(outcome)),
-                CallStep::Suspend => {
-                    return Ok(Segment::Suspended(Continuation { next, old_size }));
-                }
-            },
+            }
             0 => {
                 s.cp = pc;
                 return Ok(Segment::Done(Outcome::Complete(Box::new(s))));
@@ -704,16 +766,35 @@ fn run<E>(
                 let n = Word::from_unsigned(&s.code.len().into());
                 push(&mut s, budget, n)?;
             }
-            0x37 | 0x39 | 0x3e => {
+            0x3b => {
+                let address = external_address(pop(&mut s)?);
+                let value = s
+                    .external_code_sizes
+                    .get(&address)
+                    .map(Word::from_unsigned)
+                    .unwrap_or(Word::ZERO);
+                push(&mut s, budget, value)?;
+            }
+            0x37 | 0x39 | 0x3c | 0x3e => {
+                let address = if op == 0x3c {
+                    Some(external_address(pop(&mut s)?))
+                } else {
+                    None
+                };
                 let to = pop(&mut s)?.unsigned();
                 let from = pop(&mut s)?.unsigned();
                 let size = pop(&mut s)?.unsigned();
                 let size = size.to_usize().ok_or(Stop::ResourceLimit)?;
                 budget.bytes(size)?;
                 budget.work(size)?;
-                let source = match op {
+                let source: &[u8] = match op {
                     0x37 => &s.data,
                     0x39 => &s.code,
+                    0x3c => s
+                        .external_code_blocks
+                        .get(address.as_ref().expect("external address"))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
                     _ => &s.return_data,
                 };
                 budget.memory(&s.memory, &to, size)?;

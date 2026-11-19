@@ -40,6 +40,14 @@ pub trait Host: ChainHost {
         budget: &mut Budget,
     ) -> FunctionTypes<Self::Error>;
     fn balance(&self, address: Word, chain: &Self::Chain) -> Result<BigInt, Self::Error>;
+    fn block_hash(
+        &self,
+        _height: Word,
+        _chain: &Self::Chain,
+        _budget: &mut Budget,
+    ) -> Result<Word, runtime::Fault<Self::Error>> {
+        Err(Stop::UnimplementedInstruction(0x40).into())
+    }
     fn call(
         &self,
         request: Request<'_>,
@@ -219,6 +227,26 @@ fn prepare<H: Host>(
     b: &mut Budget,
 ) -> Preparation<H::Error, H::Chain> {
     let mut s = execution::snapshot(state, b, true)?;
+    if matches!(op, 0x31 | 0x40) {
+        let argument = pop(&mut s)?;
+        b.work(1)?;
+        let value = if op == 0x31 {
+            Word::wrapping(
+                &host
+                    .balance(argument, chain)
+                    .map_err(runtime::Fault::Host)?,
+            )
+        } else {
+            host.block_hash(argument, chain, b)?
+        };
+        return Ok(Prepared::Step(
+            CallStep::Continue {
+                value,
+                state: Box::new(s),
+            },
+            chain.clone(),
+        ));
+    }
     if s.call_stack.len() >= 1024 {
         return Ok(Prepared::Step(
             CallStep::Continue {
