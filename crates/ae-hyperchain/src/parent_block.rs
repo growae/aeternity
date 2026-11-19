@@ -2,7 +2,7 @@
 // Copyright (c) 2022, Aeternity. ISC notice in repository LICENSE.
 use ae_types::Unsigned;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParentBlock {
     pub hash: Vec<u8>,
     pub height: Unsigned,
