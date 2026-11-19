@@ -1,13 +1,14 @@
 // aevm_data/aevm_data_v1 heap-to-binary conversion, fa2a6d7.
 // Copyright (c) 2018, Aeternity Anstalt. ISC: repository LICENSE.
+use crate::maps::{Maps, Store};
 use crate::{
-    execution::{Budget, Stop},
+    execution::{Budget, Limits, Stop},
     memory::Memory,
     word::Word,
 };
 use num_bigint::BigUint;
-use num_traits::{ToPrimitive, Zero};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
+mod convert;
 
 pub type TypeRef = Arc<Type>;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,16 +20,29 @@ pub enum Type {
     Variant(Vec<Vec<TypeRef>>),
     TypeRep,
     Map(TypeRef, TypeRef),
+    Function,
+    ContractBytearray,
 }
-#[derive(Debug)]
-pub(crate) enum Error {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
     InvalidValue,
-    UnsupportedMap,
+    MissingMap(BigUint),
+    CircularReferences,
+    AddressBeforeOffset,
+    SizeLimit,
+    BinaryTooShort,
+    FunctionClause,
+    NativeFunctionClause,
+    ResourceLimit,
     Stop(Stop),
 }
 impl From<Stop> for Error {
     fn from(e: Stop) -> Self {
-        Self::Stop(e)
+        if e == Stop::ResourceLimit {
+            Self::ResourceLimit
+        } else {
+            Self::Stop(e)
+        }
     }
 }
 
@@ -76,205 +90,164 @@ pub(crate) fn check_type<'a>(ty: &'a Type, budget: &mut Budget) -> Result<(), St
     }
     Ok(())
 }
-#[derive(Clone, Copy)]
-enum Plan<'a> {
-    Native(&'a Type),
-    Word,
-    Rep,
-    RepList,
-    RepLists,
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapSerialization {
+    Legacy,
+    Corrected,
 }
-enum Task<'a> {
-    Visit {
-        plan: Plan<'a>,
-        ptr: Word,
-        dest: usize,
-        depth: usize,
-    },
-    Leave(Word),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heap {
+    pub pointer: BigUint,
+    pub offset: BigUint,
+    pub memory: Vec<u8>,
+    pub maps: Maps,
 }
-fn aligned(ptr: &BigUint) -> Result<(), Error> {
-    if (ptr % 32u8).is_zero() {
-        Ok(())
-    } else {
-        Err(Error::InvalidValue)
-    }
-}
-fn read(memory: &Memory, ptr: &BigUint) -> Result<Word, Error> {
-    aligned(ptr)?;
-    Ok(memory.words().get(ptr).copied().unwrap_or(Word::ZERO))
-}
-fn allocate(
-    out: &mut Vec<u8>,
-    size: usize,
-    maximum: &BigUint,
-    budget: &mut Budget,
-) -> Result<usize, Error> {
-    let next = out.len().checked_add(size).ok_or(Stop::ResourceLimit)?;
-    if BigUint::from(next - 32) > *maximum {
-        return Err(Error::InvalidValue);
-    }
-    budget.bytes(size)?;
-    budget.work(size.div_ceil(32))?;
-    let base = out.len();
-    out.resize(next, 0);
-    Ok(base)
-}
-fn put(out: &mut [u8], dest: usize, value: Word) {
-    out[dest..dest + 32].copy_from_slice(&value.0);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Format {
+    Binary,
+    Heap,
 }
 
-// Copies raw heap payloads instead of decoding/re-encoding normalized values.
-// Native map conversion requires the historical map/store provider, not this
-// sparse-memory-only boundary. Until supplied, it is an operational stop.
+pub fn binary_to_heap(
+    ty: &TypeRef,
+    bin: &[u8],
+    next_id: BigUint,
+    offset: BigUint,
+    limits: Limits,
+) -> Result<Heap, Error> {
+    if bin.is_empty() {
+        return Err(Error::BinaryTooShort);
+    }
+    let pointer = binary_pointer(bin)?;
+    let mut budget = Budget::new(limits);
+    check_type(ty, &mut budget)?;
+    let maps = Maps {
+        next_id,
+        ..Maps::default()
+    };
+    convert::run(
+        ty,
+        pointer,
+        convert::Source::binary(bin, 32, 32u8.into()),
+        &maps,
+        &Store::new(),
+        Format::Binary,
+        Format::Heap,
+        MapSerialization::Corrected,
+        offset,
+        None,
+        &mut budget,
+    )
+}
+pub fn heap_to_heap(
+    ty: &TypeRef,
+    heap: &Heap,
+    offset: BigUint,
+    maximum: Option<BigUint>,
+    limits: Limits,
+) -> Result<Heap, Error> {
+    let mut budget = Budget::new(limits);
+    check_type(ty, &mut budget)?;
+    convert::run(
+        ty,
+        heap.pointer.clone(),
+        convert::Source::binary(&heap.memory, 0, heap.offset.clone()),
+        &heap.maps,
+        &Store::new(),
+        Format::Heap,
+        Format::Heap,
+        MapSerialization::Corrected,
+        offset,
+        maximum,
+        &mut budget,
+    )
+}
+pub fn heap_to_binary(
+    ty: &TypeRef,
+    heap: &Heap,
+    store: &Store,
+    profile: MapSerialization,
+    maximum: Option<BigUint>,
+    limits: Limits,
+) -> Result<Vec<u8>, Error> {
+    let mut budget = Budget::new(limits);
+    check_type(ty, &mut budget)?;
+    let h = convert::run(
+        ty,
+        heap.pointer.clone(),
+        convert::Source::binary(&heap.memory, 0, heap.offset.clone()),
+        &heap.maps,
+        store,
+        Format::Heap,
+        Format::Binary,
+        profile,
+        32u8.into(),
+        maximum,
+        &mut budget,
+    )?;
+    join(h, &mut budget)
+}
+pub fn binary_to_binary(ty: &TypeRef, bin: &[u8], limits: Limits) -> Result<Vec<u8>, Error> {
+    let pointer = binary_pointer(bin)?;
+    let mut budget = Budget::new(limits);
+    check_type(ty, &mut budget)?;
+    let h = convert::run(
+        ty,
+        pointer,
+        convert::Source::binary(bin, 32, 32u8.into()),
+        &Maps::default(),
+        &Store::new(),
+        Format::Binary,
+        Format::Binary,
+        MapSerialization::Corrected,
+        32u8.into(),
+        None,
+        &mut budget,
+    )?;
+    join(h, &mut budget)
+}
+fn binary_pointer(bin: &[u8]) -> Result<BigUint, Error> {
+    Ok(BigUint::from_bytes_be(
+        bin.get(..32).ok_or(Error::NativeFunctionClause)?,
+    ))
+}
+fn join(heap: Heap, budget: &mut Budget) -> Result<Vec<u8>, Error> {
+    budget.bytes(
+        heap.memory
+            .len()
+            .checked_add(32)
+            .ok_or(Error::ResourceLimit)?,
+    )?;
+    let mut out = Word::from_unsigned(&heap.pointer).0.to_vec();
+    out.extend(heap.memory);
+    Ok(out)
+}
+pub(crate) struct MapContext<'a> {
+    pub maps: &'a Maps,
+    pub store: &'a Store,
+    pub profile: MapSerialization,
+}
 pub(crate) fn serialize(
-    ty: &Type,
+    ty: &TypeRef,
     ptr: Word,
     memory: &Memory,
+    context: MapContext<'_>,
     maximum: &BigUint,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, Error> {
-    budget.bytes(32)?;
-    let mut out = vec![0; 32];
-    let mut active = BTreeSet::new();
-    let mut tasks = vec![Task::Visit {
-        plan: Plan::Native(ty),
-        ptr,
-        dest: 0,
-        depth: 0,
-    }];
-    while let Some(task) = tasks.pop() {
-        budget.work(1)?;
-        let Task::Visit {
-            plan,
-            ptr,
-            dest,
-            depth,
-        } = task
-        else {
-            if let Task::Leave(ptr) = task {
-                active.remove(&ptr);
-            }
-            continue;
-        };
-        if depth > budget.depth {
-            return Err(Stop::ResourceLimit.into());
-        }
-        let address = ptr.unsigned();
-        let fields: Vec<Plan<'_>> = match plan {
-            Plan::Word | Plan::Native(Type::Word) => {
-                put(&mut out, dest, ptr);
-                continue;
-            }
-            Plan::Native(Type::String) => {
-                let size = (read(memory, &address)?.unsigned() + 31u8) / 32u8 * 32u8 + 32u8;
-                if &size > maximum || BigUint::from(out.len() - 32) + &size > *maximum {
-                    return Err(Error::InvalidValue);
-                }
-                let size = size.to_usize().ok_or(Stop::ResourceLimit)?;
-                let base = allocate(&mut out, size, maximum, budget)?;
-                for i in 0..size / 32 {
-                    let value = read(memory, &(&address + i * 32))?;
-                    put(&mut out, base + i * 32, value);
-                }
-                put(&mut out, dest, Word::from_unsigned(&base.into()));
-                continue;
-            }
-            Plan::Native(Type::List(item)) => {
-                if ptr == Word([255; 32]) {
-                    put(&mut out, dest, ptr);
-                    continue;
-                }
-                vec![Plan::Native(item), plan]
-            }
-            Plan::RepList | Plan::RepLists => {
-                if ptr == Word([255; 32]) {
-                    put(&mut out, dest, ptr);
-                    continue;
-                }
-                vec![
-                    if matches!(plan, Plan::RepList) {
-                        Plan::Rep
-                    } else {
-                        Plan::RepList
-                    },
-                    plan,
-                ]
-            }
-            Plan::Native(Type::Tuple(ts)) => {
-                if ts.is_empty() {
-                    put(&mut out, dest, Word::ZERO);
-                    continue;
-                }
-                budget.bytes(
-                    ts.len()
-                        .checked_mul(std::mem::size_of::<Plan<'_>>())
-                        .ok_or(Stop::ResourceLimit)?,
-                )?;
-                ts.iter().map(|t| Plan::Native(t)).collect()
-            }
-            Plan::Native(Type::Variant(cs)) => {
-                let tag = read(memory, &address)?
-                    .unsigned()
-                    .to_usize()
-                    .ok_or(Error::InvalidValue)?;
-                let ts = cs.get(tag).ok_or(Error::InvalidValue)?;
-                budget.bytes(
-                    ts.len()
-                        .checked_add(1)
-                        .and_then(|n| n.checked_mul(std::mem::size_of::<Plan<'_>>()))
-                        .ok_or(Stop::ResourceLimit)?,
-                )?;
-                std::iter::once(Plan::Word)
-                    .chain(ts.iter().map(|t| Plan::Native(t)))
-                    .collect()
-            }
-            Plan::Native(Type::TypeRep) | Plan::Rep => {
-                match read(memory, &address)?
-                    .unsigned()
-                    .to_u8()
-                    .ok_or(Error::InvalidValue)?
-                {
-                    0 | 1 | 5 => vec![Plan::Word],
-                    2 => vec![Plan::Word, Plan::Rep],
-                    3 => vec![Plan::Word, Plan::RepList],
-                    4 => vec![Plan::Word, Plan::RepLists],
-                    6 => vec![Plan::Word, Plan::Rep, Plan::Rep],
-                    _ => return Err(Error::InvalidValue),
-                }
-            }
-            Plan::Native(Type::Map(..)) => return Err(Error::UnsupportedMap),
-        };
-        if active.contains(&ptr) {
-            return Err(Error::InvalidValue);
-        }
-        aligned(&address)?;
-        budget.bytes(32)?;
-        budget.bytes(
-            fields
-                .len()
-                .checked_add(1)
-                .and_then(|n| n.checked_mul(std::mem::size_of::<Task<'_>>()))
-                .ok_or(Stop::ResourceLimit)?,
-        )?;
-        let base = allocate(
-            &mut out,
-            fields.len().checked_mul(32).ok_or(Stop::ResourceLimit)?,
-            maximum,
-            budget,
-        )?;
-        active.insert(ptr);
-        put(&mut out, dest, Word::from_unsigned(&base.into()));
-        tasks.push(Task::Leave(ptr));
-        for (i, plan) in fields.into_iter().enumerate().rev() {
-            let child = read(memory, &(&address + i * 32))?;
-            tasks.push(Task::Visit {
-                plan,
-                ptr: child,
-                dest: base + i * 32,
-                depth: depth + 1,
-            });
-        }
-    }
-    Ok(out)
+    let h = convert::run(
+        ty,
+        ptr.unsigned(),
+        convert::Source::Sparse(memory),
+        context.maps,
+        context.store,
+        Format::Heap,
+        Format::Binary,
+        context.profile,
+        32u8.into(),
+        Some(maximum.clone()),
+        budget,
+    )?;
+    join(h, budget)
 }

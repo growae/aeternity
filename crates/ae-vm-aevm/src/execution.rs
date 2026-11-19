@@ -2,6 +2,7 @@
 // Copyright (c) 2017, Aeternity Anstalt. ISC: repository LICENSE.
 use crate::{
     gas,
+    maps::{self, Maps, Store},
     memory::Memory,
     opcode::{self, GasTable, Version},
     runtime_heap,
@@ -99,6 +100,8 @@ pub struct State {
     pub out_type: Option<runtime_heap::TypeRef>,
     pub output: Vec<u8>,
     pub logs: Vec<Log>,
+    pub maps: Maps,
+    pub map_store: Store,
 }
 impl State {
     pub fn new(
@@ -123,6 +126,8 @@ impl State {
             out_type: None,
             output: Vec::new(),
             logs: Vec::new(),
+            maps: Maps::default(),
+            map_store: Store::new(),
         }
     }
 }
@@ -151,7 +156,6 @@ pub enum Stop {
     ResourceLimit,
     InvalidInitialState,
     UnimplementedInstruction(u8),
-    UnimplementedHeapMaps,
     UnimplementedPrimitiveEntry,
 }
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +182,14 @@ pub(crate) struct Budget {
     pub(crate) depth: usize,
 }
 impl Budget {
+    pub(crate) fn new(limits: Limits) -> Self {
+        Self {
+            work: limits.max_work,
+            bytes: limits.max_bytes,
+            words: limits.max_memory_words,
+            depth: limits.max_depth,
+        }
+    }
     pub(crate) fn work(&mut self, n: usize) -> Result<(), Stop> {
         self.work = self.work.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
@@ -285,19 +297,38 @@ fn area(s: &mut State, budget: &mut Budget, from: Word, size: Word) -> Result<Ve
 fn sophia_return(
     s: &State,
     budget: &mut Budget,
-    ty: Option<&runtime_heap::Type>,
+    ty: Option<&runtime_heap::TypeRef>,
     ptr: Word,
 ) -> Result<(Vec<u8>, BigUint), Fault> {
     let maximum = gas::memory_limit(&s.gas, &s.gas_table, s.float_profile)? * 32u8;
     let ty = ty.ok_or(Failure::OutOfGas)?;
-    let output =
-        runtime_heap::serialize(ty, ptr, &s.memory, &maximum, budget).map_err(|e| match e {
-            runtime_heap::Error::InvalidValue => Fault::Vm(Failure::OutOfGas),
-            runtime_heap::Error::UnsupportedMap => Fault::Stop(Stop::UnimplementedHeapMaps),
-            runtime_heap::Error::Stop(stop) => Fault::Stop(stop),
-        })?;
+    let profile = if s.version == Version::Sophia4 {
+        runtime_heap::MapSerialization::Corrected
+    } else {
+        runtime_heap::MapSerialization::Legacy
+    };
+    let output = runtime_heap::serialize(
+        ty,
+        ptr,
+        &s.memory,
+        runtime_heap::MapContext {
+            maps: &s.maps,
+            store: &s.map_store,
+            profile,
+        },
+        &maximum,
+        budget,
+    )
+    .map_err(heap_fault)?;
     let gas = gas::memory(&(output.len() / 32).into(), &s.gas_table, s.float_profile)?;
     Ok((output, gas))
+}
+fn heap_fault(error: runtime_heap::Error) -> Fault {
+    match error {
+        runtime_heap::Error::ResourceLimit => Fault::Stop(Stop::ResourceLimit),
+        runtime_heap::Error::Stop(s) => Fault::Stop(s),
+        _ => Fault::Vm(Failure::OutOfGas),
+    }
 }
 fn implemented(op: u8) -> bool {
     matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3a|0x3d|0x3e|0x41..=0x45|0x50..=0x53|0x56..=0x5b|0x60..=0xa4|0xf3|0xfd)
@@ -336,6 +367,8 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
     if let Some(ty) = &state.out_type {
         runtime_heap::check_type(ty, &mut budget)?;
     }
+    maps::reserve_maps(&state.maps, &mut budget).map_err(heap_fault)?;
+    maps::reserve_store(&state.map_store, &mut budget).map_err(heap_fault)?;
     budget.bytes(
         state
             .stack
@@ -369,6 +402,8 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
         out_type: state.out_type.clone(),
         output: state.output.clone(),
         logs: state.logs.clone(),
+        maps: state.maps.clone(),
+        map_store: state.map_store.clone(),
     };
     let mut scan = 0usize;
     while scan < s.code.len() {
@@ -472,13 +507,14 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                 if s.version == Version::Solidity1 {
                     s.output = area(&mut s, &mut budget, a, b)?;
                 } else {
+                    let revert_type = std::sync::Arc::new(runtime_heap::Type::String);
                     let (bytes, gas) = sophia_return(
                         &s,
                         &mut budget,
                         if op == 0xfd {
-                            Some(&runtime_heap::Type::String)
+                            Some(&revert_type)
                         } else {
-                            s.out_type.as_deref()
+                            s.out_type.as_ref()
                         },
                         b,
                     )?;

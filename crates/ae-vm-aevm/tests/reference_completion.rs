@@ -325,7 +325,7 @@ fn stopped_hash_log_and_return_attempts_preserve_snapshots_and_retry() {
         for field in 0..3 {
             let mut reached = false;
             let mut stopped = false;
-            for allowance in 0..2048 {
+            for allowance in 0..8192 {
                 let mut limits = Limits::default();
                 match field {
                     0 => limits.max_work = allowance,
@@ -361,7 +361,10 @@ fn stopped_hash_log_and_return_attempts_preserve_snapshots_and_retry() {
     )));
     assert_eq!(
         execution::evaluate(&s, Limits::default()),
-        Err(Stop::UnimplementedHeapMaps)
+        Ok(Outcome::Error {
+            reason: Failure::OutOfGas,
+            gas: BigUint::zero()
+        })
     );
 }
 
