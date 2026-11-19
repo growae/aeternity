@@ -24,7 +24,7 @@ static PUBLICATION: LazyLock<J> = LazyLock::new(|| {
     let pool = rows(&packed["values"]);
     name_tests::expand(&packed["root"], pool, pool.len())
 });
-fn chain(row: &J) -> Chain {
+pub(super) fn chain(row: &J) -> Chain {
     let init = &row["initial"];
     let mut s = remote_tests::chain(
         &json!({"initial":{"chain":{"accounts":init["accounts"]}},"contracts":init["contracts"],"height":50}),
@@ -137,7 +137,7 @@ fn chain(row: &J) -> Chain {
     }
     s
 }
-fn other_trees<S: NodeWriter + Clone>(row: &J, store: S) -> (Calls<S>, Trie<S>) {
+pub(super) fn other_trees<S: NodeWriter + Clone>(row: &J, store: S) -> (Calls<S>, Trie<S>) {
     fn build<S: NodeWriter>(rows_json: &J, store: S) -> Trie<S> {
         let mut out = Trie::new(store);
         for item in rows(rows_json) {
@@ -155,7 +155,7 @@ fn other_trees<S: NodeWriter + Clone>(row: &J, store: S) -> (Calls<S>, Trie<S>) 
         build(&row["initial"]["channels"], store),
     )
 }
-fn snapshot<A: NodeReader, C: NodeReader>(t: &Trees<A, C>) -> J {
+pub(super) fn snapshot<A: NodeReader, C: NodeReader>(t: &Trees<A, C>) -> J {
     json!({"accounts":tree_entries(t.accounts.tree()),"contracts":tree_entries(t.contracts.tree()),"names":tree_entries(t.names.tree()),"name_expiry":tree_entries(t.names.cache()),"oracles":tree_entries(t.oracles.tree()),"oracle_expiry":tree_entries(t.oracles.cache()),"calls":tree_entries(t.calls.tree()),"channels":tree_entries(&t.channels),
         "account_root":t.accounts.root_hash().map(|h|hex::encode(h.0)),"contract_root":t.contracts.root_hash().map(|h|hex::encode(h.0)),"name_root":t.names.root_hash().map(|h|hex::encode(h.0)),"name_expiry_root":t.names.cache_root_hash().map(|h|hex::encode(h.0)),"oracle_root":t.oracles.root_hash().map(|h|hex::encode(h.0)),"oracle_expiry_root":t.oracles.cache_root_hash().map(|h|hex::encode(h.0)),"call_root":t.calls.root_hash().map(|h|hex::encode(h.0)),"channel_root":t.channels.root_hash().map(|h|hex::encode(h.0)),"state_root":hex::encode(t.roots().hash().0)})
 }

@@ -14,6 +14,7 @@ use std::{
     fmt,
 };
 
+pub mod contracts;
 pub mod fate_chain;
 pub mod fate_compat;
 pub mod fate_store;
