@@ -17,7 +17,7 @@ fn name_error_records_match_original_release_and_test_builds() {
     .unwrap();
     check_profiles(packed, 1536);
 }
-fn check_profiles(packed: J, expected_cases: usize) {
+pub(super) fn check_profiles(packed: J, expected_cases: usize) {
     let pool = rows(&packed["values"]);
     let data = name_tests::expand(&packed["root"], pool, pool.len());
     let overrides = Overrides::default();

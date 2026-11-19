@@ -56,6 +56,8 @@ mod program_tests;
 mod publication_tests;
 #[path = "support/fate_remote.rs"]
 mod remote_tests;
+#[path = "support/fate_unicode.rs"]
+mod unicode_tests;
 static FIXTURE: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_fate_instructions.json")).unwrap()
 });

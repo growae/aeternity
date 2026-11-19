@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Native normalization adapted from OTP-26.2.5.21 unicode_util.erl.
+// Copyright Ericsson AB 2015-2023. All Rights Reserved.
+// Apache-2.0 text: repository licenses/Apache-2.0.txt.
 // Explicit historical Unicode behavior; never use the Rust host's tables.
 use crate::{Budget, Error, Limits};
 mod tables;
@@ -56,51 +60,19 @@ impl Profile {
             budget: Budget::new(limits),
             bytes: 0,
         };
-        let mut decomposed = Vec::new();
+        // Charge and validate the input before the shared native cluster scan.
         for &cp in input {
             work.budget.visit(0)?;
-            if (0xac00..=0xd7a3).contains(&cp) {
-                let index = cp - 0xac00;
-                work.push(&mut decomposed, 0x1100 + index / 588)?;
-                work.push(&mut decomposed, 0x1161 + (index % 588) / 28)?;
-                if index % 28 != 0 {
-                    work.push(&mut decomposed, 0x11a7 + index % 28)?;
-                }
-            } else if let Some(values) = lookup(tables::DECOMPOSITION, cp) {
-                for &c in values {
-                    work.push(&mut decomposed, c)?;
-                }
-            } else {
-                work.push(&mut decomposed, cp)?;
+            if char::from_u32(cp).is_none() {
+                return Err(Error::InvalidValue);
             }
         }
-        let mut start = 0;
-        for i in 0..decomposed.len() {
-            work.budget.visit(0)?;
-            if ccc(decomposed[i]) == 0 {
-                work.sort(&mut decomposed[start..i])?;
-                start = i + 1;
-            }
-        }
-        work.sort(&mut decomposed[start..])?;
         let mut points = Vec::new();
-        let mut starter = None;
-        let mut last_class = 0;
-        for cp in decomposed {
-            work.budget.visit(0)?;
-            let class = ccc(cp);
-            if let Some(i) = starter
-                && (last_class < class || last_class == 0)
-                && let Some(composed) = compose(points[i], cp)
-            {
-                points[i] = composed;
-                continue;
-            }
-            if class == 0 {
-                starter = Some(points.len());
-            }
-            work.push(&mut points, cp)?;
-            last_class = class;
+        let mut rest = input;
+        while !rest.is_empty() {
+            let len = ae_codec::unicode::Profile::Otp26Unicode15.first_grapheme_len(rest);
+            normalize_cluster(&rest[..len], &mut points, &mut work)?;
+            rest = &rest[len..];
         }
         Ok(work.finish(points))
     }
@@ -124,6 +96,82 @@ impl Profile {
         Ok(work.finish(points))
     }
 }
+fn normalize_cluster(input: &[u32], points: &mut Vec<u32>, work: &mut Work) -> Result<(), Error> {
+    let mut decomposed = Vec::new();
+    for &cp in input {
+        if (0xac00..=0xd7a3).contains(&cp) {
+            let index = cp - 0xac00;
+            work.push(&mut decomposed, 0x1100 + index / 588)?;
+            work.push(&mut decomposed, 0x1161 + (index % 588) / 28)?;
+            if index % 28 != 0 {
+                work.push(&mut decomposed, 0x11a7 + index % 28)?;
+            }
+        } else if let Some(values) = lookup(tables::DECOMPOSITION, cp) {
+            for &c in values {
+                work.push(&mut decomposed, c)?;
+            }
+        } else {
+            work.push(&mut decomposed, cp)?;
+        }
+    }
+    let mut start = 0;
+    for i in 0..decomposed.len() {
+        work.budget.visit(0)?;
+        if ccc(decomposed[i]) == 0 {
+            work.sort(&mut decomposed[start..i])?;
+            start = i + 1;
+        }
+    }
+    work.sort(&mut decomposed[start..])?;
+    // Preserve OTP's cluster-local base, including composition across
+    // zero-class joiners. Its recursive Hangul prefix path is iterative.
+    let mut tail = decomposed.as_slice();
+    while tail.len() >= 2 && (0x1100..=0x1112).contains(&tail[0]) {
+        work.budget.visit(0)?;
+        if (0x1161..=0x1175).contains(&tail[1]) {
+            let mut cp = 0xac00 + (tail[0] - 0x1100) * 588 + (tail[1] - 0x1161) * 28;
+            tail = &tail[2..];
+            if let Some(&t) = tail.first()
+                && (0x11a7..=0x11c2).contains(&t)
+            {
+                cp += t - 0x11a7;
+                tail = &tail[1..];
+            }
+            work.push(points, cp)?;
+            for &cp in tail {
+                work.push(points, cp)?;
+            }
+            return Ok(());
+        }
+        work.push(points, tail[0])?;
+        tail = &tail[1..];
+    }
+    let Some((&first, rest)) = tail.split_first() else {
+        return Ok(());
+    };
+    if tail.len() == 2
+        && let Some(cp) = compose(first, rest[0])
+    {
+        work.push(points, cp)?;
+        return Ok(());
+    }
+    let base = points.len();
+    work.push(points, first)?;
+    let mut previous = ccc(first);
+    for &cp in rest {
+        work.budget.visit(0)?;
+        let class = ccc(cp);
+        if (previous == 0 || previous < class)
+            && let Some(composed) = compose(points[base], cp)
+        {
+            points[base] = composed;
+        } else {
+            work.push(points, cp)?;
+            previous = class;
+        }
+    }
+    Ok(())
+}
 fn lookup(table: &[(u32, &'static [u32])], cp: u32) -> Option<&'static [u32]> {
     table
         .binary_search_by_key(&cp, |r| r.0)
@@ -137,15 +185,6 @@ fn ccc(cp: u32) -> u8 {
         .map_or(0, |i| tables::CCC[i].1)
 }
 fn compose(a: u32, b: u32) -> Option<u32> {
-    if (0x1100..0x1113).contains(&a) && (0x1161..0x1176).contains(&b) {
-        return Some(0xac00 + (a - 0x1100) * 588 + (b - 0x1161) * 28);
-    }
-    if (0xac00..=0xd7a3).contains(&a)
-        && (a - 0xac00).is_multiple_of(28)
-        && (0x11a8..0x11c3).contains(&b)
-    {
-        return Some(a + b - 0x11a7);
-    }
     tables::COMPOSITION
         .binary_search_by_key(&(a, b), |r| (r.0, r.1))
         .ok()

@@ -2,7 +2,8 @@
 // OTP-26.2.5.21 unicode_util:nfc decomposition and cluster composition.
 // Copyright Ericsson AB 2015-2023. All Rights Reserved.
 // Apache-2.0 text: crate LICENSE-APACHE.
-use super::{grapheme, properties, tables};
+use super::{properties, tables};
+use crate::unicode::Profile;
 
 pub(super) fn ccc(cp: u32) -> u32 {
     properties(cp) >> 12
@@ -11,7 +12,7 @@ pub(super) fn nfc(input: &[u32]) -> Vec<u32> {
     let mut output = Vec::new();
     let mut rest = input;
     while !rest.is_empty() {
-        let len = grapheme::len(rest);
+        let len = Profile::Otp26Unicode15.first_grapheme_len(rest);
         output.extend(cluster(&rest[..len]));
         rest = &rest[len..];
     }
@@ -155,7 +156,7 @@ mod reference_tests {
             let mut rest = input.as_slice();
             let mut clusters = Vec::new();
             while !rest.is_empty() {
-                let n = grapheme::len(rest);
+                let n = Profile::Otp26Unicode15.first_grapheme_len(rest);
                 clusters.push(rest[..n].to_vec());
                 rest = &rest[n..];
             }

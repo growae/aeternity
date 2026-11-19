@@ -3,8 +3,6 @@
 // IDNA portions: Copyright the authors and contributors. MIT: LICENSE-IDNA.
 // AENS wrapper: Copyright (c) 2018 Aeternity Anstalt. ISC: repository LICENSE.
 mod error;
-mod grapheme;
-mod grapheme_tables;
 mod normalize;
 mod punycode;
 mod tables;
