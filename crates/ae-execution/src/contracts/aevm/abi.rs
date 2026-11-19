@@ -114,3 +114,35 @@ pub(super) fn verify_auth(
     }
     Err(Error::Rejected("bad_function_hash"))
 }
+
+pub(super) fn verify_auth_data(
+    data: &[u8],
+    hash: &[u8],
+    b: &mut Budget,
+) -> Result<(), super::super::Error> {
+    use super::super::Error;
+    match heap::decode_with_budget(&Type::Tuple(vec![Type::Word]), data, b) {
+        Ok(Value::Tuple(v)) => {
+            let Value::Integer(n) = &v[0] else {
+                unreachable!()
+            };
+            if Word::wrapping(n).0 == hash {
+                Ok(())
+            } else {
+                Err(Error::Rejected("wrong_auth_function"))
+            }
+        }
+        Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
+        _ => Err(Error::Rejected("bad_auth_data")),
+    }
+}
+pub(super) fn auth_result(data: &[u8], b: &mut Budget) -> Result<bool, super::super::Error> {
+    use super::super::Error;
+    match heap::decode_with_budget(&Type::Word, data, b) {
+        Ok(Value::Integer(n)) if n == 0.into() => Ok(false),
+        Ok(Value::Integer(n)) if n == 1.into() => Ok(true),
+        Ok(Value::Integer(n)) => Err(Error::AuthenticationResultCase(n)),
+        Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
+        _ => Ok(false),
+    }
+}

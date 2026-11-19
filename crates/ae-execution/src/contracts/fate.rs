@@ -83,6 +83,24 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     )
     .map_err(|e| match e {
         ae_codec::object::ObjectError::Rlp(rlp::DecodeError::ResourceLimit) => Error::ResourceLimit,
+        ae_codec::object::ObjectError::ExpectedList => {
+            let rlp::Rlp::Bytes(bytes) = rlp::decode_with_limits(
+                &wrapped,
+                rlp::DecodeLimits {
+                    max_input_bytes: limits.max_bytes,
+                    max_items: limits.max_nodes,
+                    max_depth: limits.max_depth,
+                },
+            )
+            .expect("same bounded decoder") else {
+                unreachable!()
+            };
+            use ae_vm_fate::native::{Class, Exception, Term};
+            Error::NativeException(Box::new(Exception {
+                class: Class::Error,
+                reason: Term::tagged("badmatch", vec![Term::Binary(bytes.to_vec())]),
+            }))
+        }
         e => Error::State(ae_state::contracts::Error::Object(e)),
     })?;
     match abi::decode_vm_calldata(calldata, limits) {
@@ -110,9 +128,15 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     environment.origin = tx.call_origin();
     environment.gas_price = big(tx.gas_price());
     environment.fee = big(tx.fee());
+    if context.ga_transaction.is_some() {
+        environment.auth_tx_hash = context.ga_transaction_hash.map(|h| h.0.to_vec());
+    }
     let host = Host {
         contract_cache: Default::default(),
-        auth_tx: config.auth_tx.clone(),
+        auth_tx: context
+            .ga_transaction
+            .clone()
+            .or_else(|| config.auth_tx.clone()),
         accounts: trees.accounts.clone(),
         contracts: trees.contracts.clone(),
         height: context.height,

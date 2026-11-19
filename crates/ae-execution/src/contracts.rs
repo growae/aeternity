@@ -22,6 +22,7 @@ mod create;
 mod invocation;
 use invocation::Invocation;
 mod attach;
+pub(crate) mod authentication;
 pub use attach::process_attach;
 pub use create::{execute_signed_create, process_create};
 pub mod aevm;
@@ -39,6 +40,7 @@ pub enum Error {
     ResourceLimit,
     UnsupportedVm(u16),
     IllegalContractVersion(ae_protocol::contracts::Version),
+    AuthenticationResultCase(BigInt),
     UnsupportedOperation,
     UnformattedDiagnostic(Reason),
     BytecodePreparation(ae_vm_fate::code::CodeError),

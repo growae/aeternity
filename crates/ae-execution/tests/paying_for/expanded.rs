@@ -315,3 +315,6 @@ mod failures;
 
 #[path = "ga_attach.rs"]
 mod ga_attach;
+
+#[path = "ga_meta.rs"]
+mod ga_meta;

@@ -137,3 +137,26 @@ pub fn verify_with_context(
         &mut b,
     )
 }
+
+// Leading GA wrappers do not make an unrelated signer relevant. The first
+// non-meta callback may itself perform the payer's strict inner verification.
+pub(super) fn relevant(
+    mut tx: TransactionRef<'_>,
+    owner: AccountPublicKey,
+    network: &NetworkProfile,
+    limits: SignatureLimits,
+) -> Result<bool, SignatureError> {
+    let mut budget = Budget::from(limits);
+    while matches!(tx.layer().map(|l| l.wrapper()), Some(Wrapper::GaMeta(_))) {
+        budget.layers = budget
+            .layers
+            .checked_sub(1)
+            .ok_or(SignatureError::ResourceLimit)?;
+        tx = tx.inner().expect("meta inner");
+    }
+    match signers(tx, network, &mut budget) {
+        Ok(keys) => Ok(keys.contains(&owner)),
+        Err(SignatureError::ResourceLimit) => Err(SignatureError::ResourceLimit),
+        Err(_) => Ok(false),
+    }
+}

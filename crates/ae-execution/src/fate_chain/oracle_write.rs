@@ -197,6 +197,13 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         payer: next.authentication.payer,
         ga_authenticated: next.authentication.ga_authenticated.clone(),
         ga_nonces: next.authentication.ga_nonces.clone(),
+        ga_transaction: next.auth_tx.clone(),
+        ga_transaction_hash: next
+            .environment
+            .auth_tx_hash
+            .as_ref()
+            .and_then(|h| h.as_slice().try_into().ok())
+            .map(ae_types::Hash256),
     };
     let abi_limits = abi::Limits {
         fate: limits,

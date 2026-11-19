@@ -247,7 +247,11 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     state.abi_version = u32::from(contract.version.abi);
     state.data = call_data.to_vec();
     state.out_type = Some(output);
-    state.auth_tx_hash = config.environment.auth_tx_hash.clone();
+    state.auth_tx_hash = if context.ga_transaction.is_some() {
+        context.ga_transaction_hash.map(|h| h.0.to_vec())
+    } else {
+        config.environment.auth_tx_hash.clone()
+    };
     state.genesis_height = config.environment.genesis_height.into();
     state.call_stack = if init {
         vec![]
@@ -373,4 +377,29 @@ fn advance<A, C>(
         trees,
         events,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn authenticate<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ae_tx::GaMeta,
+    size: usize,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    limits: Limits,
+    relevant: impl FnOnce() -> Result<(), super::Error>,
+) -> Result<Receipt, Error<A, C>> {
+    let mut b = Budget::new(limits);
+    let p = super::authentication::prepare(tx, trees, context, relevant, |hash| {
+        abi::verify_auth_data(&tx.auth_data, hash, &mut b)
+    })
+    .map_err(transaction_fault)?;
+    driver::process_prepared(
+        Invocation::Auth(tx, size),
+        p,
+        trees,
+        context,
+        config,
+        &mut b,
+    )
 }

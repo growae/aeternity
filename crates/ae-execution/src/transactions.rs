@@ -13,7 +13,9 @@ use ae_vm_fate::maps::{MapOrder, order::Otp26};
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 
+mod failures;
 mod signatures;
+mod wrappers;
 pub use signatures::{SignatureError, SignatureLimits, verify, verify_with_context};
 
 pub struct Config<'a, O = Otp26> {
@@ -46,6 +48,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     Contract(Box<contracts::Error>),
     Aevm(Box<contracts::aevm::Error<A, C>>),
     Signature(SignatureError),
+    AuthenticationTransaction(ae_tx::Error),
     RecursivePayer,
     MinimumFeeCaseClause(BigInt),
     ContractCallContextCase(Origin),
@@ -137,63 +140,10 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
-    let mut next = trees.clone();
-    let mut context = context.clone();
-    let mut current = tx.view();
-    let mut prior_events = Vec::new();
-    let mut overhead = BigInt::from(0);
-    while let Some(layer) = current.layer() {
-        let Wrapper::PayingFor(payer) = layer.wrapper() else {
-            return Err(Error::UnsupportedTransaction(current.kind()));
-        };
-        check_payer(current, &context)?;
-        let inner = current.inner().expect("payer inner");
-        if inner
-            .layers()
-            .iter()
-            .any(|l| matches!(l.wrapper(), Wrapper::PayingFor(_)))
-        {
-            return Err(Error::RecursivePayer);
-        }
-        let mut changes = BTreeMap::new();
-        crate::prepare_sender(
-            &next.accounts,
-            &mut changes,
-            payer.payer,
-            &payer.nonce,
-            &context,
-        )?;
-        let fee_payer = crate::fee_payer(payer.payer, &payer.fee, &context);
-        crate::debit(&next.accounts, &mut changes, fee_payer, &payer.fee)?;
-        next.accounts
-            .apply(&changes.into_values().collect::<Vec<_>>())
-            .map_err(crate::Error::from)?;
-        prior_events.insert(
-            0,
-            Event::Primitive(crate::Event::FeeDebit {
-                account: fee_payer,
-                amount: payer.fee.clone(),
-            }),
-        );
-        context.payer = Some(payer.payer);
-        verify_with_context(
-            inner,
-            layer.inner_signatures(),
-            config.network,
-            &context,
-            config.signature_limits,
-        )?;
-        overhead +=
-            BigInt::from(3_000) + size_gas(current.wire_size()) - size_gas(inner.wire_size());
-        current = inner;
-    }
-    let mut result = process_leaf(current.leaf(), &mut next, &context, config)?;
-    result.gas = unsigned(big(&result.gas) + overhead)?;
-    result.events.extend(prior_events);
-    *trees = next;
-    Ok(result)
+    wrappers::process(tx, trees, context, config)
 }
-fn check_payer<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), Error<A, C>> {
+
+fn check_wrapper<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), Error<A, C>> {
     if context.origin == Origin::Contract {
         return Ok(());
     }
@@ -210,6 +160,14 @@ fn check_payer<A, C>(tx: TransactionRef<'_>, context: &Context) -> Result<(), Er
     }
     if big(tx.fee()) < minimum {
         return Err(crate::Error::TooLowFee.into());
+    }
+    if tx
+        .gas_price()
+        .is_some_and(|price| price < &context.protocol.minimum_gas_price().into())
+    {
+        return Err(Error::Contract(Box::new(contracts::Error::Rejected(
+            "too_low_gas_price",
+        ))));
     }
     if tx.ttl().is_some_and(|ttl| ttl < &context.height.into()) {
         return Err(crate::Error::TtlExpired.into());

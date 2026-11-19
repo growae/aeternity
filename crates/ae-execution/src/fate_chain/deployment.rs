@@ -264,6 +264,13 @@ fn next_nonce<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         payer: state.authentication.payer,
         ga_authenticated: state.authentication.ga_authenticated.clone(),
         ga_nonces: state.authentication.ga_nonces.clone(),
+        ga_transaction: state.auth_tx.clone(),
+        ga_transaction_hash: state
+            .environment
+            .auth_tx_hash
+            .as_ref()
+            .and_then(|h| h.as_slice().try_into().ok())
+            .map(ae_types::Hash256),
     };
     let mut changes = BTreeMap::new();
     crate::prepare_sender_with_nonce(

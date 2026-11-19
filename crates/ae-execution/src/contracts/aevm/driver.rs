@@ -2,18 +2,21 @@ use super::*;
 enum OwnedInvocation {
     Contract(ContractTransaction),
     Attach(ae_tx::GaAttachTransaction),
+    Auth(ae_tx::GaMeta, usize),
 }
 impl OwnedInvocation {
     fn new(tx: Invocation<'_>) -> Self {
         match tx {
             Invocation::Contract(t) => Self::Contract(t.clone()),
             Invocation::Attach(t) => Self::Attach(t.clone()),
+            Invocation::Auth(t, n) => Self::Auth(t.clone(), n),
         }
     }
     fn view(&self) -> Invocation<'_> {
         match self {
             Self::Contract(t) => Invocation::Contract(t),
             Self::Attach(t) => Invocation::Attach(t),
+            Self::Auth(t, n) => Invocation::Auth(t, *n),
         }
     }
 }
@@ -37,17 +40,22 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     context: &Context,
     config: &Config,
     b: &mut Budget,
+    prepared: Option<super::super::PreparedCall<A, C>>,
 ) -> Begun<A, C> {
     b.work(1)?;
     b.bytes(tx.wire_size())?;
-    let (p, created) = match tx {
-        Invocation::Contract(t) if !tx.is_create() => (
-            prepare_call(t, trees, context).map_err(transaction_fault)?,
-            None,
-        ),
-        _ => {
-            let (p, c) = create::prepare(tx, trees, context, b)?;
-            (p, Some(c))
+    let (p, created) = if let Some(p) = prepared {
+        (p, None)
+    } else {
+        match tx {
+            Invocation::Contract(t) if !tx.is_create() => (
+                prepare_call(t, trees, context).map_err(transaction_fault)?,
+                None,
+            ),
+            _ => {
+                let (p, c) = create::prepare(tx, trees, context, b)?;
+                (p, Some(c))
+            }
         }
     };
     let step = start(tx, &p.contract, p.call, p.trees, context, config, b)?;
@@ -71,8 +79,28 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
+    drive(tx, None, trees, context, config, b)
+}
+pub(super) fn process_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: Invocation<'_>,
+    prepared: super::super::PreparedCall<A, C>,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    b: &mut Budget,
+) -> Result<Receipt, Error<A, C>> {
+    drive(tx, Some(prepared), trees, context, config, b)
+}
+fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: Invocation<'_>,
+    prepared: Option<super::super::PreparedCall<A, C>>,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    b: &mut Budget,
+) -> Result<Receipt, Error<A, C>> {
     b.check_call_depth(1)?;
-    let (mut frame, mut step) = begin(tx, trees, context, config, b)?;
+    let (mut frame, mut step) = begin(tx, trees, context, config, b, prepared)?;
     let mut waiting: Vec<Waiting<A, C>> = Vec::new();
     let host = Host::new(config);
     loop {
@@ -82,13 +110,19 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                     Some(contract) => create::finish(contract, completed, config, b)?,
                     None => completed,
                 };
-                let (receipt, committed) = settle_detached(
-                    frame.tx.view(),
-                    frame.rollback,
-                    &frame.context,
-                    completed,
-                    frame.events,
-                )
+                let (receipt, committed) = match frame.tx.view() {
+                    Invocation::Auth(tx, size) => super::super::authentication::finish(
+                        tx,
+                        size,
+                        &frame.context,
+                        completed,
+                        frame.events,
+                        |data| abi::auth_result(data, b),
+                    ),
+                    tx => {
+                        settle_detached(tx, frame.rollback, &frame.context, completed, frame.events)
+                    }
+                }
                 .map_err(transaction_fault)?;
                 let Some(parent) = waiting.pop() else {
                     *trees = committed;
@@ -133,6 +167,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                             &child_context,
                             config,
                             b,
+                            None,
                         ) {
                             Ok((child, child_step)) => {
                                 b.bytes(std::mem::size_of::<Waiting<A, C>>())?;

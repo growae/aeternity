@@ -42,6 +42,8 @@ pub struct Context {
     pub payer: Option<AccountPublicKey>,
     pub ga_authenticated: BTreeSet<AccountPublicKey>,
     pub ga_nonces: BTreeMap<AccountPublicKey, Vec<u8>>,
+    pub ga_transaction: Option<std::sync::Arc<ae_tx::WireTransaction>>,
+    pub ga_transaction_hash: Option<Hash256>,
 }
 impl Context {
     pub fn transaction(height: u64, protocol: Protocol) -> Self {
@@ -53,6 +55,8 @@ impl Context {
             payer: None,
             ga_authenticated: BTreeSet::new(),
             ga_nonces: BTreeMap::new(),
+            ga_transaction: None,
+            ga_transaction_hash: None,
         }
     }
 }

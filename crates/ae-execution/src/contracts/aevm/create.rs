@@ -60,6 +60,7 @@ pub(super) fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             |v| v.is_aevm(),
             |code, data| abi::verify_init(code, data, b),
         ),
+        Invocation::Auth(_, _) => Err(super::super::Error::UnsupportedOperation),
         Invocation::Attach(t) => super::super::attach::prepare(
             t,
             trees,

@@ -277,6 +277,7 @@ fn reason<A, C>(e: &Error<A, C>) -> &'static str {
             ae_execution::Error::AccountNotFound => "account_not_found",
             ae_execution::Error::InsufficientFunds => "insufficient_funds",
             ae_execution::Error::NotBasicAccount => "not_a_basic_account",
+            ae_execution::Error::NotGeneralizedAccount => "not_a_generalized_account",
             ae_execution::Error::GaNonceMustBeZero => "nonce_in_ga_tx_should_be_zero",
             ae_execution::Error::NonceAlreadyUsed => "tx_nonce_already_used_for_account",
             ae_execution::Error::NonceTooHigh => "tx_nonce_too_high_for_account",
