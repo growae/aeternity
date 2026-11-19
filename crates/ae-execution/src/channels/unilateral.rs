@@ -11,9 +11,10 @@ pub struct Limits {
     pub state: transport::Limits,
 }
 
-fn deserialize(
+pub(super) fn deserialize(
     bytes: &[u8],
     limits: Limits,
+    atoms: Option<&std::collections::BTreeSet<Vec<u8>>>,
 ) -> Result<Option<SignedTransaction<Transaction>>, Error> {
     if bytes.is_empty() {
         return Ok(None);
@@ -23,7 +24,7 @@ fn deserialize(
         limits.transaction,
         transport::Config {
             limits: limits.state,
-            ..Default::default()
+            existing_name_status_atoms: atoms,
         },
     )
     .map_err(|e| {
@@ -44,7 +45,7 @@ fn deserialize(
     )?;
     Ok(Some(signed))
 }
-fn state(signed: &SignedTransaction<Transaction>) -> (&[u8; 32], &Unsigned, &[u8]) {
+pub(super) fn state(signed: &SignedTransaction<Transaction>) -> (&[u8; 32], &Unsigned, &[u8]) {
     let TransactionLeaf::Channel(t) = signed.transaction().leaf() else {
         unreachable!()
     };
@@ -63,7 +64,7 @@ fn account<S: NodeReader>(accounts: &Accounts<S>, key: AccountPublicKey) -> Resu
         .lookup(key)?
         .ok_or(Error::Rejected("account_not_found"))
 }
-fn check_account<S: NodeReader>(
+pub(super) fn check_account<S: NodeReader>(
     accounts: &Accounts<S>,
     sender: AccountPublicKey,
     nonce: &Unsigned,
@@ -93,7 +94,7 @@ fn check_account<S: NodeReader>(
     }
     Ok(())
 }
-fn spend<S: NodeWriter + Clone>(
+pub(super) fn spend<S: NodeWriter + Clone>(
     accounts: &mut Accounts<S>,
     sender: AccountPublicKey,
     nonce: &Unsigned,
@@ -114,7 +115,7 @@ fn spend<S: NodeWriter + Clone>(
     }
     Ok(())
 }
-fn allowed(
+pub(super) fn allowed(
     c: &Channel,
     sender: AccountPublicKey,
     kind: TransactionKind,
@@ -125,7 +126,10 @@ fn allowed(
     }
     require(
         kind == TransactionKind::ChannelSlash
-            || (kind == TransactionKind::ChannelSnapshotSolo && height_protocol >= Protocol::Iris),
+            || (matches!(
+                kind,
+                TransactionKind::ChannelSnapshotSolo | TransactionKind::ChannelForceProgress
+            ) && height_protocol >= Protocol::Iris),
         "account_not_peer",
     )?;
     let delegates = c.delegate_pubkeys(None).map_err(|e| match e {
@@ -254,7 +258,7 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                 limits.transaction,
                 transport::Config {
                     limits: limits.state,
-                    ..Default::default()
+                    existing_name_status_atoms: config.channel_state_atoms,
                 },
             )
             .map_err(Error::Codec)?;
@@ -262,7 +266,7 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     let c = trees.channels.lookup(key).map_err(Error::State)?;
     // Storage/decode exhaustion remains retryable even when get_vals would
     // select an earlier semantic channel error in the unbounded reference.
-    let decoded = match deserialize(payload, limits) {
+    let decoded = match deserialize(payload, limits, config.channel_state_atoms) {
         Err(e @ Error::Codec(_)) => return Err(e.into()),
         result => result,
     };

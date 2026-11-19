@@ -433,7 +433,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     Err(Error::ResourceLimit)
 }
 
-pub(super) fn decode_code(wrapped: &[u8], limits: Limits) -> Result<SophiaCode, Error> {
+pub(crate) fn decode_code(wrapped: &[u8], limits: Limits) -> Result<SophiaCode, Error> {
     SophiaCode::decode_with_limits(
         wrapped,
         rlp::DecodeLimits {

@@ -49,6 +49,7 @@ fn execute_limits<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone
         fate: Some(&f),
         aevm: Some(&a),
         channel_limits: Default::default(),
+        channel_state_atoms: None,
         signature_limits,
         oracle_limits: Default::default(),
         fate_limits,

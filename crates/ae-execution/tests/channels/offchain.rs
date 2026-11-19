@@ -77,6 +77,7 @@ fn execute_budgets<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clon
         fate: Some(&f),
         aevm: Some(&a),
         channel_limits: Default::default(),
+        channel_state_atoms: None,
         signature_limits: Default::default(),
         oracle_limits: Default::default(),
         fate_limits: budget.fate,
@@ -131,7 +132,7 @@ fn result<A: NodeReader, C: NodeReader>(
         .unwrap_or(atom("ok"));
     json!({"kind":"ok", "value": tuple(vec![status, snapshot(t)])})
 }
-fn failure(e: &Error) -> J {
+pub(super) fn failure(e: &Error) -> J {
     match e {
         Error::Aevm(e)
             if matches!(

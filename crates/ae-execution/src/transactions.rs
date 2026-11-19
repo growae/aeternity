@@ -27,6 +27,7 @@ pub struct Config<'a, O = Otp26> {
     pub aevm: Option<&'a contracts::aevm::Config>,
     pub signature_limits: SignatureLimits,
     pub channel_limits: crate::channels::unilateral::Limits,
+    pub channel_state_atoms: Option<&'a std::collections::BTreeSet<Vec<u8>>>,
     pub oracle_limits: oracles::abi::Limits,
     pub fate_limits: ae_vm_fate::Limits,
     pub maximum_fate_steps: usize,
@@ -40,6 +41,7 @@ impl<'a> Config<'a> {
             aevm: None,
             signature_limits: SignatureLimits::default(),
             channel_limits: Default::default(),
+            channel_state_atoms: None,
             oracle_limits: oracles::abi::Limits::default(),
             fate_limits: ae_vm_fate::Limits::default(),
             maximum_fate_steps: 1_000_000,
@@ -240,6 +242,20 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         )?),
         TransactionLeaf::Contract(_) => None,
         TransactionLeaf::Channel(t) => {
+            if matches!(t.operation(), ae_tx::channels::Operation::Offchain { .. }) {
+                return Err(if context.origin == Origin::Contract {
+                    crate::channels::Error::Native(crate::channels::NativeFailure::FunctionClause)
+                } else {
+                    crate::channels::Error::Rejected("too_low_abs_ttl")
+                }
+                .into());
+            }
+            if matches!(
+                t.operation(),
+                ae_tx::channels::Operation::ForceProgress { .. }
+            ) {
+                return crate::channels::force_progress::process(t, trees, context, source, config);
+            }
             if matches!(
                 t.operation(),
                 ae_tx::channels::Operation::CloseSolo { .. }

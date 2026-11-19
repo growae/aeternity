@@ -19,6 +19,7 @@ use ae_types::{AccountPublicKey, Id, IdTag, Unsigned};
 use std::collections::BTreeMap;
 
 pub mod authentication;
+pub mod force_progress;
 pub mod offchain;
 pub mod unilateral;
 
@@ -40,6 +41,7 @@ pub enum NativeFailure {
     },
     Badarg,
     OffchainUpdate(&'static str),
+    ForceProgressCatch(Vec<u8>),
     IllegalContractVersion(ae_protocol::contracts::Version),
     ProofAccount {
         value: ae_trie::Value,

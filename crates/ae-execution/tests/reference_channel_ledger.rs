@@ -111,6 +111,7 @@ fn entries(t: &Trie<impl NodeReader>) -> J {
 }
 fn name(k: TransactionKind) -> &'static str {
     match k {
+        TransactionKind::ChannelForceProgress => "channel_force_progress_tx",
         TransactionKind::ChannelCreate => "channel_create_tx",
         TransactionKind::ChannelDeposit => "channel_deposit_tx",
         TransactionKind::ChannelWithdraw => "channel_withdraw_tx",
@@ -284,6 +285,9 @@ fn captured_error(e: &Error) -> J {
                     ]),
                     NativeFailure::FunctionClause => atom("function_clause"),
                     NativeFailure::Badarg => atom("badarg"),
+                    NativeFailure::ForceProgressCatch(b) => {
+                        tuple(vec![atom("badmatch_trees"), bin(b)])
+                    }
                     NativeFailure::OffchainUpdate(s) => {
                         tuple(vec![atom("off_chain_update_error"), atom(s)])
                     }
@@ -509,3 +513,6 @@ mod unilateral;
 
 #[path = "channels/offchain.rs"]
 mod offchain;
+
+#[path = "channels/force_progress.rs"]
+mod force_progress;
