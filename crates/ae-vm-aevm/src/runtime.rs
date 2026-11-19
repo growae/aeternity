@@ -77,6 +77,14 @@ impl<E> From<gas::Error> for Fault<E> {
         Self::Native(Native::Gas(e))
     }
 }
+impl<E> From<execution::Native> for Fault<E> {
+    fn from(e: execution::Native) -> Self {
+        Self::Native(match e {
+            execution::Native::Gas(e) => Native::Gas(e),
+            execution::Native::BadMatchBinary(bytes) => Native::BadMatchBinary(bytes),
+        })
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome<C> {
     Complete { state: Box<State>, chain: C },
@@ -112,7 +120,9 @@ pub(crate) fn initialize_inner<E>(
     call_data_type: Option<&TypeRef>,
     b: &mut Budget,
 ) -> Result<State, Fault<E>> {
-    let mut s = execution::snapshot(state, b, false)?;
+    // init_vm replaces the execution fields below but retains jump destinations
+    // and the selfdestruct marker. Address-zero eval_code does not rebuild them.
+    let mut s = execution::snapshot(state, b, true)?;
     s.cp = 0;
     s.stack.clear();
     s.call_creates.clear();

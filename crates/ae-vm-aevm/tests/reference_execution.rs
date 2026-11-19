@@ -141,8 +141,11 @@ fn outcome(o: Outcome) -> J {
         Outcome::Revert { output, gas } => {
             json!({"kind":"revert","message":hex::encode(output),"gas":gas.to_string()})
         }
-        Outcome::Native(gas::Error::BadArithmetic) => {
+        Outcome::Native(execution::Native::Gas(gas::Error::BadArithmetic)) => {
             json!({"kind":"native","class":"error","reason":atom("badarith")})
+        }
+        Outcome::Native(execution::Native::BadMatchBinary(b)) => {
+            json!({"kind":"native","class":"error","reason":["tuple",[["atom","badmatch"],["binary",hex::encode(b)]]]})
         }
     }
 }

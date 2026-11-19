@@ -274,8 +274,11 @@ fn result(out: Outcome) -> J {
         Outcome::Revert { output, gas } => {
             json!({"kind":"revert","message":hex::encode(output),"gas":gas.to_string()})
         }
-        Outcome::Native(gas::Error::BadArithmetic) => {
+        Outcome::Native(execution::Native::Gas(gas::Error::BadArithmetic)) => {
             json!({"kind":"native","class":"error","reason":atom("badarith")})
+        }
+        Outcome::Native(execution::Native::BadMatchBinary(b)) => {
+            json!({"kind":"native","class":"error","reason":["tuple",[["atom","badmatch"],["binary",hex::encode(b)]]]})
         }
     }
 }
@@ -434,6 +437,6 @@ fn deep_native_heap_copy_is_iterative_and_depth_stops_are_retryable() {
     s.context.address = 0.into();
     assert_eq!(
         execution::evaluate(&s, Limits::default()),
-        Err(Stop::UnimplementedPrimitiveEntry)
+        Ok(Outcome::Native(execution::Native::BadMatchBinary(vec![])))
     );
 }

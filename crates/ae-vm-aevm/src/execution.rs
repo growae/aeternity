@@ -105,6 +105,7 @@ pub struct State {
     pub call_creates: Vec<CallCreate>,
     pub auth_tx_hash: Option<Vec<u8>>,
     pub solidity_storage: BTreeMap<BigUint, BigUint>,
+    pub self_destruct: Option<Word>,
     pub external_code_sizes: BTreeMap<BigUint, BigUint>,
     pub external_code_blocks: BTreeMap<BigUint, Vec<u8>>,
     pub block_hash_mode: BlockHashMode,
@@ -143,6 +144,7 @@ impl State {
             call_creates: Vec::new(),
             auth_tx_hash: None,
             solidity_storage: BTreeMap::new(),
+            self_destruct: None,
             external_code_sizes: BTreeMap::new(),
             external_code_blocks: BTreeMap::new(),
             block_hash_mode: BlockHashMode::Chain,
@@ -181,10 +183,15 @@ pub enum Failure {
     Call(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Native {
+    Gas(gas::Error),
+    BadMatchBinary(Vec<u8>),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Complete(Box<State>),
     Error { reason: Failure, gas: BigUint },
-    Native(gas::Error),
+    Native(Native),
     Revert { output: Vec<u8>, gas: BigUint },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +199,6 @@ pub enum Stop {
     ResourceLimit,
     InvalidInitialState,
     UnimplementedInstruction(u8),
-    UnimplementedPrimitiveEntry,
     UnimplementedPrimop(Word),
 }
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +373,16 @@ pub(crate) fn call_gas(s: &State) -> Result<(BigUint, BigUint), Fault> {
 }
 fn dynamic(op: u8, s: &State) -> Result<BigUint, Fault> {
     Ok(match op {
+        0x55 => {
+            let address = peek(s, 0)?.unsigned();
+            let value = peek(s, 1)?;
+            let old = s.solidity_storage.get(&address);
+            if !value.is_zero() && old.is_none_or(BigUint::is_zero) {
+                s.gas_table.sset.into()
+            } else {
+                s.gas_table.sreset.into()
+            }
+        }
         10 => BigUint::from(peek(s, 1)?.unsigned().bits().div_ceil(8)) * s.gas_table.exp_byte,
         0x37 | 0x39 => {
             gas::copy_words(&peek(s, 2)?.unsigned(), s.float_profile)? * s.gas_table.copy
@@ -421,7 +437,7 @@ fn heap_fault(error: runtime_heap::Error) -> Fault {
     }
 }
 fn implemented(op: u8) -> bool {
-    matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3e|0x40..=0x45|0x50..=0x53|0x56..=0x5b|0x60..=0xa4|0xf3|0xfd)
+    matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3e|0x40..=0x45|0x50..=0x5b|0x60..=0xa4|0xf0|0xf3|0xfd|0xff)
 }
 fn external_address(word: Word) -> BigUint {
     BigUint::from_bytes_be(&word.0[12..])
@@ -510,6 +526,9 @@ pub(crate) fn snapshot(
         budget.bytes(usize::try_from(n.bits().div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
     }
     budget.work(state.solidity_storage.len())?;
+    if state.self_destruct.is_some() {
+        budget.bytes(32)?;
+    }
     budget.work(state.external_code_sizes.len())?;
     for (k, v) in state
         .solidity_storage
@@ -554,6 +573,7 @@ pub(crate) fn snapshot(
         call_creates: state.call_creates.clone(),
         auth_tx_hash: state.auth_tx_hash.clone(),
         solidity_storage: state.solidity_storage.clone(),
+        self_destruct: state.self_destruct,
         external_code_sizes: state.external_code_sizes.clone(),
         external_code_blocks: state.external_code_blocks.clone(),
         block_hash_mode: state.block_hash_mode.clone(),
@@ -576,9 +596,6 @@ pub(crate) fn snapshot(
     })
 }
 fn prepare(state: &State, budget: &mut Budget) -> Result<State, Fault> {
-    if state.context.address.is_zero() {
-        return Err(Stop::UnimplementedPrimitiveEntry.into());
-    }
     if state.stack.len() > 1024 {
         return Err(Stop::InvalidInitialState.into());
     }
@@ -825,6 +842,41 @@ fn run<E>(
                 budget.memory(&s.memory, &a, 1)?;
                 s.memory.store8(&a, v.0[31]);
             }
+            0x54 => {
+                let address = pop(&mut s)?.unsigned();
+                let value = s
+                    .solidity_storage
+                    .get(&address)
+                    .map(Word::from_unsigned)
+                    .unwrap_or(Word::ZERO);
+                push(&mut s, budget, value)?;
+            }
+            0x55 => {
+                let address = pop(&mut s)?.unsigned();
+                let value = pop(&mut s)?;
+                if value.is_zero() {
+                    s.solidity_storage.remove(&address);
+                } else {
+                    budget.bytes(64)?;
+                    s.solidity_storage.insert(address, value.unsigned());
+                }
+            }
+            0xf0 => {
+                pop(&mut s)?;
+                let from = pop(&mut s)?;
+                let size = pop(&mut s)?;
+                area(&mut s, budget, from, size)?;
+                // The original Solidity-only create_account is a stub. Preserve
+                // its marker; activating real account creation would differ.
+                push(&mut s, budget, Word::from(0xdeadc0de))?;
+            }
+            0xff => {
+                // Original set_selfdestruct retains all 256 bits and stops
+                // without updating cp, transferring funds or deleting state.
+                s.self_destruct = Some(pop(&mut s)?);
+                finish_step(&mut s, &old_size, budget)?;
+                return Ok(Segment::Done(Outcome::Complete(Box::new(s))));
+            }
             0x56 | 0x57 => {
                 let dest = pop(&mut s)?;
                 let take = op == 0x56 || !pop(&mut s)?.is_zero();
@@ -945,7 +997,7 @@ fn segment_result<E>(result: Result<Segment, RunFault<E>>) -> Result<Segment, Ru
             reason,
             gas: BigUint::zero(),
         })),
-        Err(RunFault::Core(Fault::Native(e))) => Ok(Segment::Done(Outcome::Native(e))),
+        Err(RunFault::Core(Fault::Native(e))) => Ok(Segment::Done(Outcome::Native(Native::Gas(e)))),
         Err(RunFault::Core(Fault::Stop(e))) => Err(RunError::Stop(e)),
         Err(RunFault::Call(e)) => Err(RunError::Call(e)),
     }
@@ -956,6 +1008,18 @@ pub(crate) fn evaluate_segment<E>(
     hosted: bool,
     mut call: impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
 ) -> Result<Segment, RunError<E>> {
+    if state.context.address.is_zero() {
+        // eval_code's primitive entry precedes opcode/stack validation and
+        // jump-destination scanning. It only matches a 32-byte calldata prefix.
+        if state.data.len() < 32 {
+            budget.bytes(state.data.len()).map_err(RunError::Stop)?;
+            return Ok(Segment::Done(Outcome::Native(Native::BadMatchBinary(
+                state.data.clone(),
+            ))));
+        }
+        let state = snapshot(state, budget, true).map_err(RunError::Stop)?;
+        return Ok(Segment::Done(Outcome::Complete(Box::new(state))));
+    }
     let result = prepare(state, budget)
         .map_err(RunFault::Core)
         .and_then(|s| {
