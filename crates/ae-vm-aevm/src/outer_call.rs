@@ -4,10 +4,9 @@ use crate::{
     calls::{self, InputHost},
     execution::{self, Budget, CallCreate, CallStep, Failure, Limits, State, Stop},
     gas,
-    maps::Store,
     opcode::Version,
-    primops::{self, MapHost},
-    runtime::{self, Native, Outcome, StoreHost},
+    primops::{self, ChainHost},
+    runtime::{self, Native, Outcome},
     runtime_heap::TypeRef,
     store::OrderProfile,
     word::Word,
@@ -31,7 +30,7 @@ pub struct Request<'a> {
 }
 // Every host operation reads or returns a staged immutable chain snapshot.
 // Neither a successful child call nor set_store may durably commit here.
-pub trait Host: StoreHost {
+pub trait Host: ChainHost {
     fn function_types(
         &self,
         target: Word,
@@ -39,7 +38,6 @@ pub trait Host: StoreHost {
         function: Word,
         chain: &Self::Chain,
     ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error>;
-    fn get_store(&self, chain: &Self::Chain) -> Result<Store, Self::Error>;
     fn balance(&self, address: Word, chain: &Self::Chain) -> Result<BigInt, Self::Error>;
     fn call(
         &self,
@@ -85,12 +83,6 @@ impl<H: Host> InputHost for Bound<'_, H> {
     ) -> Result<Option<(TypeRef, TypeRef)>, Self::Error> {
         self.host
             .function_types(target, version, function, self.chain)
-    }
-}
-impl<H: Host> MapHost for Bound<'_, H> {
-    type Error = H::Error;
-    fn get_store(&self) -> Result<Store, Self::Error> {
-        self.host.get_store(self.chain)
     }
 }
 enum Problem<E, C> {
@@ -262,7 +254,9 @@ fn run<H: Host>(
         ));
     }
     let (response, next_chain) = if s.version != Version::Solidity1 && destination.is_zero() {
-        match primops::call_local_inner(&s, &call_gas, &input.data, &Bound { host, chain }, b)? {
+        let (result, next_chain) =
+            primops::call_inner(&s, &call_gas, &value, &input.data, chain, host, b)?;
+        match result {
             primops::Outcome::Complete {
                 data,
                 gas_spent,
@@ -274,8 +268,13 @@ fn run<H: Host>(
                         data,
                         gas_spent: gas_spent.into(),
                     },
-                    chain.clone(),
+                    next_chain,
                 )
+            }
+            primops::Outcome::Error(primops::Error::Chain(reason))
+                if reason == "not_allowed_off_chain" || reason == "account_is_not_payable" =>
+            {
+                return Err(Problem::Vm(Failure::Call(reason), 0u8.into()));
             }
             primops::Outcome::Error(_) => return Err(Problem::Vm(Failure::OutOfGas, 0u8.into())),
         }

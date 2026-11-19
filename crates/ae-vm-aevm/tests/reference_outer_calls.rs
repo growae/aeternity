@@ -15,6 +15,7 @@ use std::{
     cell::{Cell, RefCell},
     sync::LazyLock,
 };
+mod outer_chain;
 mod support;
 use support::*;
 static DATA: LazyLock<J> =
@@ -129,10 +130,10 @@ fn vm_id(v: Version) -> u32 {
     }
 }
 fn state(row: &J, snap: &J) -> State {
-    let mode = row["mode"].as_str().unwrap();
+    let mode = row["mode"].as_str().unwrap_or("normal");
     let mut s = State::new(
         Version::from_id(row["vm"].as_u64().unwrap() as u32).unwrap(),
-        vec![row["opcode"].as_u64().unwrap() as u8, 0],
+        vec![row["opcode"].as_u64().unwrap_or(0) as u8, 0],
         uint(field(snap, "gas")),
         FloatProfile::Otp26Word64,
     );
@@ -280,11 +281,6 @@ impl Host for Source<'_> {
         ]));
         self.check("types")?;
         Ok((self.mode != "missing_function").then(|| (ty(&atom("word")), ty(&atom("word")))))
-    }
-    fn get_store(&self, _: &J) -> Result<Store, Self::Error> {
-        self.event(atom("store"));
-        self.check("store")?;
-        Ok(Store::new())
     }
     fn balance(&self, address: Word, chain: &J) -> Result<BigInt, Self::Error> {
         self.event(tuple(vec![atom("balance"), binary(address.0)]));

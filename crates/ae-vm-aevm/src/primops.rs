@@ -14,7 +14,10 @@ use crate::{
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use std::sync::Arc;
+mod chain;
 mod pure;
+pub(crate) use chain::call_inner;
+pub use chain::{AddressKind, ChainHost, HostResult, call};
 pub use pure::call_local;
 pub(crate) use pure::call_local_inner;
 
@@ -28,6 +31,7 @@ pub enum Error {
         state: Box<State>,
     },
     Heap(HeapError),
+    Chain(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {

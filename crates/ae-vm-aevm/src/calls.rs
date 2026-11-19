@@ -159,6 +159,9 @@ fn primitive_types<E>(
 ) -> Result<(Vec<TypeRef>, TypeRef), Fault<E>> {
     let word = Arc::new(Type::Word);
     let types = match op.unsigned().to_u16() {
+        Some(1) => (vec![word], Arc::new(Type::Tuple(vec![]))),
+        Some(600 | 601 | 610) => (vec![word.clone()], word),
+        Some(600..=699) => (vec![], Arc::new(Type::Tuple(vec![]))),
         Some(300) => {
             let rep = Arc::new(Type::TypeRep);
             (vec![rep; 2], word)
@@ -243,7 +246,7 @@ pub(crate) fn input_inner<H: InputHost>(
     let offset = input.offset.unsigned();
     let (types, out) = if input.target.is_zero() {
         let op = argument_word(s, &offset)?;
-        // Map/crypto/auth primops skip dynamic type-hash checks, even for nonzero size.
+        // These static types and local map types skip dynamic type-hash checks.
         primitive_types(op, s, &offset, b)?
     } else {
         if s.auth_tx_hash.is_some() {
