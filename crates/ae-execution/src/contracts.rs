@@ -18,6 +18,8 @@ use ae_vm_fate::{
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 
+mod create;
+pub use create::{execute_signed_create, process_create};
 pub mod fate;
 
 #[derive(Debug)]
@@ -32,6 +34,7 @@ pub enum Error {
     UnsupportedVm(u16),
     UnsupportedOperation,
     UnformattedDiagnostic(Reason),
+    BytecodePreparation(ae_vm_fate::code::CodeError),
     UnsupportedLogPayload,
     InvalidVmGas,
     Suspended,
@@ -179,6 +182,24 @@ fn delta(
     );
 }
 
+fn check(tx: &ContractTransaction, context: &Context) -> Result<(), Error> {
+    if context.origin != Origin::Contract {
+        if tx.fee() < &tx.minimum_fee(context.protocol, context.origin == Origin::Generalized) {
+            return Err(crate::Error::TooLowFee.into());
+        }
+        if tx.gas_price() < &context.protocol.minimum_gas_price().into() {
+            return Err(Error::Rejected("too_low_gas_price"));
+        }
+        if tx.ttl() != &0.into() && tx.ttl() < &context.height.into() {
+            return Err(crate::Error::TtlExpired.into());
+        }
+        if !tx.valid_at_protocol(context.protocol) {
+            return Err(crate::Error::InvalidAtProtocol.into());
+        }
+    }
+    Ok(())
+}
+
 // Signature and wrapper authentication precede this callback, as for the
 // existing primitive processors. No caller roots change on any Err result.
 pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
@@ -197,20 +218,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     else {
         return Err(Error::UnsupportedOperation);
     };
-    if context.origin != Origin::Contract {
-        if tx.fee() < &tx.minimum_fee(context.protocol, context.origin == Origin::Generalized) {
-            return Err(crate::Error::TooLowFee.into());
-        }
-        if tx.gas_price() < &context.protocol.minimum_gas_price().into() {
-            return Err(Error::Rejected("too_low_gas_price"));
-        }
-        if tx.ttl() != &0.into() && tx.ttl() < &context.height.into() {
-            return Err(crate::Error::TtlExpired.into());
-        }
-        if !tx.valid_at_protocol(context.protocol) {
-            return Err(crate::Error::InvalidAtProtocol.into());
-        }
-    }
+    check(tx, context)?;
     let caller = tx.signer();
     let mut next = trees.clone();
     // process_call_from_contract has no inc_account_nonce instruction. It
@@ -320,17 +328,34 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         call_data,
         &contract,
         call,
+        false,
         next,
         context,
         vm,
         limits,
         maximum_steps,
     )?;
+    settle(tx, trees, rollback, context, completed, events)
+}
+fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ContractTransaction,
+    trees: &mut Trees<A, C>,
+    rollback: Trees<A, C>,
+    context: &Context,
+    completed: fate::Completion<A, C>,
+    mut events: Vec<Event>,
+) -> Result<Receipt, Error> {
+    let caller = tx.signer();
+    let is_create = matches!(tx.operation(), ContractOperation::Create { .. });
+    let internal = context.origin == Origin::Contract && !is_create;
     let mut call = completed.call;
+    if is_create && call.return_type == ReturnType::Ok {
+        call.return_value.clear();
+    }
     let mut next = if call.return_type == ReturnType::Ok {
         let mut out = completed.trees;
         events.splice(0..0, completed.events.into_iter().map(Event::Internal));
-        if context.origin != Origin::Contract {
+        if !internal {
             let refund = product(
                 &tx.gas()
                     .checked_sub(&call.gas_used)
@@ -345,7 +370,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     } else {
         events.clear();
         let mut out = rollback;
-        if context.origin != Origin::Contract {
+        if !internal {
             if call.return_type == ReturnType::Error
                 && context.protocol > ae_protocol::Protocol::Fortuna
                 && !context.dry_run
@@ -359,7 +384,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         }
         out
     };
-    if context.origin != Origin::Contract {
+    if !internal {
         if let Some(nonce) = context.ga_nonces.get(&caller) {
             let nonce: [u8; 32] = nonce
                 .as_slice()

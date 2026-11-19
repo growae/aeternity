@@ -14,12 +14,12 @@ static CALLS: LazyLock<J> = LazyLock::new(|| {
     let pool = rows(&packed["values"]);
     name_tests::expand(&packed["root"], pool, pool.len())
 });
-fn chain(row: &J) -> ae_execution::fate_chain::remote::State {
+pub(super) fn chain(row: &J) -> ae_execution::fate_chain::remote::State {
     let mut row = row.clone();
     row["pending"] = json!([]);
     publication_tests::chain(&row)
 }
-fn trees<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
+pub(super) fn trees<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     row: &J,
     host: &ae_execution::fate_chain::remote::State<A, C>,
 ) -> Trees<A, C> {
@@ -61,13 +61,13 @@ fn tx_context(row: &J) -> TxContext {
     }
     context
 }
-fn vm_context(row: &J) -> Context {
+pub(super) fn vm_context(row: &J) -> Context {
     let mut row = row.clone();
     row["auth"] = json!(false);
     row["onchain"] = json!(true);
     context(&row)
 }
-fn check<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
+pub(super) fn check<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
     row: &J,
     t: &Trees<A, C>,
     receipt: &contracts::Receipt,
@@ -130,7 +130,7 @@ fn check<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
         );
     }
 }
-fn failure(e: &contracts::Error) -> J {
+pub(super) fn failure(e: &contracts::Error) -> J {
     use ae_execution::Error as P;
     use ae_state::names::Error as N;
     let reason = match e {

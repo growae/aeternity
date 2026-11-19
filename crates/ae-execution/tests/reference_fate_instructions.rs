@@ -32,6 +32,8 @@ mod completion_tests;
 mod context_tests;
 #[path = "support/contract_call.rs"]
 mod contract_call_tests;
+#[path = "support/contract_create.rs"]
+mod contract_create_tests;
 #[path = "support/fate_create.rs"]
 mod create_tests;
 #[path = "support/fate_debug.rs"]

@@ -76,6 +76,10 @@ impl Account {
     pub fn set_non_payable(&mut self, non_payable: bool) {
         self.flags = self.flags.with_low_bit(non_payable);
     }
+    // Creation's ensure_account replaces all flags after Lima.
+    pub fn set_flags(&mut self, flags: Unsigned) {
+        self.flags = flags;
+    }
     pub fn set_payable(&mut self, argument: bool) {
         // Preserve the reference setter's inverted argument semantics. The FATE
         // existing-account path calls this function; changing it changes state.

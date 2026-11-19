@@ -47,6 +47,7 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     calldata: &[u8],
     contract: &Contract,
     mut call: Call,
+    allow_init: bool,
     trees: Trees<A, C>,
     context: &Context,
     config: &Config<'_, O>,
@@ -95,7 +96,7 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         Err(_) => {
             call.return_type = ReturnType::Error;
             call.gas_used = tx.gas().clone();
-            call.return_value = if sanitize(context) {
+            call.return_value = if sanitize(context, allow_init) {
                 vec![]
             } else {
                 b"bad_call_data".to_vec()
@@ -137,16 +138,41 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         environment,
         history: config.history.clone(),
     };
-    let (store, limits) = host.contract_store_source(contract.public_key, limits)?;
+    let (store, limits) = if allow_init {
+        // Init uses its supplied fresh store, even if an existing contract's
+        // persisted subtree has entries left by a prior incarnation.
+        let metadata = encoding::encode(&Value::Map(BTreeMap::new()), limits)
+            .map_err(|e| Error::Vm(machine::Error::Data(e)))?;
+        let mut remaining = limits;
+        remaining.max_bytes = remaining
+            .max_bytes
+            .checked_sub(metadata.len())
+            .ok_or(Error::ResourceLimit)?;
+        remaining.max_nodes = remaining
+            .max_nodes
+            .checked_sub(1)
+            .ok_or(Error::ResourceLimit)?;
+        let mut store = ae_state::contracts::store::Store::new(ae_trie::Trie::new(
+            OwnedReadView::new(host.contracts.tree().store().clone()),
+        ));
+        store.put(vec![0, 0], metadata);
+        (Store(crate::fate_store::Backend(store)), remaining)
+    } else {
+        host.contract_store_source(contract.public_key, limits)?
+    };
     let spec = invocation::Spec {
         contract: contract.public_key,
         bytecode: &code.byte_code,
         calldata,
         vm_version: vm,
         gas: Value::Integer(big(tx.gas())),
-        value: Value::Integer(big(tx.amount())),
+        value: Value::Integer(if allow_init {
+            0.into()
+        } else {
+            big(tx.amount())
+        }),
         store,
-        allow_init: false,
+        allow_init,
     };
     let env = invocation::Environment {
         protocol: context.protocol as u32,
@@ -169,7 +195,7 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
             reason,
             remaining_limits,
         } => {
-            let output = if sanitize(context) {
+            let output = if sanitize(context, allow_init) {
                 vec![]
             } else {
                 diagnostic(&reason).ok_or(Error::UnformattedDiagnostic(reason))?
@@ -233,8 +259,8 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         })
     }
 }
-fn sanitize(context: &Context) -> bool {
-    context.origin != Origin::Contract
+fn sanitize(context: &Context, allow_init: bool) -> bool {
+    (allow_init || context.origin != Origin::Contract)
         && context.protocol > ae_protocol::Protocol::Fortuna
         && !context.dry_run
 }
