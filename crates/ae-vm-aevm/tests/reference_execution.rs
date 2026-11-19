@@ -137,6 +137,9 @@ fn outcome(o: Outcome) -> J {
         Outcome::Error { reason, gas } => {
             json!({"kind":"error","reason":failure(reason),"gas":gas.to_string()})
         }
+        Outcome::Revert { output, gas } => {
+            json!({"kind":"revert","message":hex::encode(output),"gas":gas.to_string()})
+        }
         Outcome::Native(gas::Error::BadArithmetic) => {
             json!({"kind":"native","class":"error","reason":atom("badarith")})
         }
