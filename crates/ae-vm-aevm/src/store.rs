@@ -17,7 +17,9 @@ mod references;
 mod typerep;
 mod write;
 pub use order::OrderProfile;
+pub(crate) use order::binary_indices;
 pub use references::{has_maps, used_maps};
+pub(crate) use write::publish_inner;
 pub use write::{Plan, Update, initialize, plan, publish};
 
 fn word(bytes: &[u8], ptr: &BigUint) -> Result<BigUint, Error> {
@@ -183,14 +185,18 @@ fn parse_type(
     pop_type(&mut values)
 }
 pub fn state_type(store: &Store, limits: Limits) -> Result<Option<TypeRef>, Error> {
+    state_type_inner(store, &mut Budget::new(limits))
+}
+pub(crate) fn state_type_inner(store: &Store, b: &mut Budget) -> Result<Option<TypeRef>, Error> {
     let Some(bytes) = store.get([1].as_slice()).filter(|b| !b.is_empty()) else {
         return Ok(None);
     };
-    let mut b = Budget::new(limits);
-    parse_type(bytes, word(bytes, &BigUint::zero())?, None, &mut b).map(Some)
+    parse_type(bytes, word(bytes, &BigUint::zero())?, None, b).map(Some)
 }
 pub fn load(store: &Store, limits: Limits) -> Result<Heap, Error> {
-    let mut b = Budget::new(limits);
+    load_inner(store, &mut Budget::new(limits))
+}
+pub(crate) fn load_inner(store: &Store, b: &mut Budget) -> Result<Heap, Error> {
     let state = store.get([0].as_slice()).ok_or(Error::InvalidValue)?;
     let pointer = word(state, &BigUint::zero())?;
     b.bytes(state.len())?;
@@ -213,8 +219,8 @@ pub fn load(store: &Store, limits: Limits) -> Result<Heap, Error> {
         let size = BigUint::from_bytes_be(&meta[64..96]).into();
         let types = &meta[96..];
         let ptr = word(types, &BigUint::zero())?;
-        let key_type = parse_type(types, word(types, &ptr)?, Some(ptr.clone()), &mut b)?;
-        let value_type = parse_type(types, word(types, &(&ptr + 32u8))?, Some(ptr), &mut b)?;
+        let key_type = parse_type(types, word(types, &ptr)?, Some(ptr.clone()), b)?;
+        let value_type = parse_type(types, word(types, &(&ptr + 32u8))?, Some(ptr), b)?;
         maps.next_id = maps.next_id.max(&id + 1u8);
         maps.entries.insert(
             id,

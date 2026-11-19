@@ -10,7 +10,7 @@ use crate::{
 };
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
@@ -85,6 +85,9 @@ pub struct Log {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub version: Version,
+    pub protocol: u32,
+    pub call_stack: Vec<BigInt>,
+    pub solidity_storage: BTreeMap<BigUint, BigUint>,
     pub code: Vec<u8>,
     pub cp: usize,
     pub gas: BigUint,
@@ -112,6 +115,9 @@ impl State {
     ) -> Self {
         Self {
             version,
+            protocol: 4,
+            call_stack: Vec::new(),
+            solidity_storage: BTreeMap::new(),
             code,
             cp: 0,
             gas,
@@ -194,7 +200,12 @@ impl Budget {
         self.work = self.work.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
     }
-    fn memory(&mut self, memory: &Memory, address: &BigUint, size: usize) -> Result<(), Stop> {
+    pub(crate) fn memory(
+        &mut self,
+        memory: &Memory,
+        address: &BigUint,
+        size: usize,
+    ) -> Result<(), Stop> {
         if size == 0 {
             return Ok(());
         }
@@ -333,16 +344,17 @@ fn heap_fault(error: runtime_heap::Error) -> Fault {
 fn implemented(op: u8) -> bool {
     matches!(op,0..=11|0x10..=0x1d|0x20|0x2f|0x30|0x32..=0x3a|0x3d|0x3e|0x41..=0x45|0x50..=0x53|0x56..=0x5b|0x60..=0xa4|0xf3|0xfd)
 }
-fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
-    let mut budget = Budget {
-        work: limits.max_work,
-        bytes: limits.max_bytes,
-        words: limits.max_memory_words,
-        depth: limits.max_depth,
-    };
-    if state.context.address.is_zero() {
-        return Err(Stop::UnimplementedPrimitiveEntry.into());
+fn reserve_fault(e: runtime_heap::Error) -> Stop {
+    match e {
+        runtime_heap::Error::Stop(s) => s,
+        _ => Stop::ResourceLimit,
     }
+}
+pub(crate) fn snapshot(
+    state: &State,
+    budget: &mut Budget,
+    copy_jumps: bool,
+) -> Result<State, Stop> {
     budget.work(state.code.len())?;
     budget.work(state.stack.len())?;
     budget.work(state.memory.words().len())?;
@@ -365,10 +377,10 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
         budget.bytes(log.data.len())?;
     }
     if let Some(ty) = &state.out_type {
-        runtime_heap::check_type(ty, &mut budget)?;
+        runtime_heap::check_type(ty, budget)?;
     }
-    maps::reserve_maps(&state.maps, &mut budget).map_err(heap_fault)?;
-    maps::reserve_store(&state.map_store, &mut budget).map_err(heap_fault)?;
+    maps::reserve_maps(&state.maps, budget).map_err(reserve_fault)?;
+    maps::reserve_store(&state.map_store, budget).map_err(reserve_fault)?;
     budget.bytes(
         state
             .stack
@@ -379,16 +391,41 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
     budget.bytes(state.memory.allocated_bytes().ok_or(Stop::ResourceLimit)?)?;
     budget
         .bytes(usize::try_from(state.gas.bits().div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
-    if state.stack.len() > 1024 {
-        return Err(Stop::InvalidInitialState.into());
-    }
     if state.memory.words().len() > budget.words {
-        return Err(Stop::ResourceLimit.into());
+        return Err(Stop::ResourceLimit);
     }
-    // Do not clone an untrusted previous jump table; derive it from code again.
-    let mut s = State {
-        jump_destinations: BTreeSet::new(),
+    // Evaluation rebuilds jump destinations; runtime finalization preserves them.
+    budget.work(state.call_stack.len())?;
+    for n in &state.call_stack {
+        budget.bytes(usize::try_from(n.bits().div_ceil(8)).map_err(|_| Stop::ResourceLimit)?)?;
+    }
+    budget.work(state.solidity_storage.len())?;
+    for (k, v) in &state.solidity_storage {
+        budget.bytes(
+            usize::try_from((k.bits().div_ceil(8)).saturating_add(v.bits().div_ceil(8)))
+                .map_err(|_| Stop::ResourceLimit)?,
+        )?;
+    }
+    if copy_jumps {
+        budget.work(state.jump_destinations.len())?;
+        budget.bytes(
+            state
+                .jump_destinations
+                .len()
+                .checked_mul(std::mem::size_of::<usize>())
+                .ok_or(Stop::ResourceLimit)?,
+        )?;
+    }
+    Ok(State {
+        jump_destinations: if copy_jumps {
+            state.jump_destinations.clone()
+        } else {
+            BTreeSet::new()
+        },
         version: state.version,
+        protocol: state.protocol,
+        call_stack: state.call_stack.clone(),
+        solidity_storage: state.solidity_storage.clone(),
         code: state.code.clone(),
         cp: state.cp,
         gas: state.gas.clone(),
@@ -404,7 +441,16 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
         logs: state.logs.clone(),
         maps: state.maps.clone(),
         map_store: state.map_store.clone(),
-    };
+    })
+}
+fn run(state: &State, budget: &mut Budget) -> Result<Outcome, Fault> {
+    if state.context.address.is_zero() {
+        return Err(Stop::UnimplementedPrimitiveEntry.into());
+    }
+    if state.stack.len() > 1024 {
+        return Err(Stop::InvalidInitialState.into());
+    }
+    let mut s = snapshot(state, budget, false)?;
     let mut scan = 0usize;
     while scan < s.code.len() {
         let op = s.code[scan];
@@ -451,7 +497,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                 let b = pop(&mut s)?;
                 let c = pop(&mut s)?;
                 let v = word::modular(op, a, b, c, s.version)?;
-                push(&mut s, &mut budget, v)?;
+                push(&mut s, budget, v)?;
             }
             1..=7 | 10 | 11 | 0x10..=0x14 | 0x16..=0x18 | 0x1a..=0x1d => {
                 let a = pop(&mut s)?;
@@ -462,21 +508,21 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                     )?;
                 }
                 let v = word::binary(op, a, b, s.version)?;
-                push(&mut s, &mut budget, v)?;
+                push(&mut s, budget, v)?;
             }
             0x15 => {
                 let a = pop(&mut s)?;
-                push(&mut s, &mut budget, Word::from(u64::from(a.is_zero())))?;
+                push(&mut s, budget, Word::from(u64::from(a.is_zero())))?;
             }
             0x19 => {
                 let a = pop(&mut s)?;
-                push(&mut s, &mut budget, Word(a.0.map(|b| !b)))?;
+                push(&mut s, budget, Word(a.0.map(|b| !b)))?;
             }
             0x20 => {
                 let from = pop(&mut s)?;
                 let size = pop(&mut s)?;
-                let bytes = area(&mut s, &mut budget, from, size)?;
-                push(&mut s, &mut budget, Word(ae_crypto::keccak256(&bytes).0))?;
+                let bytes = area(&mut s, budget, from, size)?;
+                push(&mut s, budget, Word(ae_crypto::keccak256(&bytes).0))?;
             }
             0x2f | 0x30 | 0x32..=0x34 | 0x3a | 0x41..=0x45 => {
                 let value = Word::wrapping(
@@ -484,7 +530,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                         .get(op)
                         .ok_or(Stop::UnimplementedInstruction(op))?,
                 );
-                push(&mut s, &mut budget, value)?;
+                push(&mut s, budget, value)?;
             }
             0xa0..=0xa4 => {
                 let from = pop(&mut s)?;
@@ -494,7 +540,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                     topics.push(pop(&mut s)?);
                 }
                 budget.bytes(32 + topics.len() * 32)?;
-                let data = area(&mut s, &mut budget, from, size)?;
+                let data = area(&mut s, budget, from, size)?;
                 s.logs.push(Log {
                     address: Word::wrapping(&s.context.address),
                     topics,
@@ -505,12 +551,12 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                 let a = pop(&mut s)?;
                 let b = pop(&mut s)?;
                 if s.version == Version::Solidity1 {
-                    s.output = area(&mut s, &mut budget, a, b)?;
+                    s.output = area(&mut s, budget, a, b)?;
                 } else {
                     let revert_type = std::sync::Arc::new(runtime_heap::Type::String);
                     let (bytes, gas) = sophia_return(
                         &s,
-                        &mut budget,
+                        budget,
                         if op == 0xfd {
                             Some(&revert_type)
                         } else {
@@ -540,19 +586,19 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                     let n = 32.min(s.data.len() - from);
                     word[..n].copy_from_slice(&s.data[from..from + n]);
                 }
-                push(&mut s, &mut budget, Word(word))?;
+                push(&mut s, budget, Word(word))?;
             }
             0x36 => {
                 let n = Word::from_unsigned(&s.data.len().into());
-                push(&mut s, &mut budget, n)?;
+                push(&mut s, budget, n)?;
             }
             0x3d => {
                 let n = Word::from_unsigned(&s.return_data.len().into());
-                push(&mut s, &mut budget, n)?;
+                push(&mut s, budget, n)?;
             }
             0x38 => {
                 let n = Word::from_unsigned(&s.code.len().into());
-                push(&mut s, &mut budget, n)?;
+                push(&mut s, budget, n)?;
             }
             0x37 | 0x39 | 0x3e => {
                 let to = pop(&mut s)?.unsigned();
@@ -580,7 +626,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
             0x51 => {
                 let a = pop(&mut s)?.unsigned();
                 let v = s.memory.load(&a);
-                push(&mut s, &mut budget, v)?;
+                push(&mut s, budget, v)?;
             }
             0x52 => {
                 let a = pop(&mut s)?.unsigned();
@@ -607,15 +653,15 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
             }
             0x58 => {
                 let p = Word::from_unsigned(&pc.into());
-                push(&mut s, &mut budget, p)?;
+                push(&mut s, budget, p)?;
             }
             0x59 => {
                 let n = Word::from_unsigned(&(s.memory.size_in_words() * 32u8));
-                push(&mut s, &mut budget, n)?;
+                push(&mut s, budget, n)?;
             }
             0x5a => {
                 let n = Word::from_unsigned(&s.gas);
-                push(&mut s, &mut budget, n)?;
+                push(&mut s, budget, n)?;
             }
             0x5b => {}
             0x60..=0x7f => {
@@ -623,7 +669,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                 let mut value = [0; 32];
                 let available = n.min(s.code.len() - next);
                 value[32 - n..32 - n + available].copy_from_slice(&s.code[next..next + available]);
-                push(&mut s, &mut budget, Word(value))?;
+                push(&mut s, budget, Word(value))?;
                 next = next.checked_add(n).ok_or(Stop::ResourceLimit)?;
             }
             0x80..=0x8f => {
@@ -632,7 +678,7 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
                 }
                 let n = usize::from(op - 0x80);
                 let v = s.stack.get(n).copied().ok_or(Failure::DupTooSmall)?;
-                push(&mut s, &mut budget, v)?;
+                push(&mut s, budget, v)?;
             }
             0x90..=0x9f => {
                 if s.stack.is_empty() {
@@ -660,7 +706,10 @@ fn run(state: &State, limits: Limits) -> Result<Outcome, Fault> {
 // Every operational stop leaves the supplied snapshot untouched. Native errors
 // are terminal VM outcomes; unfinished host instructions are operational stops.
 pub fn evaluate(state: &State, limits: Limits) -> Result<Outcome, Stop> {
-    match run(state, limits) {
+    evaluate_inner(state, &mut Budget::new(limits))
+}
+pub(crate) fn evaluate_inner(state: &State, budget: &mut Budget) -> Result<Outcome, Stop> {
+    match run(state, budget) {
         Ok(outcome) => Ok(outcome),
         Err(Fault::Vm(reason)) => Ok(Outcome::Error {
             reason,

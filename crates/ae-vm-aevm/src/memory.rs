@@ -27,6 +27,18 @@ impl Memory {
     fn read(&self, aligned: &BigUint) -> Word {
         self.words.get(aligned).copied().unwrap_or(Word::ZERO)
     }
+    pub(crate) fn peek(&self, address: &BigUint) -> Word {
+        let (low, offset) = Self::aligned(address);
+        if offset == 0 {
+            return self.read(&low);
+        }
+        let a = self.read(&low);
+        let b = self.read(&(&low + 32u8));
+        let mut out = [0; 32];
+        out[..32 - offset].copy_from_slice(&a.0[offset..]);
+        out[32 - offset..].copy_from_slice(&b.0[..offset]);
+        Word(out)
+    }
     fn write(&mut self, aligned: BigUint, word: Word) {
         self.extend(&aligned);
         if word.is_zero() {

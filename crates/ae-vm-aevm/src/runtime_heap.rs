@@ -260,3 +260,26 @@ pub(crate) fn serialize(
     )?;
     join(h, budget)
 }
+pub(crate) fn copy_memory(
+    ty: &TypeRef,
+    ptr: Word,
+    memory: &Memory,
+    maps: &Maps,
+    maximum: BigUint,
+    budget: &mut Budget,
+) -> Result<Heap, Error> {
+    check_type(ty, budget)?;
+    convert::run(
+        ty,
+        ptr.unsigned(),
+        convert::Source::Sparse(memory),
+        maps,
+        &Store::new(),
+        Format::Heap,
+        Format::Heap,
+        MapSerialization::Corrected,
+        32u8.into(),
+        Some(maximum),
+        budget,
+    )
+}

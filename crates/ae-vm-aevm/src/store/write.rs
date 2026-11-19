@@ -476,9 +476,17 @@ pub fn publish(
     store: &Store,
     limits: Limits,
 ) -> Result<Store, Error> {
-    let mut b = Budget::new(limits);
-    maps::reserve_store(store, &mut b)?;
-    maps::reserve_maps(&heap.maps, &mut b)?;
+    publish_inner(version, profile, heap, store, &mut Budget::new(limits))
+}
+pub(crate) fn publish_inner(
+    version: Version,
+    profile: OrderProfile,
+    heap: &Heap,
+    store: &Store,
+    b: &mut Budget,
+) -> Result<Store, Error> {
+    maps::reserve_store(store, b)?;
+    maps::reserve_maps(&heap.maps, b)?;
     b.bytes(
         heap.memory
             .len()
@@ -488,8 +496,8 @@ pub fn publish(
     let mut bytes = Word::from_unsigned(&heap.pointer).0.to_vec();
     bytes.extend_from_slice(&heap.memory);
     let mut result = store.clone();
-    put(&mut result, vec![0], bytes, &mut b)?;
-    apply(version, profile, &heap.maps, &mut result, &mut b)?;
+    put(&mut result, vec![0], bytes, b)?;
+    apply(version, profile, &heap.maps, &mut result, b)?;
     Ok(result)
 }
 pub fn initialize(

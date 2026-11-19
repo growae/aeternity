@@ -132,6 +132,13 @@ pub(super) fn integers(
     indices(&hashes, !fold, b)
 }
 pub(super) fn binaries(keys: &[&[u8]], b: &mut Budget) -> Result<Vec<usize>, Error> {
+    binary_indices(keys, false, b)
+}
+pub(crate) fn binary_indices(
+    keys: &[&[u8]],
+    fold: bool,
+    b: &mut Budget,
+) -> Result<Vec<usize>, Error> {
     b.work(keys.len())?;
     b.bytes(keys.len().checked_mul(4).ok_or(Error::ResourceLimit)?)?;
     let mut hashes = Vec::new();
@@ -147,5 +154,5 @@ pub(super) fn binaries(keys: &[&[u8]], b: &mut Budget) -> Result<Vec<usize>, Err
             binary(key, con)
         });
     }
-    indices(&hashes, true, b)
+    indices(&hashes, !fold, b)
 }
