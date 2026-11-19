@@ -38,7 +38,7 @@ pub fn execute_signed_create<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     Ok(receipt)
 }
 pub(super) fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone>(
-    tx: &ContractTransaction,
+    tx: Invocation<'_>,
     trees: &Trees<A, C>,
     context: &Context,
     b: &mut Budget,
@@ -46,18 +46,32 @@ pub(super) fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     let remaining = b.remaining();
     b.work(tx.wire_size())?;
     b.bytes(tx.wire_size().checked_mul(16).ok_or(Stop::ResourceLimit)?)?;
-    let (prepared, mut code) = super::super::create::prepare(
-        tx,
-        trees,
-        context,
-        ae_codec::rlp::DecodeLimits {
-            max_input_bytes: remaining.max_bytes,
-            max_items: remaining.max_work,
-            max_depth: remaining.max_depth,
-        },
-        |v| v.is_aevm(),
-        |code, data| abi::verify_init(code, data, b),
-    )
+    let decode_limits = ae_codec::rlp::DecodeLimits {
+        max_input_bytes: remaining.max_bytes,
+        max_items: remaining.max_work,
+        max_depth: remaining.max_depth,
+    };
+    let (prepared, mut code) = match tx {
+        Invocation::Contract(t) => super::super::create::prepare(
+            t,
+            trees,
+            context,
+            decode_limits,
+            |v| v.is_aevm(),
+            |code, data| abi::verify_init(code, data, b),
+        ),
+        Invocation::Attach(t) => super::super::attach::prepare(
+            t,
+            trees,
+            context,
+            decode_limits,
+            |v| v.is_aevm(),
+            |code, data| {
+                abi::verify_auth(code, t.auth_fun(), b)?;
+                abi::verify_init(code, data, b)
+            },
+        ),
+    }
     .map_err(transaction_fault)?;
     let mut stored = prepared.contract.clone();
     if stored.version.vm >= 6 {
@@ -124,4 +138,20 @@ pub(super) fn finish<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     }
     .map_err(|e| transaction_fault(e.into()))?;
     Ok(completed)
+}
+
+pub fn process_attach<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ae_tx::GaAttachTransaction,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    limits: Limits,
+) -> Result<Receipt, Error<A, C>> {
+    driver::process(
+        Invocation::Attach(tx),
+        trees,
+        context,
+        config,
+        &mut Budget::new(limits),
+    )
 }

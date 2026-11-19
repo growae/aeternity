@@ -247,8 +247,34 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             config.oracle_limits,
         )?),
         TransactionLeaf::Contract(_) => None,
-        TransactionLeaf::GaAttach(_) => {
-            return Err(Error::UnsupportedTransaction(TransactionKind::GaAttach));
+        TransactionLeaf::GaAttach(t) => {
+            let r = if t.version().abi == 1 {
+                contracts::aevm::process_attach(
+                    t,
+                    trees,
+                    context,
+                    config.aevm.ok_or(Error::MissingVmConfiguration)?,
+                    config.aevm_limits,
+                )
+                .map_err(|e| Error::Aevm(Box::new(e)))?
+            } else {
+                contracts::process_attach(
+                    t,
+                    trees,
+                    context,
+                    config.fate.ok_or(Error::MissingVmConfiguration)?,
+                    config.fate_limits,
+                    config.maximum_fate_steps,
+                )
+                .map_err(|e| Error::Contract(Box::new(e)))?
+            };
+            return Ok(Receipt {
+                transaction_hash: None,
+                gas: r.gas,
+                call: Some(r.call),
+                events: r.events.into_iter().map(Event::Contract).collect(),
+                context: context.clone(),
+            });
         }
     };
     if let Some(r) = primitive {

@@ -53,7 +53,7 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<Receipt, Error> {
-    let (prepared, mut code) = prepare(
+    let (prepared, code) = prepare(
         tx,
         trees,
         context,
@@ -69,6 +69,28 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
             _ => Err(Error::Rejected("bad_init_function")),
         },
     )?;
+    run_prepared(
+        Invocation::Contract(tx),
+        prepared,
+        code,
+        trees,
+        context,
+        vm,
+        limits,
+        maximum_steps,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    tx: Invocation<'_>,
+    prepared: PreparedCall<A, C>,
+    mut code: SophiaCode,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    vm: &fate::Config<'_, O>,
+    limits: Limits,
+    maximum_steps: usize,
+) -> Result<Receipt, Error> {
     let PreparedCall {
         contract: init,
         call,
@@ -77,9 +99,7 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         events,
     } = prepared;
     let version = init.version;
-    let ContractOperation::Create { call_data, .. } = tx.operation() else {
-        unreachable!()
-    };
+    let call_data = tx.call_data();
     let (mut bytecode, mut remaining) =
         Code::decode_native_bounded(&code.byte_code, vm.order, limits)
             .map_err(preparation_error)?;
@@ -247,7 +267,7 @@ pub(super) fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     ))
 }
 
-fn preparation_error(failure: NativeFailure) -> Error {
+pub(super) fn preparation_error(failure: NativeFailure) -> Error {
     use ae_vm_fate::native::{Class, Term};
     match failure.exception {
         Some(exception) => match (&exception.class, &exception.reason) {

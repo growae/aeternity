@@ -1,3 +1,4 @@
+use super::invocation::Invocation;
 use super::{Completion, Error, Event, big, unsigned};
 use crate::{
     Context, Origin,
@@ -13,7 +14,6 @@ use ae_state::{
     contracts::{Code, Contract},
 };
 use ae_trie::{NodeWriter, OwnedReadView};
-use ae_tx::ContractTransaction;
 use ae_vm_fate::{
     Limits, abi, encoding,
     machine::{
@@ -37,8 +37,8 @@ pub struct Config<'a, O> {
     pub diagnostic_profile: ae_vm_fate::diagnostic::Profile,
 }
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
-    tx: &ContractTransaction,
+pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    tx: Invocation<'_>,
     calldata: &[u8],
     contract: &Contract,
     mut call: Call,

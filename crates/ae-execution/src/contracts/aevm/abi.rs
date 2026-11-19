@@ -85,3 +85,32 @@ pub(super) fn check(
         out,
     )))
 }
+
+pub(super) fn verify_auth(
+    code: &SophiaCode,
+    hash: &[u8],
+    budget: &mut Budget,
+) -> Result<(), super::super::Error> {
+    use super::super::Error;
+    for f in &code.type_info {
+        budget.work(1).map_err(|_| Error::ResourceLimit)?;
+        if f.hash == hash {
+            let decode = |b: &[u8], budget: &mut Budget| match heap::decode_with_budget(
+                &Type::TypeRep,
+                b,
+                budget,
+            ) {
+                Ok(Value::Type(t)) => Ok(t),
+                Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
+                _ => Err(Error::Rejected("bad_function_hash")),
+            };
+            decode(&f.arguments, budget)?;
+            return if decode(&f.returns, budget)? == Type::Word {
+                Ok(())
+            } else {
+                Err(Error::Rejected("bad_auth_function_return_type"))
+            };
+        }
+    }
+    Err(Error::Rejected("bad_function_hash"))
+}

@@ -64,6 +64,16 @@ fn int(n: impl ToString) -> J {
 fn magnitude(n: &Unsigned) -> num_bigint::BigInt {
     num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, n.as_bytes())
 }
+fn check_used_gas(actual: &Unsigned, captured: &J) {
+    // The inner capture is itself serialized by the outer Erlang term encoder.
+    assert_eq!(field(captured, "kind"), &bin("ok"));
+    let value = field(captured, "value");
+    assert_eq!(value[0], "list");
+    let fields = value[1].as_array().unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0], bin("integer"));
+    assert_eq!(magnitude(actual).to_string().as_bytes(), bytes(&fields[1]));
+}
 fn tree(v: &J) -> Trie {
     let mut t = Trie::default();
     for pair in v[1].as_array().unwrap() {
@@ -106,6 +116,73 @@ fn entries<S: NodeReader>(t: &Trie<S>) -> J {
     ])
 }
 fn event(e: &Event) -> J {
+    if let Event::Contract(ae_execution::contracts::Event::Aevm(e)) = e {
+        assert_eq!(e.context, ae_execution::aevm_chain::EventContext::None);
+        return event(&Event::Primitive(e.event.clone()));
+    }
+    if let Event::Contract(ae_execution::contracts::Event::Internal(e)) = e {
+        use ae_execution::fate_chain::TransferEvent;
+        let (body, info) = match e {
+            TransferEvent::DeploymentCall { info } => (
+                tuple(vec![atom("internal_call_tx"), bin(info)]),
+                atom("error"),
+            ),
+            TransferEvent::Delta {
+                account,
+                debit,
+                amount,
+            } => (
+                tuple(vec![
+                    atom("delta"),
+                    tuple(vec![
+                        bin(account.0),
+                        int(if *debit {
+                            -magnitude(amount)
+                        } else {
+                            magnitude(amount)
+                        }),
+                    ]),
+                ]),
+                bin("Spend.amount"),
+            ),
+            TransferEvent::InternalCall(t) => {
+                let id = |tag, k| tuple(vec![atom("id"), atom(tag), bin(k)]);
+                assert_eq!(t.recipient().tag, ae_types::IdTag::Account);
+                let tx = tuple(vec![
+                    atom("spend_tx"),
+                    id("account", t.sender().0),
+                    id("account", t.recipient().value),
+                    int(magnitude(t.amount())),
+                    int(magnitude(t.fee())),
+                    int(magnitude(t.ttl())),
+                    int(magnitude(t.nonce())),
+                    bin(t.payload()),
+                ]);
+                (
+                    tuple(vec![atom("internal_call_tx"), bin(t.payload())]),
+                    tuple(vec![
+                        atom("aetx"),
+                        atom("spend_tx"),
+                        atom("aec_spend_tx"),
+                        int(t.wire_size()),
+                        tx,
+                    ]),
+                )
+            }
+            e => panic!("unexpected internal event: {e:?}"),
+        };
+        return tuple(vec![
+            body,
+            json!([
+                "map",
+                [
+                    [atom("info"), info],
+                    [atom("type"), atom("non_tx")],
+                    [atom("tx_hash"), bin([])]
+                ]
+            ]),
+        ]);
+    }
     use ae_execution::Event as P;
     let delta = |k: AccountPublicKey, n: &Unsigned, debit: bool| {
         tuple(vec![
@@ -124,6 +201,12 @@ fn event(e: &Event) -> J {
             ]),
             "Spend.amount",
         ),
+        Event::Primitive(P::ContractDelta {
+            account,
+            amount,
+            debit,
+            info,
+        }) => (delta(*account, amount, *debit), *info),
         Event::Primitive(P::FeeDebit { account, amount }) => {
             (delta(*account, amount, true), "Chain.fee")
         }

@@ -3,14 +3,14 @@ use ae_trie::NodeWriter;
 use ae_types::Hash256;
 use std::{cell::Cell, rc::Rc};
 #[derive(Debug, Default)]
-struct Control {
-    reads: Cell<usize>,
-    writes: Cell<usize>,
-    read_limit: Cell<Option<usize>>,
-    write_limit: Cell<Option<usize>>,
+pub(super) struct Control {
+    pub(super) reads: Cell<usize>,
+    pub(super) writes: Cell<usize>,
+    pub(super) read_limit: Cell<Option<usize>>,
+    pub(super) write_limit: Cell<Option<usize>>,
 }
 impl Control {
-    fn reset(&self) {
+    pub(super) fn reset(&self) {
         self.reads.set(0);
         self.writes.set(0);
         self.read_limit.set(None);
@@ -26,7 +26,7 @@ impl Control {
     }
 }
 #[derive(Debug, Clone)]
-struct Store {
+pub(super) struct Store {
     store: MemoryStore,
     control: Rc<Control>,
 }
@@ -42,7 +42,7 @@ impl NodeWriter for Store {
         self.store.put_node(h, b)
     }
 }
-fn wrapped(t: &Trees, c: &Rc<Control>) -> Trees<Store, Store> {
+pub(super) fn wrapped(t: &Trees, c: &Rc<Control>) -> Trees<Store, Store> {
     let wrap = |t: &Trie| Store {
         store: t.store().clone(),
         control: c.clone(),
@@ -85,7 +85,7 @@ fn fixture(op: &str) -> &'static J {
         })
         .unwrap()
 }
-fn roots<A: NodeReader, C: NodeReader>(
+pub(super) fn roots<A: NodeReader, C: NodeReader>(
     t: &Trees<A, C>,
 ) -> (ae_state::StateRoots, Option<Hash256>, Option<Hash256>) {
     (

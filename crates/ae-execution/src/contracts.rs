@@ -19,6 +19,10 @@ use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 
 mod create;
+mod invocation;
+use invocation::Invocation;
+mod attach;
+pub use attach::process_attach;
 pub use create::{execute_signed_create, process_create};
 pub mod aevm;
 pub mod fate;
@@ -34,6 +38,7 @@ pub enum Error {
     Rejected(&'static str),
     ResourceLimit,
     UnsupportedVm(u16),
+    IllegalContractVersion(ae_protocol::contracts::Version),
     UnsupportedOperation,
     UnformattedDiagnostic(Reason),
     BytecodePreparation(ae_vm_fate::code::CodeError),
@@ -231,7 +236,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         unreachable!()
     };
     let completed = fate::execute(
-        tx,
+        Invocation::Contract(tx),
         call_data,
         &prepared.contract,
         prepared.call,
@@ -243,7 +248,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         maximum_steps,
     )?;
     settle(
-        tx,
+        Invocation::Contract(tx),
         trees,
         prepared.rollback,
         context,
@@ -378,7 +383,7 @@ fn prepare_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     })
 }
 fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
-    tx: &ContractTransaction,
+    tx: Invocation<'_>,
     trees: &mut Trees<A, C>,
     rollback: Trees<A, C>,
     context: &Context,
@@ -390,14 +395,14 @@ fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     Ok(receipt)
 }
 fn settle_detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
-    tx: &ContractTransaction,
+    tx: Invocation<'_>,
     rollback: Trees<A, C>,
     context: &Context,
     completed: Completion<A, C>,
     mut events: Vec<Event>,
 ) -> Result<(Receipt, Trees<A, C>), Error> {
     let caller = tx.signer();
-    let is_create = matches!(tx.operation(), ContractOperation::Create { .. });
+    let is_create = tx.is_create();
     let internal = context.origin == Origin::Contract && !is_create;
     let mut call = completed.call;
     if is_create && call.return_type == ReturnType::Ok {
@@ -416,6 +421,14 @@ fn settle_detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             let payer = context.payer.unwrap_or(caller);
             earn(&mut out.accounts, payer, &refund)?;
             delta(&mut events, payer, refund, false, "Chain.refund");
+            if let Some(auth_fun) = tx.auth_fun() {
+                let mut owner = account(&out.accounts, caller)?;
+                let hash = auth_fun
+                    .try_into()
+                    .map_err(|_| Error::Exception(Exception::Native("function_clause")))?;
+                owner.attach_authorization(Id::new(IdTag::Contract, call.contract), hash)?;
+                out.accounts.enter(&owner)?;
+            }
         }
         out
     } else {

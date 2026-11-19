@@ -1,5 +1,6 @@
 // aect_dispatch:run/run_common and aec_vm_chain:call_contract, fa2a6d7.
 // Copyright (c) 2017-2018, Aeternity Anstalt. ISC: repository LICENSE.
+use super::invocation::Invocation;
 use super::{Completion, Event, Receipt, big, prepare_call, settle_detached};
 use crate::{Context, Origin, aevm_chain};
 use ae_state::{
@@ -25,7 +26,7 @@ mod abi;
 mod create;
 mod driver;
 mod host;
-pub use create::{execute_signed_create, process_create};
+pub use create::{execute_signed_create, process_attach, process_create};
 
 #[derive(Debug)]
 pub enum HostError {
@@ -163,11 +164,11 @@ fn process_budgeted<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     budget: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    driver::process(tx, trees, context, config, budget)
+    driver::process(Invocation::Contract(tx), trees, context, config, budget)
 }
 
 fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
-    tx: &ContractTransaction,
+    tx: Invocation<'_>,
     contract: &Contract,
     mut call: Call,
     trees: Trees<A, C>,
@@ -180,10 +181,7 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     else {
         return Err(transaction_fault(super::Error::UnsupportedVm(contract.version.vm)).into());
     };
-    let (call_data, init) = match tx.operation() {
-        ContractOperation::Call { call_data, .. } => (call_data, false),
-        ContractOperation::Create { call_data, .. } => (call_data, true),
-    };
+    let (call_data, init) = (tx.call_data(), tx.is_create());
     let bytes = match &contract.code {
         Code::Inline(b) => b.clone(),
         Code::Reference(id) => {
@@ -247,7 +245,7 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     );
     state.protocol = context.protocol as u32;
     state.abi_version = u32::from(contract.version.abi);
-    state.data = call_data.clone();
+    state.data = call_data.to_vec();
     state.out_type = Some(output);
     state.auth_tx_hash = config.environment.auth_tx_hash.clone();
     state.genesis_height = config.environment.genesis_height.into();
@@ -302,7 +300,7 @@ enum Step<A, C> {
     },
 }
 fn advance<A, C>(
-    tx: &ContractTransaction,
+    tx: Invocation<'_>,
     mut call: Call,
     chain: aevm_chain::State<A, C>,
     result: Result<outer_call::Progress<aevm_chain::State<A, C>>, Error<A, C>>,

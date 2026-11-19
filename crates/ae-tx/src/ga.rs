@@ -110,6 +110,22 @@ impl GaAttachTransaction {
             _ => false,
         }
     }
+    pub fn fee_gas(&self) -> Unsigned {
+        Unsigned::from(self.wire_size as u64)
+            .mul_u64(20)
+            .add(&75_000.into())
+    }
+    pub fn minimum_fee(&self, protocol: Protocol, generalized: bool) -> Unsigned {
+        let gas = if generalized && protocol < Protocol::Iris {
+            75_000.into()
+        } else {
+            self.fee_gas()
+        };
+        gas.mul_u64(protocol.minimum_gas_price())
+    }
+    pub fn used_gas(&self, vm_gas: &Unsigned) -> Unsigned {
+        self.fee_gas().add(vm_gas)
+    }
     fn refresh_size(&mut self) {
         self.wire_size = self.encode().len();
     }
