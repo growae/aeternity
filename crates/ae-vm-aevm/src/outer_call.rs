@@ -100,6 +100,7 @@ enum Problem<E, C> {
     Vm(Failure, BigUint),
 }
 type StepResult<E, C> = Result<(CallStep, C), Problem<E, C>>;
+type Preparation<E, C> = Result<Prepared<C>, Problem<E, C>>;
 impl<E, C> From<Stop> for Problem<E, C> {
     fn from(e: Stop) -> Self {
         Self::Fault(e.into())
@@ -164,6 +165,37 @@ fn refund(call_gas: &BigUint, spent: &BigInt, stipend: &BigUint) -> BigUint {
         .to_biguint()
         .unwrap_or_default()
 }
+struct Pending {
+    state: Box<State>,
+    destination: BigInt,
+    input: Vec<u8>,
+    output_type: Option<TypeRef>,
+    out_offset: Word,
+    out_size: Word,
+    call_gas: BigUint,
+    stipend: BigUint,
+    after_spend: BigUint,
+    limited: bool,
+    value: BigInt,
+    stack: Vec<BigInt>,
+    origin: Word,
+}
+impl Pending {
+    fn request(&self) -> Request<'_> {
+        Request {
+            target: Word::wrapping(&self.destination),
+            gas: &self.call_gas,
+            value: &self.value,
+            data: &self.input,
+            call_stack: &self.stack,
+            origin: self.origin,
+        }
+    }
+}
+enum Prepared<C> {
+    Step(CallStep, C),
+    Call(Box<Pending>),
+}
 fn run<H: Host>(
     op: u8,
     state: &State,
@@ -171,9 +203,24 @@ fn run<H: Host>(
     host: &H,
     b: &mut Budget,
 ) -> StepResult<H::Error, H::Chain> {
+    match prepare(op, state, chain, host, b)? {
+        Prepared::Step(step, chain) => Ok((step, chain)),
+        Prepared::Call(p) => {
+            let (response, chain) = host.call(p.request(), chain, b).map_err(Problem::Fault)?;
+            finish_response(*p, response, chain, b)
+        }
+    }
+}
+fn prepare<H: Host>(
+    op: u8,
+    state: &State,
+    chain: &H::Chain,
+    host: &H,
+    b: &mut Budget,
+) -> Preparation<H::Error, H::Chain> {
     let mut s = execution::snapshot(state, b, true)?;
     if s.call_stack.len() >= 1024 {
-        return Ok((
+        return Ok(Prepared::Step(
             CallStep::Continue {
                 value: Word::ZERO,
                 state: Box::new(s),
@@ -255,7 +302,7 @@ fn run<H: Host>(
                 value,
             },
         );
-        return Ok((
+        return Ok(Prepared::Step(
             CallStep::Continue {
                 value: Word::from(1),
                 state: Box::new(s),
@@ -301,20 +348,65 @@ fn run<H: Host>(
         let mut stack = Vec::with_capacity(s.call_stack.len() + 1);
         stack.push(caller);
         stack.extend_from_slice(&s.call_stack);
-        host.call(
-            Request {
-                target: Word::wrapping(&destination),
-                gas: &call_gas,
-                value: &value,
-                data: &input.data,
-                call_stack: &stack,
-                origin: Word::wrapping(&s.context.origin),
-            },
-            chain,
-            b,
-        )
-        .map_err(Problem::Fault)?
+        b.bytes(std::mem::size_of::<Pending>())?;
+        return Ok(Prepared::Call(Box::new(Pending {
+            origin: Word::wrapping(&s.context.origin),
+            state: Box::new(s),
+            destination,
+            input: input.data,
+            output_type: input.output_type,
+            out_offset,
+            out_size,
+            call_gas,
+            stipend,
+            after_spend,
+            limited,
+            value,
+            stack,
+        })));
     };
+    finish_response(
+        Pending {
+            origin: Word::ZERO,
+            state: Box::new(s),
+            destination,
+            input: input.data,
+            output_type: input.output_type,
+            out_offset,
+            out_size,
+            call_gas,
+            stipend,
+            after_spend,
+            limited,
+            value,
+            stack: vec![],
+        },
+        response,
+        next_chain,
+        b,
+    )
+    .map(|(step, chain)| Prepared::Step(step, chain))
+}
+fn finish_response<E, C>(
+    p: Pending,
+    response: Response,
+    next_chain: C,
+    b: &mut Budget,
+) -> StepResult<E, C> {
+    let Pending {
+        state,
+        destination,
+        input,
+        output_type,
+        out_offset,
+        out_size,
+        call_gas,
+        stipend,
+        after_spend,
+        limited,
+        ..
+    } = p;
+    let mut s = *state;
     let spent = match &response {
         Response::Complete { data, gas_spent } | Response::Revert { data, gas_spent } => {
             b.bytes(data.len())?;
@@ -342,11 +434,11 @@ fn run<H: Host>(
                 &s,
                 calls::Return {
                     target: Word::wrapping(&destination),
-                    input: &input.data,
+                    input: &input,
                     output_offset: out_offset,
                     output_size: out_size,
                     data: &data,
-                    ty: input.output_type.as_ref(),
+                    ty: output_type.as_ref(),
                 },
                 b,
             )
@@ -454,5 +546,115 @@ pub fn invoke_budgeted<H: Host>(
             runtime::finalize_inner(&state, &chain, host, profile, b).map_err(Fault::Runtime)
         }
         other => Ok(other),
+    }
+}
+
+// A suspended invocation owns a prepared external call and its exact interpreter
+// continuation. It does not own or mutate the caller's native stack or budget.
+pub struct Suspension<C> {
+    pending: Box<Pending>,
+    continuation: execution::Continuation,
+    chain: C,
+}
+impl<C> Suspension<C> {
+    pub fn request(&self) -> Request<'_> {
+        self.pending.request()
+    }
+    pub fn chain(&self) -> &C {
+        &self.chain
+    }
+}
+pub enum Progress<C> {
+    Complete(Outcome<C>),
+    Call(Box<Suspension<C>>),
+}
+pub type ProgressResult<E, C> = Result<Progress<C>, Fault<E, C>>;
+enum Start<'a> {
+    Fresh(&'a State),
+    Resume(execution::Continuation, CallStep),
+}
+fn poll<H: Host>(
+    start: Start<'_>,
+    mut current: H::Chain,
+    host: &H,
+    profile: OrderProfile,
+    b: &mut Budget,
+) -> ProgressResult<H::Error, H::Chain> {
+    let mut pending = None;
+    let call = |op, s: &State, b: &mut Budget| match prepare(op, s, &current, host, b) {
+        Ok(Prepared::Step(step, next)) => {
+            current = next;
+            Ok(step)
+        }
+        Ok(Prepared::Call(p)) => {
+            pending = Some(p);
+            Ok(CallStep::Suspend)
+        }
+        Err(Problem::Vm(reason, gas)) => {
+            Ok(CallStep::Halt(execution::Outcome::Error { reason, gas }))
+        }
+        Err(Problem::Fault(e)) => Err(e),
+    };
+    let segment = match start {
+        Start::Fresh(s) => execution::evaluate_segment(s, b, true, call),
+        Start::Resume(c, step) => execution::resume_segment(c, step, b, call),
+    }
+    .map_err(|e| match e {
+        execution::RunError::Stop(e) => Fault::from(e),
+        execution::RunError::Call(e) => e,
+    })?;
+    match segment {
+        execution::Segment::Suspended(continuation) => {
+            b.bytes(std::mem::size_of::<Suspension<H::Chain>>())?;
+            Ok(Progress::Call(Box::new(Suspension {
+                pending: pending.expect("suspended external call"),
+                continuation,
+                chain: current,
+            })))
+        }
+        execution::Segment::Done(outcome) => {
+            let result = match outcome {
+                execution::Outcome::Complete(state) => {
+                    runtime::finalize_inner(&state, &current, host, profile, b)
+                        .map_err(Fault::Runtime)?
+                }
+                execution::Outcome::Error { reason, gas } => Outcome::Error { reason, gas },
+                execution::Outcome::Revert { output, gas } => Outcome::Revert { output, gas },
+                execution::Outcome::Native(n) => return Err(Fault::Runtime(n.into())),
+            };
+            Ok(Progress::Complete(result))
+        }
+    }
+}
+// The enclosing driver must check the shared Budget's active invocation depth.
+// Neither entry nor resumption calls Host::call; external calls are yielded.
+pub fn start<H: Host>(
+    state: &State,
+    call_data_type: Option<&TypeRef>,
+    chain: &H::Chain,
+    host: &H,
+    profile: OrderProfile,
+    b: &mut Budget,
+) -> ProgressResult<H::Error, H::Chain> {
+    let state = runtime::initialize_inner(state, call_data_type, b)?;
+    poll(Start::Fresh(&state), chain.clone(), host, profile, b)
+}
+pub fn resume<H: Host>(
+    suspension: Suspension<H::Chain>,
+    response: Response,
+    chain: H::Chain,
+    host: &H,
+    profile: OrderProfile,
+    b: &mut Budget,
+) -> ProgressResult<H::Error, H::Chain> {
+    let Suspension {
+        pending,
+        continuation,
+        ..
+    } = suspension;
+    match finish_response(*pending, response, chain, b) {
+        Ok((step, chain)) => poll(Start::Resume(continuation, step), chain, host, profile, b),
+        Err(Problem::Vm(reason, gas)) => Ok(Progress::Complete(Outcome::Error { reason, gas })),
+        Err(Problem::Fault(e)) => Err(e),
     }
 }

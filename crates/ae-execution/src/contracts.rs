@@ -383,8 +383,19 @@ fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     rollback: Trees<A, C>,
     context: &Context,
     completed: Completion<A, C>,
-    mut events: Vec<Event>,
+    events: Vec<Event>,
 ) -> Result<Receipt, Error> {
+    let (receipt, next) = settle_detached(tx, rollback, context, completed, events)?;
+    *trees = next;
+    Ok(receipt)
+}
+fn settle_detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ContractTransaction,
+    rollback: Trees<A, C>,
+    context: &Context,
+    completed: Completion<A, C>,
+    mut events: Vec<Event>,
+) -> Result<(Receipt, Trees<A, C>), Error> {
     let caller = tx.signer();
     let is_create = matches!(tx.operation(), ContractOperation::Create { .. });
     let internal = context.origin == Origin::Contract && !is_create;
@@ -445,11 +456,13 @@ fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         })?;
     }
     let gas = tx.used_gas(&call.gas_used);
-    *trees = next;
-    Ok(Receipt {
-        transaction_hash: None,
-        call,
-        gas,
-        events,
-    })
+    Ok((
+        Receipt {
+            transaction_hash: None,
+            call,
+            gas,
+            events,
+        },
+        next,
+    ))
 }

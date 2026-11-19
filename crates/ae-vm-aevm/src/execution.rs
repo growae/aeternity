@@ -227,6 +227,17 @@ impl Budget {
         self.work = self.work.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
     }
+    pub fn check_call_depth(&self, additional: usize) -> Result<(), Stop> {
+        if self
+            .active_calls
+            .checked_add(additional)
+            .ok_or(Stop::ResourceLimit)?
+            > self.depth
+        {
+            return Err(Stop::ResourceLimit);
+        }
+        Ok(())
+    }
     pub(crate) fn enter_call(&mut self) -> Result<(), Stop> {
         if self.active_calls >= self.depth {
             return Err(Stop::ResourceLimit);
@@ -514,12 +525,7 @@ pub(crate) fn snapshot(
         map_store: state.map_store.clone(),
     })
 }
-fn run<E>(
-    state: &State,
-    budget: &mut Budget,
-    hosted: bool,
-    call: &mut impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
-) -> Result<Outcome, RunFault<E>> {
+fn prepare(state: &State, budget: &mut Budget) -> Result<State, Fault> {
     if state.context.address.is_zero() {
         return Err(Stop::UnimplementedPrimitiveEntry.into());
     }
@@ -542,11 +548,19 @@ fn run<E>(
             })
             .ok_or(Stop::ResourceLimit)?;
     }
-    let mut pc = s.cp;
+    Ok(s)
+}
+fn run<E>(
+    mut s: State,
+    mut pc: usize,
+    budget: &mut Budget,
+    hosted: bool,
+    call: &mut impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
+) -> Result<Segment, RunFault<E>> {
     loop {
         if pc >= s.code.len() {
             s.cp = pc;
-            return Ok(Outcome::Complete(Box::new(s)));
+            return Ok(Segment::Done(Outcome::Complete(Box::new(s))));
         }
         budget.work(1)?;
         let op = s.code[pc];
@@ -573,11 +587,14 @@ fn run<E>(
                     s = *state;
                     push(&mut s, budget, value)?;
                 }
-                CallStep::Halt(outcome) => return Ok(outcome),
+                CallStep::Halt(outcome) => return Ok(Segment::Done(outcome)),
+                CallStep::Suspend => {
+                    return Ok(Segment::Suspended(Continuation { next, old_size }));
+                }
             },
             0 => {
                 s.cp = pc;
-                return Ok(Outcome::Complete(Box::new(s)));
+                return Ok(Segment::Done(Outcome::Complete(Box::new(s))));
             }
             8 | 9 => {
                 let a = pop(&mut s)?;
@@ -655,16 +672,16 @@ fn run<E>(
                     s.output = bytes;
                 }
                 if op == 0xf3 {
-                    return Ok(Outcome::Complete(Box::new(s)));
+                    return Ok(Segment::Done(Outcome::Complete(Box::new(s))));
                 }
                 let expansion =
                     gas::memory(s.memory.size_in_words(), &s.gas_table, s.float_profile)?
                         - gas::memory(&old_size, &s.gas_table, s.float_profile)?;
                 spend(&mut s, expansion)?;
-                return Ok(Outcome::Revert {
+                return Ok(Segment::Done(Outcome::Revert {
                     output: s.output,
                     gas: s.gas,
-                });
+                }));
             }
             0x35 => {
                 let from = pop(&mut s)?.unsigned();
@@ -779,18 +796,31 @@ fn run<E>(
             }
             _ => return Err(Stop::UnimplementedInstruction(op).into()),
         }
-        if s.memory.words().len() > budget.words {
-            return Err(Stop::ResourceLimit.into());
-        }
-        if *s.memory.size_in_words() != old_size {
-            let expansion = gas::memory(s.memory.size_in_words(), &s.gas_table, s.float_profile)?
-                - gas::memory(&old_size, &s.gas_table, s.float_profile)?;
-            spend(&mut s, expansion)?;
-        }
+        finish_step(&mut s, &old_size, budget)?;
         pc = next;
     }
 }
+fn finish_step(s: &mut State, old_size: &BigUint, budget: &mut Budget) -> Result<(), Fault> {
+    if s.memory.words().len() > budget.words {
+        return Err(Stop::ResourceLimit.into());
+    }
+    if s.memory.size_in_words() != old_size {
+        let expansion = gas::memory(s.memory.size_in_words(), &s.gas_table, s.float_profile)?
+            - gas::memory(old_size, &s.gas_table, s.float_profile)?;
+        spend(s, expansion)?;
+    }
+    Ok(())
+}
+pub(crate) struct Continuation {
+    next: usize,
+    old_size: BigUint,
+}
+pub(crate) enum Segment {
+    Done(Outcome),
+    Suspended(Continuation),
+}
 pub(crate) enum CallStep {
+    Suspend,
     Continue { value: Word, state: Box<State> },
     Halt(Outcome),
 }
@@ -827,21 +857,59 @@ pub(crate) enum RunError<E> {
     Stop(Stop),
     Call(E),
 }
-pub(crate) fn evaluate_calls<E>(
+fn segment_result<E>(result: Result<Segment, RunFault<E>>) -> Result<Segment, RunError<E>> {
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(RunFault::Core(Fault::Vm(reason))) => Ok(Segment::Done(Outcome::Error {
+            reason,
+            gas: BigUint::zero(),
+        })),
+        Err(RunFault::Core(Fault::Native(e))) => Ok(Segment::Done(Outcome::Native(e))),
+        Err(RunFault::Core(Fault::Stop(e))) => Err(RunError::Stop(e)),
+        Err(RunFault::Call(e)) => Err(RunError::Call(e)),
+    }
+}
+pub(crate) fn evaluate_segment<E>(
     state: &State,
     budget: &mut Budget,
     hosted: bool,
     mut call: impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
+) -> Result<Segment, RunError<E>> {
+    let result = prepare(state, budget)
+        .map_err(RunFault::Core)
+        .and_then(|s| {
+            let pc = s.cp;
+            run(s, pc, budget, hosted, &mut call)
+        });
+    segment_result(result)
+}
+pub(crate) fn resume_segment<E>(
+    continuation: Continuation,
+    step: CallStep,
+    budget: &mut Budget,
+    mut call: impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
+) -> Result<Segment, RunError<E>> {
+    let result = (|| match step {
+        CallStep::Continue { value, state } => {
+            let mut s = *state;
+            push(&mut s, budget, value)?;
+            finish_step(&mut s, &continuation.old_size, budget)?;
+            run(s, continuation.next, budget, true, &mut call)
+        }
+        CallStep::Halt(outcome) => Ok(Segment::Done(outcome)),
+        CallStep::Suspend => unreachable!("resuming a prepared call needs its response"),
+    })();
+    segment_result(result)
+}
+pub(crate) fn evaluate_calls<E>(
+    state: &State,
+    budget: &mut Budget,
+    hosted: bool,
+    call: impl FnMut(u8, &State, &mut Budget) -> Result<CallStep, E>,
 ) -> Result<Outcome, RunError<E>> {
-    match run(state, budget, hosted, &mut call) {
-        Ok(outcome) => Ok(outcome),
-        Err(RunFault::Core(Fault::Vm(reason))) => Ok(Outcome::Error {
-            reason,
-            gas: BigUint::zero(),
-        }),
-        Err(RunFault::Core(Fault::Native(e))) => Ok(Outcome::Native(e)),
-        Err(RunFault::Core(Fault::Stop(e))) => Err(RunError::Stop(e)),
-        Err(RunFault::Call(e)) => Err(RunError::Call(e)),
+    match evaluate_segment(state, budget, hosted, call)? {
+        Segment::Done(outcome) => Ok(outcome),
+        Segment::Suspended(_) => unreachable!("non-suspending evaluator"),
     }
 }
 // Every operational stop leaves the supplied snapshot untouched. Native errors

@@ -156,56 +156,10 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Host<'_,
         c: &Self::Chain,
         b: &mut Budget,
     ) -> outer_call::CallResult<HostError, Self::Chain> {
-        b.work(1)?;
-        let reject = |reason| {
-            Ok((
-                Response::Exception {
-                    reason,
-                    gas_spent: BigInt::from(r.gas.clone()),
-                },
-                c.clone(),
-            ))
+        let tx = match prepare_callback(r, c, b)? {
+            Ok(tx) => tx,
+            Err(response) => return Ok((response, c.clone())),
         };
-        let Some(target) =
-            c.trees.contracts.record(r.target.0).map_err(|e| {
-                RuntimeFault::Host(HostError::Chain(aevm_chain::Error::Contracts(e)))
-            })?
-        else {
-            return reject("unknown_contract".into());
-        };
-        b.work(1)?;
-        let caller = c
-            .trees
-            .accounts
-            .lookup(c.account)
-            .map_err(|e| RuntimeFault::Host(HostError::Chain(aevm_chain::Error::Accounts(e))))?
-            .ok_or(RuntimeFault::Native(Native::BadMatchNone))?;
-        b.bytes(caller.nonce().as_bytes().len())?;
-        if r.value.sign() == Sign::Minus || r.call_stack.iter().any(|n| n.sign() == Sign::Minus) {
-            return Err(Stop::InvalidInitialState.into());
-        }
-        b.bytes(r.data.len())?;
-        b.work(r.call_stack.len())?;
-        let mut tx = ContractTransaction::new(
-            Id::new(IdTag::Contract, c.account.0),
-            ContractOperation::Call {
-                contract: Id::new(IdTag::Contract, r.target.0),
-                abi_version: u64::from(target.version.abi).into(),
-                call_data: r.data.to_vec(),
-            },
-        )
-        .expect("typed contract callback");
-        tx.set_nonce(caller.nonce().add(&1.into()));
-        tx.set_amount(magnitude(&r.value.to_biguint().expect("nonnegative")));
-        tx.set_gas(magnitude(r.gas));
-        tx.set_call_context(
-            r.origin.0,
-            r.call_stack
-                .iter()
-                .map(|n| magnitude(&n.to_biguint().expect("nonnegative")))
-                .collect(),
-        )
-        .expect("call transaction");
         let mut context = (*c.context).clone();
         context.origin = Origin::Contract;
         let config = Config {
@@ -213,71 +167,147 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Host<'_,
             event_context: c.event_context.clone(),
             ..self.config.clone()
         };
-        let mut next = c.clone();
-        let receipt = match process_budgeted(&tx, &mut next.trees, &context, &config, b) {
+        let mut trees = c.trees.clone();
+        let receipt = match process_budgeted(&tx, &mut trees, &context, &config, b) {
             Ok(v) => v,
-            Err(outer_call::Fault::Runtime(RuntimeFault::Host(HostError::Transaction(e)))) => {
-                if let Some(reason) = rejection(&e) {
-                    return reject(call_error(reason.as_bytes()));
-                }
-                return Err(transaction_fault(e).into());
-            }
-            Err(e) => return Err(e),
+            Err(e) => return reject_callback(e, &BigUint::from_bytes_be(tx.gas().as_bytes()), c),
         };
-        b.work(
-            receipt
-                .events
-                .len()
-                .checked_add(c.events.len())
-                .ok_or(Stop::ResourceLimit)?,
-        )?;
-        for e in c.events.iter() {
-            b.bytes(aevm_chain::event_size(&e.event))?;
-        }
-        let mut events = Vec::new();
-        for e in receipt.events {
-            events.push(match e {
-                Event::Delta {
-                    account,
-                    amount,
-                    debit,
-                    info,
-                } => {
-                    b.bytes(128usize.saturating_add(amount.as_bytes().len()))?;
-                    aevm_chain::EnvironmentEvent {
-                        event: crate::Event::ContractDelta {
-                            account,
-                            amount,
-                            debit,
-                            info,
-                        },
-                        context: c.event_context.clone(),
-                    }
-                }
-                Event::Aevm(e) => {
-                    b.bytes(aevm_chain::event_size(&e.event))?;
-                    e
-                }
-                Event::Internal(_) => unreachable!("AEVM dispatcher does not execute FATE"),
-            });
-        }
-        events.extend(c.events.iter().cloned());
-        next.events = Arc::new(events);
-        let gas_spent = big(&receipt.call.gas_used);
-        let response = match receipt.call.return_type {
-            ReturnType::Ok => Response::Complete {
-                data: receipt.call.return_value,
-                gas_spent,
-            },
-            ReturnType::Revert => Response::Revert {
-                data: receipt.call.return_value,
-                gas_spent,
-            },
-            ReturnType::Error => Response::Exception {
-                reason: call_error(&receipt.call.return_value),
-                gas_spent,
-            },
-        };
-        Ok((response, next))
+        finish_callback(c, trees, receipt, b)
     }
+}
+
+pub(super) fn reject(gas: &BigUint, reason: String) -> Response {
+    Response::Exception {
+        reason,
+        gas_spent: BigInt::from(gas.clone()),
+    }
+}
+pub(super) fn reject_callback<A: Clone, C: Clone>(
+    e: Error<A, C>,
+    gas: &BigUint,
+    c: &aevm_chain::State<A, C>,
+) -> outer_call::CallResult<HostError, aevm_chain::State<A, C>> {
+    match e {
+        outer_call::Fault::Runtime(RuntimeFault::Host(HostError::Transaction(e))) => {
+            if let Some(reason) = rejection(&e) {
+                Ok((reject(gas, call_error(reason.as_bytes())), c.clone()))
+            } else {
+                Err(transaction_fault(e).into())
+            }
+        }
+        e => Err(e),
+    }
+}
+pub(super) fn prepare_callback<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    r: Request<'_>,
+    c: &aevm_chain::State<A, C>,
+    b: &mut Budget,
+) -> Result<Result<ContractTransaction, Response>, Error<A, C>> {
+    b.work(1)?;
+    let Some(target) = c
+        .trees
+        .contracts
+        .record(r.target.0)
+        .map_err(|e| RuntimeFault::Host(HostError::Chain(aevm_chain::Error::Contracts(e))))?
+    else {
+        return Ok(Err(reject(r.gas, "unknown_contract".into())));
+    };
+    b.work(1)?;
+    let caller = c
+        .trees
+        .accounts
+        .lookup(c.account)
+        .map_err(|e| RuntimeFault::Host(HostError::Chain(aevm_chain::Error::Accounts(e))))?
+        .ok_or(RuntimeFault::Native(Native::BadMatchNone))?;
+    b.bytes(caller.nonce().as_bytes().len())?;
+    if r.value.sign() == Sign::Minus || r.call_stack.iter().any(|n| n.sign() == Sign::Minus) {
+        return Err(Stop::InvalidInitialState.into());
+    }
+    b.bytes(r.data.len())?;
+    b.work(r.call_stack.len())?;
+    let mut tx = ContractTransaction::new(
+        Id::new(IdTag::Contract, c.account.0),
+        ContractOperation::Call {
+            contract: Id::new(IdTag::Contract, r.target.0),
+            abi_version: u64::from(target.version.abi).into(),
+            call_data: r.data.to_vec(),
+        },
+    )
+    .expect("typed contract callback");
+    tx.set_nonce(caller.nonce().add(&1.into()));
+    tx.set_amount(magnitude(&r.value.to_biguint().expect("nonnegative")));
+    tx.set_gas(magnitude(r.gas));
+    tx.set_call_context(
+        r.origin.0,
+        r.call_stack
+            .iter()
+            .map(|n| magnitude(&n.to_biguint().expect("nonnegative")))
+            .collect(),
+    )
+    .expect("call transaction");
+    Ok(Ok(tx))
+}
+pub(super) fn finish_callback<A: Clone, C: Clone>(
+    c: &aevm_chain::State<A, C>,
+    trees: Trees<A, C>,
+    receipt: Receipt,
+    b: &mut Budget,
+) -> outer_call::CallResult<HostError, aevm_chain::State<A, C>> {
+    let mut next = c.clone();
+    next.trees = trees;
+    b.work(
+        receipt
+            .events
+            .len()
+            .checked_add(c.events.len())
+            .ok_or(Stop::ResourceLimit)?,
+    )?;
+    for e in c.events.iter() {
+        b.bytes(aevm_chain::event_size(&e.event))?;
+    }
+    let mut events = Vec::new();
+    for e in receipt.events {
+        events.push(match e {
+            Event::Delta {
+                account,
+                amount,
+                debit,
+                info,
+            } => {
+                b.bytes(128usize.saturating_add(amount.as_bytes().len()))?;
+                aevm_chain::EnvironmentEvent {
+                    event: crate::Event::ContractDelta {
+                        account,
+                        amount,
+                        debit,
+                        info,
+                    },
+                    context: c.event_context.clone(),
+                }
+            }
+            Event::Aevm(e) => {
+                b.bytes(aevm_chain::event_size(&e.event))?;
+                e
+            }
+            Event::Internal(_) => unreachable!("AEVM dispatcher does not execute FATE"),
+        });
+    }
+    events.extend(c.events.iter().cloned());
+    next.events = Arc::new(events);
+    let gas_spent = big(&receipt.call.gas_used);
+    let response = match receipt.call.return_type {
+        ReturnType::Ok => Response::Complete {
+            data: receipt.call.return_value,
+            gas_spent,
+        },
+        ReturnType::Revert => Response::Revert {
+            data: receipt.call.return_value,
+            gas_spent,
+        },
+        ReturnType::Error => Response::Exception {
+            reason: call_error(&receipt.call.return_value),
+            gas_spent,
+        },
+    };
+    Ok((response, next))
 }

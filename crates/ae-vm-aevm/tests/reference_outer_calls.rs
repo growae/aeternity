@@ -903,3 +903,60 @@ fn outer_call_resource_and_host_failures_preserve_input_and_retry() {
         }
     }
 }
+
+#[test]
+fn suspended_invocations_match_original_states_native_failures_and_host_order() {
+    let rows = INVOCATIONS["runs"].as_array().unwrap();
+    assert_eq!(rows.len(), 225);
+    for row in rows {
+        let s = state(row, &row["before"]);
+        let before = s.clone();
+        let chain = logical(field(&row["before"], "chain_state").clone());
+        let original = chain.clone();
+        let host = Source {
+            mode: row["mode"].as_str().unwrap(),
+            events: RefCell::new(vec![]),
+            fail: Cell::new(None),
+        };
+        let input = ty(&row["type"]);
+        let mut budget = Budget::new(Limits::default());
+        budget.check_call_depth(1).unwrap();
+        let mut progress = outer_call::start(
+            &s,
+            Some(&input),
+            &chain,
+            &host,
+            OrderProfile::Otp26Word64Crc32c,
+            &mut budget,
+        );
+        let actual = loop {
+            match progress {
+                Ok(outer_call::Progress::Complete(outcome)) => break Ok(outcome),
+                Ok(outer_call::Progress::Call(call)) => {
+                    let (response, next) =
+                        match host.call(call.request(), call.chain(), &mut budget) {
+                            Ok(outcome) => outcome,
+                            Err(e) => break Err(e),
+                        };
+                    progress = outer_call::resume(
+                        *call,
+                        response,
+                        next,
+                        &host,
+                        OrderProfile::Otp26Word64Crc32c,
+                        &mut budget,
+                    );
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        check(row, actual);
+        assert_eq!(
+            logical(list(host.events.borrow().clone())),
+            logical(row["host_calls"].clone()),
+            "{row}"
+        );
+        assert_eq!(s, before);
+        assert_eq!(chain, original);
+    }
+}

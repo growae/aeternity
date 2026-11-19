@@ -1,6 +1,6 @@
 // aect_dispatch:run/run_common and aec_vm_chain:call_contract, fa2a6d7.
 // Copyright (c) 2017-2018, Aeternity Anstalt. ISC: repository LICENSE.
-use super::{Completion, Event, Receipt, big, prepare_call, settle};
+use super::{Completion, Event, Receipt, big, prepare_call, settle_detached};
 use crate::{Context, Origin, aevm_chain};
 use ae_state::{
     Trees,
@@ -22,6 +22,7 @@ use ae_vm_aevm::{
 use num_bigint::{BigInt, BigUint, Sign};
 use std::sync::Arc;
 mod abi;
+mod driver;
 mod host;
 
 #[derive(Debug)]
@@ -150,14 +151,10 @@ fn process_budgeted<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     budget: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    budget.work(1)?;
-    budget.bytes(tx.wire_size())?;
-    let p = prepare_call(tx, trees, context).map_err(transaction_fault)?;
-    let completed = execute(tx, &p.contract, p.call, p.trees, context, config, budget)?;
-    settle(tx, trees, p.rollback, context, completed, p.events)
-        .map_err(|e| transaction_fault(e).into())
+    driver::process(tx, trees, context, config, budget)
 }
-fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+
+fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: &ContractTransaction,
     contract: &Contract,
     mut call: Call,
@@ -165,7 +162,7 @@ fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     context: &Context,
     config: &Config,
     budget: &mut Budget,
-) -> Result<Completion<A, C>, Error<A, C>> {
+) -> Result<Step<A, C>, Error<A, C>> {
     let Some(version) =
         Version::from_id(u32::from(contract.version.vm)).filter(|v| *v != Version::Solidity1)
     else {
@@ -207,11 +204,11 @@ fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             call.return_type = ReturnType::Error;
             call.return_value = reason.as_bytes().to_vec();
             call.gas_used = tx.gas().clone();
-            return Ok(Completion {
+            return Ok(Step::Complete(Completion {
                 call,
                 trees,
                 events: vec![],
-            });
+            }));
         }
     };
     let mut child_context = context.clone();
@@ -265,7 +262,7 @@ fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         budget.work(1)?;
         budget.bytes(k.len().checked_add(v.len()).ok_or(Stop::ResourceLimit)?)?;
     }
-    let result = outer_call::invoke_budgeted(
+    let result = outer_call::start(
         &state,
         Some(&input),
         &chain,
@@ -273,6 +270,33 @@ fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         config.store_order,
         budget,
     );
+    advance(tx, call, chain, result)
+}
+enum Step<A, C> {
+    Complete(Completion<A, C>),
+    Suspended {
+        call: Call,
+        initial: aevm_chain::State<A, C>,
+        suspension: Box<outer_call::Suspension<aevm_chain::State<A, C>>>,
+    },
+}
+fn advance<A, C>(
+    tx: &ContractTransaction,
+    mut call: Call,
+    chain: aevm_chain::State<A, C>,
+    result: Result<outer_call::Progress<aevm_chain::State<A, C>>, Error<A, C>>,
+) -> Result<Step<A, C>, Error<A, C>> {
+    let result = match result {
+        Ok(outer_call::Progress::Call(suspension)) => {
+            return Ok(Step::Suspended {
+                call,
+                initial: chain,
+                suspension,
+            });
+        }
+        Ok(outer_call::Progress::Complete(out)) => Ok(out),
+        Err(e) => Err(e),
+    };
     let (gas, events, trees) = match result {
         Ok(Outcome::Complete { state, chain }) => {
             call.return_type = ReturnType::Ok;
@@ -325,9 +349,9 @@ fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         return Err(transaction_fault(super::Error::InvalidVmGas).into());
     }
     call.gas_used = magnitude(&(initial - gas));
-    Ok(Completion {
+    Ok(Step::Complete(Completion {
         call,
         trees,
         events,
-    })
+    }))
 }
