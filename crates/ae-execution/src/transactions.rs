@@ -26,6 +26,7 @@ pub struct Config<'a, O = Otp26> {
     pub fate: Option<&'a contracts::fate::Config<'a, O>>,
     pub aevm: Option<&'a contracts::aevm::Config>,
     pub signature_limits: SignatureLimits,
+    pub channel_limits: crate::channels::unilateral::Limits,
     pub oracle_limits: oracles::abi::Limits,
     pub fate_limits: ae_vm_fate::Limits,
     pub maximum_fate_steps: usize,
@@ -38,6 +39,7 @@ impl<'a> Config<'a> {
             fate: None,
             aevm: None,
             signature_limits: SignatureLimits::default(),
+            channel_limits: Default::default(),
             oracle_limits: oracles::abi::Limits::default(),
             fate_limits: ae_vm_fate::Limits::default(),
             maximum_fate_steps: 1_000_000,
@@ -64,6 +66,11 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
 impl<A, C> From<crate::Error> for Error<A, C> {
     fn from(e: crate::Error) -> Self {
         Self::Primitive(e)
+    }
+}
+impl<A, C> From<crate::channels::Error> for Error<A, C> {
+    fn from(e: crate::channels::Error) -> Self {
+        Self::Channel(Box::new(e))
     }
 }
 impl<A, C> From<SignatureError> for Error<A, C> {
@@ -233,6 +240,22 @@ fn process_leaf<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         )?),
         TransactionLeaf::Contract(_) => None,
         TransactionLeaf::Channel(t) => {
+            if matches!(
+                t.operation(),
+                ae_tx::channels::Operation::CloseSolo { .. }
+                    | ae_tx::channels::Operation::Slash { .. }
+                    | ae_tx::channels::Operation::SnapshotSolo { .. }
+                    | ae_tx::channels::Operation::SetDelegates { .. }
+            ) {
+                return crate::channels::unilateral::process(
+                    t,
+                    trees,
+                    context,
+                    source,
+                    config,
+                    config.channel_limits,
+                );
+            }
             return crate::channels::process(
                 t,
                 trees,

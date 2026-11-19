@@ -116,6 +116,10 @@ fn name(k: TransactionKind) -> &'static str {
         TransactionKind::ChannelWithdraw => "channel_withdraw_tx",
         TransactionKind::ChannelCloseMutual => "channel_close_mutual_tx",
         TransactionKind::ChannelSettle => "channel_settle_tx",
+        TransactionKind::ChannelCloseSolo => "channel_close_solo_tx",
+        TransactionKind::ChannelSlash => "channel_slash_tx",
+        TransactionKind::ChannelSnapshotSolo => "channel_snapshot_solo_tx",
+        TransactionKind::ChannelSetDelegates => "channel_set_delegates_tx",
         TransactionKind::PayingFor => "paying_for_tx",
         _ => panic!("{k:?}"),
     }
@@ -279,12 +283,58 @@ fn captured_error(e: &Error) -> J {
                         ]),
                     ]),
                     NativeFailure::FunctionClause => atom("function_clause"),
+                    NativeFailure::Badarg => atom("badarg"),
+                    NativeFailure::ProofAccount { value, error } => {
+                        assert_eq!(
+                            *error,
+                            ae_state::accounts::AccountError::Object(
+                                ae_codec::object::ObjectError::ExpectedList
+                            )
+                        );
+                        let ae_trie::Value::Bytes(b) = value else {
+                            panic!("{value:?}");
+                        };
+                        tuple(vec![atom("badmatch"), bin(b)])
+                    }
                     NativeFailure::MissingAuthenticationStore => tuple(vec![
                         atom("badmatch"),
                         tuple(vec![atom("error"), atom("no_such_subtree")]),
                     ]),
                     NativeFailure::AuthenticationStoreAlreadyPresent(k) => {
                         tuple(vec![atom("already_present"), bin(k)])
+                    }
+                    NativeFailure::LegacyDelegates {
+                        initiator,
+                        responder,
+                    } => {
+                        let ids = |v: &[ae_types::Id]| {
+                            json!([
+                                "list",
+                                v.iter()
+                                    .map(|id| tuple(vec![
+                                        atom("id"),
+                                        atom("account"),
+                                        bin(id.value)
+                                    ]))
+                                    .collect::<Vec<_>>()
+                            ])
+                        };
+                        let map = json!([
+                            "map",
+                            [
+                                [atom("initiator"), ids(initiator)],
+                                [atom("responder"), ids(responder)]
+                            ]
+                        ]);
+                        let schema = json!(["list", [atom("id")]]);
+                        tuple(vec![
+                            atom("illegal_field"),
+                            atom("delegate_ids"),
+                            schema.clone(),
+                            map.clone(),
+                            schema,
+                            map,
+                        ])
                     }
                 };
                 return json!({"kind":"native","class":"error","reason":reason});
@@ -439,3 +489,6 @@ mod failures;
 
 #[path = "channels/authentication.rs"]
 mod authentication;
+
+#[path = "channels/unilateral.rs"]
+mod unilateral;

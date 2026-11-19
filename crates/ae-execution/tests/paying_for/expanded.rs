@@ -167,6 +167,7 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),
+        channel_limits: Default::default(),
         signature_limits: limits,
         oracle_limits: Default::default(),
         fate_limits: Default::default(),

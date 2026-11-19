@@ -48,6 +48,7 @@ fn execute_limits<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),
+        channel_limits: Default::default(),
         signature_limits,
         oracle_limits: Default::default(),
         fate_limits,
@@ -108,7 +109,7 @@ fn contract_failure(e: &contracts::Error) -> J {
         e => panic!("unprojected contract failure {e:?}"),
     }
 }
-fn failure<A, C>(e: &Error<A, C>) -> J {
+pub(super) fn failure<A, C>(e: &Error<A, C>) -> J {
     match e {
         Error::Contract(e) => contract_failure(e),
         Error::Aevm(e) => match e.as_ref() {

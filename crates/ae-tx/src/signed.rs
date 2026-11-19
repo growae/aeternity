@@ -14,6 +14,19 @@ pub struct SignedTransaction<T> {
     transaction: T,
     signatures: Vec<Signature>,
 }
+impl SignedTransaction<crate::Transaction> {
+    pub fn decode_with_state_config(
+        bytes: &[u8],
+        limits: crate::TransactionLimits,
+        config: ae_state::transport::Config<'_>,
+    ) -> Result<Self, Error> {
+        let (inner, signatures) = decode_parts(bytes, limits.rlp)?;
+        Ok(Self {
+            transaction: crate::Transaction::decode_with_state_config(inner, limits, config)?,
+            signatures,
+        })
+    }
+}
 fn schema() -> Vec<Field> {
     vec![
         Field {

@@ -19,6 +19,7 @@ use ae_types::{AccountPublicKey, Id, IdTag, Unsigned};
 use std::collections::BTreeMap;
 
 pub mod authentication;
+pub mod unilateral;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeFailure {
@@ -32,12 +33,22 @@ pub enum NativeFailure {
     FunctionClause,
     MissingAuthenticationStore,
     AuthenticationStoreAlreadyPresent(Vec<u8>),
+    LegacyDelegates {
+        initiator: Vec<Id>,
+        responder: Vec<Id>,
+    },
+    Badarg,
+    ProofAccount {
+        value: ae_trie::Value,
+        error: ae_state::accounts::AccountError,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Primitive(crate::Error),
     State(ae_state::channels::Error),
     Contract(ae_state::contracts::Error),
+    Proof(ae_state::transport::Error),
     Codec(ae_tx::Error),
     Rejected(&'static str),
     Native(NativeFailure),
