@@ -2,8 +2,10 @@
 // Publication is an outbox operation. The caller drains it after a successful
 // FSM step (including retained effects of a modeled native exception).
 // A cloned host never shares mutable publication or pool state.
+// Live cache reads are service I/O: they may request blocks even if a later
+// local step rolls back. Only notifications and signing effects are staged.
 use super::{Failure, Host, Limits, Payload, finalization, payload};
-use crate::parent_block::ParentBlock;
+use crate::{parent_block::ParentBlock, parent_cache::runtime as cache};
 use ae_crypto::Ed25519SecretKey;
 use ae_mempool::hc_votes::{self, Admission, PushOutcome, VotePool};
 use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
@@ -13,7 +15,7 @@ use ae_tx::{SignedTransaction, Transaction};
 use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +25,17 @@ pub enum Error {
     Pool(hc_votes::Error),
     Finalization(finalization::Error),
     MissingKey(AccountPublicKey),
+    ParentCache(cache::Error),
 }
 impl Error {
     pub fn is_operational(&self) -> bool {
         match self {
+            Self::ParentCache(
+                cache::Error::Closed
+                | cache::Error::Timeout
+                | cache::Error::Core(crate::parent_cache::Error::Native(_))
+                | cache::Error::Targets(cache::TargetError::Native),
+            ) => false,
             Self::MissingKey(_) | Self::Payload(Failure::Native(_)) => false,
             Self::Finalization(
                 finalization::Error::MissingContract(_)
@@ -105,6 +114,8 @@ pub struct LocalHost<A = MemoryStore, C = MemoryStore> {
     gossip: BTreeSet<Hash256>,
     parents: BTreeMap<Unsigned, ParentBlock>,
     parent_bytes: usize,
+    parent_cache: Option<cache::Client>,
+    shutdown: Arc<AtomicBool>,
     outbox: Vec<Output>,
     outbox_bytes: usize,
 }
@@ -122,6 +133,8 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
             gossip: BTreeSet::new(),
             parents: BTreeMap::new(),
             parent_bytes: 0,
+            parent_cache: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
             outbox: vec![],
             outbox_bytes: 0,
         }
@@ -174,6 +187,37 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         let block = self.parents.remove(height)?;
         self.parent_bytes -= parent_size(&block).expect("inserted parent is bounded");
         Some(block)
+    }
+    // A configured live cache is authoritative: missing/nonfinal blocks and
+    // cache failures never fall back to manually supplied offline parents.
+    pub fn set_parent_cache(&mut self, client: Option<cache::Client>) {
+        self.parent_cache = client;
+    }
+    pub(super) fn set_shutdown(&mut self, shutdown: Arc<AtomicBool>) {
+        self.shutdown = shutdown;
+    }
+    pub fn entropy_hash(&mut self, child_epoch: &Unsigned) -> Result<Option<Vec<u8>>, Error> {
+        let height = self.entropy_height(child_epoch);
+        let block = match &self.parent_cache {
+            Some(cache) => cache
+                .get_block_cancelled(super::big(&height), 1000.into(), &self.shutdown)
+                .map_err(Error::ParentCache)?
+                .ok(),
+            None => self.parents.get(&height).cloned(),
+        };
+        let Some(block) = block else { return Ok(None) };
+        let size = parent_size(&block)?
+            .checked_add(child_epoch.as_bytes().len())
+            .ok_or(Error::ResourceLimit)?;
+        let hash = block.hash.clone();
+        self.enqueue(
+            Output::ParentBlock {
+                epoch: child_epoch.clone(),
+                block,
+            },
+            size,
+        )?;
+        Ok(Some(hash))
     }
     fn enqueue(&mut self, output: Output, bytes: usize) -> Result<(), Error> {
         let bytes = self
@@ -293,24 +337,13 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
             return Ok(Finalized::TopUnavailable);
         };
         let child_epoch = epoch.add(&2.into());
-        let height = self.entropy_height(&child_epoch);
-        let Some(block) = self.parents.get(&height).cloned() else {
-            return Ok(Finalized::EntropyNotInCache);
-        };
-        let size = parent_size(&block)?
-            .checked_add(child_epoch.as_bytes().len())
-            .ok_or(Error::ResourceLimit)?;
         // Stage notification before building/signing, exactly as get_entropy_hash.
         // Operational errors roll it back; modeled native failures retain it.
         let old_len = self.outbox.len();
         let old_bytes = self.outbox_bytes;
-        self.enqueue(
-            Output::ParentBlock {
-                epoch: child_epoch,
-                block,
-            },
-            size,
-        )?;
+        if self.entropy_hash(&child_epoch)?.is_none() {
+            return Ok(Finalized::EntropyNotInCache);
+        }
         let result = (|| {
             let tx = finalization::transaction(
                 &trees,

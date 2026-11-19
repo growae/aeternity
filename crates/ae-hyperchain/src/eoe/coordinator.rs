@@ -9,7 +9,10 @@ use ae_state::Trees;
 use ae_trie::{MemoryStore, NodeReader};
 use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 pub const RESTART_PERIOD_SECONDS: u64 = 30;
 pub const MAXIMUM_RESTARTS: usize = 3;
@@ -181,6 +184,19 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
     }
     pub fn remove_parent(&mut self, height: &Unsigned) -> Option<ParentBlock> {
         self.host.remove_parent(height)
+    }
+    pub fn set_parent_cache(&mut self, client: Option<crate::parent_cache::runtime::Client>) {
+        self.host.set_parent_cache(client);
+    }
+    pub(super) fn set_shutdown(&mut self, shutdown: Arc<AtomicBool>) {
+        self.host.set_shutdown(shutdown);
+    }
+    pub fn entropy_hash(&mut self, epoch: &Unsigned) -> Result<Option<Vec<u8>>, Error> {
+        self.transact(|next| {
+            let result = next.host.entropy_hash(epoch).map_err(Error::Host)?;
+            next.route_outputs()?;
+            Ok(result)
+        })
     }
     pub fn next_deadline(&self) -> Option<u64> {
         self.timers.iter().flatten().map(|t| t.due).min()

@@ -1,5 +1,5 @@
-// Bounded local event loop for the EOE coordinator. Consensus computations
-// stay in Machine; only this adapter reads wall-independent monotonic time.
+// Bounded local event loop for the EOE coordinator. FSM computations stay in
+// Machine; this adapter supplies monotonic timer time and cache cancellation.
 use super::{
     coordinator::{self, Coordinator, ServiceOutput},
     local_host::SelectedTip,
@@ -14,6 +14,7 @@ use std::{
     io,
     sync::{
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -48,6 +49,8 @@ pub enum Command<A = MemoryStore, C = MemoryStore> {
         block: ParentBlock,
     },
     CacheParent(ParentBlock),
+    ParentCache(Option<crate::parent_cache::runtime::Client>),
+    Entropy(Unsigned),
     ForgetParent(Unsigned),
     NewEpoch(Unsigned),
     SelectTip(SelectedTip<A, C>),
@@ -65,6 +68,7 @@ pub enum Command<A = MemoryStore, C = MemoryStore> {
 pub enum Applied {
     Unit,
     Admission(PushOutcome),
+    Entropy(Option<Vec<u8>>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
@@ -91,12 +95,13 @@ pub struct Runtime<A = MemoryStore, C = MemoryStore> {
     receiver: Option<Receiver<Output>>,
     worker: Option<JoinHandle<()>>,
     maximum_command_bytes: usize,
+    stop: Arc<AtomicBool>,
 }
 impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send + Sync + 'static>
     Runtime<A, C>
 {
     pub fn spawn(
-        coordinator: Coordinator<A, C>,
+        mut coordinator: Coordinator<A, C>,
         order: impl MapOrder + Send + 'static,
         config: Config,
     ) -> io::Result<Self> {
@@ -112,14 +117,18 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
         }
         let (sender, commands) = mpsc::sync_channel(config.command_capacity);
         let (outputs, receiver) = mpsc::sync_channel(config.output_capacity);
+        let stop = Arc::new(AtomicBool::new(false));
+        coordinator.set_shutdown(stop.clone());
+        let worker_stop = stop.clone();
         let worker = thread::Builder::new()
             .name("ae-hc-eoe".into())
-            .spawn(move || run(coordinator, order, config, commands, outputs))?;
+            .spawn(move || run(coordinator, order, config, commands, outputs, worker_stop))?;
         Ok(Self {
             sender: Some(sender),
             receiver: Some(receiver),
             worker: Some(worker),
             maximum_command_bytes: config.maximum_command_bytes,
+            stop,
         })
     }
 }
@@ -150,6 +159,7 @@ impl<A, C> Runtime<A, C> {
             .recv_timeout(timeout)
     }
     pub fn shutdown(mut self) -> thread::Result<()> {
+        self.stop.store(true, Ordering::Release);
         // Dropping the receive side releases a worker blocked by output
         // backpressure. Dropping the sender releases its idle receive wait.
         self.receiver.take();
@@ -159,6 +169,7 @@ impl<A, C> Runtime<A, C> {
 }
 impl<A, C> Drop for Runtime<A, C> {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
         self.receiver.take();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
@@ -190,7 +201,9 @@ fn command_size<A, C>(command: &Command<A, C>, maximum: usize) -> Result<(), Fai
             budget.parent(block)?;
         }
         Command::CacheParent(block) => budget.parent(block)?,
-        Command::ForgetParent(n) | Command::NewEpoch(n) => budget.add(n.as_bytes().len())?,
+        Command::ForgetParent(n) | Command::NewEpoch(n) | Command::Entropy(n) => {
+            budget.add(n.as_bytes().len())?
+        }
         Command::GossipCache(hashes) => budget.add(hashes.len().saturating_mul(32))?,
         _ => {}
     };
@@ -202,11 +215,15 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
     config: Config,
     commands: Receiver<Request<A, C>>,
     outputs: SyncSender<Output>,
+    stop: Arc<AtomicBool>,
 ) {
     let started = Instant::now();
     let start_ms = service.now();
     let mut blocked = false;
     loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         while let Some(output) = service.pop_output() {
             if outputs.send(Output::Service(output)).is_err() {
                 return;
@@ -261,7 +278,10 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
         }
         if !blocked {
             for _ in 0..config.batch_steps {
-                if service.queued_events() == 0 || service.is_stopped() {
+                if service.queued_events() == 0
+                    || service.is_stopped()
+                    || stop.load(Ordering::Acquire)
+                {
                     break;
                 }
                 let clock = || {
@@ -295,6 +315,8 @@ fn apply<A: NodeReader + Clone, C: NodeReader + Clone>(
         }
         Command::NotifyParent { epoch, block } => service.notify_parent(epoch, block)?,
         Command::CacheParent(block) => service.insert_parent(block)?,
+        Command::ParentCache(client) => service.set_parent_cache(client),
+        Command::Entropy(epoch) => return service.entropy_hash(&epoch).map(Applied::Entropy),
         Command::ForgetParent(height) => {
             service.remove_parent(&height);
         }

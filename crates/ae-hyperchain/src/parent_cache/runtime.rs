@@ -33,6 +33,7 @@ pub enum Error {
     Full,
     Closed,
     Timeout,
+    Cancelled,
     ResourceLimit,
     OutboxFull,
     Targets(TargetError),
@@ -153,6 +154,28 @@ impl Call {
     pub fn wait(self, timeout: Duration) -> Result<Reply, Error> {
         self.receiver.recv_timeout(timeout).map_err(call_error)?
     }
+    // Cancellation abandons only this receiver, just like a caller timeout;
+    // an accepted cache command remains queued and may still execute.
+    pub fn wait_cancelled(self, timeout: Duration, cancel: &AtomicBool) -> Result<Reply, Error> {
+        let start = Instant::now();
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            match self
+                .receiver
+                .recv_timeout(remaining.min(Duration::from_millis(10)))
+            {
+                Ok(reply) => return reply,
+                Err(RecvTimeoutError::Disconnected) => return Err(Error::Closed),
+                Err(RecvTimeoutError::Timeout) if start.elapsed() >= timeout => {
+                    return Err(Error::Timeout);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
 }
 fn call_error(e: RecvTimeoutError) -> Error {
     match e {
@@ -222,10 +245,39 @@ impl Client {
     pub fn get_block(
         &self,
         height: BigInt,
+        timeout_ms: BigInt,
+    ) -> Result<Result<ParentBlock, LookupError>, Error> {
+        self.get_block_inner(height, timeout_ms, None)
+    }
+    pub fn get_block_cancelled(
+        &self,
+        height: BigInt,
+        timeout_ms: BigInt,
+        cancel: &AtomicBool,
+    ) -> Result<Result<ParentBlock, LookupError>, Error> {
+        self.get_block_inner(height, timeout_ms, Some(cancel))
+    }
+    fn get_block_inner(
+        &self,
+        height: BigInt,
         mut timeout_ms: BigInt,
+        cancel: Option<&AtomicBool>,
     ) -> Result<Result<ParentBlock, LookupError>, Error> {
         loop {
-            let reply = self.get_once(height.clone())?;
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err(Error::Cancelled);
+            }
+            let reply = if let Some(cancel) = cancel {
+                match self
+                    .call(Event::Get(height.clone()))?
+                    .wait_cancelled(Duration::from_secs(5), cancel)?
+                {
+                    Reply::Block(reply) => reply,
+                    _ => unreachable!("cache lookup reply"),
+                }
+            } else {
+                self.get_once(height.clone())?
+            };
             if reply.is_ok() || timeout_ms <= BigInt::from(0) {
                 return Ok(reply);
             }

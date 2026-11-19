@@ -661,3 +661,6 @@ fn background_runtime_reports_resource_stop_once_and_resumes_after_configuration
     }
     runtime.shutdown().unwrap();
 }
+
+#[path = "entropy.rs"]
+mod entropy;
