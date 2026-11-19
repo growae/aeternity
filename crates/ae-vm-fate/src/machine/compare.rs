@@ -9,7 +9,7 @@ pub(super) fn supported(op: Opcode) -> bool {
         Opcode::Lt | Opcode::Gt | Opcode::Elt | Opcode::Egt | Opcode::Eq | Opcode::Neq
     )
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn compare(
         &mut self,
         op: Opcode,

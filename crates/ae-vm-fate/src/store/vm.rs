@@ -35,9 +35,18 @@ impl<S: Backend> Stores<S> {
     // registers still pay traversal, although planning skips their writes.
     pub fn charge_finalization(
         &self,
+        gas: BigInt,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Charge, StoreError<S::Error>> {
+        self.charge_finalization_checked(gas, order, limits, None)
+    }
+    pub(crate) fn charge_finalization_checked(
+        &self,
         mut gas: BigInt,
         order: &impl MapOrder,
         mut limits: Limits,
+        native_capacity: Option<u64>,
     ) -> Result<Charge, StoreError<S::Error>> {
         if self.version == Version::Lima {
             return Ok(Charge {
@@ -110,8 +119,13 @@ impl<S: Backend> Stores<S> {
                 }
                 // Ceres and Arcus store versions both use the Iris+ traversal
                 // rule. Each term rounds separately, before any store writes.
-                let result = gas::traversal(5, CostModel::Serial, value, gas, order, limits)
-                    .map_err(gas_error)?;
+                let result = gas::TraversalMeter {
+                    protocol: 5,
+                    model: CostModel::Serial,
+                    native_capacity,
+                }
+                .charge(value, gas, &mut gas::NoUnfold, order, limits)
+                .map_err(gas_error)?;
                 gas = result.gas;
                 limits = result.remaining_limits;
             }

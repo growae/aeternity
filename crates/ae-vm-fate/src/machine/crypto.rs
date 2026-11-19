@@ -36,7 +36,7 @@ fn bytes<const N: usize>(v: &Value) -> Option<&[u8; N]> {
     };
     b.as_slice().try_into().ok()
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn crypto(&mut self, op: Opcode, a: &[Operand]) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
         if op == Poseidon && self.context.vm_version < VmVersion::Three {

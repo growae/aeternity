@@ -64,7 +64,7 @@ fn option(value: Option<Value>) -> Value {
         values: value.into_iter().collect(),
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     fn binary_bound(&self, bytes: usize) -> Result<(), Fault<S::Error>> {
         if bytes > self.remaining.max_bytes {
             Err(DataError::ResourceLimit.into())
@@ -170,9 +170,16 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         Ok(true)
     }
     pub(super) fn simple_traversal(&mut self, value: &Value) -> Result<(), Fault<S::Error>> {
+        self.traversal(value, gas::CostModel::Simple)
+    }
+    pub(super) fn traversal(
+        &mut self,
+        value: &Value,
+        model: gas::CostModel,
+    ) -> Result<(), Fault<S::Error>> {
         let charge = gas::TraversalMeter {
             protocol: self.state.meter.protocol,
-            model: gas::CostModel::Simple,
+            model,
             native_capacity: Some(self.native_capacity()),
         }
         .charge(

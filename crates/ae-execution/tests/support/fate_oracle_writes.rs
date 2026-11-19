@@ -94,6 +94,7 @@ fn terminal(row: &J) -> &J {
 #[derive(Clone, Debug, Default)]
 pub(super) struct Faults {
     pub writes_left: Rc<Cell<Option<usize>>>,
+    pub reads_left: Rc<Cell<Option<usize>>>,
     pub fail_reads: Rc<Cell<bool>>,
 }
 #[derive(Clone, Debug)]
@@ -105,6 +106,12 @@ impl NodeReader for FaultStore {
     fn node(&self, hash: &ae_types::Hash256) -> Result<Option<Vec<u8>>, ae_trie::Error> {
         if self.faults.fail_reads.get() {
             return Err(ae_trie::Error::Backend("injected oracle read".into()));
+        }
+        if let Some(left) = self.faults.reads_left.get() {
+            if left == 0 {
+                return Err(ae_trie::Error::Backend("injected read budget".into()));
+            }
+            self.faults.reads_left.set(Some(left - 1));
         }
         self.inner.node(hash)
     }

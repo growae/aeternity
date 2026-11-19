@@ -8,6 +8,7 @@ use crate::{
 use std::sync::Arc;
 pub mod context;
 pub mod deployment;
+pub mod finalize;
 pub mod hosts;
 pub mod names;
 pub mod oracle_write;
@@ -37,7 +38,19 @@ pub enum HostFailure<E> {
 }
 // A cloned host is an isolated logical snapshot. Immutable backing nodes may
 // be shared, but later mutations must not change an earlier snapshot's roots.
-pub trait Host<E>: Clone {
+pub trait StoreAccess<E>: Clone {
+    fn store_loaded(
+        &mut self,
+        contract: [u8; 32],
+        limits: Limits,
+    ) -> Result<Limits, HostFailure<E>>;
+}
+impl<E> StoreAccess<E> for () {
+    fn store_loaded(&mut self, _: [u8; 32], limits: Limits) -> Result<Limits, HostFailure<E>> {
+        Ok(limits)
+    }
+}
+pub trait Host<E>: Clone + StoreAccess<E> {
     fn deploy(
         &mut self,
         creator: [u8; 32],
@@ -368,8 +381,14 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         let instructions = block(&code, &cursor);
         let instruction = instructions.and_then(|is| is.get(cursor.instruction));
         let dispatched = instruction.is_some() && !cursor.returned;
-        let result = if cursor.returned || cursor.suspended {
-            executor.action(&input.program.machine, &[], limits, |_| Ok(()))?
+        let (result, host) = if cursor.returned || cursor.suspended {
+            executor.action_with_host(
+                &input.program.machine,
+                &[],
+                limits,
+                session.host.clone(),
+                |_| Ok(()),
+            )?
         } else if let Some(ins) = instruction {
             let supported = ops::supported(ins.opcode)
                 || debug::supported(ins.opcode)
@@ -393,12 +412,13 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                         | Opcode::Address
                         | Opcode::Caller
                 );
-            executor.step_with(
+            executor.step_with_host(
                 &input.program.machine,
                 ins,
                 limits,
                 supported,
                 cursor.debug.is_some(),
+                session.host.clone(),
                 |step| {
                     step.defer_program_jumps = true;
                     let result = step
@@ -411,17 +431,24 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 },
             )?
         } else {
-            executor.action(&input.program.machine, &[], limits, |step| {
-                if instructions.is_none() {
-                    return Err(Fault::Abort(Reason::MissingBlock(cursor.block.clone())));
-                }
-                let Value::Integer(n) = &cursor.block else {
-                    return Err(step.native("badarith"));
-                };
-                let target = Value::Integer(step.native_integer(n + 1)?);
-                step.jump_program(&code, &mut cursor, target)
-            })?
+            executor.action_with_host(
+                &input.program.machine,
+                &[],
+                limits,
+                session.host.clone(),
+                |step| {
+                    if instructions.is_none() {
+                        return Err(Fault::Abort(Reason::MissingBlock(cursor.block.clone())));
+                    }
+                    let Value::Integer(n) = &cursor.block else {
+                        return Err(step.native("badarith"));
+                    };
+                    let target = Value::Integer(step.native_integer(n + 1)?);
+                    step.jump_program(&code, &mut cursor, target)
+                },
+            )?
         };
+        session.host = host;
         let result = outcome(super::outcome(result, cursor), session);
         let failed_limits = match &result {
             Outcome::Abort {
@@ -441,17 +468,24 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             let mut cursor = input.program.cursor.clone();
             let mut session = input.session.clone();
             let mut caught = false;
-            let unwound = executor.action(&input.program.machine, &[], failed_limits, |step| {
-                step.defer_program_jumps = true;
-                step.reset_debug_on_jump = false;
-                let r = step
-                    .unwind_protected(&mut cursor, &mut session)
-                    .map(|handled| caught = handled);
-                session.current_contract = step.context.current_contract;
-                session.vm_version = step.context.vm_version;
-                step.reserved_gas = cursor.reserved();
-                r
-            })?;
+            let (unwound, host) = executor.action_with_host(
+                &input.program.machine,
+                &[],
+                failed_limits,
+                session.host.clone(),
+                |step| {
+                    step.defer_program_jumps = true;
+                    step.reset_debug_on_jump = false;
+                    let r = step
+                        .unwind_protected(&mut cursor, &mut session)
+                        .map(|handled| caught = handled);
+                    session.current_contract = step.context.current_contract;
+                    session.vm_version = step.context.vm_version;
+                    step.reserved_gas = cursor.reserved();
+                    r
+                },
+            )?;
+            session.host = host;
             if !caught && matches!(unwound, crate::machine::Outcome::Continue { .. }) {
                 // Reaching the end rethrows the original error with its original
                 // state. An init continuation may instead throw a replacement.
@@ -524,25 +558,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         Err(Error::Data(DataError::ResourceLimit))
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
-    fn host_fault(error: HostFailure<S::Error>) -> Fault<S::Error> {
-        match error {
-            HostFailure::Unavailable(op) => Fault::Abort(Reason::Unavailable(op)),
-            HostFailure::AuthTransactionType(kind) => {
-                Fault::Abort(Reason::AuthTransactionType(kind))
-            }
-            HostFailure::NameEncoding { operation, error } => {
-                Fault::Abort(Reason::NameEncoding { operation, error })
-            }
-            HostFailure::Backend(e) => Fault::Operational(Error::Backend(e)),
-            HostFailure::ResourceLimit => DataError::ResourceLimit.into(),
-            HostFailure::Exception(e) => Fault::Exception(e),
-            HostFailure::Call(s) => Fault::Abort(Reason::CallError(s)),
-            HostFailure::Primop { operation, reason } => {
-                Fault::Abort(Reason::Primop { operation, reason })
-            }
-        }
-    }
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
     fn frame_room(&self, cursor: &Cursor) -> Result<(), Fault<S::Error>> {
         if cursor.frames.len() >= self.remaining.max_depth {
             Err(DataError::ResourceLimit.into())
@@ -550,7 +566,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             Ok(())
         }
     }
-    fn remote_instruction<H: Host<S::Error>>(
+    fn remote_instruction(
         &mut self,
         code: &Code,
         cursor: &mut Cursor,
@@ -604,7 +620,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             _ => self.program_instruction(code, cursor, ins),
         }
     }
-    fn remote_call<H: Host<S::Error>>(
+    fn remote_call(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -627,6 +643,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 Value::Boolean(b) => b,
                 v => {
                     self.state = self.entry.clone();
+                    self.host = self.entry_host.clone();
                     return Err(Fault::Abort(Reason::ValueType {
                         value: v,
                         expected: "bool",
@@ -657,7 +674,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
-    fn remote_call_common<H: Host<S::Error>>(
+    fn remote_call_common(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -701,6 +718,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 cursor.clone(),
                 session.clone(),
                 self.context.clone(),
+                self.host.clone(),
             )
         });
         let result = (|| {
@@ -815,7 +833,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 checkpoint,
                 Snapshot {
                     stores: self.state.stores.clone(),
-                    host: session.host.clone(),
+                    host: self.host.clone(),
                 },
             );
             cursor.frames.push(Frame::ReturnCheck(Box::new(ReturnCheck {
@@ -836,8 +854,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             cursor.call_value = amount.clone();
             if amount != BigInt::from(0) {
-                session
-                    .host
+                self.host
                     .transfer(from, self.context.current_contract, &amount)
                     .map_err(Self::host_fault)?;
             }
@@ -846,11 +863,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         match (result, recovery) {
             (
                 Err(Fault::Abort(_) | Fault::Revert(_) | Fault::Exception(_)),
-                Some((state, old_cursor, old_session, context)),
+                Some((state, old_cursor, old_session, context, host)),
             ) => {
                 self.state = state;
                 *cursor = old_cursor;
                 *session = old_session;
+                self.host = host;
                 self.context = context;
                 Ok(false)
             }
@@ -864,7 +882,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             0.into()
         })
     }
-    fn fetch_code<H: Host<S::Error>>(
+    fn fetch_code(
         &mut self,
         session: &mut Session<S, H>,
         key: &[u8],
@@ -874,15 +892,15 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             c.clone()
         } else {
             let gas = self.state.meter.gas.clone();
-            let host_before = session.host.clone();
+            let host_before = self.host.clone();
             self.code_fetch_gas()?;
-            let Some(c) = session
+            let Some(c) = self
                 .host
                 .code(key, self.remaining)
                 .map_err(Self::host_fault)?
             else {
                 self.state.meter.gas = gas;
-                session.host = host_before;
+                self.host = host_before;
                 return Ok(None);
             };
             let fixed = fixed
@@ -893,7 +911,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         Ok(Some(loaded))
     }
     #[allow(clippy::too_many_arguments)]
-    fn load_remote<H: Host<S::Error>>(
+    fn load_remote(
         &mut self,
         session: &mut Session<S, H>,
         cursor: &mut Cursor,
@@ -946,7 +964,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         Ok(())
     }
-    fn remote_return<H: Host<S::Error>>(
+    fn remote_return(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -977,7 +995,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         {
                             self.state = before.unwrap();
                             self.state.stores = snapshot.stores;
-                            session.host = snapshot.host;
+                            self.host = snapshot.host;
                             self.state.accumulator.top = option(None);
                         }
                         Err(e) => return Err(e),
@@ -990,7 +1008,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         cursor.returned = true;
         Ok(())
     }
-    fn restore_local<H>(
+    fn restore_local(
         &mut self,
         cursor: &mut Cursor,
         session: &Session<S, H>,
@@ -1005,7 +1023,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         cursor.bindings = frame.bindings;
         self.jump_program(&code, cursor, frame.return_block)
     }
-    fn pop_remote<H: Host<S::Error>>(
+    fn pop_remote(
         &mut self,
         session: &mut Session<S, H>,
         frame: &RemoteFrame,
@@ -1019,7 +1037,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             .position(|k| *k == frame.contract)
             .ok_or_else(|| self.native("badmatch"))?;
         session.seen_contracts.drain(..=index);
-        if !(237000..=245000).contains(&session.host.height()) {
+        if !(237000..=245000).contains(&self.host.height()) {
             self.context.current_contract = frame.contract;
         }
         self.context.vm_version = frame.vm_version;
@@ -1027,7 +1045,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         session.vm_version = self.context.vm_version;
         Ok(true)
     }
-    fn restore_remote<H: Host<S::Error>>(
+    fn restore_remote(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -1067,7 +1085,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         let code = session.code().map_err(Fault::Operational)?;
         self.jump_program(&code, cursor, frame.local.return_block)
     }
-    fn unwind_protected<H: Host<S::Error>>(
+    fn unwind_protected(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -1096,7 +1114,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         .ok_or(Fault::Operational(Error::Data(DataError::InvalidValue)))?;
                     if check.protected {
                         self.state.stores = snapshot.stores;
-                        session.host = snapshot.host;
+                        self.host = snapshot.host;
                         self.state.accumulator.top = option(None);
                         return self.remote_return(cursor, session).map(|()| true);
                     }

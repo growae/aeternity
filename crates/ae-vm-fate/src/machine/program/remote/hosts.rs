@@ -48,8 +48,8 @@ pub(super) fn supported(op: Opcode) -> bool {
             | OracleCheckQuery
     )
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
-    pub(super) fn host_instruction<H: Host<S::Error>>(
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
+    pub(super) fn host_instruction(
         &mut self,
         session: &mut Session<S, H>,
         ins: &Instruction,
@@ -75,8 +75,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let ObjectPayload::Bytes(to) = payload else {
                     return Err(self.native("function_clause"));
                 };
-                session
-                    .host
+                self.host
                     .spend(self.context.current_contract, &to, &amount)
                     .map_err(Self::host_fault)
             }
@@ -84,7 +83,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 if self.context.vm_version < VmVersion::Two {
                     return Err(Fault::Abort(Reason::Unavailable("auth_tx")));
                 }
-                let (cells, result) = session
+                let (cells, result) = self
                     .host
                     .auth_transaction(self.context.vm_version, self.remaining)
                     .map_err(Self::host_fault)?;
@@ -93,7 +92,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 self.write(&a[0], result)
             }
             AuthTxHash => {
-                let hash = session.host.environment().auth_tx_hash.clone();
+                let hash = self.host.environment().auth_tx_hash.clone();
                 self.cells(if hash.is_some() { 4.into() } else { 3.into() })?;
                 let result = option(hash.map(Value::Bytes));
                 self.check(&result)?;
@@ -149,9 +148,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             _ => self.oracle_instruction(session, ins),
         }
     }
-    fn oracle_instruction<H: Host<S::Error>>(
+    fn oracle_instruction(
         &mut self,
-        session: &mut Session<S, H>,
+        _session: &mut Session<S, H>,
         ins: &Instruction,
     ) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
@@ -222,7 +221,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             (Some(q), Some(r))
         };
-        let result = session
+        let result = self
             .host
             .oracle_read(
                 OracleRead {

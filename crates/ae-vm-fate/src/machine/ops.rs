@@ -51,7 +51,7 @@ pub(super) fn supported(op: Opcode) -> bool {
                 | Exit
         )
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn eval(&mut self, instruction: &Instruction) -> Result<Control, Fault<S::Error>> {
         use Opcode::*;
         let a = &instruction.operands;
@@ -317,6 +317,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     // APPEND re-reads its first operand from the entry state
                     // solely to obtain its length; that read's effects vanish.
                     let mut probe = Step {
+                        host: self.entry_host.clone(),
+                        entry_host: self.entry_host.clone(),
                         defer_program_jumps: self.defer_program_jumps,
                         reset_debug_on_jump: self.reset_debug_on_jump,
                         context: self.context.clone(),

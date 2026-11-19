@@ -108,7 +108,7 @@ fn optional<E>(v: &Value) -> Result<Option<&Value>, Fault<E>> {
         _ => Err(Fault::Exception(Exception::Native("case_clause"))),
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
     fn name_string(&self, v: &Value, expected: &'static str) -> Result<Vec<u8>, Fault<S::Error>> {
         if let Value::String(b) = v {
             Ok(b.clone())
@@ -200,7 +200,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         pointers.reverse();
         Ok(pointers)
     }
-    pub(super) fn name_instruction<H: Host<S::Error>>(
+    pub(super) fn name_instruction(
         &mut self,
         session: &mut Session<S, H>,
         ins: &Instruction,
@@ -254,7 +254,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let salt = self.oracle_integer(&args[3])?;
                 let fee = self.oracle_integer(&args[4])?;
                 // The original `not Integer >= 0` guards fail for integers.
-                let hash = session
+                let hash = self
                     .host
                     .name_hash("aens_claim", &name, self.remaining)
                     .map_err(Self::host_fault)?;
@@ -282,7 +282,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     &args[if transfer { 3 } else { 2 }],
                     if transfer { "string" } else { "name" },
                 )?;
-                let hash = session
+                let hash = self
                     .host
                     .name_hash(op, &name, self.remaining)
                     .map_err(Self::host_fault)?;
@@ -320,7 +320,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let pointers = optional(&args[5])?
                     .map(|v| self.name_pointers(v))
                     .transpose()?;
-                let hash = session
+                let hash = self
                     .host
                     .name_hash("aens_update", &name, self.remaining)
                     .map_err(Self::host_fault)?;
@@ -335,7 +335,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             _ => unreachable!(),
         };
-        let mut host = session.host.clone();
+        let mut host = self.host.clone();
         let gas = host
             .name_write(
                 &req,
@@ -350,12 +350,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             self.spend(gas)?;
         }
-        session.host = host;
+        self.host = host;
         Ok(())
     }
-    fn name_read_instruction<H: Host<S::Error>>(
+    fn name_read_instruction(
         &mut self,
-        session: &mut Session<S, H>,
+        _session: &mut Session<S, H>,
         ins: &Instruction,
         args: &[Value],
     ) -> Result<(), Fault<S::Error>> {
@@ -372,7 +372,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         } else {
             None
         };
-        let result = match session
+        let result = match self
             .host
             .name_read(&name, pointer.as_deref(), self.remaining)
         {

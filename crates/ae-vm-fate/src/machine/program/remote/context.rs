@@ -105,8 +105,8 @@ pub(super) fn supported(op: Opcode) -> bool {
             | Deactivate
     )
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
-    pub(super) fn context_instruction<H: Host<S::Error>>(
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
+    pub(super) fn context_instruction(
         &mut self,
         session: &mut Session<S, H>,
         ins: &Instruction,
@@ -123,42 +123,40 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             Log0 | Log1 | Log2 | Log3 | Log4 => return self.log_instruction(session, a),
             Gas => Value::Integer(self.state.meter.gas.clone()),
-            Generation => Value::Integer(session.host.height().into()),
-            Origin => address(session.host.environment().origin),
-            Gasprice => Value::Integer(session.host.environment().gas_price.clone()),
+            Generation => Value::Integer(self.host.height().into()),
+            Origin => address(self.host.environment().origin),
+            Gasprice => Value::Integer(self.host.environment().gas_price.clone()),
             Fee => {
                 if self.context.vm_version < VmVersion::Two {
                     return Err(Fault::Abort(Reason::Unavailable("fee")));
                 }
-                Value::Integer(session.host.environment().fee.clone())
+                Value::Integer(self.host.environment().fee.clone())
             }
             NetworkId => {
                 if self.context.vm_version < VmVersion::Three {
                     return Err(Fault::Abort(Reason::Unavailable("network_id")));
                 }
-                Value::String(session.host.environment().network_id.clone())
+                Value::String(self.host.environment().network_id.clone())
             }
             Beneficiary => {
-                if session.host.environment().consensus == Consensus::Pos {
+                if self.host.environment().consensus == Consensus::Pos {
                     return Err(Fault::Abort(Reason::DisabledName("Chain.coinbase")));
                 }
-                address(session.host.environment().beneficiary)
+                address(self.host.environment().beneficiary)
             }
-            Timestamp => Value::Integer(session.host.environment().timestamp.clone()),
-            Difficulty => {
-                Value::Integer(if session.host.environment().consensus == Consensus::Pos {
-                    0.into()
-                } else {
-                    session.host.environment().difficulty.clone()
-                })
-            }
-            Gaslimit => Value::Integer(session.host.environment().block_gas_limit.clone()),
+            Timestamp => Value::Integer(self.host.environment().timestamp.clone()),
+            Difficulty => Value::Integer(if self.host.environment().consensus == Consensus::Pos {
+                0.into()
+            } else {
+                self.host.environment().difficulty.clone()
+            }),
+            Gaslimit => Value::Integer(self.host.environment().block_gas_limit.clone()),
             Creator => {
                 let key = self.context.current_contract;
                 let creator = match session.creator_cache.get(&key) {
                     Some(k) => *k,
                     None => {
-                        let k = session.host.creator(key).map_err(Self::host_fault)?;
+                        let k = self.host.creator(key).map_err(Self::host_fault)?;
                         self.remaining.max_nodes = self
                             .remaining
                             .max_nodes
@@ -176,7 +174,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 address(creator)
             }
             Balance => {
-                let n = session
+                let n = self
                     .host
                     .balance(&self.context.current_contract)
                     .map_err(Self::host_fault)?
@@ -204,12 +202,15 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                     });
                 };
                 if ins.opcode == BalanceOther {
-                    let before = session.host.clone();
-                    match session.host.balance(key).map_err(Self::host_fault)? {
+                    // balance_other captures API before reading its operand.
+                    let before = self.entry_host.clone();
+                    self.host = before.clone();
+                    match self.host.balance(key).map_err(Self::host_fault)? {
                         Some(n) => Value::Integer(n),
                         None => {
                             self.state = self.entry.clone();
-                            session.host = before;
+                            self.host = self.entry_host.clone();
+                            self.host = before;
                             Value::Integer(0.into())
                         }
                     }
@@ -220,8 +221,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         _ => AddressTest::Payable,
                     };
                     Value::Boolean(
-                        session
-                            .host
+                        self.host
                             .address_test(what, key)
                             .map_err(Self::host_fault)?,
                     )
@@ -235,18 +235,18 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                         expected: "integer",
                     }));
                 };
-                let current = BigInt::from(session.host.height());
+                let current = BigInt::from(self.host.height());
                 if n.sign() == Sign::Minus
                     || n > current
                     || n <= &current - 256
                     || (n == current
                         && (self.context.vm_version < VmVersion::Two
-                            || session.host.environment().consensus == Consensus::Pos))
+                            || self.host.environment().consensus == Consensus::Pos))
                 {
                     option(None)
                 } else {
                     let height = n.to_u64().ok_or_else(|| self.native("system_limit"))?;
-                    let hash = session
+                    let hash = self
                         .host
                         .block_hash(height, self.context.vm_version, self.remaining)
                         .map_err(Self::host_fault)?;
@@ -258,7 +258,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         self.check(&result)?;
         self.write(&a[0], result)
     }
-    fn log_instruction<H: Host<S::Error>>(
+    fn log_instruction(
         &mut self,
         session: &mut Session<S, H>,
         operands: &[Operand],
@@ -306,6 +306,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 ) => p.clone(),
                 _ => {
                     self.state = self.entry.clone();
+                    self.host = self.entry_host.clone();
                     return Err(Fault::Abort(match v {
                         Value::Integer(n) => Reason::LogIllegalInt(n.clone()),
                         Value::Bits(_) | Value::BitsNil => Reason::LogIllegalBits,

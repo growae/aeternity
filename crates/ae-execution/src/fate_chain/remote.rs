@@ -81,6 +81,36 @@ fn failure(error: Error) -> HostFailure<Error> {
         e => HostFailure::Backend(e),
     }
 }
+impl<A: NodeWriter + Clone, C: NodeWriter + Clone>
+    ae_vm_fate::machine::program::remote::StoreAccess<Error> for State<A, C>
+{
+    fn store_loaded(
+        &mut self,
+        key: [u8; 32],
+        limits: Limits,
+    ) -> Result<Limits, HostFailure<Error>> {
+        self.contract_cache.budget(limits)?;
+        if self.contract_cache.pending.contains_key(&key) {
+            return Ok(limits);
+        }
+        let contract = self
+            .contracts
+            .record(key)
+            .map_err(|e| HostFailure::Backend(Error::Contracts(e)))?
+            .ok_or(HostFailure::Exception(Exception::Native("aeprimop_state")))?;
+        let mut cache = self.contract_cache.clone();
+        cache.pending.insert(
+            key,
+            super::deployment::Pending {
+                contract,
+                writes: Default::default(),
+            },
+        );
+        let remaining = cache.budget(limits)?;
+        self.contract_cache = cache;
+        Ok(remaining)
+    }
+}
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
     fn deploy(
         &mut self,
@@ -413,6 +443,38 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
 // causes or converting operational failures into a protected-call result.
 #[derive(Debug, Clone)]
 pub struct Store<S = MemoryStore>(pub crate::fate_store::Backend<S>);
+impl<S: NodeReader + Clone, A: NodeWriter + Clone, C: NodeWriter + Clone>
+    ae_vm_fate::machine::program::remote::finalize::StoreHost<Store<S>> for State<A, C>
+{
+    fn set_contract_store(
+        &mut self,
+        key: [u8; 32],
+        store: Store<S>,
+        limits: Limits,
+    ) -> Result<Limits, HostFailure<Error>> {
+        self.contract_cache.budget(limits)?;
+        let contract = self
+            .contract_cache
+            .record(&self.contracts, key)
+            .map_err(HostFailure::Backend)?
+            .ok_or(HostFailure::Exception(Exception::Native("badmatch")))?;
+        let writes = store.0.0.write_cache();
+        contract
+            .validate_writes(writes)
+            .map_err(|_| HostFailure::Exception(Exception::Native("illegal")))?;
+        let mut cache = self.contract_cache.clone();
+        cache.pending.insert(
+            key,
+            super::deployment::Pending {
+                contract,
+                writes: writes.clone(),
+            },
+        );
+        let remaining = cache.budget(limits)?;
+        self.contract_cache = cache;
+        Ok(remaining)
+    }
+}
 impl<S: NodeReader + Clone> Backend for Store<S> {
     type Error = Error;
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, Error> {

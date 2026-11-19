@@ -20,6 +20,7 @@ mod crypto;
 mod numbers;
 mod ops;
 pub mod program;
+use program::remote::StoreAccess;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Register {
@@ -151,6 +152,7 @@ pub enum Error<E> {
     Unsupported(Opcode),
     UnsupportedContractKey(Vec<u8>),
     NeedCode([u8; 32]),
+    FinalizationRequiresReturn,
     // The original native code has undefined behavior for this input. Keep
     // this outside VM outcomes: it must not become block validity or an abort.
     UnresolvedNativeBehavior {
@@ -188,12 +190,15 @@ enum Fault<E> {
     Exception(Exception),
     Operational(Error<E>),
 }
+type ActionResult<S, H, C> = Result<(Outcome<S, C>, H), Error<<S as crate::store::Backend>::Error>>;
 impl<E> From<DataError> for Fault<E> {
     fn from(e: DataError) -> Self {
         Self::Operational(Error::Data(e))
     }
 }
-struct Step<'a, 'b, S, O> {
+struct Step<'a, 'b, S, O, H = ()> {
+    host: H,
+    entry_host: H,
     state: State<S>,
     entry: State<S>,
     executor: &'a Executor<'b, S, O>,
@@ -230,6 +235,28 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         debug_enabled: bool,
         eval: impl FnOnce(&mut Step<'_, '_, S, O>) -> Result<C, Fault<S::Error>>,
     ) -> Result<Outcome<S, C>, Error<S::Error>> {
+        self.step_with_host(
+            state,
+            instruction,
+            limits,
+            supported,
+            debug_enabled,
+            (),
+            eval,
+        )
+        .map(|(out, ())| out)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_host<C, H: StoreAccess<S::Error>>(
+        &self,
+        state: &State<S>,
+        instruction: &Instruction,
+        limits: Limits,
+        supported: bool,
+        debug_enabled: bool,
+        host: H,
+        eval: impl FnOnce(&mut Step<'_, '_, S, O, H>) -> Result<C, Fault<S::Error>>,
+    ) -> ActionResult<S, H, C> {
         let info = instruction.opcode.info();
         if instruction.operands.len() != info.arity
             || info
@@ -237,12 +264,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 .iter()
                 .any(|&i| !matches!(instruction.operands[i], Operand::Immediate(_)))
         {
-            return Ok(Outcome::Exception(Exception::UnknownInstruction));
+            return Ok((Outcome::Exception(Exception::UnknownInstruction), host));
         }
         if program::debug::supported(instruction.opcode) && !debug_enabled {
-            return Ok(Outcome::Exception(Exception::UnknownInstruction));
+            return Ok((Outcome::Exception(Exception::UnknownInstruction), host));
         }
-        self.action(state, &instruction.operands, limits, |step| {
+        self.action_with_host(state, &instruction.operands, limits, host, |step| {
             if !info.offchain && !self.context.on_chain {
                 return Err(Fault::Abort(Reason::NotAllowedOffchain(instruction.opcode)));
             }
@@ -259,6 +286,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                     .into(),
             )?;
             step.entry = step.state.clone();
+            step.entry_host = step.host.clone();
             eval(step)
         })
     }
@@ -269,6 +297,17 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         limits: Limits,
         eval: impl FnOnce(&mut Step<'_, '_, S, O>) -> Result<C, Fault<S::Error>>,
     ) -> Result<Outcome<S, C>, Error<S::Error>> {
+        self.action_with_host(state, operands, limits, (), eval)
+            .map(|(out, ())| out)
+    }
+    fn action_with_host<C, H: StoreAccess<S::Error>>(
+        &self,
+        state: &State<S>,
+        operands: &[Operand],
+        limits: Limits,
+        host: H,
+        eval: impl FnOnce(&mut Step<'_, '_, S, O, H>) -> Result<C, Fault<S::Error>>,
+    ) -> ActionResult<S, H, C> {
         let mut remaining = limits;
         for value in std::iter::once(&state.accumulator.top).chain(state.accumulator.rest.iter()) {
             remaining = value::check_limits(value, remaining).map_err(Error::Data)?;
@@ -284,6 +323,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             }
         }
         let mut step = Step {
+            entry_host: host.clone(),
+            host,
             defer_program_jumps: false,
             reset_debug_on_jump: true,
             context: self.context.clone(),
@@ -298,7 +339,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             .vm_scope(state.meter.protocol, self.context.current_contract)
             .map_err(|_| Error::ProtocolMismatch)?;
         let result = eval(&mut step);
-        match result {
+        let outcome = match result {
             Ok(control) => Ok(Outcome::Continue {
                 state: step.state,
                 control,
@@ -307,7 +348,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
             Err(Fault::Abort(reason)) => {
                 step.state.meter.gas = match step.native_integer(step.reserved_gas.clone()) {
                     Ok(gas) => gas,
-                    Err(Fault::Exception(e)) => return Ok(Outcome::Exception(e)),
+                    Err(Fault::Exception(e)) => return Ok((Outcome::Exception(e), step.host)),
                     _ => unreachable!(),
                 };
                 Ok(Outcome::Abort {
@@ -321,7 +362,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 step.state.meter.gas =
                     match step.native_integer(&step.state.meter.gas + &step.reserved_gas) {
                         Ok(gas) => gas,
-                        Err(Fault::Exception(e)) => return Ok(Outcome::Exception(e)),
+                        Err(Fault::Exception(e)) => return Ok((Outcome::Exception(e), step.host)),
                         _ => unreachable!(),
                     };
                 Ok(Outcome::Revert {
@@ -331,10 +372,29 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 })
             }
             Err(Fault::Operational(e)) => Err(e),
-        }
+        }?;
+        Ok((outcome, step.host))
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
+    fn host_fault(error: program::remote::HostFailure<S::Error>) -> Fault<S::Error> {
+        match error {
+            program::remote::HostFailure::Unavailable(op) => Fault::Abort(Reason::Unavailable(op)),
+            program::remote::HostFailure::AuthTransactionType(kind) => {
+                Fault::Abort(Reason::AuthTransactionType(kind))
+            }
+            program::remote::HostFailure::NameEncoding { operation, error } => {
+                Fault::Abort(Reason::NameEncoding { operation, error })
+            }
+            program::remote::HostFailure::Backend(e) => Fault::Operational(Error::Backend(e)),
+            program::remote::HostFailure::ResourceLimit => DataError::ResourceLimit.into(),
+            program::remote::HostFailure::Exception(e) => Fault::Exception(e),
+            program::remote::HostFailure::Call(s) => Fault::Abort(Reason::CallError(s)),
+            program::remote::HostFailure::Primop { operation, reason } => {
+                Fault::Abort(Reason::Primop { operation, reason })
+            }
+        }
+    }
     fn check(&mut self, v: &Value) -> Result<(), Fault<S::Error>> {
         self.remaining = value::check_limits(v, self.remaining)?;
         Ok(())
@@ -399,6 +459,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             StoreError::OutOfGas => Fault::Abort(Reason::OutOfGas),
             StoreError::NativeIntegerLimit => self.native("system_limit"),
+            // deserialize/1 matches an empty remainder after decoding.
+            StoreError::Data(DataError::TrailingBytes) => self.native("badmatch"),
             // Historical stores use maps:get(MapId, Meta) without a default.
             StoreError::MissingMap => self.native("badkey"),
             _ => Fault::Exception(Exception::StoreData),
@@ -412,6 +474,10 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 .contracts
                 .get(&key)
                 .ok_or(Fault::Operational(Error::NeedContract(key)))?;
+            self.remaining = self
+                .host
+                .store_loaded(key, self.remaining)
+                .map_err(Self::host_fault)?;
             self.state.stores.put_contract(key, store.clone());
         }
         Ok(())
@@ -532,6 +598,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
     }
     fn entry_abort(&mut self, reason: Reason) -> Fault<S::Error> {
         self.state = self.entry.clone();
+        self.host = self.entry_host.clone();
         Fault::Abort(reason)
     }
 }

@@ -389,7 +389,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         Err(Error::Data(DataError::ResourceLimit))
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     fn program_function<'c>(
         &self,
         code: &'c Code,

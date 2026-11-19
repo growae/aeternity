@@ -26,7 +26,14 @@ pub(super) fn start<H: Host<ae_execution::fate_chain::Error>, O: ae_vm_fate::map
     let mut stores = Stores::new(Version::for_protocol(
         row["protocol"].as_u64().unwrap() as u32
     ));
-    stores.put_contract(small(1), RemoteStore(backend()));
+    stores.put_contract(
+        small(1),
+        executor
+            .contracts
+            .get(&small(1))
+            .cloned()
+            .unwrap_or_else(|| RemoteStore(backend())),
+    );
     let machine = State {
         accumulator: Accumulator {
             top: Value::Void,
@@ -150,6 +157,15 @@ struct FailingHost {
     inner: Chain,
     code_failure: bool,
     transfer_failure: bool,
+}
+impl remote::StoreAccess<ae_execution::fate_chain::Error> for FailingHost {
+    fn store_loaded(
+        &mut self,
+        key: [u8; 32],
+        limits: Limits,
+    ) -> Result<Limits, remote::HostFailure<ae_execution::fate_chain::Error>> {
+        self.inner.store_loaded(key, limits)
+    }
 }
 impl Host<ae_execution::fate_chain::Error> for FailingHost {
     fn deploy(

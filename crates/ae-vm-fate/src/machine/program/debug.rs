@@ -155,7 +155,7 @@ impl Cursor {
         }
     }
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn debug_instruction(
         &mut self,
         code: &Code,

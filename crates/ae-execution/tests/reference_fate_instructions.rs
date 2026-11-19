@@ -26,6 +26,8 @@ mod values;
 use values::{bytes, rows, string, value};
 #[path = "support/fate_auth.rs"]
 mod auth_tests;
+#[path = "support/fate_completion.rs"]
+mod completion_tests;
 #[path = "support/fate_context.rs"]
 mod context_tests;
 #[path = "support/fate_create.rs"]

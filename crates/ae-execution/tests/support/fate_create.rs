@@ -35,7 +35,7 @@ pub(super) fn fetch_pending<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWrit
         .session
         .host
         .contract_cache
-        .initial_store(&key, MemoryStore::default(), limits)
+        .overlay_store(&key, Store::default(), limits)
         .unwrap()
         .unwrap_or_else(|| panic!("missing pending contract {}", hex::encode(key)));
     sources.insert(key, RemoteStore(Backend(store)));
@@ -234,9 +234,9 @@ fn init_frames_work_limits_and_pending_store_fetch_are_retryable_without_publica
     };
     assert_eq!(key, state.session.current_contract);
     assert!(matches!(
-        state.session.host.contract_cache.initial_store(
+        state.session.host.contract_cache.overlay_store(
             &key,
-            MemoryStore::default(),
+            Store::default(),
             Limits {
                 max_bytes: 0,
                 ..limits

@@ -107,7 +107,7 @@ fn value2(p: bls::G2) -> Value {
 fn field_values<const N: usize>(p: [[u8; 48]; N]) -> Value {
     Value::Tuple(p.into_iter().map(|b| Value::Bytes(b.to_vec())).collect())
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: StoreAccess<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn bls(&mut self, op: Opcode, a: &[Operand]) -> Result<(), Fault<S::Error>> {
         use Opcode::*;
         let name = name(op);

@@ -82,7 +82,7 @@ fn ttl(v: &Value, absolute: bool) -> Option<Ttl> {
         value: value.clone(),
     })
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
     pub(super) fn oracle_error(
         &self,
         operation: &'static str,
@@ -139,9 +139,9 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             Err(self.oracle_error(name, if both { "bad_types" } else { "bad_type" }))
         }
     }
-    pub(super) fn delegation<H: Host<S::Error>>(
+    pub(super) fn delegation(
         &mut self,
-        session: &mut Session<S, H>,
+        _session: &mut Session<S, H>,
         name: &'static str,
         key: &[u8],
         query: Option<&[u8]>,
@@ -156,7 +156,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 .gas_at_protocol(self.state.meter.protocol)
                 .into(),
         )?;
-        let network = &session.host.environment().network_id;
+        let network = &self.host.environment().network_id;
         let aens = name.starts_with("aens_");
         let preclaim = name == "aens_preclaim";
         let messages = if self.context.vm_version < VmVersion::Three {
@@ -215,7 +215,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             messages
         };
         for message in messages {
-            if session
+            if self
                 .host
                 .verify_delegation(key, &message, &signature, self.context.vm_version)
                 .map_err(Self::host_fault)?
@@ -226,7 +226,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         Err(self.oracle_error(name, "bad_signature"))
     }
 
-    pub(super) fn oracle_write<H: Host<S::Error>>(
+    pub(super) fn oracle_write(
         &mut self,
         session: &mut Session<S, H>,
         ins: &Instruction,
@@ -287,6 +287,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
                 let signature = self.oracle_signature(&args[0])?;
                 let Some(ttl) = ttl(&args[2], false) else {
                     self.state = self.entry.clone();
+                    self.host = self.entry_host.clone();
                     return Err(self.oracle_error(name, "bad_ttl"));
                 };
                 self.delegation(session, name, &key, None, signature)?;
@@ -341,21 +342,21 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
             }
             _ => unreachable!(),
         };
-        let mut staged = session.host.clone();
+        let mut staged = self.host.clone();
         let result = staged
             .oracle_write(&req, self.state.meter.protocol, self.remaining)
             .map_err(Self::host_fault)?;
         // Register/query publish before dynamic gas; respond/extend publish
         // after it. Protected recovery subsequently restores its own snapshot.
         if output {
-            session.host = staged.clone();
+            self.host = staged.clone();
         }
         if result.gas <= 0.into() {
             return Err(self.native("function_clause"));
         }
         self.spend(result.gas)?;
         if !output {
-            session.host = staged;
+            self.host = staged;
         }
         if let Some(value) = result.value {
             self.write(&ins.operands[0], value)?;

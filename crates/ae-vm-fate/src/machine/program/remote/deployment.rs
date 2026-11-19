@@ -11,8 +11,8 @@ pub struct InitFrame {
 fn contract(key: [u8; 32]) -> Value {
     Value::Object(ObjectKind::Contract, ObjectPayload::Bytes(key.to_vec()))
 }
-impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
-    pub(super) fn deploy_contract<H: Host<S::Error>>(
+impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O, H> {
+    pub(super) fn deploy_contract(
         &mut self,
         cursor: &mut Cursor,
         session: &mut Session<S, H>,
@@ -64,7 +64,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         if let Value::ContractBytearray(bytes) = &source {
             self.spend(BigInt::from(bytes.len()) * 5u64)?;
         }
-        let key = session
+        let key = self
             .host
             .deploy(
                 self.context.current_contract,
@@ -99,13 +99,12 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         }
         Ok(())
     }
-    fn remove_deployed<H: Host<S::Error>>(
+    fn remove_deployed(
         &mut self,
         session: &mut Session<S, H>,
         frame: &InitFrame,
     ) -> Result<(), Fault<S::Error>> {
-        session
-            .host
+        self.host
             .remove_deployment(
                 frame.contract,
                 self.context.current_contract,
@@ -116,7 +115,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Step<'_, '_, S, O> {
         session.code_cache.remove(&frame.contract);
         Ok(())
     }
-    pub(super) fn finish_init<H: Host<S::Error>>(
+    pub(super) fn finish_init(
         &mut self,
         session: &mut Session<S, H>,
         frame: &InitFrame,
