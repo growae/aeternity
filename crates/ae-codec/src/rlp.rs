@@ -91,13 +91,13 @@ pub fn decode_one_with_limits(
                 let start = position
                     .checked_add(1 + length_bytes)
                     .ok_or(DecodeError::LengthOverflow)?;
+                if bytes.get(position + 1).filter(|_| position + 1 < boundary) == Some(&0) {
+                    return Err(DecodeError::LeadingZeroLength);
+                }
                 if start > boundary {
                     return Err(DecodeError::Truncated);
                 }
                 let raw = &bytes[position + 1..start];
-                if raw[0] == 0 {
-                    return Err(DecodeError::LeadingZeroLength);
-                }
                 let length = raw.iter().try_fold(0usize, |n, b| {
                     n.checked_mul(256)
                         .and_then(|n| n.checked_add(usize::from(*b)))

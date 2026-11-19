@@ -10,6 +10,49 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{ToPrimitive, Zero};
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeException {
+    Error(&'static str),
+    Exit(&'static str),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodingFailure {
+    pub error: Error,
+    // Operational exhaustion has no original VM exception.
+    pub exception: Option<DecodeException>,
+}
+// VM invocation deserializes before constructing an engine state. Preserve
+// native error/exit categories rather than converting them into gas aborts.
+pub fn decode_for_vm(bytes: &[u8], limits: Limits) -> Result<Value, DecodingFailure> {
+    let (value, rest) = decode_one_for_vm(bytes, limits)?;
+    if !rest.is_empty() {
+        return Err(DecodingFailure {
+            error: Error::TrailingBytes,
+            exception: Some(DecodeException::Error("badmatch")),
+        });
+    }
+    Ok(value)
+}
+pub fn decode_one_for_vm(bytes: &[u8], limits: Limits) -> Result<(Value, &[u8]), DecodingFailure> {
+    let mut decoder = Decoder::new(bytes, limits).map_err(operational_decode)?;
+    let value = decoder.value(0).map_err(|error| decoder.failure(error))?;
+    Ok((value, &bytes[decoder.pos..]))
+}
+pub fn decode_type_one_for_vm(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Type, &[u8]), DecodingFailure> {
+    let mut decoder = Decoder::new(bytes, limits).map_err(operational_decode)?;
+    let ty = decoder.ty(0).map_err(|error| decoder.failure(error))?;
+    Ok((ty, &bytes[decoder.pos..]))
+}
+fn operational_decode(error: Error) -> DecodingFailure {
+    DecodingFailure {
+        error,
+        exception: None,
+    }
+}
+
 pub fn decode(bytes: &[u8], limits: Limits) -> Result<Value, Error> {
     let (value, rest) = decode_one(bytes, limits)?;
     if !rest.is_empty() {
@@ -96,6 +139,7 @@ struct Decoder<'a> {
     bytes: &'a [u8],
     pos: usize,
     budget: Budget,
+    native_exception: DecodeException,
 }
 impl<'a> Decoder<'a> {
     fn new(bytes: &'a [u8], limits: Limits) -> Result<Self, Error> {
@@ -106,7 +150,28 @@ impl<'a> Decoder<'a> {
             bytes,
             pos: 0,
             budget: Budget::new(limits),
+            native_exception: DecodeException::Error("function_clause"),
         })
+    }
+    fn failure(&self, error: Error) -> DecodingFailure {
+        DecodingFailure {
+            error,
+            exception: (error != Error::ResourceLimit).then_some(self.native_exception),
+        }
+    }
+    fn fail<T>(&mut self, error: Error, reason: &'static str) -> Result<T, Error> {
+        self.native_exception = DecodeException::Error(reason);
+        Err(error)
+    }
+    fn exit<T>(&mut self, reason: &'static str) -> Result<T, Error> {
+        self.native_exception = DecodeException::Exit(reason);
+        Err(Error::InvalidEncoding)
+    }
+    fn string(&mut self, n: &BigUint) -> Result<Vec<u8>, Error> {
+        let Some(n) = n.to_usize().filter(|n| *n <= self.bytes.len() - self.pos) else {
+            return self.fail(Error::Truncated, "badarg");
+        };
+        Ok(self.take(n)?.to_vec())
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let end = self.pos.checked_add(n).ok_or(Error::Truncated)?;
@@ -129,9 +194,16 @@ impl<'a> Decoder<'a> {
                 .saturating_sub(self.budget.nodes),
         };
         let (value, rest) =
-            rlp::decode_one_with_limits(&self.bytes[self.pos..], limits).map_err(|e| match e {
-                rlp::DecodeError::ResourceLimit => Error::ResourceLimit,
-                _ => Error::InvalidEncoding,
+            rlp::decode_one_with_limits(&self.bytes[self.pos..], limits).map_err(|e| {
+                self.native_exception = DecodeException::Error(match e {
+                    rlp::DecodeError::EmptyInput => "function_clause",
+                    rlp::DecodeError::LeadingZeroLength => "leading_zeroes_in_size",
+                    _ => "badmatch",
+                });
+                match e {
+                    rlp::DecodeError::ResourceLimit => Error::ResourceLimit,
+                    _ => Error::InvalidEncoding,
+                }
             })?;
         self.pos = self.bytes.len() - rest.len();
         Ok(value)
@@ -139,31 +211,27 @@ impl<'a> Decoder<'a> {
     fn rlp_integer(&mut self, depth: usize) -> Result<BigUint, Error> {
         let start = self.pos;
         let Rlp::Bytes(bytes) = self.rlp(depth)? else {
-            return Err(Error::InvalidEncoding);
+            return self.fail(Error::InvalidEncoding, "badarg");
         };
         let n = BigUint::from_bytes_be(bytes);
         if rlp::encode(&Rlp::Bytes(&n.to_bytes_be())) != self.bytes[start..self.pos] {
-            return Err(Error::NonCanonical);
+            return self.fail(Error::NonCanonical, "none_unique_encoding");
         }
         Ok(n)
     }
     fn integer(&mut self, depth: usize) -> Result<BigInt, Error> {
         match self.value(depth)? {
             Value::Integer(n) => Ok(n),
-            _ => Err(Error::InvalidEncoding),
+            _ => self.fail(Error::InvalidEncoding, "badmatch"),
         }
     }
-    fn count(&self, n: &BigUint) -> Result<usize, Error> {
-        let n = n.to_usize().ok_or(Error::Truncated)?;
-        if n > self.bytes.len() - self.pos {
-            return Err(Error::Truncated);
-        }
-        Ok(n)
+    fn count(&self, n: &BigUint) -> usize {
+        // A collection cannot fit more values than remaining bytes. Still
+        // visit its prefix: a malformed nested value fails before exhaustion.
+        let bound = (self.bytes.len() - self.pos).saturating_add(1);
+        n.to_usize().unwrap_or(bound).min(bound)
     }
     fn elements(&mut self, n: usize, depth: usize) -> Result<Vec<Value>, Error> {
-        if n > self.bytes.len() - self.pos {
-            return Err(Error::Truncated);
-        }
         let mut values = Vec::new();
         for _ in 0..n {
             values.push(self.value(depth)?);
@@ -175,7 +243,7 @@ impl<'a> Decoder<'a> {
         let tag = self.byte()?;
         if tag & 1 == 0 {
             if tag == 0x80 {
-                return Err(Error::InvalidEncoding);
+                return self.fail(Error::InvalidEncoding, "illegal_sign");
             }
             let n = BigInt::from((tag & 0x7f) >> 1);
             return Ok(Value::Integer(if tag & 0x80 == 0 { n } else { -n }));
@@ -184,7 +252,7 @@ impl<'a> Decoder<'a> {
             0x6f | 0xef | 0x4f | 0xcf => {
                 let n = self.rlp_integer(depth + 1)?;
                 if tag == 0xcf && n.is_zero() {
-                    return Err(Error::InvalidEncoding);
+                    return self.fail(Error::InvalidEncoding, "illegal_parameter");
                 }
                 let n = BigInt::from(n);
                 match tag {
@@ -195,13 +263,11 @@ impl<'a> Decoder<'a> {
                 }
             }
             0x01 | 0x8f => {
-                let n = self
-                    .integer(depth + 1)?
-                    .to_biguint()
-                    .ok_or(Error::InvalidEncoding)?;
+                let Some(n) = self.integer(depth + 1)?.to_biguint() else {
+                    return self.fail(Error::InvalidEncoding, "badmatch");
+                };
                 let n = if tag == 1 { n + 64u8 } else { n };
-                let n = self.count(&n)?;
-                let bytes = self.take(n)?.to_vec();
+                let bytes = self.string(&n)?;
                 if tag == 1 {
                     Value::String(bytes)
                 } else {
@@ -217,17 +283,19 @@ impl<'a> Decoder<'a> {
                 if object == 1 {
                     match self.value(depth + 1)? {
                         Value::String(bytes) => Value::Bytes(bytes),
-                        _ => return Err(Error::InvalidEncoding),
+                        _ => return self.fail(Error::InvalidEncoding, "badmatch"),
                     }
                 } else {
-                    let kind = ObjectKind::from_tag(object)?;
                     let rlp = self.rlp(depth + 1)?;
+                    let kind = ObjectKind::from_tag(object).inspect_err(|_| {
+                        self.native_exception = DecodeException::Error("case_clause");
+                    })?;
                     Value::Object(kind, own_payload(rlp, &mut self.budget, depth + 1)?)
                 }
             }
             0x0b | 0x1f => {
                 let n = self.rlp_integer(depth + 1)? + 16u8;
-                let n = self.count(&n)?;
+                let n = self.count(&n);
                 let values = self.elements(n, depth + 1)?;
                 if tag == 0x0b {
                     Value::Tuple(values)
@@ -237,24 +305,23 @@ impl<'a> Decoder<'a> {
             }
             0x2f => {
                 let n = self.rlp_integer(depth + 1)? * 2u8;
-                let n = self.count(&n)?;
+                let n = self.count(&n);
                 let values = self.elements(n, depth + 1)?;
                 let mut map = BTreeMap::new();
                 let mut keys = Vec::new();
                 let mut values = values.into_iter();
                 while let Some(k) = values.next() {
-                    value::valid_key(&k, &mut self.budget, depth + 1)?;
+                    value::valid_key(&k, &mut self.budget, depth + 1).inspect_err(|_| {
+                        self.native_exception = DecodeException::Error("map_as_key_in_map");
+                    })?;
                     keys.push(k.clone());
-                    if map
-                        .insert(k, values.next().ok_or(Error::InvalidEncoding)?)
-                        .is_some()
-                    {
-                        return Err(Error::NonCanonical);
-                    }
+                    map.insert(k, values.next().ok_or(Error::InvalidEncoding)?);
                 }
-                let rows = value::sorted(&map, &mut self.budget, depth + 1)?;
+                let rows = value::sorted(&map, &mut self.budget, depth + 1).inspect_err(|_| {
+                    self.native_exception = DecodeException::Error("function_clause");
+                })?;
                 if rows.iter().map(|(k, _)| *k).ne(keys.iter()) {
-                    return Err(Error::NonCanonical);
+                    return self.fail(Error::NonCanonical, "unknown_map_serialization_format");
                 }
                 Value::Map(map)
             }
@@ -263,15 +330,26 @@ impl<'a> Decoder<'a> {
                 cache: BTreeMap::new(),
             },
             0xaf => {
-                let Rlp::Bytes(arities) = self.rlp(depth + 1)? else {
-                    return Err(Error::InvalidEncoding);
+                let arities = self.rlp(depth + 1)?;
+                let Some(&tag) = self.bytes.get(self.pos) else {
+                    return self.fail(Error::Truncated, "badmatch");
                 };
-                let tag = usize::from(self.byte()?);
+                self.pos += 1;
+                let Rlp::Bytes(arities) = arities else {
+                    return self.fail(Error::InvalidEncoding, "badarg");
+                };
+                let tag = usize::from(tag);
+                if tag > arities.len() {
+                    return self.exit("too_large_tag_in_variant");
+                }
                 let Value::Tuple(values) = self.value(depth + 1)? else {
-                    return Err(Error::InvalidEncoding);
+                    return self.fail(Error::InvalidEncoding, "badmatch");
                 };
+                if tag == arities.len() {
+                    return self.fail(Error::InvalidEncoding, "function_clause");
+                }
                 if arities.get(tag).map(|n| usize::from(*n)) != Some(values.len()) {
-                    return Err(Error::InvalidEncoding);
+                    return self.exit("tag_does_not_match_type_in_variant");
                 }
                 if arities.len()
                     > self
@@ -291,7 +369,7 @@ impl<'a> Decoder<'a> {
             }
             t if t & 3 == 1 => {
                 let n = usize::from(t >> 2);
-                Value::String(self.take(n)?.to_vec())
+                Value::String(self.string(&n.into())?)
             }
             t if t & 15 == 3 => Value::List(self.elements(usize::from(t >> 4), depth + 1)?),
             t if t & 15 == 11 => Value::Tuple(self.elements(usize::from(t >> 4), depth + 1)?),
@@ -325,14 +403,22 @@ impl<'a> Decoder<'a> {
                     Type::Variant(ts)
                 }
             }
-            0x47 => Type::Object(ObjectKind::from_tag(self.byte()?)?),
+            0x47 => {
+                let tag = self.byte()?;
+                Type::Object(ObjectKind::from_tag(tag).inspect_err(|_| {
+                    self.native_exception = DecodeException::Error("case_clause");
+                })?)
+            }
             0x67 => Type::Map(Box::new(self.ty(depth + 1)?), Box::new(self.ty(depth + 1)?)),
             0x97 => {
                 let n = self.integer(depth + 1)?;
                 if n == BigInt::from(-1) {
                     Type::Bytes(None)
                 } else {
-                    Type::Bytes(Some(n.to_biguint().ok_or(Error::InvalidEncoding)?))
+                    let Some(n) = n.to_biguint() else {
+                        return self.fail(Error::InvalidEncoding, "if_clause");
+                    };
+                    Type::Bytes(Some(n))
                 }
             }
             _ => return Err(Error::InvalidEncoding),
