@@ -15,8 +15,10 @@ pub enum Error {
     Contracts(contracts::Error),
     Oracles(ae_trie::Error),
     OracleState(ae_state::oracles::Error),
+    Names(ae_state::names::Error),
     Primitive(Box<crate::Error>),
 }
+mod name;
 mod oracle;
 mod oracle_write;
 mod state;

@@ -15,6 +15,7 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use std::sync::Arc;
 mod chain;
+mod name;
 mod oracle;
 mod oracle_write;
 mod pure;

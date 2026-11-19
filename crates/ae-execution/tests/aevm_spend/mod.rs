@@ -20,6 +20,7 @@ static SPENDS: LazyLock<J> = LazyLock::new(|| {
     expand(&p["root"], p["values"].as_array().unwrap())
 });
 mod invocations;
+mod name;
 mod oracle;
 mod oracle_write;
 fn field<'a>(v: &'a J, k: &str) -> &'a J {

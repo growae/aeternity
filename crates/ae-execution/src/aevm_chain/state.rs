@@ -225,6 +225,16 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> StoreHost for Host<A, C> {
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> ChainHost for Host<A, C> {
     type Spend = Spend;
     type Oracle = ae_tx::OracleTransaction;
+    fn resolve_name(
+        &self,
+        name: &[u8],
+        key: &[u8],
+        ty: &ae_vm_aevm::heap::Type,
+        chain: &Self::Chain,
+        budget: &mut Budget,
+    ) -> HostResult<ae_vm_aevm::heap::Value, Error> {
+        self.name_resolution(name, key, ty, chain, budget)
+    }
     fn oracle_height(
         &self,
         _: Word,

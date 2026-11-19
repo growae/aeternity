@@ -61,10 +61,11 @@ fn state(row: &J) -> State {
         event_context: EventContext::None,
     }
 }
-fn ty(t: &J) -> Type {
+pub(super) fn ty(t: &J) -> Type {
     if t[0] == "atom" {
         return match t[1].as_str().unwrap() {
             "word" => Type::Word,
+            "bool" => Type::Bool,
             "string" => Type::String,
             _ => panic!("{t}"),
         };
@@ -76,9 +77,10 @@ fn ty(t: &J) -> Type {
         _ => panic!("{t}"),
     }
 }
-fn type_term(t: &Type) -> J {
+pub(super) fn type_term(t: &Type) -> J {
     match t {
         Type::Word => atom("word"),
+        Type::Bool => atom("bool"),
         Type::String => atom("string"),
         Type::TypeRep => atom("typerep"),
         Type::Tuple(ts) => tuple(vec![
@@ -98,7 +100,7 @@ fn type_term(t: &Type) -> J {
         _ => panic!("{t:?}"),
     }
 }
-fn term(v: &Value) -> J {
+pub(super) fn term(v: &Value) -> J {
     match v {
         Value::Integer(n) => int(n),
         Value::String(s) => bin(s),
@@ -134,7 +136,7 @@ fn call(
     };
     Host::default().oracle(request, s, &mut Budget::new(limits))
 }
-fn result(r: ae_vm_aevm::primops::HostResult<Value, aevm_chain::Error>) -> J {
+pub(super) fn result(r: ae_vm_aevm::primops::HostResult<Value, aevm_chain::Error>) -> J {
     match r {
         Ok(Ok(v)) => json!({"kind":"ok","value":tuple(vec![atom("ok"),term(&v)])}),
         Ok(Err(e)) => json!({"kind":"ok","value":tuple(vec![atom("error"),atom(&e)])}),
