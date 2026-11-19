@@ -6,6 +6,36 @@ use ae_vm_aevm::{
     runtime_heap::{Type as RuntimeType, TypeRef},
     store,
 };
+pub(super) fn verify_init(
+    code: &SophiaCode,
+    data: &[u8],
+    budget: &mut Budget,
+) -> Result<(), super::super::Error> {
+    use super::super::Error;
+    let value = match heap::decode_with_budget(&Type::Tuple(vec![Type::Word]), data, budget) {
+        Ok(v) => v,
+        Err(heap::Error::ResourceLimit) => return Err(Error::ResourceLimit),
+        Err(_) => return Err(Error::Rejected("bad_init_function")),
+    };
+    let Value::Tuple(values) = value else {
+        unreachable!()
+    };
+    let Value::Integer(hash) = &values[0] else {
+        unreachable!()
+    };
+    let hash = Word::wrapping(hash);
+    for f in &code.type_info {
+        budget.work(1).map_err(|_| Error::ResourceLimit)?;
+        if f.hash == hash.0 {
+            return if f.name == b"init" {
+                Ok(())
+            } else {
+                Err(Error::Rejected("bad_init_function"))
+            };
+        }
+    }
+    Err(Error::Rejected("bad_init_function"))
+}
 pub(super) fn check(
     data: &[u8],
     code: &SophiaCode,

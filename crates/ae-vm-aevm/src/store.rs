@@ -20,7 +20,7 @@ pub use order::OrderProfile;
 pub(crate) use order::binary_indices;
 pub use references::{has_maps, used_maps};
 pub(crate) use write::publish_inner;
-pub use write::{Plan, Update, initialize, plan, publish};
+pub use write::{Plan, Update, initialize, initialize_budgeted, plan, publish};
 pub(crate) fn encode_type(ty: &TypeRef, b: &mut Budget) -> Result<Vec<u8>, Error> {
     typerep::encode(std::slice::from_ref(ty), false, b)
 }

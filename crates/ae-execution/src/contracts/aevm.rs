@@ -22,8 +22,10 @@ use ae_vm_aevm::{
 use num_bigint::{BigInt, BigUint, Sign};
 use std::sync::Arc;
 mod abi;
+mod create;
 mod driver;
 mod host;
+pub use create::{execute_signed_create, process_create};
 
 #[derive(Debug)]
 pub enum HostError {
@@ -72,7 +74,10 @@ fn chain_fault<T>(
     })
 }
 fn transaction_fault(e: super::Error) -> RuntimeFault<HostError> {
-    RuntimeFault::Host(HostError::Transaction(e))
+    match e {
+        super::Error::ResourceLimit => RuntimeFault::Stop(Stop::ResourceLimit),
+        e => RuntimeFault::Host(HostError::Transaction(e)),
+    }
 }
 fn magnitude(n: &BigUint) -> Unsigned {
     Unsigned::from_field_bytes(&n.to_bytes_be()).expect("canonical nonnegative magnitude")
@@ -120,6 +125,9 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     limits: Limits,
 ) -> Result<Receipt, Error<A, C>> {
+    if !matches!(tx.operation(), ContractOperation::Call { .. }) {
+        return Err(transaction_fault(super::Error::UnsupportedOperation).into());
+    }
     process_budgeted(tx, trees, context, config, &mut Budget::new(limits))
 }
 #[allow(clippy::too_many_arguments)]
@@ -168,8 +176,9 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     else {
         return Err(transaction_fault(super::Error::UnsupportedVm(contract.version.vm)).into());
     };
-    let ContractOperation::Call { call_data, .. } = tx.operation() else {
-        unreachable!()
+    let (call_data, init) = match tx.operation() {
+        ContractOperation::Call { call_data, .. } => (call_data, false),
+        ContractOperation::Create { call_data, .. } => (call_data, true),
     };
     let bytes = match &contract.code {
         Code::Inline(b) => b.clone(),
@@ -198,19 +207,20 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         }
     };
     let code = chain_fault(aevm_chain::decode_code(&bytes, budget))?;
-    let (input, output) = match abi::check(call_data, &code, tx.amount() != &0.into(), budget)? {
-        Ok(t) => t,
-        Err(reason) => {
-            call.return_type = ReturnType::Error;
-            call.return_value = reason.as_bytes().to_vec();
-            call.gas_used = tx.gas().clone();
-            return Ok(Step::Complete(Completion {
-                call,
-                trees,
-                events: vec![],
-            }));
-        }
-    };
+    let (input, output) =
+        match abi::check(call_data, &code, !init && tx.amount() != &0.into(), budget)? {
+            Ok(t) => t,
+            Err(reason) => {
+                call.return_type = ReturnType::Error;
+                call.return_value = reason.as_bytes().to_vec();
+                call.gas_used = tx.gas().clone();
+                return Ok(Step::Complete(Completion {
+                    call,
+                    trees,
+                    events: vec![],
+                }));
+            }
+        };
     let mut child_context = context.clone();
     child_context.origin = Origin::Contract;
     // aeprimop's run_contract explicitly sets off_chain=false, even when its
@@ -236,18 +246,22 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     state.data = call_data.clone();
     state.out_type = Some(output);
     state.auth_tx_hash = config.environment.auth_tx_hash.clone();
-    state.call_stack = tx.call_stack().iter().map(big).collect();
+    state.call_stack = if init {
+        vec![]
+    } else {
+        tx.call_stack().iter().map(big).collect()
+    };
     state.context = execution::Context {
         address: BigUint::from_bytes_be(&contract.public_key).into(),
         creator: BigUint::from_bytes_be(&contract.owner.0).into(),
-        origin: BigUint::from_bytes_be(&if version == Version::Sophia1 {
+        origin: BigUint::from_bytes_be(&if init || version == Version::Sophia1 {
             tx.signer().0
         } else {
             tx.call_origin()
         })
         .into(),
         caller: BigUint::from_bytes_be(&tx.signer().0).into(),
-        value: big(tx.amount()),
+        value: if init { 0.into() } else { big(tx.amount()) },
         gas_price: big(tx.gas_price()),
         coinbase: BigUint::from_bytes_be(&config.environment.beneficiary.0).into(),
         timestamp: config.environment.timestamp_ms.clone(),
@@ -256,8 +270,10 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         gas_limit: config.environment.block_gas_limit.clone(),
     };
     let host = Host::new(config);
-    state.map_store = chain_fault(host.source.store(&chain))?
-        .ok_or(RuntimeFault::Native(Native::BadMatchNone))?;
+    if !init {
+        state.map_store = chain_fault(host.source.store(&chain))?
+            .ok_or(RuntimeFault::Native(Native::BadMatchNone))?;
+    }
     for (k, v) in &state.map_store {
         budget.work(1)?;
         budget.bytes(k.len().checked_add(v.len()).ok_or(Stop::ResourceLimit)?)?;

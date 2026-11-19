@@ -506,21 +506,28 @@ pub fn initialize(
     bytes: &[u8],
     limits: Limits,
 ) -> Result<Store, Error> {
-    let mut b = Budget::new(limits);
+    initialize_budgeted(version, profile, bytes, &mut Budget::new(limits))
+}
+pub fn initialize_budgeted(
+    version: Version,
+    profile: OrderProfile,
+    bytes: &[u8],
+    b: &mut Budget,
+) -> Result<Store, Error> {
     let root = word(bytes, &BigUint::zero())?;
-    let ty = parse_type(bytes, word(bytes, &root)?, Some(root.clone()), &mut b)?;
+    let ty = parse_type(bytes, word(bytes, &root)?, Some(root.clone()), b)?;
     let ptr = word(bytes, &(&root + 32u8))?;
     b.bytes(bytes.len())?;
     let mut value = Word::from_unsigned(&ptr).0.to_vec();
     value.extend_from_slice(&bytes[32..]);
-    let h = runtime_heap::binary_to_heap_inner(&ty, &value, 0u8.into(), 32u8.into(), &mut b)?;
-    let type_bytes = typerep::encode(&[ty], false, &mut b)?;
+    let h = runtime_heap::binary_to_heap_inner(&ty, &value, 0u8.into(), 32u8.into(), b)?;
+    let type_bytes = typerep::encode(&[ty], false, b)?;
     b.bytes(h.memory.len().checked_add(32).ok_or(Error::ResourceLimit)?)?;
     let mut value = Word::from_unsigned(&h.pointer).0.to_vec();
     value.extend(h.memory);
     let mut result = Store::new();
-    put(&mut result, vec![1], type_bytes, &mut b)?;
-    put(&mut result, vec![0], value, &mut b)?;
-    apply(version, profile, &h.maps, &mut result, &mut b)?;
+    put(&mut result, vec![1], type_bytes, b)?;
+    put(&mut result, vec![0], value, b)?;
+    apply(version, profile, &h.maps, &mut result, b)?;
     Ok(result)
 }

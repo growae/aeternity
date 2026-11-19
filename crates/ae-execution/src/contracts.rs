@@ -422,6 +422,13 @@ fn settle_detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         events.clear();
         let mut out = rollback;
         if !internal {
+            if context.protocol < ae_protocol::Protocol::Fortuna {
+                let key = AccountPublicKey(call.contract);
+                if out.accounts.lookup(key)?.is_none() {
+                    out.accounts
+                        .enter(&ae_state::accounts::Account::new(key, 0.into()))?;
+                }
+            }
             if call.return_type == ReturnType::Error
                 && context.protocol > ae_protocol::Protocol::Fortuna
                 && !context.dry_run

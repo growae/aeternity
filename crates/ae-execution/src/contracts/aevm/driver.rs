@@ -4,6 +4,7 @@ struct Frame<A, C> {
     context: Context,
     rollback: Trees<A, C>,
     events: Vec<Event>,
+    created: Option<Contract>,
 }
 struct Waiting<A, C> {
     frame: Frame<A, C>,
@@ -21,7 +22,15 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
 ) -> Begun<A, C> {
     b.work(1)?;
     b.bytes(tx.wire_size())?;
-    let p = prepare_call(tx, trees, context).map_err(transaction_fault)?;
+    let (p, created) = if matches!(tx.operation(), ContractOperation::Create { .. }) {
+        let (p, c) = create::prepare(tx, trees, context, b)?;
+        (p, Some(c))
+    } else {
+        (
+            prepare_call(tx, trees, context).map_err(transaction_fault)?,
+            None,
+        )
+    };
     let step = start(tx, &p.contract, p.call, p.trees, context, config, b)?;
     Ok((
         Frame {
@@ -29,6 +38,7 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             context: context.clone(),
             rollback: p.rollback,
             events: p.events,
+            created,
         },
         step,
     ))
@@ -49,6 +59,10 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     loop {
         match step {
             Step::Complete(completed) => {
+                let completed = match frame.created {
+                    Some(contract) => create::finish(contract, completed, config, b)?,
+                    None => completed,
+                };
                 let (receipt, committed) = settle_detached(
                     &frame.tx,
                     frame.rollback,
