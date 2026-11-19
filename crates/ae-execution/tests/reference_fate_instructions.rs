@@ -46,6 +46,8 @@ mod name_tests;
 mod oracle_write_tests;
 #[path = "support/fate_program.rs"]
 mod program_tests;
+#[path = "support/fate_publication.rs"]
+mod publication_tests;
 #[path = "support/fate_remote.rs"]
 mod remote_tests;
 static FIXTURE: LazyLock<J> = LazyLock::new(|| {

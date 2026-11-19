@@ -16,7 +16,7 @@ fn sources(row: &J) -> BTreeMap<[u8; 32], RemoteStore> {
     let source = RemoteStore(Backend(Store::new(tree)));
     (1..=3).map(|n| (small(n), source.clone())).collect()
 }
-static COMPLETION: LazyLock<J> = LazyLock::new(|| {
+pub(super) static COMPLETION: LazyLock<J> = LazyLock::new(|| {
     let packed: J =
         serde_json::from_str(include_str!("../fixtures/erlang_fate_completion.json")).unwrap();
     assert_eq!(packed["format"], "interned-json-v1");

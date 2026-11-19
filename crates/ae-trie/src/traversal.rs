@@ -87,6 +87,45 @@ pub struct ReadView<'a, S> {
     overlay: MemoryStore,
     backing: &'a S,
 }
+// Retain the synthetic subtree root and a backing-store handle without
+// enumerating/copying the reachable subtree. Cloning the handle must preserve
+// access to immutable content-addressed nodes.
+#[derive(Debug, Clone)]
+pub struct OwnedReadView<S> {
+    overlay: MemoryStore,
+    backing: S,
+}
+impl<S> OwnedReadView<S> {
+    pub fn new(backing: S) -> Self {
+        Self {
+            overlay: MemoryStore::default(),
+            backing,
+        }
+    }
+}
+impl<S: NodeReader> NodeReader for OwnedReadView<S> {
+    fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error> {
+        match self.overlay.node(hash)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => self.backing.node(hash),
+        }
+    }
+}
+impl<S: NodeReader + Clone> Trie<S> {
+    pub fn owned_read_only_subtree(
+        &self,
+        prefix: &Nibbles,
+    ) -> Result<Trie<OwnedReadView<S>>, Error> {
+        let subtree = self.read_only_subtree(prefix)?;
+        Ok(Trie {
+            root: subtree.root,
+            store: OwnedReadView {
+                overlay: subtree.store.overlay,
+                backing: self.store.clone(),
+            },
+        })
+    }
+}
 impl<S: NodeReader> NodeReader for ReadView<'_, S> {
     fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error> {
         match self.overlay.node(hash)? {

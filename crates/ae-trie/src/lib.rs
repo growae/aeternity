@@ -8,7 +8,7 @@ use ae_types::Hash256;
 use std::{collections::BTreeMap, fmt};
 
 mod traversal;
-pub use traversal::{IteratorOptions, ReadView, TrieIterator, transaction_root};
+pub use traversal::{IteratorOptions, OwnedReadView, ReadView, TrieIterator, transaction_root};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

@@ -19,7 +19,9 @@ pub mod history;
 pub mod names;
 pub mod oracle;
 mod oracle_write;
+mod publication;
 pub mod remote;
+mod store_source;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

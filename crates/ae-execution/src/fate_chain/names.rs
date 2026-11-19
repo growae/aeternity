@@ -33,7 +33,7 @@ pub struct Cache {
     pub auctions: BTreeMap<[u8; 33], Auction>,
 }
 impl Cache {
-    pub(super) fn budget(&self, mut limits: Limits) -> Result<(), HostFailure<Error>> {
+    pub(super) fn budget(&self, mut limits: Limits) -> Result<Limits, HostFailure<Error>> {
         let mut take = |n: usize| {
             limits.max_bytes = limits
                 .max_bytes
@@ -54,9 +54,9 @@ impl Cache {
         for n in self.auctions.values() {
             take(n.serialize().map_err(backend)?.len())?;
         }
-        Ok(())
+        Ok(limits)
     }
-    fn flush<S: NodeWriter, C: NodeWriter>(
+    pub(super) fn flush<S: NodeWriter, C: NodeWriter>(
         &self,
         names: &mut Names<S, C>,
     ) -> Result<(), HostFailure<Error>> {

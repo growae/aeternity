@@ -3,7 +3,7 @@ use ae_execution::fate_chain::{
     deployment::{self, Source},
     remote::{State as Chain, View},
 };
-use ae_state::{StateRoots, accounts::Accounts, contracts::Code as ContractCode};
+use ae_state::{accounts::Accounts, calls::Calls, contracts::Code as ContractCode};
 use ae_trie::NodeWriter;
 use ae_types::AccountPublicKey;
 use ae_vm_fate::machine::program::remote::{Host, HostFailure};
@@ -66,12 +66,13 @@ pub(super) fn snapshot<A: NodeWriter + Clone, C: NodeWriter + Clone>(s: &Chain<A
  "encoded":match c.serialize() {Ok(b)=>json!(hex::encode(b)),Err(_)=>json!({"kind":"exception","class":"error","reason":"function_clause"})},
  "writes":p.writes.iter().map(|(k,v)|json!([hex::encode(k),hex::encode(v)])).collect::<Vec<_>>()})
  }).collect();
-    let publication = match s
-        .contract_cache
-        .materialize(&s.contracts, Limits::default())
-    {
-        Ok(c) => {
-            json!({"contracts":tree_entries(c.tree()),"contract_root":c.root_hash().map(|h|hex::encode(h.0)),"tree_root":hex::encode(StateRoots{accounts:s.accounts.root_hash(),contracts:c.root_hash(),..Default::default()}.hash().0)})
+    let publication = match s.final_trees(
+        &Calls::new(s.contracts.tree().store().clone()),
+        &Trie::new(s.contracts.tree().store().clone()),
+        Limits::default(),
+    ) {
+        Ok((trees, _)) => {
+            json!({"contracts":tree_entries(trees.contracts.tree()),"contract_root":trees.contracts.root_hash().map(|h|hex::encode(h.0)),"tree_root":hex::encode(trees.roots().hash().0)})
         }
         Err(e) => exception(e),
     };

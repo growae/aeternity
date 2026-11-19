@@ -611,7 +611,10 @@ pub(super) fn assert_chain<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWrite
         "chain events"
     );
 }
-pub(super) fn assert_stores(actual: &Stores<RemoteStore>, expected: &J) {
+pub(super) fn assert_stores<S: ae_trie::NodeReader + Clone>(
+    actual: &Stores<RemoteStore<S>>,
+    expected: &J,
+) {
     let entries: BTreeMap<_, _> = rows(expected).iter().map(|e| (key(&e[0]), &e[1])).collect();
     assert_eq!(
         actual.keys().collect::<Vec<_>>(),
@@ -660,8 +663,12 @@ fn assert_local(f: &LocalFrame, e: &J) {
     assert_eq!(f.memory, memory(&e[8]));
     assert_eq!(f.call_value, number(&e[9]));
 }
-pub(super) fn assert_remote<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
-    actual: &ChainState<A, C>,
+pub(super) fn assert_remote<
+    S: ae_trie::NodeReader + Clone,
+    A: ae_trie::NodeWriter + Clone,
+    C: ae_trie::NodeWriter + Clone,
+>(
+    actual: &remote::State<RemoteStore<S>, Chain<A, C>>,
     expected: &J,
     pc: bool,
 ) {

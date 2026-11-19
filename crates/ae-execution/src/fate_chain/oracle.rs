@@ -2,7 +2,7 @@
 // Copyright (c) 2019, Aeternity Anstalt. ISC notice in repository LICENSE.
 use super::Error;
 use ae_state::oracles::{Oracle, Oracles, Query};
-use ae_trie::{Nibbles, NodeReader};
+use ae_trie::{Nibbles, NodeReader, NodeWriter};
 use ae_vm_fate::{
     Limits, encoding,
     machine::{
@@ -24,6 +24,18 @@ pub struct Cache {
     pub queries: BTreeMap<([u8; 32], [u8; 32]), Query>,
 }
 impl Cache {
+    pub(super) fn flush<S: NodeWriter, C: NodeWriter>(
+        &self,
+        tree: &mut Oracles<S, C>,
+    ) -> Result<(), HostFailure<Error>> {
+        for oracle in self.oracles.values() {
+            tree.enter_oracle(oracle).map_err(backend)?;
+        }
+        for query in self.queries.values() {
+            tree.enter_query(query).map_err(backend)?;
+        }
+        Ok(())
+    }
     pub(super) fn budget(&self, mut limits: Limits) -> Result<Limits, HostFailure<Error>> {
         let mut take = |parts: &[&[u8]]| {
             limits.max_nodes = limits
