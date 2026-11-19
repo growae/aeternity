@@ -41,6 +41,33 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     tx: Invocation<'_>,
     calldata: &[u8],
     contract: &Contract,
+    call: Call,
+    allow_init: bool,
+    trees: Trees<A, C>,
+    context: &Context,
+    config: &Config<'_, O>,
+    limits: Limits,
+    maximum_steps: usize,
+) -> Result<Completion<A, C>, Error> {
+    execute_with_store_key(
+        tx,
+        calldata,
+        contract,
+        call,
+        allow_init,
+        trees,
+        context,
+        config,
+        limits,
+        maximum_steps,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_with_store_key<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    tx: Invocation<'_>,
+    calldata: &[u8],
+    contract: &Contract,
     mut call: Call,
     allow_init: bool,
     trees: Trees<A, C>,
@@ -48,6 +75,7 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     config: &Config<'_, O>,
     limits: Limits,
     maximum_steps: usize,
+    store_key: Option<[u8; 32]>,
 ) -> Result<Completion<A, C>, Error> {
     let vm = match contract.version.vm {
         5 => Version::One,
@@ -176,6 +204,29 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         ));
         store.put(vec![0, 0], metadata);
         (Store(crate::fate_store::Backend(store)), remaining)
+    } else if let Some(key) = store_key {
+        let mut remaining = limits;
+        remaining.max_bytes = remaining
+            .max_bytes
+            .checked_sub(32)
+            .ok_or(Error::ResourceLimit)?;
+        remaining.max_nodes = remaining
+            .max_nodes
+            .checked_sub(1)
+            .ok_or(Error::ResourceLimit)?;
+        let tree = host
+            .contracts
+            .tree()
+            .owned_read_only_subtree(&ae_trie::Nibbles::from_bytes(
+                &ae_state::contracts::store_id(key),
+            ))
+            .map_err(ae_state::contracts::Error::from)?;
+        (
+            Store(crate::fate_store::Backend(
+                ae_state::contracts::store::Store::new(tree),
+            )),
+            remaining,
+        )
     } else {
         host.contract_store_source(contract.public_key, limits)?
     };

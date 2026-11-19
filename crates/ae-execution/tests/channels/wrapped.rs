@@ -6,13 +6,13 @@ use ae_vm_fate::{
 };
 use std::sync::Arc;
 #[path = "../../../ae-vm-fate/tests/support/otp_order.rs"]
-mod otp_order;
+pub(super) mod otp_order;
 pub(super) static WRAPPED: LazyLock<J> = LazyLock::new(|| {
     unpack(include_str!(
         "../fixtures/erlang_channel_wrapped_execution.json"
     ))
 });
-fn vm() -> machine::Context {
+pub(super) fn vm() -> machine::Context {
     machine::Context {
         current_contract: [0; 32],
         vm_version: ae_vm_fate::types::Version::Three,
@@ -29,7 +29,7 @@ fn small(n: u8) -> [u8; 32] {
     b[31] = n;
     b
 }
-fn environment() -> machine::program::remote::context::Environment {
+pub(super) fn environment() -> machine::program::remote::context::Environment {
     machine::program::remote::context::Environment {
         auth_tx_hash: None,
         origin: [0; 32],
@@ -44,7 +44,7 @@ fn environment() -> machine::program::remote::context::Environment {
         key_hash: [0; 32],
     }
 }
-fn aevm() -> aevm::Config {
+pub(super) fn aevm() -> aevm::Config {
     aevm::Config {
         environment: aevm::Environment {
             genesis_height: 0,

@@ -18,6 +18,8 @@ use ae_tx::{
 use ae_types::{AccountPublicKey, Id, IdTag, Unsigned};
 use std::collections::BTreeMap;
 
+pub mod authentication;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeFailure {
     MissingSignedTransaction,

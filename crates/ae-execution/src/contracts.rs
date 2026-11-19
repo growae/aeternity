@@ -18,6 +18,7 @@ use ae_vm_fate::{
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 
+pub(crate) mod channel_auth;
 mod create;
 mod invocation;
 use invocation::Invocation;

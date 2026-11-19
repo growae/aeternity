@@ -34,6 +34,7 @@ struct Waiting<A, C> {
     suspension: Box<outer_call::Suspension<aevm_chain::State<A, C>>>,
 }
 type Begun<A, C> = Result<(Frame<A, C>, Step<A, C>), Error<A, C>>;
+#[allow(clippy::too_many_arguments)]
 fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: Invocation<'_>,
     trees: &Trees<A, C>,
@@ -41,6 +42,7 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
     prepared: Option<super::super::PreparedCall<A, C>>,
+    supplied_store: Option<&ae_state::contracts::store::Contents>,
 ) -> Begun<A, C> {
     b.work(1)?;
     b.bytes(tx.wire_size())?;
@@ -58,7 +60,16 @@ fn begin<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             }
         }
     };
-    let step = start(tx, &p.contract, p.call, p.trees, context, config, b)?;
+    let step = start(
+        tx,
+        &p.contract,
+        p.call,
+        p.trees,
+        context,
+        config,
+        b,
+        supplied_store,
+    )?;
     Ok((
         Frame {
             tx: OwnedInvocation::new(tx),
@@ -79,7 +90,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    drive(tx, None, trees, context, config, b)
+    settled(drive(tx, None, trees, context, config, b, None)?)
 }
 pub(super) fn process_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: Invocation<'_>,
@@ -89,8 +100,34 @@ pub(super) fn process_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     b: &mut Budget,
 ) -> Result<Receipt, Error<A, C>> {
-    drive(tx, Some(prepared), trees, context, config, b)
+    settled(drive(tx, Some(prepared), trees, context, config, b, None)?)
 }
+enum Output {
+    Settled(Receipt),
+    Detached(Call),
+}
+fn settled<A, C>(output: Output) -> Result<Receipt, Error<A, C>> {
+    match output {
+        Output::Settled(r) => Ok(r),
+        Output::Detached(_) => unreachable!(),
+    }
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn detached<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: Invocation<'_>,
+    prepared: super::super::PreparedCall<A, C>,
+    store: &ae_state::contracts::store::Contents,
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    b: &mut Budget,
+) -> Result<Call, Error<A, C>> {
+    match drive(tx, Some(prepared), trees, context, config, b, Some(store))? {
+        Output::Detached(call) => Ok(call),
+        Output::Settled(_) => unreachable!(),
+    }
+}
+#[allow(clippy::too_many_arguments)]
 fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: Invocation<'_>,
     prepared: Option<super::super::PreparedCall<A, C>>,
@@ -98,14 +135,18 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     context: &Context,
     config: &Config,
     b: &mut Budget,
-) -> Result<Receipt, Error<A, C>> {
+    supplied_store: Option<&ae_state::contracts::store::Contents>,
+) -> Result<Output, Error<A, C>> {
     b.check_call_depth(1)?;
-    let (mut frame, mut step) = begin(tx, trees, context, config, b, prepared)?;
+    let (mut frame, mut step) = begin(tx, trees, context, config, b, prepared, supplied_store)?;
     let mut waiting: Vec<Waiting<A, C>> = Vec::new();
     let host = Host::new(config);
     loop {
         match step {
             Step::Complete(completed) => {
+                if waiting.is_empty() && supplied_store.is_some() {
+                    return Ok(Output::Detached(completed.call));
+                }
                 let completed = match frame.created {
                     Some(contract) => create::finish(contract, completed, config, b)?,
                     None => completed,
@@ -126,7 +167,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                 .map_err(transaction_fault)?;
                 let Some(parent) = waiting.pop() else {
                     *trees = committed;
-                    return Ok(receipt);
+                    return Ok(Output::Settled(receipt));
                 };
                 let (response, next) =
                     host::finish_callback(parent.suspension.chain(), committed, receipt, b)?;
@@ -167,6 +208,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                             &child_context,
                             config,
                             b,
+                            None,
                             None,
                         ) {
                             Ok((child, child_step)) => {

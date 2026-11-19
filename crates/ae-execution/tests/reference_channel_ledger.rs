@@ -436,3 +436,6 @@ mod wrapped;
 
 #[path = "channels/failures.rs"]
 mod failures;
+
+#[path = "channels/authentication.rs"]
+mod authentication;

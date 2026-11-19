@@ -167,6 +167,7 @@ fn process_budgeted<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     driver::process(Invocation::Contract(tx), trees, context, config, budget)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: Invocation<'_>,
     contract: &Contract,
@@ -175,6 +176,7 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     context: &Context,
     config: &Config,
     budget: &mut Budget,
+    supplied_store: Option<&ae_state::contracts::store::Contents>,
 ) -> Result<Step<A, C>, Error<A, C>> {
     let Some(version) =
         Version::from_id(u32::from(contract.version.vm)).filter(|v| *v != Version::Solidity1)
@@ -277,7 +279,9 @@ fn start<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         gas_limit: config.environment.block_gas_limit.clone(),
     };
     let host = Host::new(config);
-    if !init {
+    if let Some(store) = supplied_store {
+        state.map_store = store.clone();
+    } else if !init {
         state.map_store = chain_fault(host.source.store(&chain))?
             .ok_or(RuntimeFault::Native(Native::BadMatchNone))?;
     }
@@ -402,4 +406,56 @@ pub(crate) fn authenticate<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         config,
         &mut b,
     )
+}
+
+pub(crate) fn verify_payload_auth_data(
+    data: &[u8],
+    hash: &[u8],
+    limits: Limits,
+) -> Result<(), super::Error> {
+    abi::verify_auth_data(data, hash, &mut Budget::new(limits))
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn detached_auth<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ae_tx::GaMeta,
+    contract: Contract,
+    store_key: [u8; 32],
+    trees: &Trees<A, C>,
+    context: &Context,
+    config: &Config,
+    limits: Limits,
+) -> Result<Call, Error<A, C>> {
+    let mut b = Budget::new(limits);
+    let store = trees
+        .contracts
+        .read_store(store_key)
+        .and_then(|s| s.contents())
+        .map_err(|e| transaction_fault(e.into()))?;
+    let call = Call::new(
+        Id::new(IdTag::Account, tx.account.0),
+        0.into(),
+        contract.public_key,
+        None,
+        context.height.into(),
+        tx.gas_price.clone(),
+    );
+    let p = super::PreparedCall {
+        contract,
+        call,
+        trees: trees.clone(),
+        rollback: trees.clone(),
+        events: vec![],
+    };
+    driver::detached(
+        Invocation::Auth(tx, 0),
+        p,
+        &store,
+        &mut trees.clone(),
+        context,
+        config,
+        &mut b,
+    )
+}
+pub(crate) fn payload_auth_result(data: &[u8], limits: Limits) -> Result<bool, super::Error> {
+    abi::auth_result(data, &mut Budget::new(limits))
 }
