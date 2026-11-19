@@ -71,7 +71,11 @@ impl Default for Config {
         }
     }
 }
-type ReplySender = SyncSender<Result<Consensus<usize>, Error>>;
+pub(crate) type ReplySender = SyncSender<Result<Consensus<usize>, Error>>;
+pub(crate) struct FetchRequest {
+    pub query: Query,
+    pub reply: Option<ReplySender>,
+}
 enum Job {
     Barrier(SyncSender<()>),
     Fetch {
@@ -99,12 +103,12 @@ pub struct Client {
     maximum_query_bytes: usize,
 }
 impl Client {
-    fn submit(&self, job: Job) -> Result<(), Error> {
+    fn submit_owned(&self, job: Job) -> Result<(), (Error, Job)> {
         if self.control.stop.load(Ordering::Acquire) {
-            return Err(Error::Closed);
+            return Err((Error::Closed, job));
         }
         if matches!(&job,Job::Fetch{query,..} if !query.fits(self.maximum_query_bytes)) {
-            return Err(Error::ResourceLimit);
+            return Err((Error::ResourceLimit, job));
         }
         let _enqueue = self
             .control
@@ -117,9 +121,24 @@ impl Client {
                 job,
             })
             .map_err(|e| match e {
-                TrySendError::Full(_) => Error::Full,
-                TrySendError::Disconnected(_) => Error::Closed,
+                TrySendError::Full(item) => (Error::Full, item.job),
+                TrySendError::Disconnected(item) => (Error::Closed, item.job),
             })
+    }
+    fn submit(&self, job: Job) -> Result<(), Error> {
+        self.submit_owned(job).map_err(|(e, _)| e)
+    }
+    pub(crate) fn forward(&self, request: FetchRequest) -> Result<(), (Error, FetchRequest)> {
+        self.submit_owned(Job::Fetch {
+            query: request.query,
+            reply: request.reply,
+        })
+        .map_err(|(error, job)| {
+            let Job::Fetch { query, reply } = job else {
+                unreachable!("forwarded fetch")
+            };
+            (error, FetchRequest { query, reply })
+        })
     }
     pub fn fetch(&self, query: Query) -> Result<Consensus<usize>, Error> {
         self.fetch_timeout(query, Duration::from_secs(5))

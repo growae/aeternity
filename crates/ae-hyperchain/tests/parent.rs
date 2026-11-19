@@ -7,6 +7,8 @@ use ae_vm_fate::{
 use num_bigint::BigInt;
 use serde_json::{Value as J, json};
 use std::sync::LazyLock;
+#[path = "parent/cache_runtime.rs"]
+mod cache_runtime;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
 #[path = "parent/runtime.rs"]
