@@ -38,6 +38,8 @@ mod debug_tests;
 mod deployment_tests;
 #[path = "support/fate_hosts.rs"]
 mod host_tests;
+#[path = "support/fate_invocation.rs"]
+mod invocation_tests;
 #[path = "support/fate_names.rs"]
 mod name_tests;
 #[path = "support/fate_oracle_writes.rs"]

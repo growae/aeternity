@@ -10,6 +10,7 @@ pub mod context;
 pub mod deployment;
 pub mod finalize;
 pub mod hosts;
+pub mod invocation;
 pub mod names;
 pub mod oracle_write;
 use context::{AddressTest, Environment, Log};
@@ -51,6 +52,8 @@ impl<E> StoreAccess<E> for () {
     }
 }
 pub trait Host<E>: Clone + StoreAccess<E> {
+    fn is_on_chain(&self) -> bool;
+    fn dry_run(&self) -> bool;
     fn deploy(
         &mut self,
         creator: [u8; 32],
@@ -167,6 +170,9 @@ pub struct Snapshot<S, H> {
 }
 #[derive(Debug, Clone)]
 pub struct Session<S, H> {
+    // Immutable invocation flags. Remote/protected calls cannot change them.
+    pub in_auth: bool,
+    pub on_chain: bool,
     pub current_contract: [u8; 32],
     pub vm_version: VmVersion,
     pub caller: Value,
@@ -334,6 +340,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         };
         let result = executor.start_program(&code.code, machine, entry, limits)?;
         let session = Session {
+            in_auth: context.in_auth,
+            on_chain: context.on_chain,
             current_contract: context.current_contract,
             vm_version: code.vm_version,
             caller,
@@ -369,6 +377,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         let context = Context {
             current_contract: session.current_contract,
             vm_version: session.vm_version,
+            in_auth: session.in_auth,
+            on_chain: session.on_chain,
             reserved_gas: cursor.reserved(),
             ..self.context.clone()
         };
@@ -508,6 +518,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
                 let context = Context {
                     current_contract: state.session.current_contract,
                     vm_version: state.session.vm_version,
+                    in_auth: state.session.in_auth,
+                    on_chain: state.session.on_chain,
                     reserved_gas: state.program.cursor.reserved(),
                     ..self.context.clone()
                 };

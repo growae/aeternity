@@ -168,6 +168,12 @@ impl remote::StoreAccess<ae_execution::fate_chain::Error> for FailingHost {
     }
 }
 impl Host<ae_execution::fate_chain::Error> for FailingHost {
+    fn is_on_chain(&self) -> bool {
+        self.inner.is_on_chain()
+    }
+    fn dry_run(&self) -> bool {
+        self.inner.dry_run()
+    }
     fn deploy(
         &mut self,
         creator: [u8; 32],

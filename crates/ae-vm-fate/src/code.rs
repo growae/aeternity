@@ -212,6 +212,10 @@ impl Code {
         Ok(bytes)
     }
     pub fn decode(bytes: &[u8], limits: Limits) -> Result<Self, CodeError> {
+        Self::decode_bounded(bytes, limits).map(|(code, _)| code)
+    }
+    // Carry shared invocation work/byte budgets across code and calldata.
+    pub fn decode_bounded(bytes: &[u8], limits: Limits) -> Result<(Self, Limits), CodeError> {
         if bytes.len() > limits.max_bytes {
             return Err(Error::ResourceLimit.into());
         }
@@ -237,7 +241,14 @@ impl Code {
             annotations,
         };
         code.validate()?;
-        Ok(code)
+        Ok((
+            code,
+            Limits {
+                max_nodes: meter.remaining(),
+                max_bytes: limits.max_bytes - bytes.len(),
+                ..limits
+            },
+        ))
     }
 }
 fn append(out: &mut Vec<u8>, bytes: &[u8], limits: Limits) -> Result<(), CodeError> {

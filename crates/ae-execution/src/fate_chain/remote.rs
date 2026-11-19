@@ -112,6 +112,12 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone>
     }
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<Error> for State<A, C> {
+    fn is_on_chain(&self) -> bool {
+        self.onchain.is_none()
+    }
+    fn dry_run(&self) -> bool {
+        self.authentication.dry_run
+    }
     fn deploy(
         &mut self,
         creator: [u8; 32],

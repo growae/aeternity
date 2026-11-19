@@ -40,6 +40,8 @@ impl<S: CachedSubtreeBackend, O: MapOrder> Executor<'_, S, O> {
         let context = Context {
             current_contract: input.session.current_contract,
             vm_version: input.session.vm_version,
+            in_auth: input.session.in_auth,
+            on_chain: input.session.on_chain,
             reserved_gas: input.program.cursor.reserved(),
             ..self.context.clone()
         };

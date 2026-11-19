@@ -331,6 +331,8 @@ fn finalization_operational_errors_leave_the_return_checkpoint_retryable() {
     let faulted = remote::State {
         program: state.program.clone(),
         session: remote::Session {
+            in_auth: state.session.in_auth,
+            on_chain: state.session.on_chain,
             host: oracle_write_tests::fault_host(state.session.host.clone(), &faults),
             snapshots: Default::default(),
             current_contract: state.session.current_contract,

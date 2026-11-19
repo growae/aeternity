@@ -24,14 +24,28 @@ pub struct DecodingFailure {
 // VM invocation deserializes before constructing an engine state. Preserve
 // native error/exit categories rather than converting them into gas aborts.
 pub fn decode_for_vm(bytes: &[u8], limits: Limits) -> Result<Value, DecodingFailure> {
-    let (value, rest) = decode_one_for_vm(bytes, limits)?;
-    if !rest.is_empty() {
+    decode_for_vm_bounded(bytes, limits).map(|(value, _)| value)
+}
+pub(crate) fn decode_for_vm_bounded(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<(Value, Limits), DecodingFailure> {
+    let mut decoder = Decoder::new(bytes, limits).map_err(operational_decode)?;
+    let value = decoder.value(0).map_err(|error| decoder.failure(error))?;
+    if decoder.pos != bytes.len() {
         return Err(DecodingFailure {
             error: Error::TrailingBytes,
             exception: Some(DecodeException::Error("badmatch")),
         });
     }
-    Ok(value)
+    Ok((
+        value,
+        Limits {
+            max_nodes: limits.max_nodes - decoder.budget.nodes,
+            max_bytes: limits.max_bytes - bytes.len(),
+            ..limits
+        },
+    ))
 }
 pub fn decode_one_for_vm(bytes: &[u8], limits: Limits) -> Result<(Value, &[u8]), DecodingFailure> {
     let mut decoder = Decoder::new(bytes, limits).map_err(operational_decode)?;
