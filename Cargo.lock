@@ -102,6 +102,8 @@ dependencies = [
  "ae-protocol",
  "ae-types",
  "hex",
+ "num-bigint",
+ "num-traits",
  "serde_json",
 ]
 

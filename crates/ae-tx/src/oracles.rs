@@ -39,7 +39,7 @@ impl OracleOperation {
         }
         Ok(())
     }
-    fn kind(&self) -> TransactionKind {
+    pub fn kind(&self) -> TransactionKind {
         match self {
             Self::Register { .. } => TransactionKind::OracleRegister,
             Self::Extend { .. } => TransactionKind::OracleExtend,

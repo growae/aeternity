@@ -5,17 +5,24 @@ use ae_types::TypeError;
 use std::fmt;
 
 mod contracts;
+mod ga;
 mod names;
 mod oracles;
 mod schema;
 mod signed;
 mod spend;
+mod transaction;
 pub use contracts::{ContractOperation, ContractTransaction};
+pub use ga::GaAttachTransaction;
 pub use names::{NameOperation, NameTransaction};
 pub use oracles::{OracleOperation, OracleTransaction};
 pub use schema::TransactionKind;
 pub use signed::SignedTransaction;
 pub use spend::Spend;
+pub use transaction::{
+    GaMeta, Layer, PayingFor, Pricing, Transaction, TransactionLeaf, TransactionLimits,
+    TransactionRef, Wrapper,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -29,6 +36,9 @@ pub enum Error {
     InvalidSerializationVersion,
     InvalidTtlType,
     SignatureVerificationFailed,
+    RecursivePayer,
+    UnsupportedTransaction(TransactionKind),
+    ResourceLimit,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

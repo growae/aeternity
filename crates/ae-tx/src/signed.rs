@@ -1,7 +1,10 @@
 // Behavioral reference: aeternity fa2a6d7, aetx_sign.erl.
 // Copyright (c) 2017, aeternity developers. ISC notice in repository LICENSE.
 use crate::{CanonicalTransaction, Error, Spend};
-use ae_codec::object::{self, Field, FieldType, ObjectTag, Value};
+use ae_codec::{
+    object::{self, Field, FieldType, ObjectError, ObjectTag, Value},
+    rlp::{DecodeLimits, Rlp},
+};
 use ae_crypto::{blake2b_256, verify_ed25519};
 use ae_protocol::{NetworkProfile, Protocol};
 use ae_types::{AccountPublicKey, Hash256, Signature};
@@ -22,6 +25,53 @@ fn schema() -> Vec<Field> {
             kind: FieldType::Binary,
         },
     ]
+}
+pub(crate) fn decode_parts(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<(&[u8], Vec<Signature>), Error> {
+    let e = object::decode_envelope_with_limits(bytes, limits)?;
+    if e.tag != ObjectTag::SignedTx {
+        return Err(ObjectError::WrongTag.into());
+    }
+    if e.version != 1.into() {
+        return Err(ObjectError::WrongVersion.into());
+    }
+    let [Rlp::List(values), Rlp::Bytes(inner)] = e.fields.as_slice() else {
+        return Err(if e.fields.len() != 2 {
+            ObjectError::FieldCount
+        } else {
+            ObjectError::WrongType
+        }
+        .into());
+    };
+    let signatures = values
+        .iter()
+        .map(|v| {
+            let Rlp::Bytes(b) = v else {
+                return Err(Error::Object(ObjectError::WrongType));
+            };
+            Ok(Signature::try_from(*b)?)
+        })
+        .collect::<Result<_, Error>>()?;
+    Ok((inner, signatures))
+}
+pub(crate) fn encode_parts(signatures: &[Signature], bytes: Vec<u8>) -> Vec<u8> {
+    let mut sorted = signatures.to_vec();
+    sorted.sort(); // Decoded duplicates survive canonical serialization.
+    object::serialize(
+        ObjectTag::SignedTx,
+        &1.into(),
+        &schema(),
+        &[
+            (
+                "signatures".into(),
+                Value::List(sorted.iter().map(|s| Value::Binary(s.0.to_vec())).collect()),
+            ),
+            ("transaction".into(), Value::Binary(bytes)),
+        ],
+    )
+    .expect("typed signed transaction")
 }
 impl<T: CanonicalTransaction> SignedTransaction<T> {
     pub fn new(transaction: T, mut signatures: Vec<Signature>) -> Self {
@@ -44,19 +94,7 @@ impl<T: CanonicalTransaction> SignedTransaction<T> {
         self.signatures.dedup();
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let fields = object::deserialize(bytes, ObjectTag::SignedTx, &1.into(), &schema())?;
-        let [(_, Value::List(values)), (_, Value::Binary(bytes))] = fields.as_slice() else {
-            unreachable!("validated schema")
-        };
-        let signatures = values
-            .iter()
-            .map(|v| {
-                let Value::Binary(bytes) = v else {
-                    unreachable!("validated signature type")
-                };
-                Signature::try_from(bytes.as_slice())
-            })
-            .collect::<Result<_, _>>()?;
+        let (bytes, signatures) = decode_parts(bytes, DecodeLimits::default())?;
         // Decoding preserves order AND duplicates; constructors deduplicate.
         Ok(Self {
             transaction: T::decode(bytes)?,
@@ -64,24 +102,7 @@ impl<T: CanonicalTransaction> SignedTransaction<T> {
         })
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut sorted = self.signatures.clone();
-        sorted.sort(); // Do not deduplicate a decoded signature list.
-        object::serialize(
-            ObjectTag::SignedTx,
-            &1.into(),
-            &schema(),
-            &[
-                (
-                    "signatures".into(),
-                    Value::List(sorted.iter().map(|s| Value::Binary(s.0.to_vec())).collect()),
-                ),
-                (
-                    "transaction".into(),
-                    Value::Binary(self.transaction.encode()),
-                ),
-            ],
-        )
-        .expect("typed signed transaction")
+        encode_parts(&self.signatures, self.transaction.encode())
     }
     pub fn hash(&self) -> Hash256 {
         blake2b_256(&self.encode())

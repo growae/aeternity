@@ -10,6 +10,8 @@ ae-types.workspace = true
 ae-crypto.workspace = true
 ae-codec.workspace = true
 ae-protocol.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

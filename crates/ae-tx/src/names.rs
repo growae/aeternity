@@ -46,7 +46,7 @@ impl NameOperation {
             _ => Ok(()),
         }
     }
-    fn kind(&self) -> TransactionKind {
+    pub fn kind(&self) -> TransactionKind {
         match self {
             Self::Preclaim { .. } => TransactionKind::NamePreclaim,
             Self::Claim { .. } => TransactionKind::NameClaim,
