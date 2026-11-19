@@ -7,10 +7,12 @@ use num_bigint::{BigInt, Sign};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod callbacks;
+pub mod coordinator;
 pub mod finalization;
 pub mod local_host;
 mod machine;
 pub mod payload;
+pub mod runtime;
 pub use callbacks::{ClientState, FinalizeInput, calculate_delta, finalize_calldata};
 pub use machine::{
     Event, Host, Machine, Negotiation, Reply, ResultState, State, StepError, Timeout, Transition,

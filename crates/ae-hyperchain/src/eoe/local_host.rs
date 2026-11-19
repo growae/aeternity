@@ -132,6 +132,9 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     pub fn pool(&self) -> &VotePool {
         &self.pool
     }
+    pub fn stakers(&self) -> BTreeSet<AccountPublicKey> {
+        self.keys.keys().copied().collect()
+    }
     pub fn update_epoch(&mut self, epoch: Unsigned) {
         self.pool.update_epoch(epoch);
     }

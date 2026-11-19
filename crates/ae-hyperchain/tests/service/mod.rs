@@ -1,4 +1,5 @@
 use super::*;
+mod coordinator;
 use ae_hyperchain::eoe::local_host::{
     self, Config, Finalized, LocalHost, Output, SelectedTip, ServiceLimits,
 };
