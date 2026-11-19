@@ -34,6 +34,7 @@ pub enum Error {
     FunctionClause,
     NativeFunctionClause,
     NativeBadKey(BigUint),
+    NativeBadAlignment(u8),
     ResourceLimit,
     Stop(Stop),
 }

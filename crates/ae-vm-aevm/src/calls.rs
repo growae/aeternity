@@ -151,7 +151,7 @@ fn argument_word<E>(s: &State, offset: &BigUint) -> Result<Word, Fault<E>> {
     }
     Ok(s.memory.words().get(offset).copied().unwrap_or(Word::ZERO))
 }
-fn map_types<E>(
+fn primitive_types<E>(
     op: Word,
     s: &State,
     offset: &BigUint,
@@ -185,6 +185,34 @@ fn map_types<E>(
             (vec![word; if id == 301 { 2 } else { 1 }], Arc::new(output))
         }
         Some(306..=399) => (vec![], Arc::new(Type::Tuple(vec![]))),
+        Some(400) => (
+            vec![
+                word.clone(),
+                word.clone(),
+                Arc::new(Type::Tuple(vec![word.clone(); 2])),
+            ],
+            word,
+        ),
+        Some(401..=403) => (vec![Arc::new(Type::TypeRep), word.clone()], word),
+        Some(404 | 405) => (vec![Arc::new(Type::String)], word),
+        Some(410) => {
+            let bytes = Arc::new(Type::Tuple(vec![word.clone(); 2]));
+            (vec![word.clone(), bytes.clone(), bytes], word)
+        }
+        Some(420) => (
+            vec![
+                word.clone(),
+                word.clone(),
+                Arc::new(Type::Tuple(vec![word.clone(); 3])),
+            ],
+            word,
+        ),
+        Some(421) => (
+            vec![word.clone(), Arc::new(Type::Tuple(vec![word.clone(); 3]))],
+            Arc::new(Type::Variant(vec![vec![], vec![word]])),
+        ),
+        Some(500) => (vec![], Arc::new(Type::Variant(vec![vec![], vec![word]]))),
+        Some(400..=599) => (vec![], Arc::new(Type::Tuple(vec![]))),
         _ => return Err(Fault::Stop(Stop::UnimplementedPrimop(op))),
     };
     b.bytes(256)?;
@@ -215,8 +243,8 @@ pub(crate) fn input_inner<H: InputHost>(
     let offset = input.offset.unsigned();
     let (types, out) = if input.target.is_zero() {
         let op = argument_word(s, &offset)?;
-        // All map primops skip the dynamic type-hash check, including nonzero size.
-        map_types(op, s, &offset, b)?
+        // Map/crypto/auth primops skip dynamic type-hash checks, even for nonzero size.
+        primitive_types(op, s, &offset, b)?
     } else {
         if s.auth_tx_hash.is_some() {
             return Err(Fault::Native(Native::OutOfGas));

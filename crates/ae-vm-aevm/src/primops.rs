@@ -1,4 +1,4 @@
-// aevm_ae_primops map calls, fa2a6d7.
+// aevm_ae_primops local map/crypto/auth calls, fa2a6d7.
 // Copyright (c) 2018, Aeternity Anstalt. ISC: repository LICENSE.
 use crate::{
     calls,
@@ -14,11 +14,19 @@ use crate::{
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use std::sync::Arc;
+mod pure;
+pub use pure::call_local;
+pub(crate) use pure::call_local_inner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     IllegalCall,
     OutOfGas,
+    BaseGas {
+        op: Word,
+        required: BigUint,
+        state: Box<State>,
+    },
     Heap(HeapError),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

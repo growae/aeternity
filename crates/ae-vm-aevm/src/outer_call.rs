@@ -262,12 +262,7 @@ fn run<H: Host>(
         ));
     }
     let (response, next_chain) = if s.version != Version::Solidity1 && destination.is_zero() {
-        let prim = calls::words(&input.data, 1, b).map_err(|e| e.widen())?[0];
-        let id = prim.unsigned();
-        if id < 300u16.into() || id >= 400u16.into() {
-            return Err(Stop::UnimplementedPrimop(prim).into());
-        }
-        match primops::call_map_inner(&s, &input.data, &Bound { host, chain }, b)? {
+        match primops::call_local_inner(&s, &call_gas, &input.data, &Bound { host, chain }, b)? {
             primops::Outcome::Complete {
                 data,
                 gas_spent,

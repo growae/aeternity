@@ -45,8 +45,9 @@ impl<'a> Source<'a> {
     fn word(&self, ptr: &BigUint) -> Result<BigUint, Error> {
         match self {
             Self::Sparse(m) => {
-                if !(ptr % 32u8).is_zero() {
-                    return Err(Error::InvalidValue);
+                let remainder = (ptr % 32u8).to_u8().expect("remainder below 32");
+                if remainder != 0 {
+                    return Err(Error::NativeBadAlignment(remainder));
                 }
                 Ok(m.words().get(ptr).copied().unwrap_or(Word::ZERO).unsigned())
             }
@@ -75,8 +76,11 @@ impl<'a> Source<'a> {
                 Ok(bytes.bytes()[start + r.start..start + r.end].to_vec())
             }
             Self::Sparse(_) => {
-                if !(ptr % 32u8).is_zero() || !(size % 32u8).is_zero() {
-                    return Err(Error::InvalidValue);
+                for n in [ptr, size] {
+                    let remainder = (n % 32u8).to_u8().expect("remainder below 32");
+                    if remainder != 0 {
+                        return Err(Error::NativeBadAlignment(remainder));
+                    }
                 }
                 let n = size.to_usize().ok_or(Error::ResourceLimit)?;
                 b.bytes(n)?;
@@ -458,8 +462,8 @@ pub(super) fn run(
                         .source
                         .word(&ptr)?
                         .to_usize()
-                        .ok_or(Error::InvalidValue)?;
-                    let ts = cs.get(tag).ok_or(Error::InvalidValue)?;
+                        .ok_or(Error::FunctionClause)?;
+                    let ts = cs.get(tag).ok_or(Error::FunctionClause)?;
                     b.bytes(
                         ts.len()
                             .checked_add(1)

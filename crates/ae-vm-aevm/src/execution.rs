@@ -96,7 +96,7 @@ pub struct State {
     pub call_stack: Vec<BigInt>,
     pub no_recursion: bool,
     pub call_creates: Vec<CallCreate>,
-    pub auth_tx_hash: Option<Word>,
+    pub auth_tx_hash: Option<Vec<u8>>,
     pub solidity_storage: BTreeMap<BigUint, BigUint>,
     pub code: Vec<u8>,
     pub cp: usize,
@@ -437,6 +437,9 @@ pub(crate) fn snapshot(
     if state.memory.words().len() > budget.words {
         return Err(Stop::ResourceLimit);
     }
+    if let Some(hash) = &state.auth_tx_hash {
+        budget.bytes(hash.len())?;
+    }
     budget.work(state.call_creates.len())?;
     for call in &state.call_creates {
         budget.bytes(call.data.len())?;
@@ -481,7 +484,7 @@ pub(crate) fn snapshot(
         call_stack: state.call_stack.clone(),
         no_recursion: state.no_recursion,
         call_creates: state.call_creates.clone(),
-        auth_tx_hash: state.auth_tx_hash,
+        auth_tx_hash: state.auth_tx_hash.clone(),
         solidity_storage: state.solidity_storage.clone(),
         code: state.code.clone(),
         cp: state.cp,

@@ -23,6 +23,95 @@ static EXECUTION: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_outer_call_execution.json")));
 static INVOCATIONS: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_outer_call_invocations.json")));
+static CRYPTO: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_crypto_auth.json")));
+#[test]
+fn original_outer_crypto_auth_calls_preserve_gas_imports_and_native_cases() {
+    let rows = CRYPTO["outer"].as_array().unwrap();
+    assert_eq!(rows.len(), 2800);
+    for row in rows {
+        let s = state(row, &row["before"]);
+        let before = s.clone();
+        let chain = logical(field(&row["before"], "chain_state").clone());
+        let host = Source {
+            mode: "crypto_auth",
+            events: RefCell::new(vec![]),
+            fail: Cell::new(None),
+        };
+        check(
+            row,
+            outer_call::evaluate(&s, &chain, &host, Limits::default()),
+        );
+        assert_eq!(
+            logical(list(host.events.borrow().clone())),
+            logical(row["host_calls"].clone()),
+            "{row}"
+        );
+        assert_eq!(s, before);
+    }
+}
+#[test]
+fn outer_crypto_auth_budget_and_balance_failures_leave_inputs_retryable() {
+    let mut count = 0;
+    for row in CRYPTO["outer"].as_array().unwrap().iter().filter(|r| {
+        r["vm"] == 6
+            && field(&r["before"], "gas") == &int(5000)
+            && field(&r["before"], "stack")[1][0] == int(1300)
+            && field(&r["before"], "auth_tx_hash") == &binary(word(7))
+            && r["result"]["kind"] == "ok"
+            && r["result"]["value"][1][0] == atom("ok")
+    }) {
+        count += 1;
+        let s = state(row, &row["before"]);
+        let before = s.clone();
+        let chain = logical(field(&row["before"], "chain_state").clone());
+        let original = chain.clone();
+        let host = Source {
+            mode: "crypto_auth",
+            events: RefCell::new(vec![]),
+            fail: Cell::new(None),
+        };
+        let expected = outer_call::evaluate(&s, &chain, &host, Limits::default());
+        check(row, expected.clone());
+        for dim in 0..4 {
+            let mut stopped = false;
+            let mut reached = false;
+            for n in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 1_000_000] {
+                let mut limits = Limits::default();
+                match dim {
+                    0 => limits.max_work = n,
+                    1 => limits.max_bytes = n,
+                    2 => limits.max_depth = n,
+                    _ => limits.max_memory_words = n,
+                }
+                match outer_call::evaluate(&s, &chain, &host, limits) {
+                    Err(Fault::Runtime(runtime::Fault::Stop(Stop::ResourceLimit))) => {
+                        stopped = true
+                    }
+                    actual => {
+                        assert_eq!(actual, expected);
+                        reached = true;
+                        break;
+                    }
+                }
+            }
+            assert!(stopped && reached);
+        }
+        host.fail.set(Some("balance"));
+        assert_eq!(
+            outer_call::evaluate(&s, &chain, &host, Limits::default()),
+            Err(Fault::Runtime(runtime::Fault::Host("balance")))
+        );
+        host.fail.set(None);
+        assert_eq!(
+            outer_call::evaluate(&s, &chain, &host, Limits::default()),
+            expected
+        );
+        assert_eq!(s, before);
+        assert_eq!(chain, original);
+    }
+    assert_eq!(count, 10);
+}
 fn optional<'a>(v: &'a J, key: &str) -> Option<&'a J> {
     v[1].as_array()
         .unwrap()
@@ -64,7 +153,7 @@ fn state(row: &J, snap: &J) -> State {
         }
     ];
     if mode == "auth" {
-        s.auth_tx_hash = Some(Word::from(7));
+        s.auth_tx_hash = Some(Word::from(7).0.to_vec());
     }
     if let Some(code) = optional(snap, "code") {
         s.code = bytes(code);
@@ -93,6 +182,9 @@ fn state(row: &J, snap: &J) -> State {
     }
     if let Some(flag) = optional(snap, "no_recursion") {
         s.no_recursion = *flag == atom("true");
+    }
+    if let Some(hash) = optional(snap, "auth_tx_hash") {
+        s.auth_tx_hash = (*hash != atom("undefined")).then(|| bytes(hash));
     }
     if let Some(storage) = optional(snap, "storage").filter(|v| v[0] == "map") {
         s.map_store = store(storage);

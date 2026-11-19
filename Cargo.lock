@@ -114,6 +114,7 @@ name = "ae-vm-aevm"
 version = "0.1.0"
 dependencies = [
  "ae-crypto",
+ "ae-types",
  "hex",
  "num-bigint",
  "num-traits",

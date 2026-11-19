@@ -14,6 +14,148 @@ mod support;
 use support::*;
 static RETURNS: LazyLock<J> =
     LazyLock::new(|| fixture(include_str!("fixtures/erlang_call_returns.json")));
+static PURE: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_hash_auth.json")));
+static CRYPTO: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_crypto_auth.json")));
+#[test]
+fn original_signature_primitives_preserve_padding_gates_and_malformed_failures() {
+    let mut count = 0;
+    for group in ["runs", "malformed"] {
+        for row in CRYPTO[group].as_array().unwrap() {
+            let s = map_state(row, &row["before"]);
+            let before = s.clone();
+            let host = MapSource {
+                store: &s.map_store,
+                calls: Cell::new(0),
+                fail: Cell::new(true),
+            };
+            let result = primops::call_local(
+                &s,
+                &row["call_gas"].as_u64().unwrap().into(),
+                &bytes(&row["data"]),
+                &host,
+                Limits::default(),
+            );
+            assert_eq!(result, Ok(primop_expected(row)), "{row}");
+            assert_eq!(s, before);
+            assert_eq!(host.calls.get(), 0);
+            count += 1;
+        }
+    }
+    assert_eq!(count, 4270);
+}
+#[test]
+fn original_crypto_auth_input_types_skip_dynamic_hash_checks() {
+    let rows = CRYPTO["inputs"].as_array().unwrap();
+    assert_eq!(rows.len(), 672);
+    let host = TypesHost {
+        calls: RefCell::new(vec![]),
+        argument: None,
+        fail: Cell::new(true),
+    };
+    for row in rows {
+        let s = map_state(row, &row["before"]);
+        let before = s.clone();
+        let request = Input {
+            target: Word::ZERO,
+            offset: Word::from_unsigned(&row["input_pointer"].as_str().unwrap().parse().unwrap()),
+            size: Word::from(777),
+        };
+        assert_eq!(
+            calls::prepare_input(&s, request, &host, Limits::default()),
+            prepared(row, &row["result"]),
+            "{row}"
+        );
+        assert_eq!(s, before);
+    }
+    assert!(host.calls.borrow().is_empty());
+}
+#[test]
+fn pure_primitive_budget_exhaustion_preserves_inputs_and_retries() {
+    let mut rows: Vec<&J> = PURE["hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r["vm"] == 6 && r["call_gas"] == 1000 && field(&r["before"], "gas") == &int(1000)
+        })
+        .collect();
+    rows.extend(
+        CRYPTO["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["vm"] == 6 && r["call_gas"] == 5000)
+            .take(12),
+    );
+    assert!(!rows.is_empty());
+    for row in rows {
+        let s = map_state(row, &row["before"]);
+        let before = s.clone();
+        let host = MapSource {
+            store: &s.map_store,
+            calls: Cell::new(0),
+            fail: Cell::new(true),
+        };
+        let gas = row["call_gas"].as_u64().unwrap().into();
+        let data = bytes(&row["data"]);
+        let expected = Ok(primop_expected(row));
+        for dim in 0..4 {
+            let mut stopped = false;
+            let mut reached = false;
+            for n in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 1_000_000] {
+                let mut limits = Limits::default();
+                match dim {
+                    0 => limits.max_work = n,
+                    1 => limits.max_bytes = n,
+                    2 => limits.max_depth = n,
+                    _ => limits.max_memory_words = n,
+                }
+                match primops::call_local(&s, &gas, &data, &host, limits) {
+                    Err(Fault::Stop(Stop::ResourceLimit)) => stopped = true,
+                    actual => {
+                        assert_eq!(actual, expected);
+                        reached = true;
+                        break;
+                    }
+                }
+                assert_eq!(s, before);
+            }
+            assert!(reached && (dim >= 2 || stopped));
+        }
+        assert_eq!(s, before);
+        assert_eq!(host.calls.get(), 0);
+    }
+}
+#[test]
+fn original_generic_hashes_preserve_stored_map_versions_and_heap_failures() {
+    let corpus = fixture(include_str!("fixtures/erlang_crypto_heaps.json"));
+    let rows = corpus["runs"].as_array().unwrap();
+    assert_eq!(rows.len(), 720);
+    for row in rows {
+        let s = map_state(row, &row["before"]);
+        let before = s.clone();
+        let host = MapSource {
+            store: &s.map_store,
+            calls: Cell::new(0),
+            fail: Cell::new(true),
+        };
+        assert_eq!(
+            primops::call_local(
+                &s,
+                &row["call_gas"].as_u64().unwrap().into(),
+                &bytes(&row["data"]),
+                &host,
+                Limits::default()
+            ),
+            Ok(primop_expected(row)),
+            "{row}"
+        );
+        assert_eq!(s, before);
+        assert_eq!(host.calls.get(), 0);
+    }
+}
 fn state(vm: u32, snap: &J) -> State {
     let mut s = State::new(
         Version::from_id(vm).unwrap(),
@@ -39,7 +181,7 @@ fn state(vm: u32, snap: &J) -> State {
         .iter()
         .find(|p| p[0] == atom("auth_tx_hash") && p[1] != atom("undefined"))
     {
-        s.auth_tx_hash = Some(Word(bytes(&v[1]).try_into().unwrap()));
+        s.auth_tx_hash = Some(bytes(&v[1]));
     }
     s.cp = uint(field(snap, "cp")).try_into().unwrap();
     s.stack = field(snap, "stack")[1]
@@ -239,13 +381,82 @@ fn primop_expected(row: &J) -> primops::Outcome {
         }
     } else {
         assert_eq!(v[0], atom("primop_error"));
+        if v[1][0] == "tuple" {
+            let payload = &v[1][1];
+            if payload[0] == atom("badmatch") {
+                let error = if payload[1][0] == "integer" {
+                    Error::NativeBadAlignment(uint(&payload[1]).try_into().unwrap())
+                } else {
+                    assert_eq!(
+                        logical(payload[1].clone()),
+                        logical(field(&row["before"], "maps")[1][1].clone())
+                    );
+                    let data = bytes(&row["data"]);
+                    let start: usize = num_bigint::BigUint::from_bytes_be(&data[..32])
+                        .try_into()
+                        .unwrap();
+                    Error::MissingMap(num_bigint::BigUint::from_bytes_be(
+                        &data[start + 64..start + 96],
+                    ))
+                };
+                return primops::Outcome::Error(primops::Error::Heap(error));
+            }
+            assert_eq!(payload[0], atom("out_of_gas"));
+            let charge = &payload[1][1];
+            let resource = &charge[0][1];
+            assert_eq!(resource[0], atom("primop"));
+            let base = &resource[1][1];
+            assert_eq!(base[0], atom("base"));
+            for pair in row["before"][1].as_array().unwrap() {
+                if pair[0] != atom("storage") {
+                    assert_eq!(
+                        logical(field(&payload[2], pair[0][1].as_str().unwrap()).clone()),
+                        logical(pair[1].clone())
+                    );
+                }
+            }
+            return primops::Outcome::Error(primops::Error::BaseGas {
+                op: Word::from_unsigned(&uint(&base[1])),
+                required: uint(&charge[1]),
+                state: Box::new(map_state(row, &row["before"])),
+            });
+        }
         primops::Outcome::Error(match v[1][1].as_str().unwrap() {
             "illegal_primop_call" => primops::Error::IllegalCall,
             "out_of_gas" => primops::Error::OutOfGas,
             "max_size_exceeded" => primops::Error::Heap(Error::SizeLimit),
+            "function_clause" => primops::Error::Heap(Error::FunctionClause),
+            "circular_references" => primops::Error::Heap(Error::CircularReferences),
             s => panic!("{s}"),
         })
     }
+}
+#[test]
+fn original_hash_and_auth_primitives_match_gates_gas_bytes_and_failures() {
+    let mut count = 0;
+    for group in ["hashes", "strings", "auth"] {
+        for row in PURE[group].as_array().unwrap() {
+            let s = map_state(row, &row["before"]);
+            let before = s.clone();
+            let host = MapSource {
+                store: &s.map_store,
+                calls: Cell::new(0),
+                fail: Cell::new(true),
+            };
+            let result = primops::call_local(
+                &s,
+                &row["call_gas"].as_u64().unwrap().into(),
+                &bytes(&row["data"]),
+                &host,
+                Limits::default(),
+            );
+            assert_eq!(result, Ok(primop_expected(row)), "{row}");
+            assert_eq!(s, before);
+            assert_eq!(host.calls.get(), 0);
+            count += 1;
+        }
+    }
+    assert_eq!(count, 2220);
 }
 #[test]
 fn original_map_primops_preserve_versions_gas_results_and_store_reads() {
