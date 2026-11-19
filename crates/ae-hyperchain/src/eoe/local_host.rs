@@ -1,0 +1,333 @@
+// Local service boundary for aec_eoe_gen_vote, aeternity fa2a6d7.
+// Publication is an outbox operation. The caller drains it after a successful
+// FSM step (including retained effects of a modeled native exception).
+// A cloned host never shares mutable publication or pool state.
+use super::{Failure, Host, Limits, Payload, finalization, payload};
+use crate::parent_block::ParentBlock;
+use ae_crypto::Ed25519SecretKey;
+use ae_mempool::hc_votes::{self, Admission, PushOutcome, VotePool};
+use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
+use ae_state::Trees;
+use ae_trie::{MemoryStore, NodeReader};
+use ae_tx::{SignedTransaction, Transaction};
+use ae_types::{AccountPublicKey, Hash256, Unsigned};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    ResourceLimit,
+    Payload(Failure),
+    Pool(hc_votes::Error),
+    Finalization(finalization::Error),
+    MissingKey(AccountPublicKey),
+}
+impl Error {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::MissingKey(_) | Self::Payload(Failure::Native(_)) => false,
+            Self::Finalization(
+                finalization::Error::MissingContract(_)
+                | finalization::Error::MissingAccount(_)
+                | finalization::Error::Transaction(_),
+            ) => false,
+            Self::Pool(hc_votes::Error::Signature(e)) => e.is_operational(),
+            Self::Pool(hc_votes::Error::OnlyHcVoteAllowed | hc_votes::Error::InvalidAtProtocol) => {
+                false
+            }
+            _ => true,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Finalized {
+    Signed(Box<SignedTransaction<Transaction>>),
+    TopUnavailable,
+    EntropyNotInCache,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    Vote {
+        event: hc_votes::Event,
+        signed: Box<SignedTransaction<Transaction>>,
+    },
+    ParentBlock {
+        epoch: Unsigned,
+        block: ParentBlock,
+    },
+}
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceLimits {
+    pub maximum_outbox_entries: usize,
+    pub maximum_outbox_bytes: usize,
+    pub maximum_parent_blocks: usize,
+    pub maximum_parent_bytes: usize,
+    pub maximum_cached_hashes: usize,
+    pub pool: hc_votes::Limits,
+}
+impl Default for ServiceLimits {
+    fn default() -> Self {
+        Self {
+            maximum_outbox_entries: 100_000,
+            maximum_outbox_bytes: 256 * 1024 * 1024,
+            maximum_parent_blocks: 100_000,
+            maximum_parent_bytes: 16 * 1024 * 1024,
+            maximum_cached_hashes: 100_000,
+            pool: Default::default(),
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub network: NetworkProfile,
+    pub election_contract: [u8; 32],
+    pub parent_epoch_length: Unsigned,
+    pub parent_start_height: Unsigned,
+    pub limits: ServiceLimits,
+}
+
+// A selected tip couples the admission protocol/mode and the tree view. None
+// is the original no-top state; its supplied protocol/mode come from genesis.
+#[derive(Debug, Clone)]
+pub struct SelectedTip<A = MemoryStore, C = MemoryStore> {
+    pub trees: Option<Arc<Trees<A, C>>>,
+    pub protocol: Protocol,
+    pub consensus: ConsensusType,
+}
+#[derive(Clone)]
+pub struct LocalHost<A = MemoryStore, C = MemoryStore> {
+    config: Config,
+    tip: SelectedTip<A, C>,
+    keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
+    pool: VotePool,
+    gossip: BTreeSet<Hash256>,
+    parents: BTreeMap<Unsigned, ParentBlock>,
+    parent_bytes: usize,
+    outbox: Vec<Output>,
+    outbox_bytes: usize,
+}
+impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
+    pub fn new(
+        config: Config,
+        tip: SelectedTip<A, C>,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+    ) -> Self {
+        Self {
+            config,
+            tip,
+            keys: Arc::new(keys),
+            pool: VotePool::default(),
+            gossip: BTreeSet::new(),
+            parents: BTreeMap::new(),
+            parent_bytes: 0,
+            outbox: vec![],
+            outbox_bytes: 0,
+        }
+    }
+    pub fn select_tip(&mut self, tip: SelectedTip<A, C>) {
+        self.tip = tip;
+    }
+    pub fn pool(&self) -> &VotePool {
+        &self.pool
+    }
+    pub fn update_epoch(&mut self, epoch: Unsigned) {
+        self.pool.update_epoch(epoch);
+    }
+    pub fn outbox(&self) -> &[Output] {
+        &self.outbox
+    }
+    pub fn drain_outbox(&mut self) -> Vec<Output> {
+        self.outbox_bytes = 0;
+        std::mem::take(&mut self.outbox)
+    }
+    pub fn set_gossip_cache(&mut self, hashes: BTreeSet<Hash256>) -> Result<(), Error> {
+        if hashes.len() > self.config.limits.maximum_cached_hashes {
+            return Err(Error::ResourceLimit);
+        }
+        self.gossip = hashes;
+        Ok(())
+    }
+    pub fn insert_parent(&mut self, block: ParentBlock) -> Result<(), Error> {
+        let old = self.parents.get(&block.height);
+        if old.is_none() && self.parents.len() >= self.config.limits.maximum_parent_blocks {
+            return Err(Error::ResourceLimit);
+        }
+        let previous = old.map_or(Ok(0), parent_size)?;
+        let bytes = self
+            .parent_bytes
+            .checked_sub(previous)
+            .and_then(|n| n.checked_add(parent_size(&block).ok()?))
+            .ok_or(Error::ResourceLimit)?;
+        if bytes > self.config.limits.maximum_parent_bytes {
+            return Err(Error::ResourceLimit);
+        }
+        self.parents.insert(block.height.clone(), block);
+        self.parent_bytes = bytes;
+        Ok(())
+    }
+    pub fn remove_parent(&mut self, height: &Unsigned) -> Option<ParentBlock> {
+        let block = self.parents.remove(height)?;
+        self.parent_bytes -= parent_size(&block).expect("inserted parent is bounded");
+        Some(block)
+    }
+    fn enqueue(&mut self, output: Output, bytes: usize) -> Result<(), Error> {
+        let bytes = self
+            .outbox_bytes
+            .checked_add(bytes)
+            .ok_or(Error::ResourceLimit)?;
+        if self.outbox.len() >= self.config.limits.maximum_outbox_entries
+            || bytes > self.config.limits.maximum_outbox_bytes
+        {
+            return Err(Error::ResourceLimit);
+        }
+        self.outbox.push(output);
+        self.outbox_bytes = bytes;
+        Ok(())
+    }
+    // Network input uses Received; locally created votes use Created. The
+    // outbox event feeds the FSM only after admission succeeded. Duplicates
+    // still emit events, while gossip-cache hits do not.
+    pub fn admit(
+        &mut self,
+        signed: SignedTransaction<Transaction>,
+        event: hc_votes::Event,
+    ) -> Result<PushOutcome, Error> {
+        let mut pool = self.pool.clone();
+        let outcome = pool
+            .push(
+                &signed,
+                event,
+                &Admission {
+                    network: &self.config.network,
+                    protocol: self.tip.protocol,
+                    consensus: self.tip.consensus,
+                    limits: self.config.limits.pool,
+                },
+                |hash| self.gossip.contains(&hash),
+            )
+            .map_err(Error::Pool)?;
+        if matches!(outcome, PushOutcome::Accepted { .. }) {
+            let bytes = signed.encode().len();
+            self.enqueue(
+                Output::Vote {
+                    event,
+                    signed: Box::new(signed),
+                },
+                bytes,
+            )?;
+        }
+        self.pool = pool;
+        Ok(outcome)
+    }
+    pub fn entropy_height(&self, child_epoch: &Unsigned) -> Unsigned {
+        let epoch = child_epoch.checked_sub(&3.into()).unwrap_or(0.into());
+        let product = super::big(&epoch) * super::big(&self.config.parent_epoch_length);
+        // Multiplication of unsigned operands is always nonnegative.
+        let (_, bytes) = product.to_bytes_be();
+        Unsigned::from_field_bytes(&bytes)
+            .expect("nonnegative product")
+            .add(&self.config.parent_start_height)
+    }
+}
+fn parent_size(block: &ParentBlock) -> Result<usize, Error> {
+    [
+        block.hash.len(),
+        block.previous_hash.len(),
+        block.height.as_bytes().len(),
+        block.time.as_bytes().len(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |n, size| {
+        n.checked_add(size).ok_or(Error::ResourceLimit)
+    })
+}
+impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
+    type Error = Error;
+    type View = Arc<Trees<A, C>>;
+    type Finalized = Finalized;
+    fn is_operational(error: &Error) -> bool {
+        error.is_operational()
+    }
+    fn create_vote(
+        &mut self,
+        voter: AccountPublicKey,
+        epoch: &Unsigned,
+        kind: &Unsigned,
+        fields: &Payload,
+        limits: Limits,
+    ) -> Result<SignedTransaction<Transaction>, Error> {
+        let key = self.keys.get(&voter).ok_or(Error::MissingKey(voter))?;
+        let fields = payload::create_payload(fields, key, limits).map_err(Error::Payload)?;
+        payload::create_transaction(
+            voter,
+            epoch.clone(),
+            kind.clone(),
+            &fields,
+            key,
+            &self.config.network,
+            limits,
+        )
+        .map_err(Error::Payload)
+    }
+    fn publish(&mut self, vote: SignedTransaction<Transaction>) -> Result<bool, Error> {
+        match self.admit(vote, hc_votes::Event::Created) {
+            Ok(_) => Ok(true),
+            Err(Error::Pool(e)) if !Error::Pool(e.clone()).is_operational() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    fn finalize(
+        &mut self,
+        epoch: &Unsigned,
+        leader: AccountPublicKey,
+        calldata: &[u8],
+        nonce_offset: &Unsigned,
+        view: Option<&Self::View>,
+    ) -> Result<Finalized, Error> {
+        let Some(trees) = view.cloned().or_else(|| self.tip.trees.clone()) else {
+            return Ok(Finalized::TopUnavailable);
+        };
+        let child_epoch = epoch.add(&2.into());
+        let height = self.entropy_height(&child_epoch);
+        let Some(block) = self.parents.get(&height).cloned() else {
+            return Ok(Finalized::EntropyNotInCache);
+        };
+        let size = parent_size(&block)?
+            .checked_add(child_epoch.as_bytes().len())
+            .ok_or(Error::ResourceLimit)?;
+        // Stage notification before building/signing, exactly as get_entropy_hash.
+        // Operational errors roll it back; modeled native failures retain it.
+        let old_len = self.outbox.len();
+        let old_bytes = self.outbox_bytes;
+        self.enqueue(
+            Output::ParentBlock {
+                epoch: child_epoch,
+                block,
+            },
+            size,
+        )?;
+        let result = (|| {
+            let tx = finalization::transaction(
+                &trees,
+                leader,
+                self.config.election_contract,
+                calldata.to_vec(),
+                nonce_offset,
+            )
+            .map_err(Error::Finalization)?;
+            let key = self.keys.get(&leader).ok_or(Error::MissingKey(leader))?;
+            Ok(Finalized::Signed(Box::new(finalization::sign(
+                tx,
+                key,
+                &self.config.network,
+            ))))
+        })();
+        if result.as_ref().is_err_and(Error::is_operational) {
+            self.outbox.truncate(old_len);
+            self.outbox_bytes = old_bytes;
+        }
+        result
+    }
+}
