@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 
 mod create;
 pub use create::{execute_signed_create, process_create};
+pub mod aevm;
 pub mod fate;
 
 #[derive(Debug)]
@@ -80,6 +81,7 @@ pub enum Event {
         info: &'static str,
     },
     Internal(fate_chain::TransferEvent),
+    Aevm(crate::aevm_chain::EnvironmentEvent),
 }
 #[derive(Debug, Clone)]
 pub struct Receipt {
@@ -88,6 +90,19 @@ pub struct Receipt {
     // Includes the transaction's base and incoming-byte gas in addition to VM gas.
     pub gas: Unsigned,
     pub events: Vec<Event>,
+}
+
+pub(crate) struct Completion<A, C> {
+    pub call: Call,
+    pub trees: Trees<A, C>,
+    pub events: Vec<Event>,
+}
+pub(crate) struct PreparedCall<A, C> {
+    contract: ae_state::contracts::Contract,
+    call: Call,
+    trees: Trees<A, C>,
+    rollback: Trees<A, C>,
+    events: Vec<Event>,
 }
 
 // The context's payer and authenticated identities must have been produced by
@@ -211,10 +226,40 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<Receipt, Error> {
+    let prepared = prepare_call(tx, trees, context)?;
+    let ContractOperation::Call { call_data, .. } = tx.operation() else {
+        unreachable!()
+    };
+    let completed = fate::execute(
+        tx,
+        call_data,
+        &prepared.contract,
+        prepared.call,
+        false,
+        prepared.trees,
+        context,
+        vm,
+        limits,
+        maximum_steps,
+    )?;
+    settle(
+        tx,
+        trees,
+        prepared.rollback,
+        context,
+        completed,
+        prepared.events,
+    )
+}
+fn prepare_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    tx: &ContractTransaction,
+    trees: &Trees<A, C>,
+    context: &Context,
+) -> Result<PreparedCall<A, C>, Error> {
     let ContractOperation::Call {
         contract: target,
         abi_version,
-        call_data,
+        ..
     } = tx.operation()
     else {
         return Err(Error::UnsupportedOperation);
@@ -324,26 +369,20 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         context.height.into(),
         tx.gas_price().clone(),
     );
-    let completed = fate::execute(
-        tx,
-        call_data,
-        &contract,
+    Ok(PreparedCall {
+        contract,
         call,
-        false,
-        next,
-        context,
-        vm,
-        limits,
-        maximum_steps,
-    )?;
-    settle(tx, trees, rollback, context, completed, events)
+        trees: next,
+        rollback,
+        events,
+    })
 }
 fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     tx: &ContractTransaction,
     trees: &mut Trees<A, C>,
     rollback: Trees<A, C>,
     context: &Context,
-    completed: fate::Completion<A, C>,
+    completed: Completion<A, C>,
     mut events: Vec<Event>,
 ) -> Result<Receipt, Error> {
     let caller = tx.signer();
@@ -355,7 +394,7 @@ fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     }
     let mut next = if call.return_type == ReturnType::Ok {
         let mut out = completed.trees;
-        events.splice(0..0, completed.events.into_iter().map(Event::Internal));
+        events.splice(0..0, completed.events);
         if !internal {
             let refund = product(
                 &tx.gas()

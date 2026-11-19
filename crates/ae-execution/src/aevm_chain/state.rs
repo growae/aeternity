@@ -181,13 +181,10 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Host<A, C> {
         Ok(Ok(next))
     }
 }
-pub(super) fn append_events<A, C>(
-    chain: &State<A, C>,
-    added: Vec<crate::Event>,
-    budget: &mut Budget,
-) -> Result<Arc<Vec<EnvironmentEvent>>, Fault<Error>> {
-    let event_size = |e: &crate::Event| match e {
-        crate::Event::Spend { amount, .. }
+pub(crate) fn event_size(e: &crate::Event) -> usize {
+    match e {
+        crate::Event::ContractDelta { amount, .. }
+        | crate::Event::Spend { amount, .. }
         | crate::Event::FeeDebit { amount, .. }
         | crate::Event::OracleQueryFee { amount, .. }
         | crate::Event::OracleRefund { amount, .. }
@@ -196,7 +193,13 @@ pub(super) fn append_events<A, C>(
         | crate::Event::NameFeeLocked { amount } => {
             128usize.saturating_add(amount.as_bytes().len())
         }
-    };
+    }
+}
+pub(super) fn append_events<A, C>(
+    chain: &State<A, C>,
+    added: Vec<crate::Event>,
+    budget: &mut Budget,
+) -> Result<Arc<Vec<EnvironmentEvent>>, Fault<Error>> {
     budget.work(
         chain
             .events

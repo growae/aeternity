@@ -19,11 +19,13 @@ pub enum Error {
     Primitive(Box<crate::Error>),
 }
 mod contract_types;
+pub use contract_types::decode_code;
 mod name;
 mod name_write;
 mod oracle;
 mod oracle_write;
 mod state;
+pub(crate) use state::event_size;
 pub use state::{EnvironmentEvent, EventContext, Host, State};
 pub struct View<'a, A = MemoryStore, C = MemoryStore> {
     pub accounts: &'a Accounts<A>,

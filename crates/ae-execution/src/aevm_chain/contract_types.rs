@@ -63,40 +63,7 @@ impl<A: NodeReader, C: NodeReader> Reads<'_, A, C> {
                 abi: version.abi,
             }));
         }
-        // Bound the wrapper's allocations and traversal separately from gas.
-        let limits = budget.remaining();
-        budget.work(code.len())?;
-        budget.bytes(code.len().checked_mul(16).ok_or(Stop::ResourceLimit)?)?;
-        let wrapped = match SophiaCode::decode_with_limits(
-            &code,
-            rlp::DecodeLimits {
-                max_input_bytes: limits.max_bytes,
-                max_items: limits.max_work,
-                max_depth: limits.max_depth,
-            },
-        ) {
-            Ok(w) => w,
-            Err(ObjectError::Rlp(rlp::DecodeError::ResourceLimit)) => {
-                return Err(Stop::ResourceLimit.into());
-            }
-            Err(ObjectError::ExpectedList) => {
-                let rlp::Rlp::Bytes(bytes) = rlp::decode_with_limits(
-                    &code,
-                    rlp::DecodeLimits {
-                        max_input_bytes: limits.max_bytes,
-                        max_items: limits.max_work,
-                        max_depth: limits.max_depth,
-                    },
-                )
-                .expect("same bounded decoder") else {
-                    unreachable!()
-                };
-                return Err(Fault::Native(Native::BadMatchBinary(bytes.to_vec())));
-            }
-            // Other malformed wrappers remain a non-consensus host fault until
-            // their exact native exception payload is modeled.
-            Err(e) => return Err(Fault::Host(Error::Contracts(contracts::Error::Object(e)))),
-        };
+        let wrapped = decode_code(&code, budget)?;
         // lists:keyfind selects the first matching entry, including malformed
         // type bytes. Payability and function names do not affect this lookup.
         for entry in wrapped.type_info {
@@ -141,4 +108,42 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> InputHost for State<A, C> {
     ) -> HostResult<TypeRef, Error> {
         ae_vm_aevm::primops::oracle_format(&Host::default(), self, oracle, response, budget)
     }
+}
+
+pub fn decode_code(code: &[u8], budget: &mut Budget) -> Result<SophiaCode, Fault<Error>> {
+    // Bound the wrapper's allocations and traversal separately from gas.
+    let limits = budget.remaining();
+    budget.work(code.len())?;
+    budget.bytes(code.len().checked_mul(16).ok_or(Stop::ResourceLimit)?)?;
+    let wrapped = match SophiaCode::decode_with_limits(
+        code,
+        rlp::DecodeLimits {
+            max_input_bytes: limits.max_bytes,
+            max_items: limits.max_work,
+            max_depth: limits.max_depth,
+        },
+    ) {
+        Ok(w) => w,
+        Err(ObjectError::Rlp(rlp::DecodeError::ResourceLimit)) => {
+            return Err(Stop::ResourceLimit.into());
+        }
+        Err(ObjectError::ExpectedList) => {
+            let rlp::Rlp::Bytes(bytes) = rlp::decode_with_limits(
+                code,
+                rlp::DecodeLimits {
+                    max_input_bytes: limits.max_bytes,
+                    max_items: limits.max_work,
+                    max_depth: limits.max_depth,
+                },
+            )
+            .expect("same bounded decoder") else {
+                unreachable!()
+            };
+            return Err(Fault::Native(Native::BadMatchBinary(bytes.to_vec())));
+        }
+        // Other malformed wrappers remain a non-consensus host fault until
+        // their exact native exception payload is modeled.
+        Err(e) => return Err(Fault::Host(Error::Contracts(contracts::Error::Object(e)))),
+    };
+    Ok(wrapped)
 }

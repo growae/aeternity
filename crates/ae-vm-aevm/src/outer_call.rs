@@ -54,7 +54,7 @@ pub enum Fault<E, C> {
     ResponseCase {
         response: Response,
         state: Box<State>,
-        chain: C,
+        chain: Box<C>,
     },
     VersionCase(Version),
 }
@@ -333,7 +333,7 @@ fn run<H: Host>(
             Err(Problem::Fault(Fault::ResponseCase {
                 response,
                 state: Box::new(s),
-                chain: next_chain,
+                chain: Box::new(next_chain),
             }))
         }
         Response::Complete { data, gas_spent } => {

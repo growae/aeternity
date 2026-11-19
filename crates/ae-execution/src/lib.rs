@@ -125,6 +125,12 @@ impl From<ae_state::oracles::Error> for Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    ContractDelta {
+        account: AccountPublicKey,
+        amount: Unsigned,
+        debit: bool,
+        info: &'static str,
+    },
     OracleQueryFee {
         account: AccountPublicKey,
         amount: Unsigned,

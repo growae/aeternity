@@ -1,8 +1,8 @@
-use super::{Error, big, unsigned};
+use super::{Completion, Error, Event, big, unsigned};
 use crate::{
     Context, Origin,
     fate_chain::{
-        self, TransferEvent,
+        self,
         remote::{State as Host, Store},
     },
 };
@@ -36,12 +36,6 @@ pub struct Config<'a, O> {
     pub metering_floor: Option<u32>,
     pub diagnostic_profile: ae_vm_fate::diagnostic::Profile,
 }
-pub(crate) struct Completion<A, C> {
-    pub call: Call,
-    pub trees: Trees<A, C>,
-    pub events: Vec<TransferEvent>,
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     tx: &ContractTransaction,
@@ -257,7 +251,13 @@ pub(crate) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         Ok(Completion {
             call,
             trees,
-            events: state.session.host.events,
+            events: state
+                .session
+                .host
+                .events
+                .into_iter()
+                .map(Event::Internal)
+                .collect(),
         })
     } else {
         Ok(Completion {

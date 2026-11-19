@@ -103,6 +103,7 @@ pub(super) fn check<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(
                 }
                 json!({"account":hex::encode(account.0),"amount":n.to_string(),"info":info})
             }
+            Event::Aevm(e) => panic!("unexpected AEVM event in FATE fixture: {e:?}"),
             Event::Internal(e) => {
                 let j = remote_tests::event_json(e);
                 if j["kind"] == "delta" {

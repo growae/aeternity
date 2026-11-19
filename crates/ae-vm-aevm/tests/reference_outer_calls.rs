@@ -510,7 +510,7 @@ fn check(row: &J, actual: Result<Outcome<J>, Fault<&'static str, J>>) {
                     gas_spent: number(&v[2])
                 },
                 state: Box::new(state(row, &v[3])),
-                chain: logical(field(&v[3], "chain_state").clone())
+                chain: Box::new(logical(field(&v[3], "chain_state").clone()))
             }),
             "{row}"
         );

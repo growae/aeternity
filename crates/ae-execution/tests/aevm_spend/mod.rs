@@ -25,6 +25,7 @@ mod name;
 mod name_write;
 mod oracle;
 mod oracle_write;
+mod recursive;
 fn field<'a>(v: &'a J, k: &str) -> &'a J {
     &v[1]
         .as_array()
