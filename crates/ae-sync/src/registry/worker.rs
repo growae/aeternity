@@ -54,6 +54,12 @@ pub struct Inspection {
     pub recovery_required: bool,
     pub closed: bool,
 }
+pub(crate) struct Frame {
+    pub inspection: Inspection,
+    pub delivery: Option<Delivery>,
+    pub timer: Option<ae_p2p::registry::Timer>,
+    pub startup: Option<super::startup::Progress>,
+}
 struct State {
     queue: VecDeque<Box<dyn Work>>,
     stopped: bool,
@@ -213,6 +219,22 @@ impl Worker {
             shared: self.shared.clone(),
         }
     }
+    pub fn stop(&self) {
+        self.shared.stop();
+    }
+    // Borrowed observation can be cancelled without losing this owner. Stop
+    // first, then wait for the real thread to finish before a nonblocking join.
+    // Abrupt Worker drop still synchronously joins any executing store work.
+    pub async fn join(&mut self) -> Result<Service, Error> {
+        while !self.join.as_ref().ok_or(Error::Stopped)?.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        self.join
+            .take()
+            .unwrap()
+            .join()
+            .map_err(|_| Error::Panicked)
+    }
     // Explicit stop rejects waiting work, joins the executing operation, then
     // returns ownership so a supervisor can drain effects/retire resources.
     pub fn shutdown(mut self) -> Result<Service, Error> {
@@ -361,22 +383,42 @@ impl Client {
         self.submit(256, move |s| Ok(s.acknowledge(id)))
     }
     pub fn inspect(&self) -> Result<Ticket<Inspection>, Error> {
-        self.submit(256, |s| {
-            let (effects, effect_bytes) = s.queued_effects();
-            Ok(Inspection {
-                policy_revision: s.policy().revision(),
-                storage_revision: s.version().revision(),
-                counts: s.policy().counts(),
-                effects,
-                effect_bytes,
-                recovery_required: s.recovery_required(),
-                closed: s.policy().is_closed(),
+        self.submit(256, |s| Ok(inspection(s)))
+    }
+    pub(crate) fn frame(&self) -> Result<Ticket<Frame>, Error> {
+        self.submit(512 + self.shared.host_bytes, |s| {
+            Ok(Frame {
+                inspection: inspection(s),
+                delivery: s.next_effect()?.cloned(),
+                timer: s.policy().timers().min_by_key(|t| t.deadline),
+                startup: s.startup_status(),
             })
+        })
+    }
+    pub(crate) fn connection(
+        &self,
+        peer: ae_types::PeerPublicKey,
+    ) -> Result<Ticket<Option<ae_p2p::registry::Connection>>, Error> {
+        self.submit(256 + self.shared.host_bytes, move |s| {
+            s.core.ready()?;
+            Ok(s.policy().connection(peer).cloned())
         })
     }
     pub fn outstanding(&self) -> (usize, usize) {
         let s = self.shared.lock();
         (s.outstanding, s.bytes)
+    }
+}
+fn inspection(service: &Service) -> Inspection {
+    let (effects, effect_bytes) = service.queued_effects();
+    Inspection {
+        policy_revision: service.policy().revision(),
+        storage_revision: service.version().revision(),
+        counts: service.policy().counts(),
+        effects,
+        effect_bytes,
+        recovery_required: service.recovery_required(),
+        closed: service.policy().is_closed(),
     }
 }
 #[cfg(test)]

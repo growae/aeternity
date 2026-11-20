@@ -1,7 +1,7 @@
 use super::*;
 pub struct Service {
     context: Context,
-    peers: pool::Handle,
+    peers: pool::Reader,
     incoming: pool::Events,
     commands: mpsc::Receiver<Command>,
     forwarded: mpsc::Sender<pool::Forwarded>,
@@ -26,7 +26,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         context: Context,
-        peers: pool::Handle,
+        peers: pool::Reader,
         incoming: pool::Events,
         commands: mpsc::Receiver<Command>,
         forwarded: mpsc::Sender<pool::Forwarded>,

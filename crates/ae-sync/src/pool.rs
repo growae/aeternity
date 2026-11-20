@@ -188,7 +188,25 @@ pub struct Handle {
     stop: watch::Sender<bool>,
     status: watch::Receiver<Status>,
 }
+#[derive(Clone)]
+pub struct Reader(Handle);
+impl Reader {
+    pub fn peers(&self) -> Result<Ticket<Vec<net::Client>>, Error> {
+        self.0.peers()
+    }
+    pub fn status(&self) -> Status {
+        self.0.status()
+    }
+}
+impl From<Handle> for Reader {
+    fn from(handle: Handle) -> Self {
+        Self(handle)
+    }
+}
 impl Handle {
+    pub fn reader(&self) -> Reader {
+        Reader(self.clone())
+    }
     pub fn attach(&self, connection: Connection, initiate: bool) -> Result<Ticket<u64>, Error> {
         if *self.stop.borrow() || self.commands.is_closed() {
             return Err(Error::Closed);

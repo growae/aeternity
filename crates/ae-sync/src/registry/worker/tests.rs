@@ -206,3 +206,44 @@ fn an_unobserved_inbound_reservation_remains_bounded_and_can_expire_through_the_
     );
     worker.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn borrowed_async_join_keeps_executor_live_and_cancelled_wait_retains_owner() {
+    let temp = Temp::new();
+    let mut worker = Worker::start(service(db(&temp), config()), Settings::default()).unwrap();
+    let client = worker.client();
+    let (started, observing) = oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let running = client
+        .submit(256, move |s| {
+            started.send(()).unwrap();
+            gate.recv_timeout(Duration::from_secs(10)).unwrap();
+            s.apply(1, Command::Add(peer(1, false)))
+        })
+        .unwrap();
+    observing.await.unwrap();
+    let queued = client.apply(2, Command::Add(peer(2, false))).unwrap();
+    worker.stop();
+    assert!(matches!(client.inspect(), Err(Error::Stopped)));
+    // A current-thread timer must run while the actual store worker is gated.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), worker.join())
+            .await
+            .is_err()
+    );
+    assert!(worker.join.is_some());
+    assert_eq!(client.outstanding().0, 2);
+    release.send(()).unwrap();
+    let service = tokio::time::timeout(Duration::from_secs(10), worker.join())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        service.saved_peers().map(|p| p.id).collect::<Vec<_>>(),
+        vec![peer(1, false).id]
+    );
+    assert!(matches!(worker.join().await, Err(Error::Stopped)));
+    running.await.unwrap();
+    assert!(matches!(queued.await, Err(Error::Stopped)));
+    assert_eq!(client.outstanding(), (0, 0));
+}

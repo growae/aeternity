@@ -318,7 +318,7 @@ struct Context {
 pub fn create(
     db: Arc<Database>,
     admission: worker::Client,
-    peers: pool::Handle,
+    peers: impl Into<pool::Reader>,
     incoming: pool::Events,
     network: NetworkProfile,
     consensus: ConsensusType,
@@ -367,7 +367,7 @@ pub fn create(
     };
     let service = Service::new(
         context,
-        peers,
+        peers.into(),
         incoming,
         receiver,
         forwarded,

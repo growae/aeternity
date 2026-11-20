@@ -313,7 +313,7 @@ pub(super) async fn recover(
 pub(super) async fn fanout(
     context: Context,
     jobs: blocking::Pool,
-    peers: pool::Handle,
+    peers: pool::Reader,
     tx: Arc<Signed>,
     policy: Policy,
     random: RandomState,
