@@ -125,6 +125,7 @@ pub fn prepare<S: Read>(view: &View<S>, target: Target, limits: Limits) -> Resul
     };
     let block = view.require_block(hash)?;
     let height = block.header().common().height;
+    view.require_retained(height)?;
     if matches!(
         (&target, &block),
         (Target::Height(_) | Target::Key(_), Block::Micro(_)) | (Target::Micro(_), Block::Key(_))

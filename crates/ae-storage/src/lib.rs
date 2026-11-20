@@ -13,6 +13,7 @@ use std::{
     },
 };
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
+pub mod gc;
 
 pub struct Database {
     db: DB,
@@ -106,6 +107,7 @@ impl Database {
             config,
         };
         result.view()?.verify_tip()?;
+        result.validate_gc()?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
@@ -266,6 +268,7 @@ impl Database {
                 None => batch.delete(k),
             }
         }
+        self.gc_barrier(&update, &mut batch)?;
         check()?;
         self.db
             .write_opt(batch, &write_options())

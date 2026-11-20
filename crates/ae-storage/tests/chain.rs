@@ -1272,3 +1272,174 @@ fn paged_scan_of_real_state_survives_live_insertion_and_rollback() {
     assert_eq!(scan.block(), micro);
     assert!(db.view().unwrap().status().revision > scan.revision());
 }
+
+#[test]
+fn real_blocks_commit_during_gc_and_pruned_history_stays_an_operational_rejection() {
+    use repo::retention::{Phase, Selection};
+    let n = Network::Mainnet;
+    let network = profile(n);
+    let config = transactions::Config::primitives(&network);
+    let all = blocks(n);
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity(n)).unwrap();
+    bootstrap(&db, n);
+    db.commit(
+        ledger::prepare(
+            &db.view().unwrap(),
+            &all[0],
+            &config,
+            &rules(n),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let old = db.view().unwrap();
+    let stale = ledger::prepare(&old, &all[1], &config, &rules(n), Default::default()).unwrap();
+    let stale_rollback =
+        repo::rollback::prepare(&old, repo::rollback::Target::Height(0), Default::default())
+            .unwrap();
+    assert!(db.begin_gc(Selection::default()).unwrap());
+    assert!(matches!(db.commit(stale), Err(repo::Error::Conflict)));
+    assert!(matches!(
+        db.commit(stale_rollback),
+        Err(repo::Error::Conflict)
+    ));
+    let fresh = db.view().unwrap();
+    let plan = ledger::prepare(&fresh, &all[1], &config, &rules(n), Default::default()).unwrap();
+    let exact = plan
+        .writes()
+        .iter()
+        .map(|(k, v)| k.len() + v.as_ref().map_or(0, Vec::len))
+        .sum();
+    let plan = ledger::prepare(
+        &fresh,
+        &all[1],
+        &config,
+        &rules(n),
+        Limits {
+            commit_bytes: exact,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let before = fresh.source().prefix(&[], 100000).unwrap();
+    assert!(matches!(db.commit(plan), Err(repo::Error::ResourceLimit)));
+    assert_eq!(
+        db.view().unwrap().source().prefix(&[], 100000).unwrap(),
+        before
+    );
+    db.commit(
+        ledger::prepare(
+            &db.view().unwrap(),
+            &all[1],
+            &config,
+            &rules(n),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let limits = ae_storage::gc::Limits {
+        rows: 7,
+        ..Default::default()
+    };
+    for _ in 0..10000 {
+        let state = db.gc_step(limits).unwrap();
+        if state.phase == Phase::Sweep
+            && db
+                .view()
+                .unwrap()
+                .source()
+                .prefix(&[repo::GC_PENDING], 10000)
+                .unwrap()
+                .is_empty()
+        {
+            break;
+        }
+        assert!(state.active());
+    }
+    assert_eq!(db.gc_state().unwrap().phase, Phase::Sweep);
+    for block in &all[2..] {
+        db.commit(
+            ledger::prepare(
+                &db.view().unwrap(),
+                block,
+                &config,
+                &rules(n),
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.gc_step(limits).unwrap();
+    }
+    for _ in 0..10000 {
+        if !db.gc_step(limits).unwrap().active() {
+            break;
+        }
+    }
+    assert_eq!(db.gc_state().unwrap().phase, Phase::Complete);
+    let tip = all.last().unwrap().hash().unwrap();
+    let mut scan = db
+        .view()
+        .unwrap()
+        .scan_state(tip, Default::default())
+        .unwrap();
+    while !scan.is_complete() {
+        scan.next_page(Default::default()).unwrap();
+    }
+    assert!(old.trees(identity(n).genesis, Default::default()).is_ok());
+    assert!(matches!(
+        db.view()
+            .unwrap()
+            .trees(identity(n).genesis, Default::default()),
+        Err(repo::Error::Pruned {
+            height: 0,
+            floor: 1
+        })
+    ));
+    db.begin_gc(Selection::default()).unwrap();
+    assert!(matches!(
+        db.rollback(repo::rollback::Target::Height(1), Default::default()),
+        Err(repo::rollback::Failure::Repository(
+            repo::Error::Pruned { .. }
+        ))
+    ));
+    let mut old_block = all[0].clone();
+    let Block::Key(ref mut key) = old_block else {
+        panic!()
+    };
+    key.nonce ^= 1;
+    assert!(matches!(
+        ledger::prepare(
+            &db.view().unwrap(),
+            &old_block,
+            &config,
+            &rules(n),
+            Default::default()
+        ),
+        Err(repo::InsertError::Repository(repo::Error::Pruned { .. }))
+    ));
+    for _ in 0..10000 {
+        if !db.gc_step(limits).unwrap().active() {
+            break;
+        }
+    }
+    assert_eq!(db.gc_state().unwrap().phase, Phase::Complete);
+    assert_eq!(db.view().unwrap().status().tip, Some(tip));
+    drop(scan);
+    drop(fresh);
+    drop(old);
+    drop(db);
+    let db = Database::open(&dir.0, identity(n)).unwrap();
+    db.view().unwrap().verify_tip().unwrap();
+    let mut scan = db
+        .view()
+        .unwrap()
+        .scan_state(tip, Default::default())
+        .unwrap();
+    while !scan.is_complete() {
+        scan.next_page(Default::default()).unwrap();
+    }
+}

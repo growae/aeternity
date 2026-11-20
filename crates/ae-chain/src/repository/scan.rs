@@ -35,6 +35,7 @@ impl<S: Read> View<S> {
     pub fn scan_state(&self, block: Hash256, limits: Limits) -> Result<StateScan<S>, Error> {
         let record = self.require_record(block)?;
         let header = self.require_block(block)?.header();
+        self.require_retained(header.common().height)?;
         if record.roots.state.hash().0 != header.common().state_hash {
             return Err(Error::Corrupt("state binding"));
         }

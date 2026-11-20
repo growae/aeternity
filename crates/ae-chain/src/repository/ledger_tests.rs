@@ -230,6 +230,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
             );
             let pending = publish(
                 Update {
+                    commit_bytes: 0,
                     identity: id.clone(),
                     source_id: 1,
                     policy_generation: v.resilience().generation,

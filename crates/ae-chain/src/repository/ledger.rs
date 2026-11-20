@@ -97,6 +97,7 @@ pub struct Update {
     identity: Identity,
     source_id: u64,
     policy_generation: u64,
+    commit_bytes: usize,
     expected: Status,
     change: Change,
     writes: Writes,
@@ -116,6 +117,7 @@ impl Update {
                 identity: view.identity.clone(),
                 source_id: view.source.source_id(),
                 policy_generation: view.resilience().generation,
+                commit_bytes: 0,
                 expected: view.status,
                 change,
                 writes,
@@ -134,6 +136,9 @@ impl Update {
     }
     pub fn policy_generation(&self) -> u64 {
         self.policy_generation
+    }
+    pub fn commit_bytes_limit(&self) -> usize {
+        self.commit_bytes
     }
     pub fn expected(&self) -> Status {
         self.expected
@@ -158,6 +163,7 @@ fn put(w: &mut Writes, k: Vec<u8>, v: Vec<u8>) {
     w.insert(k, Some(v));
 }
 fn publish(mut u: Update, limit: usize) -> Result<Update, Error> {
+    u.commit_bytes = limit;
     put(
         &mut u.writes,
         STATUS.to_vec(),
@@ -296,6 +302,7 @@ pub fn bootstrap<S: Read>(
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
             policy_generation: view.resilience().generation,
+            commit_bytes: 0,
             expected: view.status,
             change,
             writes,
@@ -523,6 +530,7 @@ pub fn prepare<S: Read, O: MapOrder>(
         });
     }
     let top_height = view.require_block(top)?.header().common().height;
+    view.require_retained(header.common().height)?;
     check_policy(
         header.common().height,
         top_height,
@@ -590,7 +598,8 @@ pub fn prepare<S: Read, O: MapOrder>(
         fees: incoming_fees,
         reported_fraud: incoming_fraud,
     };
-    let mut state = view.trees(parent_hash, limits.overlay)?;
+    let mut state =
+        view.insertion_trees(parent_hash, matches!(block, Block::Key(_)), limits.overlay)?;
     let vm_key = match block {
         Block::Key(k) => k,
         Block::Micro(_) => &previous_key,
@@ -731,6 +740,7 @@ pub fn prepare<S: Read, O: MapOrder>(
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
             policy_generation: view.resilience().generation,
+            commit_bytes: 0,
             expected: view.status,
             change,
             writes,

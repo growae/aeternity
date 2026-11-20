@@ -14,6 +14,7 @@ mod blocks;
 mod codec;
 mod decoding;
 mod history;
+pub mod retention;
 pub mod rollback;
 pub mod scan;
 mod signaling;
@@ -39,6 +40,9 @@ pub const ENDS: u8 = 10;
 pub const EVENTS: u8 = 11;
 pub const PROOFS: u8 = 12;
 pub const SIGNALS: u8 = 13;
+pub const GC_MARKS: u8 = 14;
+pub const GC_PENDING: u8 = 15;
+pub const GC_STATE: &[u8] = b"\0gc";
 pub fn key(prefix: u8, suffix: impl AsRef<[u8]>) -> Vec<u8> {
     let mut k = vec![prefix];
     k.extend_from_slice(suffix.as_ref());
@@ -54,6 +58,8 @@ pub enum Error {
     TransactionStorage(ae_tx::storage::Error),
     Identity,
     Conflict,
+    GcActive,
+    Pruned { height: u64, floor: u64 },
     AlreadyPresent,
     Uninitialized,
     NotEmpty,
@@ -118,7 +124,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(5)
+        self.encode_version(6)
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
@@ -134,7 +140,7 @@ impl Identity {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
         let version = integer(&a[0])?;
-        if !matches!(version, 1..=5) {
+        if !matches!(version, 1..=6) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();
@@ -229,7 +235,7 @@ impl Roots {
                 .map_err(|_| Error::Corrupt("oracle roots"))?,
         })
     }
-    fn array(&self) -> [Option<Hash256>; 8] {
+    pub fn array(&self) -> [Option<Hash256>; 8] {
         [
             self.state.accounts,
             self.state.calls,
@@ -538,6 +544,14 @@ impl<S: Read> View<S> {
         h: Hash256,
         limits: OverlayLimits,
     ) -> Result<Trees<Overlay<S>, Overlay<S>>, Error> {
+        self.require_retained(self.require_block(h)?.header().common().height)?;
+        self.load_trees(h, limits)
+    }
+    fn load_trees(
+        &self,
+        h: Hash256,
+        limits: OverlayLimits,
+    ) -> Result<Trees<Overlay<S>, Overlay<S>>, Error> {
         let r = self.require_record(h)?;
         let b = self.require_block(h)?;
         if r.roots.state.hash().0 != b.header().common().state_hash {
@@ -609,8 +623,10 @@ impl<S: Read> View<S> {
     }
     pub fn verify_tip(&self) -> Result<(), Error> {
         self.finalized_height()?;
+        let retention = self.retention()?;
         if let Some(h) = self.status.tip {
             let b = self.require_block(h)?;
+            self.require_retained(b.header().common().height)?;
             let r = self.require_record(h)?;
             if r.roots.state.hash().0 != b.header().common().state_hash || !self.is_canonical(h)? {
                 return Err(Error::Corrupt("tip state"));
@@ -632,7 +648,7 @@ impl<S: Read> View<S> {
             if self.canonical_key(b.header().common().height)? != Some(generation) {
                 return Err(Error::Corrupt("tip generation index"));
             }
-        } else if !self.source.prefix(&[BLOCKS], 1)?.is_empty() {
+        } else if retention.epoch != 0 || !self.source.prefix(&[BLOCKS], 1)?.is_empty() {
             return Err(Error::Corrupt("blocks without initialized chain"));
         }
         Ok(())

@@ -109,16 +109,13 @@ impl Cursor {
             }
             // Integrity scanning must not inherit the historical PoI exception
             // that permits a reader to skip content authentication.
-            if blake2b_256(&raw) != hash {
-                return Err(Error::HashMismatch(hash));
-            }
             let node_count = next.nodes.checked_add(1).ok_or(Error::ResourceLimit)?;
             let byte_count = next
                 .bytes
                 .checked_add(u64::try_from(raw.len()).map_err(|_| Error::ResourceLimit)?)
                 .filter(|n| *n <= next.limits.bytes)
                 .ok_or(Error::ResourceLimit)?;
-            let children = children(&raw, store.decode_limits())?;
+            let children = inspect_node(hash, &raw, store.decode_limits())?;
             let pending = next
                 .pending
                 .len()
@@ -205,7 +202,14 @@ fn integer(value: &Rlp<'_>) -> Result<u64, Error> {
     }
     Ok(bytes.iter().fold(0, |n, b| (n << 8) | u64::from(*b)))
 }
-fn children(raw: &[u8], limits: rlp::DecodeLimits) -> Result<Vec<Hash256>, Error> {
+pub fn inspect_node(
+    hash: Hash256,
+    raw: &[u8],
+    limits: rlp::DecodeLimits,
+) -> Result<Vec<Hash256>, Error> {
+    if blake2b_256(raw) != hash {
+        return Err(Error::HashMismatch(hash));
+    }
     enum Work {
         Decoded(Node),
         Hash(Hash256),
