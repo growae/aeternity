@@ -1443,3 +1443,77 @@ fn real_blocks_commit_during_gc_and_pruned_history_stays_an_operational_rejectio
         scan.next_page(Default::default()).unwrap();
     }
 }
+
+#[test]
+fn background_gc_observes_real_commits_and_completes_without_polling_the_database() {
+    use ae_storage::gc::worker::{Info, Worker};
+    use repo::retention::{Config, Phase, Selection};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    fn wait(worker: &Worker, predicate: impl Fn(&Info) -> bool) -> Info {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut info = worker.info();
+        while !predicate(&info) {
+            assert!(Instant::now() < deadline, "{info:?}");
+            assert!(!info.faulted, "{info:?}");
+            info = worker.wait_for_change(info.version, Duration::from_millis(100));
+        }
+        info
+    }
+    let n = Network::Mainnet;
+    let network = profile(n);
+    let config = transactions::Config::primitives(&network);
+    let dir = Temp::new();
+    let db = Arc::new(Database::open(&dir.0, identity(n)).unwrap());
+    bootstrap(&db, n);
+    let worker = Worker::spawn(
+        db.clone(),
+        Config::default(),
+        ae_storage::gc::Limits {
+            rows: 7,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (i, block) in blocks(n).iter().enumerate() {
+        let receipt = db
+            .commit(
+                ledger::prepare(
+                    &db.view().unwrap(),
+                    block,
+                    &config,
+                    &rules(n),
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        wait(&worker, |info| {
+            info.observed_revision == receipt.change().revision
+        });
+        if i == 0 {
+            assert!(db.begin_gc(Selection::default()).unwrap());
+        }
+    }
+    let info = wait(&worker, |info| info.state.phase == Phase::Complete);
+    assert!(info.pages > 0 && !info.enabled);
+    assert_eq!(info.state.height, 1);
+    let tip = db.view().unwrap().status().tip.unwrap();
+    let mut scan = db
+        .view()
+        .unwrap()
+        .scan_state(tip, Default::default())
+        .unwrap();
+    while !scan.is_complete() {
+        scan.next_page(Default::default()).unwrap();
+    }
+    drop(scan);
+    worker.shutdown().unwrap();
+    assert_eq!(Arc::strong_count(&db), 1);
+    drop(db);
+    let reopened = Database::open(&dir.0, identity(n)).unwrap();
+    assert_eq!(reopened.gc_state().unwrap().phase, Phase::Complete);
+    assert_eq!(reopened.view().unwrap().status().tip, Some(tip));
+}

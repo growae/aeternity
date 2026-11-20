@@ -1,6 +1,7 @@
 use super::*;
 use repo::retention::{Config, Phase, Selection, State};
 use std::collections::BTreeMap;
+pub mod worker;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -118,20 +119,46 @@ impl Database {
         configured: Option<(Config, bool)>,
         check: impl FnOnce() -> Result<(), Error>,
     ) -> Result<bool, Error> {
+        self.begin_gc_at(trees, configured, None, check)
+    }
+    fn begin_gc_at(
+        &self,
+        trees: Selection,
+        configured: Option<(Config, bool)>,
+        generation_baseline: Option<u64>,
+        check: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
         let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
         let view = self.view_locked(&policy)?;
         let prior = view.retention()?;
         if let Some((config, _)) = configured {
             config.validate()?;
         }
-        let Some(top) = view.status().tip else {
+        let Some(mut top) = view.status().tip else {
             return Ok(false);
         };
-        let header = view.require_block(top)?.header();
+        let mut header = view.require_block(top)?.header();
+        // Worker notifications may coalesce a selected key and its microblocks.
+        // Resolve the currently selected generation while holding the writer.
+        if generation_baseline.is_some() && matches!(header, ae_codec::headers::Header::Micro(_)) {
+            let height = header.common().height;
+            top = Hash256(header.common().previous_key_hash);
+            header = view.require_block(top)?.header();
+            if !matches!(header, ae_codec::headers::Header::Key(_))
+                || header.common().height != height
+                || view.canonical_key(height)? != Some(top)
+            {
+                return Err(Error::Corrupt("GC selected generation"));
+            }
+        }
         let key_block = matches!(header, ae_codec::headers::Header::Key(_));
         let height = header.common().height;
         if let Some((config, synced)) = configured {
-            if !config.eligible(height, key_block, synced, &prior)? {
+            let mut schedule = prior.clone();
+            if let Some(baseline) = generation_baseline {
+                schedule.height = schedule.height.max(baseline);
+            }
+            if !config.eligible(height, key_block, synced, &schedule)? {
                 return Ok(false);
             }
         } else if !key_block {
@@ -162,9 +189,9 @@ impl Database {
         // A failed engine write can have an uncertain durable outcome. Invalidate
         // old insertion/rollback plans even if the engine returns an error.
         policy.generation = generation;
-        self.db
-            .write_opt(batch, &write_options())
-            .map_err(backend)?;
+        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
+        self.wake_gc();
+        result?;
         Ok(true)
     }
     pub fn cancel_gc(&self) -> Result<State, Error> {
@@ -178,9 +205,9 @@ impl Database {
             batch.delete_range([repo::GC_MARKS], [repo::GC_MARKS + 1]);
             batch.delete_range([repo::GC_PENDING], [repo::GC_PENDING + 1]);
             batch.put(repo::GC_STATE, state.encode());
-            self.db
-                .write_opt(batch, &write_options())
-                .map_err(backend)?;
+            let result = self.db.write_opt(batch, &write_options()).map_err(backend);
+            self.wake_gc();
+            result?;
         }
         // Cancellation never promises that previously removed state returned.
         Ok(state)
@@ -362,9 +389,9 @@ impl Database {
             return Err(Error::ResourceLimit);
         }
         check()?;
-        self.db
-            .write_opt(batch, &write_options())
-            .map_err(backend)?;
+        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
+        self.wake_gc();
+        result?;
         Ok(state)
     }
     pub(super) fn gc_barrier(&self, update: &Update, batch: &mut WriteBatch) -> Result<(), Error> {

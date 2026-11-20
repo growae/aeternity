@@ -21,6 +21,7 @@ pub struct Database {
     writer: Mutex<resilience::Snapshot>,
     source_id: u64,
     config: ReadConfig,
+    gc_worker: Mutex<std::sync::Weak<gc::worker::Shared>>,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -105,6 +106,7 @@ impl Database {
             writer: Mutex::new(Default::default()),
             source_id,
             config,
+            gc_worker: Mutex::new(Default::default()),
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
@@ -270,9 +272,9 @@ impl Database {
         }
         self.gc_barrier(&update, &mut batch)?;
         check()?;
-        self.db
-            .write_opt(batch, &write_options())
-            .map_err(backend)?;
+        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
+        self.wake_gc();
+        result?;
         Ok(Committed { update })
     }
 }
