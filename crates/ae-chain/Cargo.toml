@@ -1,0 +1,27 @@
+[package]
+name = "ae-chain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ae-types.workspace = true
+ae-crypto.workspace = true
+ae-codec.workspace = true
+ae-protocol.workspace = true
+ae-trie.workspace = true
+ae-state.workspace = true
+ae-tx.workspace = true
+ae-consensus.workspace = true
+ae-execution.workspace = true
+ae-vm-fate.workspace = true
+num-bigint.workspace = true
+
+[dev-dependencies]
+ae-vm-aevm.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

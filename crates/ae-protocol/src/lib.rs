@@ -115,6 +115,18 @@ impl NetworkProfile {
     pub fn network_id(&self) -> &[u8] {
         &self.network_id
     }
+    // aec_governance:network_block_gas_limit: public chain limits do not
+    // change with local configuration. Other deployments choose explicitly.
+    pub fn block_gas_limit(&self, configured: &ae_types::Unsigned) -> ae_types::Unsigned {
+        self.fixed_block_gas_limit()
+            .map_or_else(|| configured.clone(), Into::into)
+    }
+    pub fn fixed_block_gas_limit(&self) -> Option<u64> {
+        match self.network_id.as_slice() {
+            b"ae_mainnet" | b"ae_uat" => Some(6_000_000),
+            _ => None,
+        }
+    }
     // Raw cb_ payloads from the pinned aecore pre-Iris ordering assets.
     // The VM decodes these with its bounded FATE decoder. Custom networks
     // have no bundled overrides; their caller may supply explicit entries.

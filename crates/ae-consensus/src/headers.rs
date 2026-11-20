@@ -111,6 +111,14 @@ pub fn validate_context(
     ctx: &Context<'_>,
     checkpoints: &Checkpoints,
 ) -> Result<(), Error> {
+    validate_context_with_cycle(header, ctx, checkpoints, 3000)
+}
+pub fn validate_context_with_cycle(
+    header: &Header,
+    ctx: &Context<'_>,
+    checkpoints: &Checkpoints,
+    micro_cycle_ms: u64,
+) -> Result<(), Error> {
     let common = header.common();
     if common.previous_hash != ctx.previous.hash()?.0 {
         return Err(Error::PreviousHash);
@@ -144,11 +152,11 @@ pub fn validate_context(
     match header {
         Header::Micro(m) => {
             let interval = if matches!(ctx.previous, Header::Micro(_)) {
-                3000
+                micro_cycle_ms
             } else {
                 1
             };
-            if u128::from(m.time) < u128::from(timestamp(ctx.previous)) + interval {
+            if u128::from(m.time) < u128::from(timestamp(ctx.previous)) + u128::from(interval) {
                 return Err(Error::MicroInterval);
             }
             if !verify_ed25519(
