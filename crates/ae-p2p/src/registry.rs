@@ -261,6 +261,21 @@ pub enum Effect {
         alive: bool,
     },
 }
+impl Effect {
+    pub fn retained_bytes(&self) -> Result<usize, Error> {
+        let heap = match self {
+            Self::Dial { peer, .. } => peer.host.len(),
+            Self::Resolve { host, .. } => host.len(),
+            Self::Store(discovery::Effect::Persist(peer) | discovery::Effect::Delete(peer)) => {
+                peer.host.len()
+            }
+            _ => 0,
+        };
+        std::mem::size_of::<Self>()
+            .checked_add(heap)
+            .ok_or(Error::ResourceLimit)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub result: Outcome,
@@ -419,6 +434,48 @@ impl Prepared {
     pub fn result(&self) -> &Outcome {
         &self.change.result
     }
+    // Expose budgets and liveness, not executable payloads, before publication.
+    pub fn effect_budget(&self) -> Result<(usize, usize), Error> {
+        self.change
+            .effects
+            .iter()
+            .filter(|e| self.next.effect_is_current(e))
+            .try_fold((0usize, 0usize), |(count, bytes), e| {
+                Ok((
+                    count.checked_add(1).ok_or(Error::ResourceLimit)?,
+                    bytes
+                        .checked_add(e.retained_bytes()?)
+                        .ok_or(Error::ResourceLimit)?,
+                ))
+            })
+    }
+    pub fn effect_is_current(&self, effect: &Effect) -> bool {
+        self.next.effect_is_current(effect)
+    }
+}
+impl State {
+    fn effect_is_current(&self, effect: &Effect) -> bool {
+        match effect {
+            Effect::Dial { token, peer, probe } => {
+                self.connections.get(&peer.id).is_some_and(|c| {
+                    c.connection.token == *token
+                        && c.connection.status == Status::Connecting
+                        && c.connection.probe == *probe
+                })
+            }
+            Effect::Ping { token, peer } => self.connections.get(peer).is_some_and(|c| {
+                c.connection.token == *token
+                    && c.connection.status == Status::Connected
+                    && c.connection.probe.is_none()
+            }),
+            Effect::Resolve { token, host } => self
+                .hosts
+                .get(host)
+                .is_some_and(|r| r.attempt == Some(*token)),
+            Effect::Store(_) => false,
+            _ => true,
+        }
+    }
 }
 impl Registry {
     pub fn new(local: PeerPublicKey, config: Config) -> Result<Self, Error> {
@@ -544,5 +601,22 @@ impl Registry {
     }
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    pub fn effect_is_current(&self, effect: &Effect) -> bool {
+        self.state.effect_is_current(effect)
+    }
+    pub fn connection_timer(&self, peer: PeerPublicKey) -> Option<Timer> {
+        let token = self.state.connections.get(&peer)?.timer?;
+        Some(Timer {
+            token,
+            deadline: self.state.timers.get(&token)?.at,
+        })
+    }
+    pub fn resolution_timer(&self, host: &[u8]) -> Option<Timer> {
+        let token = self.state.hosts.get(host)?.timer;
+        Some(Timer {
+            token,
+            deadline: self.state.timers.get(&token)?.at,
+        })
     }
 }

@@ -248,6 +248,9 @@ impl Version {
     pub fn revision(self) -> u64 {
         self.revision
     }
+    pub fn same_database(self, other: Self) -> bool {
+        self.source == other.source
+    }
 }
 pub struct Stored<'a> {
     source: Snapshot<'a>,
@@ -347,6 +350,9 @@ impl Writer {
     }
     pub fn version(&self) -> Result<Version, Error> {
         Ok(self.db.peer_view()?.version())
+    }
+    pub fn recovery_required(&self) -> bool {
+        self.uncertain
     }
     // Recovery returns the complete durable truth. The registry owner must
     // reconcile/rebuild its state before executing any further lifecycle effects.
