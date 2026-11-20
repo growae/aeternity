@@ -162,6 +162,8 @@ pub struct Completion {
 pub struct Update {
     pub completions: Vec<Completion>,
     pub ping: PingAction,
+    pub ping_before: Option<u16>,
+    pub ping_busy: bool,
     pub error: Option<Error>,
 }
 pub struct Requests {
@@ -197,9 +199,17 @@ impl Requests {
     pub fn ping_version(&self) -> u16 {
         self.ping.outgoing()
     }
+    pub fn selected_ping_version(&self) -> Option<u16> {
+        self.ping.selected()
+    }
     pub fn receive_ping(&mut self, ping: &Message, now: Instant) -> Update {
         let mut update = self.expire(now);
         if self.closed {
+            return update;
+        }
+        update.ping_before = self.ping.selected();
+        if ping.kind() == Kind::Ping && self.pending.contains_key(&Slot::Ping(ping.version())) {
+            update.ping_busy = true;
             return update;
         }
         match self.ping.observe(ping, false) {
@@ -292,6 +302,8 @@ impl Requests {
         Update {
             completions,
             ping,
+            ping_before: None,
+            ping_busy: false,
             error: None,
         }
     }
@@ -340,6 +352,9 @@ impl Requests {
         };
         if pending.expected != *kind {
             return update;
+        }
+        if *kind == Kind::Ping {
+            update.ping_before = self.ping.selected();
         }
         if let Some(body) = body.filter(|b| b.kind() == Kind::Ping) {
             match self.ping.observe(body, true) {

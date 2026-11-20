@@ -334,6 +334,8 @@ async fn ping_probe_fallback_is_driven_by_runtime_timer_without_closing_connecti
         })
     ));
     tokio::time::resume();
+    assert_eq!(client.selected_ping_version(), Some(1));
+    assert_eq!(client.ping_version(), 1);
     assert!(!client.is_closed());
     let next = client.request(&init(), None).unwrap();
     assert_eq!(within(raw.receive()).await, init());
@@ -705,4 +707,119 @@ async fn prepared_gossip_is_shared_but_each_peer_enforces_its_own_limits_and_bud
     for driver in drivers {
         within(driver).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn ping_observation_carries_pre_message_state_despite_a_newer_current_selection() {
+    let (client, mut events, driver, mut raw) = raw_pair(Config::default()).await;
+    let task = tokio::spawn(driver.run());
+    assert_eq!(client.selected_ping_version(), None);
+    assert_eq!(client.ping_version(), 1);
+    raw.send(&ping(2)).await;
+    raw.send(&ping(2)).await;
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(Event::Ping {
+            action: requests::PingAction::Selected(2),
+            ..
+        })
+    ));
+    let first = message(&mut events).await;
+    let second = message(&mut events).await;
+    assert_eq!(
+        first.ping,
+        Some(PingObservation {
+            previous: None,
+            action: requests::PingAction::Selected(2),
+            busy: false
+        })
+    );
+    assert_eq!(
+        second.ping,
+        Some(PingObservation {
+            previous: Some(2),
+            action: requests::PingAction::None,
+            busy: false
+        })
+    );
+    assert_eq!(client.selected_ping_version(), Some(2));
+    assert_eq!(client.ping_version(), 2);
+    assert_eq!(first.generation, second.generation);
+    raw.send(&init()).await;
+    assert_eq!(message(&mut events).await.ping, None);
+    client.shutdown();
+    assert_eq!(within(task).await.unwrap().reason, Error::Shutdown);
+}
+
+#[tokio::test]
+async fn ping_response_metadata_and_current_version_do_not_depend_on_event_consumption() {
+    let (client, mut events, driver, mut raw) = raw_pair(Config::default()).await;
+    let task = tokio::spawn(driver.run());
+    let first = client.request(&ping(1), None).unwrap();
+    assert_eq!(within(raw.receive()).await, ping(1));
+    raw.send(&Message::response_ok(&ping(1), Default::default()).unwrap())
+        .await;
+    let Reply::Response(first) = within(first).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        first.ping,
+        Some(PingObservation {
+            previous: None,
+            action: requests::PingAction::ProbeV2,
+            busy: false
+        })
+    );
+    assert_eq!(client.ping_version(), 1);
+    // Keep the earlier ProbeV2 event queued while completing the real upgrade.
+    let probe = client.probe(&ping(2)).unwrap();
+    assert_eq!(within(raw.receive()).await, ping(2));
+    raw.send(&Message::response_ok(&ping(2), Default::default()).unwrap())
+        .await;
+    let Reply::Response(upgraded) = within(probe).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        upgraded.ping,
+        Some(PingObservation {
+            previous: None,
+            action: requests::PingAction::Selected(2),
+            busy: false
+        })
+    );
+    assert_eq!(client.selected_ping_version(), Some(2));
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(Event::Ping {
+            action: requests::PingAction::ProbeV2,
+            ..
+        })
+    ));
+    assert_eq!(client.ping_version(), 2);
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(Event::Ping {
+            action: requests::PingAction::Selected(2),
+            ..
+        })
+    ));
+    let refused = client.request(&ping(1), None).unwrap();
+    assert_eq!(within(raw.receive()).await, ping(1));
+    raw.send(
+        &Message::response_error(Kind::Ping, b"refused".to_vec(), Default::default()).unwrap(),
+    )
+    .await;
+    let Reply::Response(refused) = within(refused).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        refused.ping,
+        Some(PingObservation {
+            previous: Some(2),
+            action: requests::PingAction::None,
+            busy: false
+        })
+    );
+    client.shutdown();
+    within(task).await.unwrap();
 }

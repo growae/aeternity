@@ -180,11 +180,36 @@ impl Ticket {
         self.0.await.map_err(|_| Error::Closed)?.result
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Connection {
+    pub token: policy::Token,
+    pub peer: ae_types::PeerPublicKey,
+    pub address: std::net::Ipv4Addr,
+    pub kind: policy::Kind,
+}
+pub struct ConnectionTicket {
+    accepted: Ticket,
+    result: oneshot::Receiver<Option<Connection>>,
+}
+impl ConnectionTicket {
+    pub async fn wait(self) -> Result<Option<Connection>, Error> {
+        self.accepted.wait().await?;
+        self.result.await.map_err(|_| Error::Closed)
+    }
+}
 enum Work {
     Policy(policy::Command),
     PingReceived(net::Client),
     Disconnect(net::Client),
     Synchronize(net::Client),
+    Connection {
+        client: net::Client,
+        reply: Option<oneshot::Sender<Option<Connection>>>,
+    },
+    Learn {
+        client: net::Client,
+        peers: Vec<policy::Info>,
+    },
 }
 struct Command {
     work: Work,
@@ -203,6 +228,7 @@ impl Command {
 }
 #[derive(Clone)]
 pub struct Handle {
+    database: std::sync::Weak<Database>,
     peers: pool::Reader,
     commands: mpsc::Sender<Command>,
     slots: Arc<Semaphore>,
@@ -212,6 +238,9 @@ pub struct Handle {
     maximum_host_bytes: usize,
 }
 impl Handle {
+    pub(crate) fn uses_database(&self, database: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(database))
+    }
     pub fn peers(&self) -> pool::Reader {
         self.peers.clone()
     }
@@ -284,6 +313,32 @@ impl Handle {
     pub fn synchronize(&self, client: net::Client) -> Result<Ticket, Error> {
         self.submit(Work::Synchronize(client), 256)
     }
+    pub fn connection(&self, client: net::Client) -> Result<ConnectionTicket, Error> {
+        let (reply, result) = oneshot::channel();
+        let accepted = self.submit(
+            Work::Connection {
+                client,
+                reply: Some(reply),
+            },
+            256,
+        )?;
+        Ok(ConnectionTicket { accepted, result })
+    }
+    // The source is the authenticated socket address, never its saved pool
+    // grouping address. Accepted rows are independent native-style additions;
+    // an error after a prefix is not permission to replay the whole batch.
+    pub fn learn(&self, client: net::Client, peers: Vec<policy::Info>) -> Result<Ticket, Error> {
+        if peers.len() > 32 {
+            return Err(Error::Busy);
+        }
+        let weight = peers
+            .iter()
+            .try_fold(256usize, |n, p| {
+                n.checked_add(64).and_then(|n| n.checked_add(p.host.len()))
+            })
+            .ok_or(Error::Busy)?;
+        self.submit(Work::Learn { client, peers }, weight)
+    }
     pub fn shutdown(&self) {
         self.stopped.send_replace(true);
     }
@@ -333,6 +388,7 @@ pub async fn create(
     let worker = registry::worker::Worker::start(registry, config.worker)?;
     let resolver = resolver::Resolver::start(config.resolver)?;
     let sockets = transport::Sockets::new(identity, network, config.transport)?;
+    let database = Arc::downgrade(&db);
     let (peers, incoming, pool_service) = pool::create(db, admission, config.pool)?;
     let (commands, receiver) = mpsc::channel(config.commands);
     let (published, events) = mpsc::channel(config.events);
@@ -352,6 +408,7 @@ pub async fn create(
     };
     let (status, observed) = watch::channel(current.clone());
     let handle = Handle {
+        database,
         peers: peers.reader(),
         commands,
         slots: Arc::new(Semaphore::new(config.commands)),

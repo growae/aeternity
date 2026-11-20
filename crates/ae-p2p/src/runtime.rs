@@ -13,7 +13,7 @@ mod queue;
 mod wire;
 pub use driver::Driver;
 pub use lifecycle::Monitor;
-pub use queue::{Client, Event, Generation, Prepared, Received, Reply, Ticket};
+pub use queue::{Client, Event, Generation, PingObservation, Prepared, Received, Reply, Ticket};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -145,9 +145,27 @@ pub async fn establish(
     let (events, incoming) = mpsc::channel(config.events);
     let (stop, stopped) = watch::channel(None);
     let (guard, monitor) = lifecycle::Guard::new(peer, generation.clone());
-    let client = Client::new(commands, stop, generation.clone(), peer, config, monitor);
+    let selected_ping = Arc::new(std::sync::atomic::AtomicU16::new(0));
+    let client = Client::new(
+        commands,
+        stop,
+        generation.clone(),
+        peer,
+        config,
+        monitor,
+        selected_ping.clone(),
+    );
     let driver = Driver::new(
-        socket, crypto, receiver, events, stopped, generation, requests, config, guard,
+        socket,
+        crypto,
+        receiver,
+        events,
+        stopped,
+        generation,
+        requests,
+        config,
+        selected_ping,
+        guard,
     );
     Ok((client, Events(incoming), driver))
 }

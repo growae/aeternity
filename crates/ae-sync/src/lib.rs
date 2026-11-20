@@ -3,6 +3,7 @@
 mod blocking;
 pub mod gossip;
 pub mod network;
+pub mod peer;
 pub mod pool;
 pub mod registry;
 pub mod resolver;

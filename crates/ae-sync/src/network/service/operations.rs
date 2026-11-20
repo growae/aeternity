@@ -120,6 +120,7 @@ impl Service {
                 if let Some(client) = self
                     .admitted
                     .get(&token)
+                    .map(|a| &a.client)
                     .filter(|c| c.peer() == peer && !c.is_closed())
                     .cloned()
                 {
@@ -336,7 +337,7 @@ impl Service {
             peer,
             inbound,
             connection,
-            ..
+            address,
         } = ready;
         let client = connection.client().clone();
         if self.stopping || client.is_closed() {
@@ -383,7 +384,22 @@ impl Service {
             Err(error) => Err(error),
         };
         if attached.is_ok() && !self.stopping {
-            self.admitted.insert(token, client);
+            let kind = match outcome {
+                policy::Outcome::Accepted(kind) => kind,
+                _ => policy::Kind::Permanent,
+            };
+            self.admitted.insert(
+                token,
+                Admitted {
+                    client,
+                    connection: Connection {
+                        token,
+                        peer: peer.id,
+                        address,
+                        kind,
+                    },
+                },
+            );
             let count = if inbound {
                 &mut self.current.counts.accepted
             } else {
@@ -432,8 +448,9 @@ impl Service {
     }
     async fn token(&mut self, client: &net::Client) -> Result<Option<policy::Token>, Error> {
         let token = self.admitted.iter().find_map(|(token, owned)| {
-            (owned.peer() == client.peer() && owned.generation() == client.generation())
-                .then_some(*token)
+            (owned.client.peer() == client.peer()
+                && owned.client.generation() == client.generation())
+            .then_some(*token)
         });
         let Some(token) = token else { return Ok(None) };
         let ticket = self.client.connection(client.peer())?;
@@ -444,13 +461,43 @@ impl Service {
             .filter(|c| c.token == token && c.status == policy::Status::Connected)
             .map(|_| token))
     }
-    pub(super) async fn command(&mut self, command: Command) {
+    async fn learn(
+        &mut self,
+        client: &net::Client,
+        peers: Vec<policy::Info>,
+    ) -> Result<policy::Outcome, Error> {
+        let Some(token) = self.token(client).await? else {
+            return Ok(policy::Outcome::Stale);
+        };
+        let source = self.admitted[&token].connection.address;
+        for peer in peers {
+            self.apply(policy::Command::Resolve {
+                peer,
+                source: Some(source),
+                trusted: false,
+            })
+            .await?;
+        }
+        Ok(policy::Outcome::Done)
+    }
+    pub(super) async fn command(&mut self, mut command: Command) {
         if self.stopping {
             command.finish(Err(Error::Closed));
             return;
         }
-        let result = match &command.work {
+        let result = match &mut command.work {
             Work::Policy(policy) => self.apply(policy.clone()).await,
+            Work::Learn { client, peers } => self.learn(client, std::mem::take(peers)).await,
+            Work::Connection { client, reply } => match self.token(client).await {
+                Ok(token) => {
+                    let info = token
+                        .and_then(|t| self.admitted.get(&t))
+                        .map(|a| a.connection);
+                    let _ = reply.take().unwrap().send(info);
+                    Ok(policy::Outcome::Done)
+                }
+                Err(error) => Err(error),
+            },
             Work::PingReceived(client) => match self.token(client).await {
                 Ok(Some(token)) => {
                     self.apply(policy::Command::PingDone {

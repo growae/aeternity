@@ -17,6 +17,7 @@ pub struct Driver {
     record_deadline: Option<Instant>,
     fragment_deadline: Option<Instant>,
     budget: Arc<Semaphore>,
+    selected_ping: Arc<std::sync::atomic::AtomicU16>,
     config: Config,
     // Struct fields drop in declaration order. Keep this guard last: observers
     // must not see completion until the socket, queues and pending replies drop,
@@ -34,6 +35,7 @@ impl Driver {
         generation: Generation,
         requests: requests::Requests,
         config: Config,
+        selected_ping: Arc<std::sync::atomic::AtomicU16>,
         terminal: lifecycle::Guard,
     ) -> Self {
         Self {
@@ -51,6 +53,7 @@ impl Driver {
             record_deadline: None,
             fragment_deadline: None,
             budget: Arc::new(Semaphore::new(config.incoming_bytes)),
+            selected_ping,
             config,
             terminal,
         }
@@ -233,14 +236,21 @@ impl Driver {
             }
             message::Kind::Close => Err(Error::RemoteClose),
             kind => {
+                let mut ping = None;
                 if kind == message::Kind::Ping {
                     let update = self.requests.receive_ping(&message, now);
+                    ping = Some(PingObservation {
+                        previous: update.ping_before,
+                        action: update.ping,
+                        busy: update.ping_busy,
+                    });
                     self.settle(update, None)?;
                 }
                 self.event(Event::Message(Received::new(
                     message,
                     self.generation.clone(),
                     budget,
+                    ping,
                 )))
             }
         }
@@ -250,6 +260,15 @@ impl Driver {
         update: requests::Update,
         mut budget: Option<OwnedSemaphorePermit>,
     ) -> Result<(), Error> {
+        self.selected_ping.store(
+            self.requests.selected_ping_version().unwrap_or(0),
+            std::sync::atomic::Ordering::Release,
+        );
+        let observation = PingObservation {
+            previous: update.ping_before,
+            action: update.ping,
+            busy: update.ping_busy,
+        };
         for completion in update.completions {
             if let Some(index) = self
                 .pending
@@ -258,11 +277,22 @@ impl Driver {
             {
                 let (_, answer) = self.pending.swap_remove(index);
                 let reply = match completion.result {
-                    Ok(message) => Ok(Reply::Response(Received::new(
-                        message,
-                        self.generation.clone(),
-                        budget.take().expect("one wire response"),
-                    ))),
+                    Ok(message) => {
+                        let ping = matches!(
+                            message.details(),
+                            message::Details::Response {
+                                kind: message::Kind::Ping,
+                                ..
+                            }
+                        )
+                        .then_some(observation);
+                        Ok(Reply::Response(Received::new(
+                            message,
+                            self.generation.clone(),
+                            budget.take().expect("one wire response"),
+                            ping,
+                        )))
+                    }
                     Err(error) => Err(Error::RequestFailed(error)),
                 };
                 answer.finish(reply);

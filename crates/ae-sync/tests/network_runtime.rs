@@ -319,6 +319,13 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     let (first, _events, first_task) = incoming(&node, &h, local.public_key(), &remote).await;
     let request = first.request(&ping(&node, 4321), None).unwrap();
     let (first_local, received) = forwarded(&mut forwarded_events).await;
+    let facts = within(h.connection(first_local.clone()).unwrap().wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.peer, remote.public_key());
+    assert_eq!(facts.address, Ipv4Addr::LOCALHOST);
+    assert_eq!(facts.kind, ae_p2p::registry::Kind::Permanent);
     assert_eq!(received.message(), &ping(&node, 4321));
     within(
         first_local
@@ -344,9 +351,29 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     let (replacement_local, _) = forwarded(&mut forwarded_events).await;
     status(&mut h, |s| s.counts.accepted == 2).await;
     assert_ne!(first_local.generation(), replacement_local.generation());
+    assert_eq!(
+        within(h.connection(first_local.clone()).unwrap().wait())
+            .await
+            .unwrap(),
+        None
+    );
+    let replacement_facts = within(h.connection(replacement_local.clone()).unwrap().wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(facts.token, replacement_facts.token);
     for ticket in [
         h.ping_received(first_local.clone()).unwrap(),
         h.synchronize(first_local.clone()).unwrap(),
+        h.learn(
+            first_local.clone(),
+            vec![Info {
+                id: PeerPublicKey([7; 32]),
+                host: b"127.0.0.1".to_vec(),
+                port: 9876,
+            }],
+        )
+        .unwrap(),
         h.disconnect(first_local).unwrap(),
     ] {
         assert_eq!(within(ticket.wait()).await.unwrap(), Outcome::Stale);
@@ -384,6 +411,14 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
         incoming(&node, &h, local.public_key(), &remote).await;
     let request = client.request(&ping(&node, 3015), None).unwrap();
     let (local_client, received) = forwarded(&mut forwarded_events).await;
+    assert_eq!(
+        within(h.connection(local_client.clone()).unwrap().wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .kind,
+        ae_p2p::registry::Kind::Temporary
+    );
     status(&mut h, |s| s.policy.as_ref().unwrap().counts.temporary == 1).await;
     within(
         local_client
@@ -436,6 +471,43 @@ async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_
     let (mut h, mut events, _incoming, task) = start(&node, local, c).await;
     let (peer, remote_client, mut remote_events, remote_task) = outgoing(&node, &h, &remote).await;
     let first = next_ping(&mut events).await;
+    let facts = within(h.connection(first.client.clone()).unwrap().wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.address, Ipv4Addr::LOCALHOST);
+    assert_ne!(facts.address, peer.address);
+    let learned = Info {
+        id: PeerPublicKey([7; 32]),
+        host: b"127.0.0.3".to_vec(),
+        port: 9876,
+    };
+    assert_eq!(
+        within(
+            h.learn(first.client.clone(), vec![learned.clone()])
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap(),
+        Outcome::Done
+    );
+    within(async {
+        loop {
+            if node
+                .db
+                .peer_view()
+                .unwrap()
+                .get(learned.id, 1024)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
     let generation = first.client.generation().clone();
     // Error envelopes have no inner ping version and use the v1 request slot.
     let v1 = Message::new(
@@ -485,8 +557,14 @@ async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_
     .await;
     let exit = stop(&h, task).await;
     let registry = exit.registry.unwrap();
+    let discovered = registry.policy().pool().find(learned.id).unwrap();
+    assert_eq!(discovered.source, Ipv4Addr::LOCALHOST);
+    assert!(!discovered.trusted);
     assert_eq!(registry.policy().pool().find(peer.id), Some(&peer));
-    let saved = registry.saved_peers().next().unwrap();
+    let saved = registry
+        .saved_peers()
+        .find(|row| row.id == peer.id)
+        .unwrap();
     assert_eq!(saved.host, peer.host);
     within(remote_task).await.unwrap();
 }

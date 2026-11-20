@@ -23,6 +23,10 @@ enum Completion {
         outcome: Option<bool>,
     },
 }
+struct Admitted {
+    client: net::Client,
+    connection: Connection,
+}
 pub struct Exit {
     pub status: Status,
     pub registry: Result<registry::Service, registry::worker::Error>,
@@ -42,7 +46,7 @@ pub struct Service {
     dns: Tasks<policy::Token, resolver::Completion>,
     ping_jobs: Tasks<policy::Token, Option<bool>>,
     ping_tokens: BTreeMap<policy::Token, net::Client>,
-    admitted: BTreeMap<policy::Token, net::Client>,
+    admitted: BTreeMap<policy::Token, Admitted>,
     pending: VecDeque<Completion>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,

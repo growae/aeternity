@@ -423,6 +423,27 @@ fn bounded_expansions_and_request_admission_are_atomic() {
 }
 
 #[test]
+fn simultaneous_ping_only_blocks_matching_version_and_does_not_negotiate() {
+    let now = Instant::now();
+    let p1 = ping(1, Value::List(vec![]));
+    let p2 = ping(2, Value::List(vec![]));
+    let mut tracker = Requests::new(Limits::default(), 1).unwrap();
+    let pending = tracker.start(&p2, now, None).unwrap();
+    let collision = tracker.receive_ping(&p2, now);
+    assert!(collision.ping_busy);
+    assert_eq!(collision.ping, PingAction::None);
+    assert_eq!(collision.ping_before, None);
+    assert_eq!(tracker.selected_ping_version(), None);
+    assert!(!tracker.receive_ping(&p1, now).ping_busy);
+    assert!(tracker.contains(&pending.token));
+    let reply = tracker.receive_response(response(&p2), now);
+    assert!(!reply.ping_busy);
+    assert_eq!(reply.ping, PingAction::Selected(2));
+    assert_eq!(reply.completions[0].token, pending.token);
+    assert_eq!(tracker.selected_ping_version(), Some(2));
+}
+
+#[test]
 fn ping_probe_has_separate_completion_and_respects_minimum() {
     let now = Instant::now();
     let p1 = ping(1, Value::List(vec![]));

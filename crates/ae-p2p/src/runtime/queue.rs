@@ -2,7 +2,7 @@ use super::*;
 use std::{
     future::Future,
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, Ordering},
     task::{Context, Poll},
 };
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
@@ -21,9 +21,17 @@ impl PartialEq for Generation {
 }
 impl Eq for Generation {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingObservation {
+    pub previous: Option<u16>,
+    pub action: requests::PingAction,
+    pub busy: bool,
+}
+
 #[derive(Debug)]
 pub struct Received {
     pub generation: Generation,
+    pub ping: Option<PingObservation>,
     message: message::Message,
     _budget: OwnedSemaphorePermit,
 }
@@ -35,10 +43,12 @@ impl Received {
         message: message::Message,
         generation: Generation,
         budget: OwnedSemaphorePermit,
+        ping: Option<PingObservation>,
     ) -> Self {
         Self {
             message,
             generation,
+            ping,
             _budget: budget,
         }
     }
@@ -173,6 +183,7 @@ pub struct Client {
     budget: Arc<Semaphore>,
     config: Config,
     monitor: Monitor,
+    selected_ping: Arc<AtomicU16>,
 }
 impl Client {
     pub(super) fn new(
@@ -182,6 +193,7 @@ impl Client {
         peer: PeerPublicKey,
         config: Config,
         monitor: Monitor,
+        selected_ping: Arc<AtomicU16>,
     ) -> Self {
         Self {
             commands,
@@ -191,6 +203,7 @@ impl Client {
             budget: Arc::new(Semaphore::new(config.outgoing_bytes)),
             config,
             monitor,
+            selected_ping,
         }
     }
     pub fn generation(&self) -> &Generation {
@@ -201,6 +214,19 @@ impl Client {
     }
     pub fn monitor(&self) -> Monitor {
         self.monitor.clone()
+    }
+    pub fn selected_ping_version(&self) -> Option<u16> {
+        match self.selected_ping.load(Ordering::Acquire) {
+            0 => None,
+            version => Some(version),
+        }
+    }
+    pub fn ping_version(&self) -> u16 {
+        self.selected_ping_version()
+            .unwrap_or(self.config.minimum_ping)
+    }
+    pub fn minimum_ping_version(&self) -> u16 {
+        self.config.minimum_ping
     }
     pub fn shutdown(&self) {
         stop(&self.stop, Error::Shutdown);
