@@ -274,6 +274,10 @@ impl Pool {
     pub fn retained_record_bytes(&self) -> usize {
         self.bytes
     }
+    pub fn transaction(&self, hash: Hash256) -> Option<Arc<Signed>> {
+        let (_, key) = self.gc.get(&hash)?;
+        self.entry(key).map(|(_, entry)| entry.tx.clone())
+    }
     pub fn gc_height(&self) -> u64 {
         self.gc_height
     }

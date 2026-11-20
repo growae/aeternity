@@ -12,11 +12,12 @@ ae-crypto.workspace = true
 ae-codec.workspace = true
 ae-trie.workspace = true
 ae-state.workspace = true
+ae-mempool.workspace = true
+ae-tx.workspace = true
+ae-protocol.workspace = true
 rocksdb.workspace = true
 
 [dev-dependencies]
-ae-tx.workspace = true
-ae-protocol.workspace = true
 ae-execution.workspace = true
 hex.workspace = true
 serde_json.workspace = true

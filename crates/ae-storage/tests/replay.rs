@@ -149,6 +149,56 @@ fn descriptor(b: &[u8], count: u64) -> Chunk {
     }
 }
 #[test]
+fn schema_seven_replay_ownership_and_partial_progress_resume_after_upgrade() {
+    let n = Network::Mainnet;
+    let m = manifest(n);
+    let id = identity(n);
+    let Value::List(mut fields) = Value::decode(&id.encode()).unwrap() else {
+        panic!()
+    };
+    fields[0] = Value::Bytes(vec![7]);
+    let legacy = Value::List(fields).encode();
+    assert_eq!(id.binding(), legacy);
+    for initialized in [false, true] {
+        let temp = Temp::new();
+        std::fs::create_dir_all(&temp.0).unwrap();
+        let mut bound = legacy.clone();
+        bound.extend(m.id().0);
+        let marker = temp.0.join(format!(
+            ".ae-replay-{}",
+            hex::encode(ae_crypto::blake2b_256(&bound).0)
+        ));
+        std::fs::write(&marker, []).unwrap();
+        let prior = if initialized {
+            let mut replay = open(&temp, n, &m);
+            replay
+                .apply_chunk(&chunks(n)[0], 1, |v, b| prepare(n, v, b))
+                .unwrap();
+            let progress = replay.progress().clone();
+            drop(replay);
+            let raw = rocksdb::DB::open_default(&temp.0).unwrap();
+            raw.put(repo::IDENTITY, &legacy).unwrap();
+            drop(raw);
+            Some(progress)
+        } else {
+            // A v7 importer can die after persisting ownership but before
+            // RocksDB creates CURRENT. Unrelated contents must not block it.
+            std::fs::write(temp.0.join("LOG"), b"interrupted v7 open").unwrap();
+            None
+        };
+        let mut replay = open(&temp, n, &m);
+        if let Some(prior) = prior {
+            assert_eq!(replay.progress(), &prior);
+        }
+        replay_all(&mut replay, n);
+        verify_all(&mut replay);
+        drop(replay.into_database().unwrap());
+        assert!(marker.is_file());
+        let raw = rocksdb::DB::open_default(&temp.0).unwrap();
+        assert_eq!(raw.get(repo::IDENTITY).unwrap(), Some(id.encode()));
+    }
+}
+#[test]
 fn original_mnesia_exports_resume_and_execute_the_next_real_block() {
     for n in [Network::Mainnet, Network::Uat] {
         let m = manifest(n);

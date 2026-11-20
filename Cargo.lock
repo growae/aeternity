@@ -147,6 +147,7 @@ dependencies = [
  "ae-codec",
  "ae-crypto",
  "ae-execution",
+ "ae-mempool",
  "ae-protocol",
  "ae-state",
  "ae-trie",

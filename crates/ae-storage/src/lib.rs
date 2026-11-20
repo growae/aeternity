@@ -14,6 +14,7 @@ use std::{
 };
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod gc;
+pub mod pool;
 pub mod replay;
 
 pub struct Database {
@@ -23,6 +24,7 @@ pub struct Database {
     source_id: u64,
     config: ReadConfig,
     gc_worker: Mutex<std::sync::Weak<gc::worker::Shared>>,
+    pool_owner: Mutex<std::sync::Weak<()>>,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -143,10 +145,12 @@ impl Database {
             source_id,
             config,
             gc_worker: Mutex::new(Default::default()),
+            pool_owner: Mutex::new(Default::default()),
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
         result.validate_replay(importing)?;
+        result.validate_pool()?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
@@ -309,8 +313,19 @@ impl Database {
         if current != update.expected() {
             return Err(Error::Conflict);
         }
+        let pool_writes = self.pool_chain_writes(update.change(), update.writes())?;
+        let extra_bytes = extra
+            .map_or(Some(0), |(k, v)| k.len().checked_add(v.len()))
+            .ok_or(Error::ResourceLimit)?;
+        let total = pool::write_bytes(update.writes())?
+            .checked_add(pool::write_bytes(&pool_writes)?)
+            .and_then(|n| n.checked_add(extra_bytes))
+            .ok_or(Error::ResourceLimit)?;
+        if total > update.commit_bytes_limit() {
+            return Err(Error::ResourceLimit);
+        }
         let mut batch = WriteBatch::default();
-        for (k, v) in update.writes() {
+        for (k, v) in update.writes().iter().chain(pool_writes.iter()) {
             check()?;
             match v {
                 Some(b) => batch.put(k, b),
@@ -319,19 +334,6 @@ impl Database {
         }
         self.gc_barrier(&update, &mut batch)?;
         if let Some((key, value)) = extra {
-            let used = update.writes().iter().try_fold(
-                key.len()
-                    .checked_add(value.len())
-                    .ok_or(Error::ResourceLimit)?,
-                |sum, (k, v)| {
-                    sum.checked_add(k.len())
-                        .and_then(|n| n.checked_add(v.as_ref().map_or(0, Vec::len)))
-                        .ok_or(Error::ResourceLimit)
-                },
-            )?;
-            if used > update.commit_bytes_limit() {
-                return Err(Error::ResourceLimit);
-            }
             batch.put(key, value);
         }
         check()?;

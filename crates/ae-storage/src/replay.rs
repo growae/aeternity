@@ -230,7 +230,7 @@ impl Replay {
             return Err(Error::Identity.into());
         }
         let path = path.as_ref();
-        let mut binding = identity.encode();
+        let mut binding = identity.binding();
         binding.extend(manifest.id().0);
         let name = format!(
             "{MARKER}{}",
