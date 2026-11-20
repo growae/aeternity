@@ -59,6 +59,7 @@ pub enum Error {
     Identity,
     Conflict,
     GcActive,
+    IncompleteImport,
     Pruned { height: u64, floor: u64 },
     AlreadyPresent,
     Uninitialized,
@@ -124,7 +125,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(6)
+        self.encode_version(7)
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
@@ -140,7 +141,7 @@ impl Identity {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
         let version = integer(&a[0])?;
-        if !matches!(version, 1..=6) {
+        if !matches!(version, 1..=7) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();

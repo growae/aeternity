@@ -14,6 +14,7 @@ use std::{
 };
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod gc;
+pub mod replay;
 
 pub struct Database {
     db: DB,
@@ -62,6 +63,15 @@ impl Database {
         config: ReadConfig,
         recovery: repo::rollback::Limits,
     ) -> Result<Self, Error> {
+        Self::open_mode(path, identity, config, recovery, false)
+    }
+    fn open_mode(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+        recovery: repo::rollback::Limits,
+        importing: bool,
+    ) -> Result<Self, Error> {
         if Identity::decode(&identity.encode())? != identity {
             return Err(Error::Identity);
         }
@@ -72,7 +82,33 @@ impl Database {
         o.set_write_buffer_size(16 * 1024 * 1024);
         o.set_max_write_buffer_number(2);
         o.set_max_background_jobs(2);
+        let path = path.as_ref();
         let db = DB::open(&o, path).map_err(backend)?;
+        if !importing
+            && db.get(replay::PROGRESS).map_err(backend)?.is_none()
+            && replay::has_marker(path)?
+        {
+            return Err(Error::IncompleteImport);
+        }
+        if importing && db.get(replay::PROGRESS).map_err(backend)?.is_none() {
+            for entry in db.iterator(IteratorMode::Start) {
+                let (key, _) = entry.map_err(backend)?;
+                if key.as_ref() != repo::IDENTITY && key.as_ref() != repo::STATUS {
+                    return Err(Error::NotEmpty);
+                }
+            }
+        }
+        if importing
+            && db.get(replay::PROGRESS).map_err(backend)?.is_none()
+            && db
+                .get(repo::STATUS)
+                .map_err(backend)?
+                .map(|b| Status::decode(&b))
+                .transpose()?
+                .is_some_and(|s| s != Status::default())
+        {
+            return Err(Error::NotEmpty);
+        }
         let mut upgrade = false;
         match db.get(repo::IDENTITY).map_err(backend)? {
             Some(b) => {
@@ -110,6 +146,7 @@ impl Database {
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
+        result.validate_replay(importing)?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
@@ -121,7 +158,9 @@ impl Database {
                 .write_opt(batch, &write_options())
                 .map_err(backend)?;
         }
-        result.enforce_community_fork(recovery)?;
+        if !importing {
+            result.enforce_community_fork(recovery)?;
+        }
         Ok(result)
     }
     pub fn rollback(
@@ -240,6 +279,14 @@ impl Database {
     fn commit_checked(
         &self,
         update: Update,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<Committed, Error> {
+        self.commit_extra(update, None, check)
+    }
+    fn commit_extra(
+        &self,
+        update: Update,
+        extra: Option<(&[u8], &[u8])>,
         mut check: impl FnMut() -> Result<(), Error>,
     ) -> Result<Committed, Error> {
         let guard = self
@@ -271,6 +318,22 @@ impl Database {
             }
         }
         self.gc_barrier(&update, &mut batch)?;
+        if let Some((key, value)) = extra {
+            let used = update.writes().iter().try_fold(
+                key.len()
+                    .checked_add(value.len())
+                    .ok_or(Error::ResourceLimit)?,
+                |sum, (k, v)| {
+                    sum.checked_add(k.len())
+                        .and_then(|n| n.checked_add(v.as_ref().map_or(0, Vec::len)))
+                        .ok_or(Error::ResourceLimit)
+                },
+            )?;
+            if used > update.commit_bytes_limit() {
+                return Err(Error::ResourceLimit);
+            }
+            batch.put(key, value);
+        }
         check()?;
         let result = self.db.write_opt(batch, &write_options()).map_err(backend);
         self.wake_gc();
