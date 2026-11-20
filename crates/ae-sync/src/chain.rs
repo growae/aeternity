@@ -72,6 +72,10 @@ pub enum Error {
     Hash,
     WrongConsensus,
     BlockedByWhitelist,
+    Policy {
+        height: u64,
+        top: u64,
+    },
     Refused(Vec<u8>),
     Message(message::Error),
     Generation(generation::Error),
@@ -154,6 +158,7 @@ struct Context<O> {
     rules: Rules,
     config: Config,
     stopped: AtomicBool,
+    shutdown: tokio::sync::watch::Sender<bool>,
     recovery: AtomicBool,
     #[cfg(test)]
     commit_hook: Option<CommitHook>,
@@ -233,6 +238,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 rules,
                 config,
                 stopped: AtomicBool::new(false),
+                shutdown: tokio::sync::watch::channel(false).0,
                 recovery: AtomicBool::new(false),
                 #[cfg(test)]
                 commit_hook: None,
@@ -248,6 +254,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     }
     pub fn stop(&self) {
         self.context.stopped.store(true, Ordering::Release);
+        self.context.shutdown.send_replace(true);
         self.jobs.stop();
     }
     pub async fn join(&self) {
@@ -264,40 +271,53 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         direction: Direction,
         now_ms: u64,
     ) -> Result<Ticket, Error> {
-        self.submit(Input::Packet(packet), requested, direction, now_ms)
+        self.check_open()?;
+        if packet.len() > self.context.config.messages.body_bytes.saturating_add(2) {
+            return Err(Error::Busy);
+        }
+        self.submit(
+            self.reserve()?,
+            Input::Packet(packet),
+            requested,
+            direction,
+            now_ms,
+        )
     }
-    fn submit(
-        &self,
-        input: Input,
-        requested: Hash256,
-        direction: Direction,
-        now_ms: u64,
-    ) -> Result<Ticket, Error> {
+    fn check_open(&self) -> Result<(), Error> {
         if self.context.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
         if self.recovery_required() {
             return Err(Error::RecoveryRequired);
         }
-        let c = &self.context.config;
-        if let Input::Packet(b) = &input
-            && b.len() > c.messages.body_bytes.saturating_add(2)
-        {
-            return Err(Error::Busy);
-        }
-        let weight = c
+        Ok(())
+    }
+    fn reserve(&self) -> Result<blocking::Reservation<'_>, Error> {
+        self.check_open()?;
+        let weight = self
+            .context
+            .config
             .messages
             .body_bytes
-            .checked_add(c.messages.work_bytes)
+            .checked_add(self.context.config.messages.work_bytes)
             .ok_or(Error::Busy)?;
+        self.jobs.reserve(weight).map_err(Into::into)
+    }
+    fn submit(
+        &self,
+        reservation: blocking::Reservation<'_>,
+        input: Input,
+        requested: Hash256,
+        direction: Direction,
+        now_ms: u64,
+    ) -> Result<Ticket, Error> {
+        self.check_open()?;
         let context = self.context.clone();
-        self.jobs
-            .submit(weight, move |cancel| {
-                context.apply(input, requested, direction, now_ms, cancel)
-            })
+        reservation
+            .submit(move |cancel| context.apply(input, requested, direction, now_ms, cancel))
             .map(|pending| Ticket {
                 pending,
-                timeout: c.timeout,
+                timeout: self.context.config.timeout,
             })
             .map_err(Into::into)
     }
@@ -313,16 +333,25 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             progress: Some(Report::default()),
             error,
         };
-        if self.context.stopped.load(Ordering::Acquire) {
-            return Err(empty(Error::Closed));
-        }
-        if self.recovery_required() {
-            return Err(empty(Error::RecoveryRequired));
-        }
+        self.check_open().map_err(empty)?;
         if !owner.uses_database(&self.context.db) {
             return Err(empty(Error::Configuration));
         }
-        let operation = async {
+        let limits = self.context.config.messages;
+        let transport = client.message_limits();
+        // The driver decodes the response before handing it to the importer.
+        // Its limits must fit the capacity reserved here, not just the later
+        // re-encoding check in the blocking worker.
+        if transport.body_bytes > limits.body_bytes
+            || transport.work_bytes > limits.work_bytes
+            || transport.items > limits.items
+            || transport.depth > limits.depth
+        {
+            return Err(empty(Error::Configuration));
+        }
+        let reservation = self.reserve().map_err(empty)?;
+        let mut shutdown = self.context.shutdown.subscribe();
+        let download = async {
             if client.is_closed()
                 || owner
                     .connection(client.clone())
@@ -367,8 +396,17 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             {
                 return Err(empty(Error::Stale));
             }
+            Ok(Live { received, client })
+        };
+        let operation = async {
+            let live = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopped| *stopped) => return Err(empty(Error::Closed)),
+                result = download => result?,
+            };
             self.submit(
-                Input::Live(Box::new(Live { received, client })),
+                reservation,
+                Input::Live(Box::new(live)),
                 requested,
                 direction,
                 now_ms,
@@ -391,6 +429,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
 impl<O> Drop for Importer<O> {
     fn drop(&mut self) {
         self.context.stopped.store(true, Ordering::Release);
+        self.context.shutdown.send_replace(true);
         self.jobs.stop();
     }
 }

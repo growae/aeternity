@@ -228,6 +228,9 @@ impl Client {
     pub fn minimum_ping_version(&self) -> u16 {
         self.config.minimum_ping
     }
+    pub fn message_limits(&self) -> message::Limits {
+        self.config.messages
+    }
     pub fn shutdown(&self) {
         stop(&self.stop, Error::Shutdown);
     }

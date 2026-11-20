@@ -966,6 +966,319 @@ async fn encrypted_generation_download_commits_actual_ledger_and_rejects_foreign
     stop(app).await;
 }
 
+async fn admitted_client(app: &App, peer: PeerPublicKey) -> net::Client {
+    within(async {
+        loop {
+            let clients = app.network.peers().peers().unwrap().wait().await.unwrap();
+            if let Some(client) = clients.into_iter().find(|c| c.peer() == peer) {
+                return client;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+async fn generation_request(events: &mut net::Events) -> net::Received {
+    loop {
+        let request = incoming(events).await;
+        if request.message().kind() == Kind::GetGeneration {
+            return request;
+        }
+    }
+}
+fn download_importer(node: &Node, config: ae_sync::chain::Config) -> ae_sync::chain::Importer {
+    ae_sync::chain::Importer::new(
+        node.db.clone(),
+        common::ledger_fixtures::execution(&NetworkProfile::mainnet()),
+        common::ledger_fixtures::rules(node.db.view().unwrap().identity().genesis),
+        config,
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn generation_downloads_reserve_shared_slots_and_bytes_before_any_wire_request() {
+    use ae_sync::chain::{Config, Direction, Error, Outcome};
+    let limits = message::Limits::default();
+    let weight = limits.body_bytes + limits.work_bytes;
+    // Exhaust slots with bytes remaining, then bytes with a slot remaining.
+    for (jobs, bytes) in [(1, weight * 2), (2, weight)] {
+        let node = Node::new();
+        let app = start(&node, config(), Default::default()).await;
+        let (remote, mut events, driver) = connect(&node, &app).await;
+        let _ = response(&remote, &ping(&node, 1, false)).await;
+        let client = admitted_client(&app, remote_peer()).await;
+        let second_id = noise::Identity::from_secret([9; 32]);
+        let socket = TcpStream::connect(app.network.status().listening.unwrap())
+            .await
+            .unwrap();
+        let (second, mut second_events, second_driver) = establish(
+            &node,
+            socket,
+            &second_id,
+            noise::Role::Initiator(app.identity.public_key()),
+        )
+        .await;
+        let _ = response(&second, &ping(&node, 1, false)).await;
+        let second_client = admitted_client(&app, second_id.public_key()).await;
+        let importer = download_importer(
+            &node,
+            Config {
+                jobs,
+                bytes,
+                ..Default::default()
+            },
+        );
+        let all = common::ledger_fixtures::blocks(&NetworkProfile::mainnet());
+        let key = &all[0];
+        let hash = key.hash().unwrap();
+        let mut fetch = Box::pin(importer.fetch(
+            &app.network,
+            client.clone(),
+            hash,
+            Direction::Backward,
+            u64::MAX - 600_000,
+        ));
+        tokio::select! {
+            result = &mut fetch => panic!("response not supplied: {result:?}"),
+            _ = generation_request(&mut events) => (),
+        }
+        assert_eq!(importer.available(), (jobs - 1, bytes - weight));
+        let error = within(importer.fetch(
+            &app.network,
+            second_client.clone(),
+            hash,
+            Direction::Backward,
+            u64::MAX - 600_000,
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(error.error, Error::Busy);
+        assert!(error.progress.unwrap().accepted.is_empty());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                generation_request(&mut second_events)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!second_client.is_closed());
+        let packet = common::import::packet(key, &[], Direction::Backward);
+        assert!(matches!(
+            importer.import(
+                packet.clone(),
+                hash,
+                Direction::Backward,
+                u64::MAX - 600_000
+            ),
+            Err(Error::Busy)
+        ));
+        let body = common::import::message(key, &[], Direction::Backward);
+        remote
+            .send(&Message::response_ok(&body, Default::default()).unwrap())
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(matches!(
+            within(fetch).await.unwrap().accepted[0].outcome,
+            Outcome::Committed { .. }
+        ));
+        assert_eq!(importer.available(), (jobs, bytes));
+        // An unread offline result is part of the very same budget.
+        let unread = importer
+            .import(packet, hash, Direction::Backward, u64::MAX - 600_000)
+            .unwrap();
+        assert_eq!(
+            within(importer.fetch(
+                &app.network,
+                second_client,
+                hash,
+                Direction::Backward,
+                u64::MAX - 600_000
+            ))
+            .await
+            .unwrap_err()
+            .error,
+            Error::Busy
+        );
+        assert_eq!(
+            unread.wait().await.unwrap().accepted[0].outcome,
+            Outcome::Present
+        );
+        assert_eq!(importer.available(), (jobs, bytes));
+        importer.stop();
+        importer.join().await;
+        remote.shutdown();
+        second.shutdown();
+        within(driver).await.unwrap();
+        within(second_driver).await.unwrap();
+        stop(app).await;
+    }
+}
+fn remote_peer() -> PeerPublicKey {
+    identities().1.public_key()
+}
+
+#[tokio::test]
+async fn pending_generation_downloads_release_capacity_on_shutdown_cancellation_and_timeout() {
+    use ae_sync::chain::{Config, Direction, Error};
+    for mode in ["shutdown", "cancel", "timeout"] {
+        let node = Node::new();
+        let app = start(&node, config(), Default::default()).await;
+        let (remote, mut events, driver) = connect(&node, &app).await;
+        let _ = response(&remote, &ping(&node, 1, false)).await;
+        let client = admitted_client(&app, remote_peer()).await;
+        let limits = Config {
+            jobs: 1,
+            timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let available = (limits.jobs, limits.bytes);
+        let importer = download_importer(&node, limits);
+        let before = node.db.view().unwrap().status();
+        let hash = common::ledger_fixtures::blocks(&NetworkProfile::mainnet())[0]
+            .hash()
+            .unwrap();
+        let mut fetch = Box::pin(importer.fetch(
+            &app.network,
+            client.clone(),
+            hash,
+            Direction::Backward,
+            u64::MAX - 600_000,
+        ));
+        tokio::select! {
+            result = &mut fetch => panic!("response not supplied: {result:?}"),
+            _ = generation_request(&mut events) => (),
+        }
+        assert_eq!(importer.available().0, 0);
+        if mode == "cancel" {
+            drop(fetch);
+        } else {
+            if mode == "shutdown" {
+                importer.stop();
+            }
+            let failure = within(fetch).await.unwrap_err();
+            assert_eq!(
+                failure.error,
+                if mode == "shutdown" {
+                    Error::Closed
+                } else {
+                    Error::Timeout
+                }
+            );
+            if mode == "shutdown" {
+                assert!(failure.progress.unwrap().accepted.is_empty());
+            }
+        }
+        within(client.monitor().wait()).await;
+        within(driver).await.unwrap();
+        assert_eq!(importer.available(), available);
+        assert_eq!(node.db.view().unwrap().status(), before);
+        importer.stop();
+        importer.join().await;
+        stop(app).await;
+    }
+}
+
+#[tokio::test]
+async fn generation_download_limits_refusals_and_validation_failures_return_capacity() {
+    use ae_sync::chain::{Config, Direction, Error};
+    let node = Node::new();
+    let app = start(&node, config(), Default::default()).await;
+    let (remote, mut events, driver) = connect(&node, &app).await;
+    let _ = response(&remote, &ping(&node, 1, false)).await;
+    let client = admitted_client(&app, remote_peer()).await;
+    let all = common::ledger_fixtures::blocks(&NetworkProfile::mainnet());
+    let key = &all[0];
+    let hash = key.hash().unwrap();
+    for field in 0..4 {
+        let mut limits = Config::default();
+        match field {
+            0 => limits.messages.body_bytes -= 1,
+            1 => limits.messages.work_bytes -= 1,
+            2 => limits.messages.items -= 1,
+            _ => limits.messages.depth -= 1,
+        }
+        let available = (limits.jobs, limits.bytes);
+        let importer = download_importer(&node, limits);
+        assert_eq!(
+            importer
+                .fetch(
+                    &app.network,
+                    client.clone(),
+                    hash,
+                    Direction::Backward,
+                    u64::MAX - 600_000
+                )
+                .await
+                .unwrap_err()
+                .error,
+            Error::Configuration
+        );
+        assert_eq!(importer.available(), available);
+        importer.stop();
+        importer.join().await;
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), generation_request(&mut events))
+            .await
+            .is_err()
+    );
+    assert!(!client.is_closed());
+    let limits = Config {
+        jobs: 1,
+        ..Default::default()
+    };
+    let available = (limits.jobs, limits.bytes);
+    let importer = download_importer(&node, limits);
+    for case in ["refused", "invalid", "valid"] {
+        let fetch = importer.fetch(
+            &app.network,
+            client.clone(),
+            hash,
+            Direction::Backward,
+            u64::MAX - 600_000,
+        );
+        let serve = async {
+            let _ = generation_request(&mut events).await;
+            let response = match case {
+                "refused" => Message::response_error(
+                    Kind::Generation,
+                    b"not_found".to_vec(),
+                    Default::default(),
+                )
+                .unwrap(),
+                "invalid" => {
+                    let body = common::import::message(key, &[], Direction::Forward);
+                    Message::response_ok(&body, Default::default()).unwrap()
+                }
+                _ => Message::response_ok(
+                    &common::import::message(key, &[], Direction::Backward),
+                    Default::default(),
+                )
+                .unwrap(),
+            };
+            remote.send(&response).unwrap().await.unwrap();
+        };
+        let (result, ()) = within(async { tokio::join!(fetch, serve) }).await;
+        match case {
+            "refused" => assert_eq!(
+                result.unwrap_err().error,
+                Error::Refused(b"not_found".to_vec())
+            ),
+            "invalid" => assert!(matches!(result.unwrap_err().error, Error::Generation(_))),
+            _ => assert_eq!(result.unwrap().accepted.len(), 1),
+        }
+        assert_eq!(importer.available(), available);
+    }
+    assert_eq!(node.db.view().unwrap().require_block(hash).unwrap(), *key);
+    importer.stop();
+    importer.join().await;
+    remote.shutdown();
+    within(driver).await.unwrap();
+    stop(app).await;
+}
+
 #[tokio::test]
 async fn matching_top_schedules_real_pool_sync_and_emits_generation_intent_in_order() {
     let node = Node::new();

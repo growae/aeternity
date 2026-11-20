@@ -95,6 +95,19 @@ impl<T> Drop for Pending<T> {
 }
 #[derive(Clone)]
 pub(crate) struct Pool(Arc<Inner>);
+pub(crate) struct Reservation<'a> {
+    pool: &'a Pool,
+    slot: OwnedSemaphorePermit,
+    bytes: OwnedSemaphorePermit,
+}
+impl Reservation<'_> {
+    pub fn submit<T: Send + 'static>(
+        self,
+        operation: impl FnOnce(Cancellation) -> T + Send + 'static,
+    ) -> Result<Pending<T>, Error> {
+        self.pool.enqueue(self.slot, self.bytes, operation)
+    }
+}
 impl Pool {
     pub fn new(threads: usize, jobs: usize, bytes: usize) -> Result<Self, Error> {
         Self::named("ae-sync-read", threads, jobs, bytes)
@@ -175,6 +188,14 @@ impl Pool {
         bytes: usize,
         operation: impl FnOnce(Cancellation) -> T + Send + 'static,
     ) -> Result<Pending<T>, Error> {
+        self.reserve(bytes)?.submit(operation)
+    }
+    // A caller can charge work before acquiring input from an external peer.
+    // Moving this reservation into the job does not release/reacquire capacity.
+    pub fn reserve(&self, bytes: usize) -> Result<Reservation<'_>, Error> {
+        if self.stopped() {
+            return Err(Error::Stopped);
+        }
         let slot = self
             .0
             .slots
@@ -188,7 +209,11 @@ impl Pool {
             .clone()
             .try_acquire_many_owned(weight)
             .map_err(|_| Error::Busy)?;
-        self.enqueue(slot, bytes, operation)
+        Ok(Reservation {
+            pool: self,
+            slot,
+            bytes,
+        })
     }
     pub async fn submit_wait<T: Send + 'static>(
         &self,
@@ -273,6 +298,44 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reservations_charge_capacity_before_work_and_transfer_through_unread_results() {
+        let pool = Pool::new(1, 2, 8).unwrap();
+        let first = pool.reserve(4).unwrap();
+        assert_eq!(pool.available(), (1, 4));
+        assert!(matches!(pool.reserve(5), Err(Error::Busy)));
+        assert_eq!(pool.available(), (1, 4)); // Failed byte reservation returns its slot.
+        let second = pool.reserve(4).unwrap();
+        assert!(matches!(pool.submit(1, |_| 0), Err(Error::Busy)));
+        let (done, observed) = oneshot::channel();
+        let pending = first
+            .submit(move |_| {
+                done.send(()).unwrap();
+                7
+            })
+            .unwrap();
+        observed.await.unwrap();
+        assert_eq!(pool.available(), (0, 0));
+        assert_eq!(pending.await, Ok(7));
+        assert_eq!(pool.available(), (1, 4));
+        drop(second);
+        assert_eq!(pool.available(), (2, 8));
+        pool.stop();
+        pool.join().await;
+    }
+    #[tokio::test]
+    async fn stopping_a_pool_rejects_already_reserved_work_without_losing_capacity() {
+        let pool = Pool::new(1, 1, 4).unwrap();
+        let reservation = pool.reserve(4).unwrap();
+        pool.stop();
+        assert!(matches!(
+            reservation.submit(|_| panic!("stopped work")),
+            Err(Error::Stopped)
+        ));
+        assert_eq!(pool.available(), (1, 4));
+        assert!(matches!(pool.reserve(4), Err(Error::Stopped)));
+        pool.join().await;
+    }
     #[tokio::test]
     async fn quotas_cover_unobserved_results_and_cancelled_queued_jobs_do_not_execute() {
         let pool = Pool::new(1, 1, 4).unwrap();

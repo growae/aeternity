@@ -173,9 +173,14 @@ impl<O: MapOrder> Context<O> {
                 .with_config(|config| {
                     ledger::prepare(&view, block, config, rules, self.config.ledger)
                 })
-                .map_err(|e| Error::Validation {
-                    operational: e.is_operational(),
-                    reason: format!("{e:?}"),
+                .map_err(|e| match e {
+                    ledger::InsertError::Repository(error) => Error::Storage(error),
+                    ledger::InsertError::Policy { height, top } => Error::Policy { height, top },
+                    ledger::InsertError::WrongConsensus => Error::WrongConsensus,
+                    other => Error::Validation {
+                        operational: other.is_operational(),
+                        reason: format!("{other:?}"),
+                    },
                 })?;
             self.check(cancel, client)?;
             match self.commit(update) {

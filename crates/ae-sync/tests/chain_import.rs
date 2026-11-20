@@ -520,3 +520,127 @@ async fn real_public_generations_import_and_reopen_with_roots_and_transaction_lo
         }
     }
 }
+
+#[tokio::test]
+async fn missing_ancestry_policy_rejection_and_pruned_state_remain_typed() {
+    use ae_chain::{repository, resilience};
+    let node = Node::new();
+    let service = importer(&node, Default::default());
+    let all = blocks(&NetworkProfile::mainnet());
+    let second_key = all
+        .iter()
+        .find(|b| matches!(b, Block::Key(k) if k.common.height == 2))
+        .unwrap();
+    let failure = service
+        .import(
+            packet(second_key, &[], Direction::Backward),
+            second_key.hash().unwrap(),
+            Direction::Backward,
+            NOW,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failure.error,
+        Error::Storage(repository::Error::Missing(Hash256(
+            second_key.header().common().previous_hash
+        )))
+    );
+    assert!(failure.progress.unwrap().accepted.is_empty());
+    let mut last_key = &all[0];
+    for block in &all {
+        let (key, micros, direction) = if matches!(block, Block::Key(_)) {
+            last_key = block;
+            (block, &[][..], Direction::Backward)
+        } else {
+            (last_key, std::slice::from_ref(block), Direction::Forward)
+        };
+        service
+            .import(
+                packet(key, micros, direction),
+                key.hash().unwrap(),
+                direction,
+                NOW,
+            )
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    }
+    let before = node.db.view().unwrap().status();
+    let top = node
+        .db
+        .view()
+        .unwrap()
+        .require_block(before.tip.unwrap())
+        .unwrap()
+        .header()
+        .common()
+        .height;
+    // An unknown old micro passes standalone body checks. Local policy/pruning
+    // is consulted before contextual signature validation, as in the conductor.
+    let Block::Micro(mut old) = all[1].clone() else {
+        panic!()
+    };
+    old.header.signature[0] ^= 1;
+    let old = Block::Micro(old);
+    let height = old.header().common().height;
+    assert!(
+        node.db
+            .view()
+            .unwrap()
+            .block(old.hash().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    node.db
+        .update_resilience(
+            resilience::Event::Start,
+            resilience::Config {
+                depth: 1,
+                from_start: true,
+            },
+        )
+        .unwrap();
+    let failure = service
+        .import(
+            packet(&all[0], std::slice::from_ref(&old), Direction::Forward),
+            all[0].hash().unwrap(),
+            Direction::Forward,
+            NOW,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert_eq!(failure.error, Error::Policy { height, top });
+    assert!(failure.progress.unwrap().accepted.is_empty());
+    node.db
+        .update_resilience(resilience::Event::Synced, resilience::Config::default())
+        .unwrap();
+    assert!(node.db.begin_gc(Default::default()).unwrap());
+    let floor = node.db.gc_state().unwrap().height;
+    let failure = service
+        .import(
+            packet(&all[0], &[old], Direction::Forward),
+            all[0].hash().unwrap(),
+            Direction::Forward,
+            NOW,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failure.error,
+        Error::Storage(repository::Error::Pruned { height, floor })
+    );
+    assert!(failure.progress.unwrap().accepted.is_empty());
+    assert_eq!(node.db.view().unwrap().status(), before);
+    assert!(!service.recovery_required());
+    node.db.cancel_gc().unwrap();
+    service.stop();
+    service.join().await;
+}
