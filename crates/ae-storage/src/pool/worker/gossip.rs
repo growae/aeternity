@@ -67,7 +67,8 @@ impl GossipCache {
         self.cache.clear_poison();
         Ok(())
     }
-    fn check(&self, hash: ae_types::Hash256) -> bool {
+    // Checking records a miss, matching the native shared first-level filter.
+    pub fn check(&self, hash: ae_types::Hash256) -> bool {
         // Cache failure must not reject a transaction. The original API
         // returns a miss when its process is unavailable or its call times out.
         self.lock(false).map(|mut c| c.check(hash)).unwrap_or(false)

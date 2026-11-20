@@ -11,7 +11,7 @@ mod driver;
 mod queue;
 mod wire;
 pub use driver::Driver;
-pub use queue::{Client, Event, Generation, Received, Reply, Ticket};
+pub use queue::{Client, Event, Generation, Prepared, Received, Reply, Ticket};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

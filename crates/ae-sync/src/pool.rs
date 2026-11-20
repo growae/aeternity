@@ -152,6 +152,7 @@ impl Default for Status {
     }
 }
 pub struct Forwarded {
+    pub client: net::Client,
     pub peer: PeerPublicKey,
     pub event: net::Event,
 }
@@ -168,6 +169,7 @@ impl<T> Ticket<T> {
     }
 }
 enum Command {
+    Peers(oneshot::Sender<Result<Vec<net::Client>, Error>>),
     Attach {
         connection: Box<Connection>,
         initiate: bool,
@@ -204,6 +206,16 @@ impl Handle {
             permit,
             reply,
         });
+        Ok(Ticket(receiver))
+    }
+    pub fn peers(&self) -> Result<Ticket<Vec<net::Client>>, Error> {
+        if *self.stop.borrow() || self.commands.is_closed() {
+            return Err(Error::Closed);
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .try_send(Command::Peers(reply))
+            .map_err(|_| Error::Busy)?;
         Ok(Ticket(receiver))
     }
     pub fn synchronize(&self, peer: PeerPublicKey) -> Result<Ticket<bool>, Error> {

@@ -550,3 +550,52 @@ async fn handshake_deadlines_wrong_network_and_invalid_configuration_close_socke
         assert_eq!(config.validate(), Err(Error::Configuration));
     }
 }
+
+#[tokio::test]
+async fn prepared_gossip_is_shared_but_each_peer_enforces_its_own_limits_and_budget() {
+    let message = transactions(64);
+    let prepared = Prepared::new(&message, message::Limits::default()).unwrap();
+    let config = Config {
+        outgoing_bytes: prepared.bytes(),
+        messages: message::Limits {
+            body_bytes: 128,
+            work_bytes: 4096,
+            items: 100,
+            depth: 8,
+        },
+        ..Config::default()
+    };
+    let ((first, _first_events, first_driver), (_remote_a, mut events_a, remote_a_driver)) =
+        pair(config).await;
+    let ((second, _second_events, second_driver), (_remote_b, mut events_b, remote_b_driver)) =
+        pair(config).await;
+    let a = first.send_prepared(&prepared).unwrap();
+    let b = second.send_prepared(&prepared).unwrap();
+    assert!(matches!(first.send_prepared(&prepared), Err(Error::Busy)));
+    let larger = Prepared::new(&transactions(256), message::Limits::default()).unwrap();
+    assert!(matches!(
+        second.send_prepared(&larger),
+        Err(Error::Message(_))
+    ));
+    drop(prepared);
+    let drivers = [
+        first_driver,
+        remote_a_driver,
+        second_driver,
+        remote_b_driver,
+    ]
+    .map(|d| tokio::spawn(d.run()));
+    assert!(matches!(within(a).await, Ok(Reply::Sent)));
+    assert!(matches!(within(b).await, Ok(Reply::Sent)));
+    for events in [&mut events_a, &mut events_b] {
+        let Event::Message(received) = within(events.recv()).await.unwrap() else {
+            panic!()
+        };
+        assert_eq!(received.message(), &message);
+    }
+    first.shutdown();
+    second.shutdown();
+    for driver in drivers {
+        within(driver).await.unwrap();
+    }
+}

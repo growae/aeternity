@@ -65,6 +65,13 @@ impl Connections {
             cursor: 0,
         }
     }
+    pub fn clients(&self) -> Vec<net::Client> {
+        self.entries
+            .iter()
+            .filter(|e| !e.connection.client.is_closed())
+            .map(|e| e.connection.client.clone())
+            .collect()
+    }
     pub fn len(&self) -> usize {
         self.entries.len()
     }

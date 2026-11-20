@@ -185,7 +185,9 @@ dependencies = [
  "ae-protocol",
  "ae-state",
  "ae-storage",
+ "ae-tx",
  "ae-types",
+ "hex",
  "serde_json",
  "tokio",
 ]

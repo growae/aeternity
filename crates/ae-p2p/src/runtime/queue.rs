@@ -127,11 +127,41 @@ pub(super) enum Mode {
     },
 }
 pub(super) struct Command {
-    pub packet: Vec<u8>,
+    pub packet: Arc<[u8]>,
     pub mode: Mode,
     pub deadline: Instant,
     pub answer: Answer,
     pub budget: OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    packet: Arc<[u8]>,
+    limits: message::Limits,
+}
+impl Prepared {
+    pub fn new(message: &message::Message, limits: message::Limits) -> Result<Self, Error> {
+        Ok(Self {
+            packet: message
+                .encode_packet(limits)
+                .map_err(Error::Message)?
+                .into(),
+            limits,
+        })
+    }
+    pub fn bytes(&self) -> usize {
+        self.packet.len()
+    }
+    fn validate(&self, limits: message::Limits) -> Result<(), Error> {
+        if limits.body_bytes < self.limits.body_bytes
+            || limits.work_bytes < self.limits.work_bytes
+            || limits.items < self.limits.items
+            || limits.depth < self.limits.depth
+        {
+            message::Message::decode_packet(&self.packet, limits).map_err(Error::Message)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -175,6 +205,11 @@ impl Client {
     pub fn send(&self, message: &message::Message) -> Result<Ticket, Error> {
         self.submit(message, Mode::Send)
     }
+    pub fn send_prepared(&self, prepared: &Prepared) -> Result<Ticket, Error> {
+        let slot = self.reserve()?;
+        prepared.validate(self.config.messages)?;
+        self.submit_packet(prepared.packet.clone(), Mode::Send, slot)
+    }
     pub fn request(
         &self,
         message: &message::Message,
@@ -197,17 +232,26 @@ impl Client {
             },
         )
     }
-    fn submit(&self, message: &message::Message, mode: Mode) -> Result<Ticket, Error> {
+    fn reserve(&self) -> Result<mpsc::Permit<'_, Command>, Error> {
         if self.is_closed() {
             return Err(Error::Closed);
         }
-        let slot = self.commands.try_reserve().map_err(|e| match e {
+        self.commands.try_reserve().map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => Error::Busy,
             mpsc::error::TrySendError::Closed(_) => Error::Closed,
-        })?;
-        let packet = message
-            .encode_packet(self.config.messages)
-            .map_err(Error::Message)?;
+        })
+    }
+    fn submit(&self, message: &message::Message, mode: Mode) -> Result<Ticket, Error> {
+        let slot = self.reserve()?;
+        let prepared = Prepared::new(message, self.config.messages)?;
+        self.submit_packet(prepared.packet, mode, slot)
+    }
+    fn submit_packet(
+        &self,
+        packet: Arc<[u8]>,
+        mode: Mode,
+        slot: mpsc::Permit<'_, Command>,
+    ) -> Result<Ticket, Error> {
         if packet.len() > self.config.fragments.message_bytes {
             return Err(Error::Frame(framing::Error::ResourceLimit));
         }

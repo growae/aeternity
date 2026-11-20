@@ -42,6 +42,7 @@ struct Inner {
     threads: Mutex<Vec<JoinHandle<()>>>,
     slots: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    byte_limit: usize,
 }
 impl Inner {
     fn stop(&self) {
@@ -116,6 +117,7 @@ impl Pool {
             threads: Mutex::new(vec![]),
             slots: Arc::new(Semaphore::new(jobs)),
             bytes: Arc::new(Semaphore::new(bytes)),
+            byte_limit: bytes,
         }));
         for index in 0..threads {
             let shared = pool.0.shared.clone();
@@ -164,6 +166,39 @@ impl Pool {
             .clone()
             .try_acquire_many_owned(weight)
             .map_err(|_| Error::Busy)?;
+        self.enqueue(slot, bytes, operation)
+    }
+    pub async fn submit_wait<T: Send + 'static>(
+        &self,
+        bytes: usize,
+        operation: impl FnOnce(Cancellation) -> T + Send + 'static,
+    ) -> Result<Pending<T>, Error> {
+        let weight = u32::try_from(bytes.max(1)).map_err(|_| Error::Busy)?;
+        if bytes.max(1) > self.0.byte_limit {
+            return Err(Error::Busy);
+        }
+        let slot = self
+            .0
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Stopped)?;
+        let bytes = self
+            .0
+            .bytes
+            .clone()
+            .acquire_many_owned(weight)
+            .await
+            .map_err(|_| Error::Stopped)?;
+        self.enqueue(slot, bytes, operation)
+    }
+    fn enqueue<T: Send + 'static>(
+        &self,
+        slot: OwnedSemaphorePermit,
+        bytes: OwnedSemaphorePermit,
+        operation: impl FnOnce(Cancellation) -> T + Send + 'static,
+    ) -> Result<Pending<T>, Error> {
         let (sender, receiver) = oneshot::channel();
         let cancel = Cancellation(Arc::new(AtomicBool::new(false)));
         let token = cancel.clone();
@@ -285,5 +320,40 @@ mod tests {
         assert!(completed.load(Ordering::Acquire));
         assert_eq!(running.await, Ok(9));
         releaser.join().unwrap();
+    }
+    #[tokio::test]
+    async fn asynchronous_capacity_wait_is_cancellable_and_oversize_never_waits() {
+        let pool = Pool::new(1, 1, 4).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, observed) = oneshot::channel();
+        let running = pool
+            .submit(4, move |_| {
+                let _ = started.send(());
+                wait.recv().unwrap();
+                7
+            })
+            .unwrap();
+        observed.await.unwrap();
+        let executed = Arc::new(AtomicBool::new(false));
+        let flag = executed.clone();
+        let mut waiting =
+            Box::pin(pool.submit_wait(4, move |_| flag.store(true, Ordering::Release)));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), waiting.as_mut())
+                .await
+                .is_err()
+        );
+        drop(waiting);
+        release.send(()).unwrap();
+        assert_eq!(running.await, Ok(7));
+        assert_eq!(pool.submit_wait(4, |_| 8).await.unwrap().await, Ok(8));
+        assert!(!executed.load(Ordering::Acquire));
+        assert!(matches!(pool.submit_wait(5, |_| 0).await, Err(Error::Busy)));
+        pool.stop();
+        assert!(matches!(
+            pool.submit_wait(1, |_| 0).await,
+            Err(Error::Stopped)
+        ));
+        pool.join().await;
     }
 }

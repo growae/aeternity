@@ -106,6 +106,9 @@ impl Service {
     }
     fn command(&mut self, command: Command) {
         match command {
+            Command::Peers(reply) => {
+                let _ = reply.send(Ok(self.peers.clients()));
+            }
             Command::Attach {
                 connection,
                 initiate,
@@ -385,6 +388,7 @@ impl Service {
                     self.peers.close(id);
                     return;
                 }
+                let client = entry.connection.client.clone();
                 if let net::Event::Message(received) = event {
                     if matches!(
                         received.message().kind(),
@@ -396,6 +400,7 @@ impl Service {
                     if self
                         .forwarded
                         .try_send(Forwarded {
+                            client,
                             peer,
                             event: net::Event::Message(received),
                         })
@@ -403,7 +408,15 @@ impl Service {
                     {
                         self.peers.close(id);
                     }
-                } else if self.forwarded.try_send(Forwarded { peer, event }).is_err() {
+                } else if self
+                    .forwarded
+                    .try_send(Forwarded {
+                        client,
+                        peer,
+                        event,
+                    })
+                    .is_err()
+                {
                     self.peers.close(id);
                 }
             }

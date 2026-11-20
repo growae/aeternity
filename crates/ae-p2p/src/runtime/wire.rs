@@ -58,7 +58,7 @@ pub(super) async fn handshake(
 }
 
 pub(super) struct Outgoing {
-    packet: Vec<u8>,
+    packet: Arc<[u8]>,
     next: usize,
     record: Vec<u8>,
     written: usize,
@@ -68,7 +68,7 @@ pub(super) struct Outgoing {
 }
 impl Outgoing {
     pub fn new(
-        packet: Vec<u8>,
+        packet: Arc<[u8]>,
         deadline: Instant,
         answer: Option<queue::Answer>,
         budget: tokio::sync::OwnedSemaphorePermit,
@@ -89,7 +89,7 @@ impl Outgoing {
         }
         let plaintext = if self.packet.len() <= framing::MAX_PAYLOAD {
             self.next = self.packet.len();
-            self.packet.clone()
+            self.packet.to_vec()
         } else {
             let total = self.packet.len().div_ceil(framing::MAX_FRAGMENT);
             let number = self.next / framing::MAX_FRAGMENT + 1;
