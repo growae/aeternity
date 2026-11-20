@@ -136,6 +136,20 @@ impl State {
             .insert(token, PendingInbound { address, timer });
         Ok(Outcome::Reserved(token))
     }
+    pub(super) fn reject_inbound(
+        &mut self,
+        token: Token,
+        reason: Option<Rejection>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<Outcome, Error> {
+        if let Some(pending) = self.pending.remove(&token) {
+            self.timers.remove(&pending.timer);
+            effects.push(Effect::Close(token));
+            Ok(reason.map_or(Outcome::Done, Outcome::Rejected))
+        } else {
+            Ok(Outcome::Stale)
+        }
+    }
     pub(super) fn accept(
         &mut self,
         token: Token,

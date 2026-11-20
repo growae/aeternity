@@ -120,6 +120,7 @@ impl State {
         Ok(Outcome::Updated(updated))
     }
     fn delete(&mut self, id: PeerPublicKey, effects: &mut Vec<Effect>) -> Result<(), Error> {
+        self.cancel_resolving_peer(id, effects);
         self.remove_connection(id, true, effects);
         self.pool.release(self.now, id)?;
         if self.pool.find(id).is_some() {
@@ -128,11 +129,33 @@ impl State {
         }
         Ok(())
     }
-    fn block(&mut self, info: Info, effects: &mut Vec<Effect>) -> Result<Outcome, Error> {
+    pub(super) fn block(
+        &mut self,
+        info: Info,
+        effects: &mut Vec<Effect>,
+    ) -> Result<Outcome, Error> {
+        self.block_address(
+            crate::address::Address {
+                id: info.id,
+                host: info.host,
+                port: Some(info.port.into()),
+            },
+            effects,
+        )
+    }
+    pub(super) fn block_address(
+        &mut self,
+        info: crate::address::Address,
+        effects: &mut Vec<Effect>,
+    ) -> Result<Outcome, Error> {
         self.maybe_unblock();
         let info = match self.pool.find(info.id) {
             Some(p) if p.trusted => return Ok(Outcome::Ignored),
-            Some(p) => Info::from(p),
+            Some(p) => crate::address::Address {
+                id: p.id,
+                host: p.host.clone(),
+                port: Some(p.port.into()),
+            },
             None => info,
         };
         if !self.blocked.contains_key(&info.id) && self.blocked.len() >= self.config.maximum_blocked
@@ -248,14 +271,9 @@ impl State {
             Command::Probe(class) => self.connect(None, Some(class), effects),
             Command::ReserveInbound { address } => self.reserve_inbound(address),
             Command::Accept { token, peer } => self.accept(token, peer, effects),
-            Command::AbandonInbound(token) => {
-                if let Some(p) = self.pending.remove(&token) {
-                    self.timers.remove(&p.timer);
-                    effects.push(Effect::Close(token));
-                    Ok(Outcome::Done)
-                } else {
-                    Ok(Outcome::Stale)
-                }
+            Command::AbandonInbound(token) => self.reject_inbound(token, None, effects),
+            Command::RejectInbound { token, reason } => {
+                self.reject_inbound(token, Some(reason), effects)
             }
             Command::Connected { peer, token } => self.connected(peer, token, effects),
             Command::Alive { peer, token } => self.alive(peer, token, effects),

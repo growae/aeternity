@@ -1,6 +1,32 @@
 use super::*;
 
 impl State {
+    pub(super) fn resolution_capacity(&self, host: &[u8], id: PeerPublicKey) -> bool {
+        let existing = self.hosts.get(host);
+        let replaces = existing.is_some_and(|r| r.peers.contains_key(&id));
+        self.config.maximum_peers_per_host != 0
+            && (replaces || self.counts().resolving_peers < self.config.maximum_resolving_peers)
+            && (existing.is_some() || self.hosts.len() < self.config.maximum_hosts)
+            && (replaces
+                || existing.is_none_or(|r| r.peers.len() < self.config.maximum_peers_per_host))
+    }
+    pub(super) fn cancel_resolving_peer(&mut self, peer: PeerPublicKey, effects: &mut Vec<Effect>) {
+        let hosts: Vec<_> = self
+            .hosts
+            .iter_mut()
+            .filter_map(|(host, r)| {
+                r.peers.remove(&peer);
+                r.peers.is_empty().then(|| host.clone())
+            })
+            .collect();
+        for host in hosts {
+            let removed = self.hosts.remove(&host).unwrap();
+            self.timers.remove(&removed.timer);
+            if let Some(token) = removed.attempt {
+                effects.push(Effect::CancelResolve(token));
+            }
+        }
+    }
     pub(super) fn resolve(
         &mut self,
         peer: Info,
@@ -13,14 +39,7 @@ impl State {
         }
         let host = peer.host.clone();
         let id = peer.id;
-        let existing = self.hosts.get(&host);
-        let replaces = existing.is_some_and(|r| r.peers.contains_key(&id));
-        if (!replaces && self.counts().resolving_peers >= self.config.maximum_resolving_peers)
-            || (existing.is_none() && self.hosts.len() >= self.config.maximum_hosts)
-            || (!replaces
-                && existing.is_some_and(|r| r.peers.len() >= self.config.maximum_peers_per_host))
-            || self.config.maximum_peers_per_host == 0
-        {
+        if !self.resolution_capacity(&host, id) {
             return Err(Error::ResourceLimit);
         }
         let data = ResolutionPeer {

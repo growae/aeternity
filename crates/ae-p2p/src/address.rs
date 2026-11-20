@@ -22,7 +22,7 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    fn validate(self) -> Result<(), Error> {
+    pub fn validate(self) -> Result<(), Error> {
         if self.bytes == 0
             || self.bytes > 1 << 20
             || self.host_bytes > 65536

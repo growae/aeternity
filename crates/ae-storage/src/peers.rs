@@ -351,6 +351,9 @@ impl Writer {
     pub fn version(&self) -> Result<Version, Error> {
         Ok(self.db.peer_view()?.version())
     }
+    pub fn network_id(&self) -> &[u8] {
+        &self.db.identity.network
+    }
     pub fn recovery_required(&self) -> bool {
         self.uncertain
     }

@@ -297,6 +297,52 @@ impl Client {
             .checked_mul(128 + self.shared.host_bytes)
             .ok_or(Error::RequestTooLarge)
     }
+    pub fn configure_startup(
+        &self,
+        now: u64,
+        configuration: super::startup::Configuration,
+        settings: super::startup::Settings,
+    ) -> Result<Ticket<super::startup::Progress>, Error> {
+        let mut bytes = 256usize;
+        for uri in configuration
+            .peers
+            .iter()
+            .chain(&configuration.blocked_peers)
+            .chain(configuration.defaults.iter().flatten())
+        {
+            bytes = bytes
+                .checked_add(64)
+                .and_then(|n| n.checked_add(uri.len()))
+                .ok_or(Error::RequestTooLarge)?;
+        }
+        self.submit(bytes, move |s| {
+            s.configure_startup(now, configuration, settings)
+        })
+    }
+    pub fn advance_startup(
+        &self,
+        now: u64,
+        maximum: usize,
+    ) -> Result<Ticket<super::startup::Progress>, Error> {
+        self.submit(256, move |s| s.advance_startup(now, maximum))
+    }
+    pub fn startup_status(&self) -> Result<Ticket<Option<super::startup::Progress>>, Error> {
+        self.submit(256, |s| Ok(s.startup_status()))
+    }
+    pub fn startup_diagnostics(
+        &self,
+        offset: usize,
+        maximum: usize,
+    ) -> Result<Ticket<Vec<super::startup::Diagnostic>>, Error> {
+        if maximum > self.shared.settings.maximum_sample {
+            return Err(Error::RequestTooLarge);
+        }
+        let bytes = maximum
+            .checked_mul(128)
+            .and_then(|n| n.checked_add(256))
+            .ok_or(Error::RequestTooLarge)?;
+        self.submit(bytes, move |s| s.startup_diagnostics(offset, maximum))
+    }
     pub fn recover(&self) -> Result<Ticket<Recovery>, Error> {
         self.submit(256, Service::recover)
     }

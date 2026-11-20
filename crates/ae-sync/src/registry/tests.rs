@@ -6,6 +6,9 @@ use ae_types::Hash256;
 use std::{net::Ipv4Addr, path::PathBuf};
 mod native;
 mod recovery;
+mod startup;
+mod startup_native;
+mod startup_recovery;
 
 pub(super) struct Temp(PathBuf);
 impl Temp {

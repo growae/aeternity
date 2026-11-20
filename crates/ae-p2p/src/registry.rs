@@ -217,6 +217,7 @@ pub enum Rejection {
     Blocked,
     AlreadyConnected,
     TrustedAddressChanged,
+    TrustedPending,
     Capacity,
     Ignored,
     Invalid,
@@ -307,6 +308,10 @@ pub enum Command {
         peer: Info,
     },
     AbandonInbound(Token),
+    RejectInbound {
+        token: Token,
+        reason: Rejection,
+    },
     Connected {
         peer: PeerPublicKey,
         token: Token,
@@ -398,7 +403,7 @@ struct State {
     random: StdRng,
     connections: BTreeMap<PeerPublicKey, OwnedConnection>,
     sockets: BTreeMap<SocketAddrV4, BTreeSet<PeerPublicKey>>,
-    blocked: BTreeMap<PeerPublicKey, Info>,
+    blocked: BTreeMap<PeerPublicKey, crate::address::Address>,
     pending: BTreeMap<Token, PendingInbound>,
     hosts: BTreeMap<Vec<u8>, Resolution>,
     probe_status: BTreeMap<PeerPublicKey, bool>,
@@ -556,6 +561,58 @@ impl Registry {
             change: Change { result, effects },
         })
     }
+    // Startup block installation is one prepared transition and is available
+    // only before any other policy command has been published.
+    pub fn prepare_initial_blocks(
+        &self,
+        now: u64,
+        peers: &[crate::address::Address],
+    ) -> Result<Prepared, Error> {
+        if self.revision != 0 || self.state.closed {
+            return Err(Error::Configuration);
+        }
+        if peers.len() > self.state.config.maximum_blocked
+            || peers
+                .iter()
+                .any(|p| p.host.len() > self.state.config.pool.maximum_host_bytes)
+        {
+            return Err(Error::ResourceLimit);
+        }
+        now.checked_add(self.state.config.maximum_delay())
+            .ok_or(Error::TimeOverflow)?;
+        let mut next = self.state.clone();
+        next.now = now;
+        let mut effects = vec![];
+        for peer in peers {
+            next.block_address(peer.clone(), &mut effects)?;
+        }
+        next.schedule_connect(None)?;
+        next.reconcile();
+        Ok(Prepared {
+            registry: self.state.registry,
+            revision: self.revision,
+            next,
+            change: Change {
+                result: Outcome::Done,
+                effects,
+            },
+        })
+    }
+    pub fn configuration(&self) -> &Config {
+        &self.state.config
+    }
+    pub fn local_peer(&self) -> PeerPublicKey {
+        self.state.local
+    }
+    pub fn resolution_capacity(&self, host: &[u8], peer: PeerPublicKey) -> bool {
+        self.state.resolution_capacity(host, peer)
+    }
+    pub fn resolving_peer(&self, host: &[u8], peer: PeerPublicKey) -> bool {
+        self.state
+            .hosts
+            .get(host)
+            .is_some_and(|r| r.peers.contains_key(&peer))
+    }
     // The owner must serialize preparation, durable persistence and publication.
     pub fn commit(&mut self, prepared: Prepared) -> Result<Change, Error> {
         if prepared.registry != self.state.registry || prepared.revision != self.revision {
@@ -577,7 +634,7 @@ impl Registry {
     pub fn connections(&self) -> impl Iterator<Item = &Connection> {
         self.state.connections.values().map(|c| &c.connection)
     }
-    pub fn blocked(&self) -> impl Iterator<Item = &Info> {
+    pub fn blocked(&self) -> impl Iterator<Item = &crate::address::Address> {
         self.state.blocked.values()
     }
     pub fn socket_peers(&self, socket: SocketAddrV4) -> impl Iterator<Item = PeerPublicKey> {
