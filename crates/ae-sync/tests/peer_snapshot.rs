@@ -130,3 +130,108 @@ fn one_snapshot_keeps_genesis_while_validated_public_key_and_micro_change_select
         }
     }
 }
+
+#[test]
+fn public_bootstrap_generations_include_stored_transactions_and_preserve_snapshot_selection() {
+    use ae_p2p::message::{Details, Kind, Value};
+    let node = Node::new();
+    let pinned = node.db.pool_view().unwrap();
+    let genesis = pinned.chain().identity().genesis;
+    let network = NetworkProfile::mainnet();
+    let config = ae_execution::transactions::Config::primitives(&network);
+    let rules = ae_chain::key::Rules::new(
+        ae_chain::admission::PowRules {
+            now_ms: u64::MAX - 600_000,
+            micro_cycle_ms: 3000,
+            configured_gas_limit: 6_000_000.into(),
+            body_limits: Default::default(),
+        },
+        genesis,
+    );
+    let blocks = blocks();
+    for block in &blocks {
+        let plan = ledger::prepare(
+            &node.db.view().unwrap(),
+            block,
+            &config,
+            &rules,
+            Default::default(),
+        )
+        .unwrap();
+        node.db.commit(plan).unwrap();
+    }
+    let stored = node.db.pool_view().unwrap();
+    let key = blocks[0].hash().unwrap();
+    let request = Message::new(
+        Kind::GetGeneration,
+        1,
+        std::collections::BTreeMap::from([
+            ("hash".into(), Value::Binary(key.0.to_vec())),
+            ("forward".into(), Value::Boolean(true)),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    let response = snapshot::serve(&stored, &request, Default::default())
+        .unwrap()
+        .unwrap();
+    let Details::Response {
+        message: Some(Ok(body)),
+        ..
+    } = response.details()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        body.fields()["key_block"],
+        Value::Binary(blocks[0].encode().unwrap())
+    );
+    assert_eq!(
+        body.fields()["micro_blocks"],
+        Value::List(vec![Value::Binary(blocks[1].encode().unwrap())])
+    );
+    let old = snapshot::serve(&pinned, &request, Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.fields()["reason"],
+        Value::Binary(b"block_not_found".to_vec())
+    );
+    let request = Message::new(
+        Kind::GetSuccessors,
+        2,
+        std::collections::BTreeMap::from([
+            ("from_hash".into(), Value::Binary(genesis.0.to_vec())),
+            (
+                "target_hash".into(),
+                Value::Binary(blocks[1].hash().unwrap().0.to_vec()),
+            ),
+            ("n".into(), Value::Integer(u64::MAX.into())),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    let response = snapshot::serve(&stored, &request, Default::default())
+        .unwrap()
+        .unwrap();
+    let Details::Response {
+        message: Some(Ok(body)),
+        ..
+    } = response.details()
+    else {
+        panic!()
+    };
+    let mut entry = 1u64.to_be_bytes().to_vec();
+    entry.extend(key.0);
+    assert_eq!(
+        body.fields()["header_hashes"],
+        Value::List(vec![Value::Binary(entry)])
+    );
+    let old = snapshot::serve(&pinned, &request, Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.fields()["reason"],
+        Value::Binary(b"not_on_chain".to_vec())
+    );
+}

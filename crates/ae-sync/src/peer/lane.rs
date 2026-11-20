@@ -360,7 +360,11 @@ impl Session {
     async fn serve(&mut self, received: net::Received) -> Result<(), Error> {
         if !matches!(
             received.message().kind(),
-            Kind::GetHeaderByHash | Kind::GetHeaderByHeight | Kind::GetBlockTransactions
+            Kind::GetHeaderByHash
+                | Kind::GetHeaderByHeight
+                | Kind::GetBlockTransactions
+                | Kind::GetSuccessors
+                | Kind::GetGeneration
         ) {
             return self.ctx.published.send(
                 EventKind::Unhandled {

@@ -17,6 +17,7 @@ mod history;
 pub mod retention;
 pub mod rollback;
 pub mod scan;
+pub mod serving;
 mod signaling;
 use codec::*;
 pub use decoding::ReadConfig;
@@ -53,6 +54,7 @@ pub enum Error {
     Backend(String),
     Corrupt(&'static str),
     Missing(Hash256),
+    MissingCanonicalKey(u64),
     ResourceLimit,
     UnsupportedBlock,
     TransactionStorage(ae_tx::storage::Error),

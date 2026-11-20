@@ -646,6 +646,75 @@ async fn headers_and_transaction_expansion_are_served_from_actual_storage() {
 }
 
 #[tokio::test]
+async fn successors_and_generations_are_served_over_the_actual_encrypted_application() {
+    let node = Node::new();
+    let app = start(&node, config(), Default::default()).await;
+    let (client, _events, task) = connect(&node, &app).await;
+    response(&client, &ping(&node, 2, true)).await;
+    let view = node.db.view().unwrap();
+    let genesis = view.identity().genesis;
+    for forward in [true, false] {
+        let generation = message(
+            Kind::GetGeneration,
+            1,
+            &[
+                ("hash", Value::Binary(genesis.0.to_vec())),
+                ("forward", Value::Boolean(forward)),
+            ],
+        );
+        let result = response(&client, &generation).await;
+        assert_eq!(body(&result).fields()["forward"], Value::Boolean(forward));
+        assert_eq!(body(&result).fields()["micro_blocks"], Value::List(vec![]));
+        assert_eq!(
+            body(&result).fields()["key_block"],
+            Value::Binary(view.require_block(genesis).unwrap().encode().unwrap())
+        );
+        let missing = alter(&generation, &[("hash", Value::Binary(vec![]))]);
+        assert_eq!(
+            response(&client, &missing).await.message().fields()["reason"],
+            Value::Binary(b"block_not_found".to_vec())
+        );
+    }
+    for version in [1, 2] {
+        let mut fields = vec![
+            (
+                if version == 1 { "hash" } else { "from_hash" },
+                Value::Binary(genesis.0.to_vec()),
+            ),
+            (
+                "n",
+                Value::Integer(
+                    ae_types::Unsigned::from_field_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                        .unwrap(),
+                ),
+            ),
+        ];
+        if version == 2 {
+            fields.push(("target_hash", Value::Binary(genesis.0.to_vec())));
+        }
+        let successors = message(Kind::GetSuccessors, version, &fields);
+        let result = response(&client, &successors).await;
+        assert_eq!(body(&result).fields()["header_hashes"], Value::List(vec![]));
+        if version == 2 {
+            let missing = alter(
+                &successors,
+                &[
+                    ("from_hash", Value::Binary(vec![])),
+                    ("target_hash", Value::Binary(vec![])),
+                ],
+            );
+            assert_eq!(
+                response(&client, &missing).await.message().fields()["reason"],
+                Value::Binary(b"not_on_chain".to_vec())
+            );
+        }
+    }
+    client.shutdown();
+    within(task).await.unwrap();
+    stop(app).await;
+}
+
+#[tokio::test]
 async fn matching_top_schedules_real_pool_sync_and_emits_generation_intent_in_order() {
     let node = Node::new();
     let mut app = start(&node, config(), Default::default()).await;

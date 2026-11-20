@@ -188,6 +188,7 @@ dependencies = [
  "ae-protocol",
  "ae-state",
  "ae-storage",
+ "ae-trie",
  "ae-tx",
  "ae-types",
  "hex",

@@ -1,6 +1,6 @@
 use ae_chain::{
     block::Block,
-    repository::{self, Read, View},
+    repository::{self, Read, View, serving},
 };
 use ae_p2p::{
     message::{self, Kind, Message, Value},
@@ -83,6 +83,79 @@ pub fn serve<S: Read>(
     let chain = view.chain();
     let fields = request.fields();
     match request.kind() {
+        Kind::GetSuccessors => {
+            let from = if request.version() == 1 {
+                "hash"
+            } else {
+                "from_hash"
+            };
+            let Value::Integer(n) = &fields["n"] else {
+                unreachable!("decoded schema")
+            };
+            let result = hash(&fields[from])
+                .map(|h| serving::successors(chain, h, n, serving_limits(limits)))
+                .transpose()?
+                .flatten();
+            if request.version() == 2 {
+                let canonical = hash(&fields["target_hash"])
+                    .map(|h| chain.is_canonical(h))
+                    .transpose()?
+                    .unwrap_or(false);
+                if !canonical {
+                    return refusal(Kind::HeaderHashes, b"not_on_chain", limits).map(Some);
+                }
+            }
+            let Some(successors) = result else {
+                return refusal(Kind::HeaderHashes, b"block_not_found", limits).map(Some);
+            };
+            let hashes = successors
+                .into_iter()
+                .map(|(height, hash)| {
+                    let mut bytes = height.to_be_bytes().to_vec();
+                    bytes.extend(hash.0);
+                    Value::Binary(bytes)
+                })
+                .collect();
+            answer(
+                Kind::HeaderHashes,
+                BTreeMap::from([("header_hashes".into(), Value::List(hashes))]),
+                limits,
+            )
+            .map(Some)
+        }
+        Kind::GetGeneration => {
+            let Value::Boolean(forward) = fields["forward"] else {
+                unreachable!("decoded schema")
+            };
+            let result = hash(&fields["hash"])
+                .map(|h| serving::generation(chain, h, forward, serving_limits(limits)))
+                .transpose()?
+                .flatten();
+            let Some(generation) = result else {
+                return refusal(Kind::Generation, b"block_not_found", limits).map(Some);
+            };
+            let encode =
+                |block: Block| block.encode().map(Value::Binary).map_err(|_| Error::Header);
+            answer(
+                Kind::Generation,
+                BTreeMap::from([
+                    ("key_block".into(), encode(generation.key)?),
+                    (
+                        "micro_blocks".into(),
+                        Value::List(
+                            generation
+                                .micros
+                                .into_iter()
+                                .map(encode)
+                                .collect::<Result<_, _>>()?,
+                        ),
+                    ),
+                    ("forward".into(), Value::Boolean(forward)),
+                ]),
+                limits,
+            )
+            .map(Some)
+        }
         Kind::GetHeaderByHash | Kind::GetHeaderByHeight => {
             let key = if request.kind() == Kind::GetHeaderByHash {
                 hash(&fields["hash"])
@@ -144,5 +217,11 @@ pub fn serve<S: Read>(
             .map(Some)
         }
         _ => Ok(None),
+    }
+}
+fn serving_limits(limits: message::Limits) -> serving::Limits {
+    serving::Limits {
+        items: limits.items,
+        bytes: limits.body_bytes.min(limits.work_bytes),
     }
 }

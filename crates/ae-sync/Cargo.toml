@@ -17,6 +17,7 @@ ae-types.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ae-trie.workspace = true
 ae-execution.workspace = true
 ae-state.workspace = true
 ae-crypto.workspace = true
