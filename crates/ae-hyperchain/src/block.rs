@@ -63,7 +63,7 @@ pub enum Error<E, A = MemoryStore, C = MemoryStore> {
     ParentNotSynced { wait_ms: Unsigned },
 }
 impl<E, A, C> Error<E, A, C> {
-    fn operational<H: Host<Error = E>>(&self) -> bool {
+    pub(crate) fn operational<H: Host<Error = E>>(&self) -> bool {
         match self {
             Self::Chain(e) => e.is_operational(),
             Self::Contract(e) => !e.is_native(),

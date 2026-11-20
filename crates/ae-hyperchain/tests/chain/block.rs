@@ -142,7 +142,7 @@ fn map(rows: Vec<(J, J)>) -> J {
             .collect::<Vec<_>>()
     ])
 }
-fn cache(s: &b::State) -> J {
+pub(super) fn cache(s: &b::State) -> J {
     json!({"leaders":named(vec![
         ("epochs",list(s.leaders.epochs().iter().map(int).collect())),
         ("epoch_infos",map(s.leaders.ranges().iter().map(|(e,(f,l))|(int(e),tuple(vec![int(f),int(l)]))).collect())),

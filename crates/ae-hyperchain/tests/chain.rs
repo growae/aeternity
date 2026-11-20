@@ -30,6 +30,8 @@ mod block;
 mod genesis;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
+#[path = "chain/producer.rs"]
+mod producer;
 fn unpack(s: &str) -> J {
     fn u(v: &J, p: &[J]) -> J {
         match v {

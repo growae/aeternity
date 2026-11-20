@@ -148,6 +148,9 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     pub fn stakers(&self) -> BTreeSet<AccountPublicKey> {
         self.keys.keys().copied().collect()
     }
+    pub(crate) fn signing_keys(&self) -> Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>> {
+        self.keys.clone()
+    }
     pub fn update_epoch(&mut self, epoch: Unsigned) {
         self.pool.update_epoch(epoch);
     }

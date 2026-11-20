@@ -10,3 +10,5 @@ pub mod leader;
 pub mod parent_block;
 pub mod parent_cache;
 pub mod parent_connector;
+pub mod producer;
+pub mod signing;
