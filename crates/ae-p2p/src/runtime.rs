@@ -81,7 +81,7 @@ impl Default for Config {
     }
 }
 impl Config {
-    fn validate(self) -> Result<(), Error> {
+    pub fn validate(self) -> Result<(), Error> {
         let max = Semaphore::MAX_PERMITS.min(u32::MAX as usize);
         if self.commands == 0
             || self.commands > max
@@ -96,6 +96,7 @@ impl Config {
         {
             return Err(Error::Configuration);
         }
+        requests::Requests::new(self.requests, self.minimum_ping).map_err(Error::Request)?;
         for duration in [
             self.handshake_timeout,
             self.write_timeout,

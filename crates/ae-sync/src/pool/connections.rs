@@ -2,7 +2,7 @@ use super::*;
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
-    task::Poll,
+    task::{Context, Poll},
 };
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -11,6 +11,7 @@ pub struct Connection {
     events: net::Events,
     driver: Pin<Box<dyn Future<Output = net::Exit> + Send>>,
     exit: Option<net::Exit>,
+    buffered: VecDeque<net::Event>,
 }
 impl Connection {
     pub fn new(
@@ -26,10 +27,45 @@ impl Connection {
             events,
             driver: Box::pin(driver.run()),
             exit: None,
+            buffered: VecDeque::new(),
         })
     }
     pub fn peer(&self) -> PeerPublicKey {
         self.client.peer()
+    }
+    pub fn client(&self) -> &net::Client {
+        &self.client
+    }
+    fn poll_driver(&mut self, cx: &mut Context<'_>) {
+        if self.exit.is_none()
+            && let Poll::Ready(exit) = self.driver.as_mut().poll(cx)
+        {
+            self.exit = Some(exit);
+        }
+    }
+    fn poll_wire_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<net::Event>> {
+        let future = self.events.recv();
+        let mut future = std::pin::pin!(future);
+        future.as_mut().poll(cx)
+    }
+    // Admission keeps the same driver future and replays retained events after
+    // handoff. Neither encrypted stream state nor incoming byte credits reset.
+    pub(crate) async fn admission_event(&mut self) -> Result<net::Event, net::Error> {
+        poll_fn(|cx| {
+            self.poll_driver(cx);
+            if let Some(exit) = &self.exit {
+                return Poll::Ready(Err(exit.reason.clone()));
+            }
+            match self.poll_wire_event(cx) {
+                Poll::Ready(Some(event)) => Poll::Ready(Ok(event)),
+                Poll::Ready(None) => Poll::Ready(Err(net::Error::Closed)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
+    pub(crate) fn retain_admission_event(&mut self, event: net::Event) {
+        self.buffered.push_back(event);
     }
 }
 impl Drop for Connection {
@@ -124,16 +160,11 @@ impl Connections {
             for offset in 0..length {
                 let index = (self.cursor + offset) % length;
                 let entry = &mut self.entries[index];
-                if entry.connection.exit.is_none()
-                    && let Poll::Ready(exit) = entry.connection.driver.as_mut().poll(cx)
-                {
-                    entry.connection.exit = Some(exit);
-                }
+                entry.connection.poll_driver(cx);
                 if !entry.busy {
-                    let event = {
-                        let future = entry.connection.events.recv();
-                        let mut future = std::pin::pin!(future);
-                        future.as_mut().poll(cx)
+                    let event = match entry.connection.buffered.pop_front() {
+                        Some(event) => Poll::Ready(Some(event)),
+                        None => entry.connection.poll_wire_event(cx),
                     };
                     if let Poll::Ready(Some(event)) = event {
                         self.cursor = (index + 1) % length;
