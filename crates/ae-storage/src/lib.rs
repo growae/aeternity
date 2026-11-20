@@ -14,6 +14,7 @@ use std::{
 };
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod gc;
+pub mod peers;
 pub mod pool;
 pub mod replay;
 
@@ -26,6 +27,7 @@ pub struct Database {
     gc_worker: Mutex<std::sync::Weak<gc::worker::Shared>>,
     pool_owner: Mutex<std::sync::Weak<()>>,
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
+    peer_owner: Mutex<std::sync::Weak<()>>,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -148,11 +150,13 @@ impl Database {
             gc_worker: Mutex::new(Default::default()),
             pool_owner: Mutex::new(Default::default()),
             pool_worker: Mutex::new(Default::default()),
+            peer_owner: Mutex::new(Default::default()),
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
         result.validate_replay(importing)?;
         result.validate_pool()?;
+        result.validate_peers()?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
