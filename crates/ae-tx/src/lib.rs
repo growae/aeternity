@@ -23,6 +23,7 @@ pub use oracles::{OracleOperation, OracleTransaction};
 pub use schema::TransactionKind;
 pub use signed::{SignedTransaction, verify_signatures};
 pub use spend::Spend;
+pub use transaction::storage;
 pub use transaction::{
     GaMeta, Layer, PayingFor, Pricing, Transaction, TransactionLeaf, TransactionLimits,
     TransactionRef, Wrapper,

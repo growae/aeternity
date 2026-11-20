@@ -1,4 +1,5 @@
 use super::*;
+use crate::block::DecodeConfig;
 use serde_json::{Value as J, json};
 use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone, Debug, Default)]
@@ -174,7 +175,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
                 row["changed"].as_bool().unwrap()
             );
             let mut writes = Writes::new();
-            store_block(&mut writes, &b, &record).unwrap();
+            store_block(&mut writes, &b, &record, &ReadConfig::default()).unwrap();
             canonical(&v, &b, &mut change, &mut writes).unwrap();
             let mut effects = vec![];
             for tx in &change.requeue {
@@ -276,7 +277,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
     }
 }
 #[test]
-fn storage_refuses_to_lose_noncanonical_transaction_size_metadata() {
+fn storage_preserves_noncanonical_transaction_size_metadata() {
     use ae_tx::{CanonicalTransaction, SignedTransaction, Transaction};
     let d = data();
     let row = &d["traces"][0][2];
@@ -309,12 +310,373 @@ fn storage_refuses_to_lose_noncanonical_transaction_size_metadata() {
         fork: Hash256::ZERO,
     };
     let mut writes = Writes::new();
-    assert_eq!(
-        store_block(&mut writes, &block, &record),
-        Err(Error::UnsupportedBlock)
-    );
+    store_block(&mut writes, &block, &record, &ReadConfig::default()).unwrap();
+    let id = Identity::new(&NetworkProfile::mainnet(), Hash256::ZERO, Hash256::ZERO);
+    put(&mut writes, IDENTITY.to_vec(), id.encode());
+    put(&mut writes, STATUS.to_vec(), Status::default().encode());
+    let mut memory = Memory::default();
+    memory.apply(writes);
+    let v = View::load(memory).unwrap();
+    assert_eq!(v.require_block(block.hash().unwrap()).unwrap(), block);
+}
+#[test]
+fn original_mnesia_records_preserve_metadata_and_share_last_written_transactions() {
+    use ae_tx::{SignedTransaction, Transaction};
+    fn projection(tx: &SignedTransaction<Transaction>) -> J {
+        let mut layers = vec![];
+        let mut view = tx.transaction().view();
+        let mut signatures = tx.signatures();
+        loop {
+            layers.push(json!({
+                "size": view.wire_size(),
+                "signatures": signatures.iter().map(|s| hex::encode(s.0)).collect::<Vec<_>>(),
+                "prices": (1..=8).map(|p| {
+                    let costs = view.pricing(&50.into(), ae_protocol::Protocol::try_from(p).unwrap());
+                    json!({"protocol":p,"fee":costs.fee_gas.to_string(),"gas":costs.gas_limit.to_string(),"minimum":costs.minimum_fee.to_string()})
+                }).collect::<Vec<_>>()
+            }));
+            let Some(inner) = view.inner() else { break };
+            signatures = view.layer().unwrap().inner_signatures();
+            view = inner;
+        }
+        let context = match tx.transaction().leaf() {
+            ae_tx::TransactionLeaf::Contract(t)
+                if matches!(t.operation(), ae_tx::ContractOperation::Call { .. }) =>
+            {
+                json!([
+                    hex::encode(t.call_origin()),
+                    t.call_stack()
+                        .iter()
+                        .map(|n| num_bigint::BigUint::from_bytes_be(n.as_bytes()).to_string())
+                        .collect::<Vec<_>>()
+                ])
+            }
+            _ => json!([]),
+        };
+        json!({"canonical":hex::encode(tx.encode()),"hash":hex::encode(tx.hash().0),"layers":layers,"context":context})
+    }
+    let data: J =
+        serde_json::from_str(include_str!("../../tests/fixtures/erlang_tx_records.json")).unwrap();
+    let id = Identity::new(&NetworkProfile::mainnet(), Hash256::ZERO, Hash256::ZERO);
+    let mut initial = Writes::new();
+    put(&mut initial, IDENTITY.to_vec(), id.encode());
+    put(&mut initial, STATUS.to_vec(), Status::default().encode());
+    let mut db = Memory::default();
+    db.apply(initial);
+    let record = Record {
+        roots: Roots {
+            state: StateRoots::default(),
+            names: None,
+            oracles: None,
+        },
+        difficulty: 0.into(),
+        fees: 0.into(),
+        fraud: false,
+        fork: Hash256::ZERO,
+    };
+    let mut kinds = BTreeSet::new();
+    for row in data["rows"].as_array().unwrap() {
+        let first = h(&row["hashes"][0]);
+        let mut retained = None;
+        for (step, expected) in ["before", "after_noncanonical", "after_canonical"]
+            .into_iter()
+            .enumerate()
+        {
+            let block = Block::decode(
+                &hex::decode(row["inputs"][step].as_str().unwrap()).unwrap(),
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(block.hash().unwrap(), h(&row["hashes"][step]));
+            let Block::Micro(m) = &block else { panic!() };
+            let tx = &m.transactions[0];
+            kinds.insert(format!("{:?}", tx.transaction().view().kind()));
+            assert_eq!(projection(tx), row[expected]);
+            let encoded = ae_tx::storage::encode(tx, Default::default()).unwrap();
+            let restored = ae_tx::storage::decode(&encoded, Default::default()).unwrap();
+            assert_eq!(restored, *tx);
+            let mut writes = Writes::new();
+            store_block(&mut writes, &block, &record, &ReadConfig::default()).unwrap();
+            db.apply(writes);
+            let view = View::load(db.clone()).unwrap();
+            assert_eq!(view.transaction(tx.hash()).unwrap().unwrap(), *tx);
+            let Block::Micro(old) = view.require_block(first).unwrap() else {
+                panic!()
+            };
+            assert_eq!(projection(&old.transactions[0]), row[expected]);
+            if step == 0 {
+                retained = Some(view);
+            }
+            let Block::Micro(pinned) = retained.as_ref().unwrap().require_block(first).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(projection(&pinned.transactions[0]), row["before"]);
+        }
+    }
+    assert_eq!(kinds.len(), 27);
+    assert_eq!(data["rows"].as_array().unwrap().len(), 264);
+    for row in data["contexts"].as_array().unwrap() {
+        let raw = hex::decode(row["block"].as_str().unwrap()).unwrap();
+        let (ae_codec::headers::Header::Micro(header), _) =
+            ae_codec::headers::Header::decode_partial(
+                &raw,
+                ae_codec::headers::HeaderMode::ProofOfWork,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let record_bytes = list(vec![
+            binary(hex::decode(row["expected"]["canonical"].as_str().unwrap()).unwrap()),
+            number(row["size"].as_u64().unwrap()),
+            list(vec![]),
+            list(vec![]),
+            list(vec![
+                binary(hex::decode(row["context"][0].as_str().unwrap()).unwrap()),
+                list(
+                    row["context"][1]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|n| binary(u(n).as_bytes()))
+                        .collect(),
+                ),
+            ]),
+        ])
+        .encode();
+        let mut stored = ae_tx::storage::MAGIC.to_vec();
+        stored.extend(record_bytes);
+        let tx = ae_tx::storage::decode(&stored, Default::default()).unwrap();
+        let ae_tx::TransactionLeaf::Contract(call) = tx.transaction().leaf() else {
+            panic!()
+        };
+        assert_eq!(
+            Block::decode(&raw, Default::default()).is_ok(),
+            call.actor().tag == ae_types::IdTag::Account
+        );
+        let block = Block::Micro(crate::block::MicroBlock {
+            header,
+            transactions: vec![tx],
+            proof: None,
+        });
+        assert_eq!(block.encode().unwrap(), raw);
+        let Block::Micro(m) = &block else { panic!() };
+        assert_eq!(projection(&m.transactions[0]), row["expected"]);
+        let mut writes = Writes::new();
+        store_block(&mut writes, &block, &record, &ReadConfig::default()).unwrap();
+        db.apply(writes);
+        let Block::Micro(restored) = View::load(db.clone())
+            .unwrap()
+            .require_block(block.hash().unwrap())
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(projection(&restored.transactions[0]), row["expected"]);
+    }
+    assert_eq!(data["contexts"].as_array().unwrap().len(), 36);
+    assert_eq!(data["restart_blocks"], 828);
+}
+#[test]
+fn stored_channel_trees_require_and_retain_the_explicit_atom_profile() {
+    use ae_tx::{CanonicalTransaction, SignedTransaction, Transaction, WireTransaction};
+    let data: J =
+        serde_json::from_str(include_str!("../../tests/fixtures/erlang_tx_records.json")).unwrap();
+    let row = data["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "aesc_force_progress_tx_1")
+        .unwrap();
+    let mut block = Block::decode(
+        &hex::decode(row["inputs"][0].as_str().unwrap()).unwrap(),
+        Default::default(),
+    )
+    .unwrap();
+    let Block::Micro(m) = &mut block else {
+        panic!()
+    };
+    let wire = WireTransaction::decode(&m.transactions[0].transaction().encode()).unwrap();
+    let mut trees = Trees {
+        accounts: Default::default(),
+        contracts: Contracts::new(MemoryStore::default()),
+        calls: Default::default(),
+        channels: Default::default(),
+        names: Default::default(),
+        oracles: Default::default(),
+    };
+    let mut name =
+        ae_state::names::Name::new([42; 32], ae_types::AccountPublicKey([1; 32]), 100.into());
+    name.status = b"stored_channel_status".to_vec();
+    trees.names.enter_name(&name).unwrap();
+    let state = trees.serialize_to_binary(Default::default()).unwrap();
+    let fields = wire
+        .fields()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                if k == "offchain_trees" {
+                    ae_codec::object::Value::Binary(state.clone())
+                } else {
+                    v.clone()
+                },
+            )
+        })
+        .collect();
+    let encoded = WireTransaction::new(wire.kind(), wire.version(), fields)
+        .unwrap()
+        .encode();
+    let config = ReadConfig {
+        existing_name_status_atoms: Some(Arc::new(BTreeSet::from([name.status]))),
+        ..Default::default()
+    };
+    let tx =
+        Transaction::decode_with_state_config(&encoded, config.transaction, config.block().state)
+            .unwrap();
+    m.transactions[0] = SignedTransaction::new(tx, vec![]);
+    let record = Record {
+        roots: Roots {
+            state: StateRoots::default(),
+            names: None,
+            oracles: None,
+        },
+        difficulty: 0.into(),
+        fees: 0.into(),
+        fraud: false,
+        fork: Hash256::ZERO,
+    };
+    let mut writes = Writes::new();
+    assert!(matches!(
+        store_block(&mut writes, &block, &record, &ReadConfig::default()),
+        Err(Error::TransactionStorage(
+            ae_tx::storage::Error::Transaction(ae_tx::Error::StateTransport(
+                ae_state::transport::Error::MissingAtomProfile(_)
+            ))
+        ))
+    ));
     assert!(writes.is_empty());
-    assert!(InsertError::<Memory>::from(Error::UnsupportedBlock).is_operational());
+    store_block(&mut writes, &block, &record, &config).unwrap();
+    put(
+        &mut writes,
+        IDENTITY.to_vec(),
+        Identity::new(&NetworkProfile::mainnet(), Hash256::ZERO, Hash256::ZERO).encode(),
+    );
+    put(&mut writes, STATUS.to_vec(), Status::default().encode());
+    let mut db = Memory::default();
+    db.apply(writes);
+    let hash = block.hash().unwrap();
+    assert!(matches!(
+        View::load(db.clone()).unwrap().require_block(hash),
+        Err(Error::TransactionStorage(
+            ae_tx::storage::Error::Transaction(ae_tx::Error::StateTransport(
+                ae_state::transport::Error::MissingAtomProfile(_)
+            ))
+        ))
+    ));
+    assert_eq!(
+        View::load_with_config(db, config)
+            .unwrap()
+            .require_block(hash)
+            .unwrap(),
+        block
+    );
+}
+#[test]
+fn block_and_transaction_record_corruption_cannot_replace_a_pinned_view() {
+    let block = Block::decode(
+        &hex::decode(data()["traces"][0][2]["block"].as_str().unwrap()).unwrap(),
+        Default::default(),
+    )
+    .unwrap();
+    let Block::Micro(m) = &block else { panic!() };
+    let tx = m.transactions[0].hash();
+    let hash = block.hash().unwrap();
+    let record = Record {
+        roots: Roots {
+            state: StateRoots::default(),
+            names: None,
+            oracles: None,
+        },
+        difficulty: 0.into(),
+        fees: 0.into(),
+        fraud: false,
+        fork: Hash256::ZERO,
+    };
+    let mut writes = Writes::new();
+    store_block(&mut writes, &block, &record, &ReadConfig::default()).unwrap();
+    put(
+        &mut writes,
+        IDENTITY.to_vec(),
+        Identity::new(&NetworkProfile::mainnet(), Hash256::ZERO, Hash256::ZERO).encode(),
+    );
+    put(&mut writes, STATUS.to_vec(), Status::default().encode());
+    let mut db = Memory::default();
+    db.apply(writes);
+    let pinned = View::load(db.clone()).unwrap();
+    let block_key = key(BLOCKS, hash.0);
+    let tx_key = key(TRANSACTIONS, tx.0);
+    let mut limited = ReadConfig::default();
+    limited.body.max_items = 0;
+    let mut empty = Writes::new();
+    assert_eq!(
+        store_block(&mut empty, &block, &record, &limited),
+        Err(Error::ResourceLimit)
+    );
+    assert!(empty.is_empty());
+    limited = ReadConfig {
+        max_transactions: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        View::load_with_config(db.clone(), limited)
+            .unwrap()
+            .require_block(hash),
+        Err(Error::ResourceLimit)
+    );
+    for mode in 0..7 {
+        let mut bad = db.clone();
+        let map = Arc::make_mut(&mut bad.kv);
+        match mode {
+            0 => {
+                map.remove(&tx_key);
+            }
+            1 => {
+                map.get_mut(&tx_key).unwrap()[5] = 99;
+            }
+            2 => {
+                map.get_mut(&block_key).unwrap()[8] = 99;
+            }
+            3 => {
+                map.get_mut(&block_key).unwrap().push(0);
+            }
+            _ => {
+                let raw = map.get(&block_key).unwrap();
+                let Value::List(mut f) = Value::decode(&raw[9..]).unwrap() else {
+                    panic!()
+                };
+                match mode {
+                    4 => f[1] = list(vec![binary([42; 32])]),
+                    5 => f[2] = binary([0]),
+                    _ => {
+                        let Value::Bytes(header) = &mut f[0] else {
+                            panic!()
+                        };
+                        header[10] ^= 1;
+                    }
+                }
+                let mut altered = raw[..9].to_vec();
+                altered.extend(list(f).encode());
+                map.insert(block_key.clone(), altered);
+            }
+        }
+        assert!(
+            View::load(bad).unwrap().require_block(hash).is_err(),
+            "mode {mode}"
+        );
+        assert_eq!(pinned.require_block(hash).unwrap(), block);
+    }
 }
 #[test]
 fn generation_reset_policy_and_persistent_records_reject_malformed_values() {

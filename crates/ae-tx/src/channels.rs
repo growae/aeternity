@@ -188,7 +188,7 @@ pub struct ChannelTransaction {
     fee: Unsigned,
     ttl: Unsigned,
     nonce: Unsigned,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
     canonical: Vec<u8>,
 }
 impl ChannelTransaction {

@@ -233,6 +233,116 @@ fn actual_public_generations_replay_persist_and_reopen_with_transaction_location
     }
 }
 #[test]
+fn noncanonical_public_micro_metadata_survives_restart_and_next_key_execution() {
+    use ae_codec::rlp::{self, Rlp};
+    use ae_tx::CanonicalTransaction;
+    let n = Network::Mainnet;
+    let dir = Temp::new();
+    let network = profile(n);
+    let config = transactions::Config::primitives(&network);
+    let all = blocks(n);
+    let mut micro = all[1].clone();
+    let Block::Micro(m) = &mut micro else {
+        panic!()
+    };
+    let canonical = m.transactions[0].clone();
+    let inner = canonical.transaction().encode();
+    assert_eq!(inner[0], 0xf8);
+    let mut noncanonical = vec![0xf8, inner[1] + 1, 0x81];
+    noncanonical.extend_from_slice(&inner[2..]);
+    let outer = canonical.encode();
+    let Rlp::List(mut fields) = rlp::decode(&outer).unwrap() else {
+        panic!()
+    };
+    fields[3] = Rlp::Bytes(&noncanonical);
+    m.transactions[0] = ae_tx::SignedTransaction::decode(&rlp::encode(&Rlp::List(fields))).unwrap();
+    let expected = m.transactions[0].clone();
+    assert_ne!(expected, canonical);
+    assert_eq!(expected.hash(), canonical.hash());
+    assert_eq!(expected.encode(), canonical.encode());
+    assert_eq!(
+        expected.transaction().view().wire_size(),
+        canonical.transaction().view().wire_size() + 1
+    );
+    assert_eq!(micro.hash().unwrap(), all[1].hash().unwrap());
+    let db = Database::open(&dir.0, identity(n)).unwrap();
+    bootstrap(&db, n);
+    db.commit(
+        ledger::prepare(
+            &db.view().unwrap(),
+            &all[0],
+            &config,
+            &rules(n),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    db.commit(
+        ledger::prepare(
+            &db.view().unwrap(),
+            &micro,
+            &config,
+            &rules(n),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.view()
+            .unwrap()
+            .require_block(micro.hash().unwrap())
+            .unwrap(),
+        micro
+    );
+    drop(db);
+    let limited = repo::ReadConfig {
+        max_transaction_record_bytes: 1,
+        ..Default::default()
+    };
+    assert!(matches!(
+        Database::open_with_config(&dir.0, identity(n), limited),
+        Err(repo::Error::TransactionStorage(
+            ae_tx::storage::Error::ResourceLimit
+        ))
+    ));
+    let db = Database::open(&dir.0, identity(n)).unwrap();
+    assert_eq!(
+        db.view()
+            .unwrap()
+            .transaction(expected.hash())
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+    let next = &all[2];
+    db.commit(
+        ledger::prepare(
+            &db.view().unwrap(),
+            next,
+            &config,
+            &rules(n),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let view = db.view().unwrap();
+    assert_eq!(
+        view.require_record(next.hash().unwrap()).unwrap().fees,
+        101014u64.into()
+    );
+    assert_eq!(
+        view.trees(next.hash().unwrap(), Default::default())
+            .unwrap()
+            .roots()
+            .hash()
+            .0,
+        next.header().common().state_hash
+    );
+}
+#[test]
 fn incomplete_or_incompatible_genesis_cannot_be_published() {
     use ae_trie::{MemoryStore, Nibbles, NodeReader, NodeWriter, Trie, Value};
     let n = Network::Mainnet;

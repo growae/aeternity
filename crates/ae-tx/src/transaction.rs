@@ -15,6 +15,7 @@ use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_types::{AccountPublicKey, Hash256, Id, IdTag, Signature, Unsigned};
 
 mod pricing;
+pub mod storage;
 pub use pricing::Pricing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +234,13 @@ impl TransactionLeaf {
         bytes: &[u8],
         config: ae_state::transport::Config<'_>,
     ) -> Result<Self, Error> {
+        Self::decode_record(bytes, config, false)
+    }
+    fn decode_record(
+        bytes: &[u8],
+        config: ae_state::transport::Config<'_>,
+        stored: bool,
+    ) -> Result<Self, Error> {
         let tag = object::decode_envelope_with_limits(
             bytes,
             ae_codec::rlp::DecodeLimits {
@@ -263,7 +271,7 @@ impl TransactionLeaf {
             | TransactionKind::OracleQuery
             | TransactionKind::OracleResponse => Self::Oracle(OracleTransaction::decode(bytes)?),
             TransactionKind::ContractCreate | TransactionKind::ContractCall => {
-                Self::Contract(ContractTransaction::decode(bytes)?)
+                Self::Contract(ContractTransaction::decode_record(bytes, stored)?)
             }
             TransactionKind::GaAttach => Self::GaAttach(GaAttachTransaction::decode(bytes)?),
             TransactionKind::ChannelCreate
@@ -389,6 +397,14 @@ impl Transaction {
         limits: TransactionLimits,
         config: ae_state::transport::Config<'_>,
     ) -> Result<Self, Error> {
+        Self::decode_record(bytes, limits, config, false)
+    }
+    fn decode_record(
+        bytes: &[u8],
+        limits: TransactionLimits,
+        config: ae_state::transport::Config<'_>,
+        stored: bool,
+    ) -> Result<Self, Error> {
         let mut current = bytes;
         let mut layers = Vec::new();
         let mut remaining = limits.max_total_bytes;
@@ -399,10 +415,12 @@ impl Transaction {
             let e = object::decode_envelope_with_limits(current, limits.rlp)?;
             let kind = TransactionKind::from_tag(e.tag).ok_or(Error::NotTransaction)?;
             if !matches!(kind, TransactionKind::GaMeta | TransactionKind::PayingFor) {
-                let leaf = TransactionLeaf::decode_with_state_config(current, config)?;
+                let leaf = TransactionLeaf::decode_record(current, config, stored)?;
                 layers.reverse();
                 let tx = Self { leaf, layers };
-                tx.validate_payer_nesting()?;
+                if !stored {
+                    tx.validate_payer_nesting()?;
+                }
                 return Ok(tx);
             }
             if layers.len() >= limits.max_layers {

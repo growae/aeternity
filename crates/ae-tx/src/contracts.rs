@@ -59,7 +59,7 @@ pub struct ContractTransaction {
     amount: Unsigned,
     gas: Unsigned,
     gas_price: Unsigned,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
     // Internal contract calls carry these fields; neither is serialized.
     call_origin: [u8; 32],
     call_stack: Vec<Unsigned>,
@@ -216,6 +216,14 @@ impl ContractTransaction {
 }
 impl CanonicalTransaction for ContractTransaction {
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        Self::decode_record(bytes, false)
+    }
+    fn encode(&self) -> Vec<u8> {
+        self.encode_record()
+    }
+}
+impl ContractTransaction {
+    pub(crate) fn decode_record(bytes: &[u8], internal: bool) -> Result<Self, Error> {
         let wire = WireTransaction::decode(bytes)?;
         let (actor, operation) = match wire.kind() {
             TransactionKind::ContractCreate => (
@@ -237,7 +245,11 @@ impl CanonicalTransaction for ContractTransaction {
             ),
             _ => return Err(Error::WrongTransactionKind),
         };
-        if actor.tag != IdTag::Account {
+        if actor.tag != IdTag::Account
+            && !(internal
+                && actor.tag == IdTag::Contract
+                && matches!(operation, ContractOperation::Call { .. }))
+        {
             return Err(Error::InvalidIdType);
         }
         operation.validate()?;
@@ -255,7 +267,7 @@ impl CanonicalTransaction for ContractTransaction {
             call_stack: vec![],
         })
     }
-    fn encode(&self) -> Vec<u8> {
+    fn encode_record(&self) -> Vec<u8> {
         let mut fields = vec![
             (
                 match self.operation {

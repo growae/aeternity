@@ -12,7 +12,7 @@ pub struct HcVote {
     epoch: Unsigned,
     vote_type: Unsigned,
     data: BTreeMap<Vec<u8>, Vec<u8>>,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
 }
 
 // The original client view retains binary map keys and values. JSON adapters

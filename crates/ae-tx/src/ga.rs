@@ -17,7 +17,7 @@ pub struct GaAttachTransaction {
     gas: Unsigned,
     gas_price: Unsigned,
     call_data: Vec<u8>,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
 }
 impl GaAttachTransaction {
     pub fn new(

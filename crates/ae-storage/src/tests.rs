@@ -53,6 +53,101 @@ fn plan(db: &Database) -> Update {
     .unwrap()
 }
 #[test]
+fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
+    use ae_trie::Value;
+    use ae_tx::{SignedTransaction, Spend, Transaction, TransactionLeaf};
+    use ae_types::{AccountPublicKey, Id, IdTag};
+    let dir = Temp::new();
+    let id = identity();
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    db.commit(plan(&db)).unwrap();
+    let tx = SignedTransaction::new(
+        Transaction::new(TransactionLeaf::Spend(
+            Spend::new(AccountPublicKey([1; 32]), Id::new(IdTag::Account, [2; 32])).unwrap(),
+        )),
+        vec![],
+    );
+    let Value::List(mut fields) = Value::decode(&id.encode()).unwrap() else {
+        panic!()
+    };
+    fields[0] = Value::Bytes(vec![1]);
+    let legacy = Value::List(fields).encode();
+    let legacy_block = db
+        .view()
+        .unwrap()
+        .require_block(id.genesis)
+        .unwrap()
+        .encode()
+        .unwrap();
+    db.db
+        .put(repo::key(repo::BLOCKS, id.genesis.0), legacy_block)
+        .unwrap();
+    db.db.put(repo::IDENTITY, &legacy).unwrap();
+    db.db
+        .put(repo::key(repo::TRANSACTIONS, tx.hash().0), tx.encode())
+        .unwrap();
+    let before = db.view().unwrap().source().prefix(&[], 10000).unwrap();
+    drop(db);
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    assert_eq!(db.db.get(repo::IDENTITY).unwrap().unwrap(), id.encode());
+    assert_eq!(
+        db.view().unwrap().transaction(tx.hash()).unwrap().unwrap(),
+        tx
+    );
+    let after = db.view().unwrap().source().prefix(&[], 10000).unwrap();
+    let without_identity = |pairs: repo::Entries| {
+        pairs
+            .into_iter()
+            .filter(|(k, _)| k != repo::IDENTITY)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(without_identity(before), without_identity(after));
+    assert_eq!(db.view().unwrap().status().revision, 1);
+}
+#[test]
+fn failed_legacy_validation_never_advances_the_schema_marker() {
+    use ae_trie::Value;
+    let dir = Temp::new();
+    let id = identity();
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    db.commit(plan(&db)).unwrap();
+    let root = db
+        .view()
+        .unwrap()
+        .require_record(id.genesis)
+        .unwrap()
+        .roots
+        .state
+        .accounts
+        .unwrap();
+    let node = db.db.get(repo::key(repo::NODES, root.0)).unwrap().unwrap();
+    let Value::List(mut fields) = Value::decode(&id.encode()).unwrap() else {
+        panic!()
+    };
+    fields[0] = Value::Bytes(vec![1]);
+    let legacy = Value::List(fields).encode();
+    let legacy_block = db
+        .view()
+        .unwrap()
+        .require_block(id.genesis)
+        .unwrap()
+        .encode()
+        .unwrap();
+    db.db
+        .put(repo::key(repo::BLOCKS, id.genesis.0), legacy_block)
+        .unwrap();
+    db.db.put(repo::IDENTITY, &legacy).unwrap();
+    db.db.delete(repo::key(repo::NODES, root.0)).unwrap();
+    drop(db);
+    assert!(Database::open(&dir.0, id.clone()).is_err());
+    let raw = DB::open_default(&dir.0).unwrap();
+    assert_eq!(raw.get(repo::IDENTITY).unwrap().unwrap(), legacy);
+    raw.put(repo::key(repo::NODES, root.0), node).unwrap();
+    drop(raw);
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    assert_eq!(db.db.get(repo::IDENTITY).unwrap().unwrap(), id.encode());
+}
+#[test]
 fn every_batch_construction_failure_keeps_the_database_unchanged_and_allows_retry() {
     let count = {
         let dir = Temp::new();

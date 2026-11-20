@@ -1,9 +1,6 @@
 // Rust-owned persistence schema. Consensus blocks and authenticated nodes keep
 // their original encodings; this database is not an Erlang/Mnesia directory.
-use crate::{
-    block::{Block, DecodeConfig},
-    fraud,
-};
+use crate::{block::Block, fraud};
 use ae_crypto::blake2b_256;
 use ae_protocol::NetworkProfile;
 use ae_state::{
@@ -13,9 +10,12 @@ use ae_state::{
 use ae_trie::{NodeReader, Overlay, OverlayLimits, Value};
 use ae_types::{Hash256, Unsigned};
 use std::collections::BTreeMap;
+mod blocks;
 mod codec;
+mod decoding;
 mod history;
 use codec::*;
+pub use decoding::ReadConfig;
 pub use history::vm_history;
 pub mod ledger;
 pub use ledger::{InsertError, Limits, Update, bootstrap, prepare};
@@ -46,6 +46,7 @@ pub enum Error {
     Missing(Hash256),
     ResourceLimit,
     UnsupportedBlock,
+    TransactionStorage(ae_tx::storage::Error),
     Identity,
     Conflict,
     AlreadyPresent,
@@ -56,6 +57,11 @@ pub enum Error {
 impl From<ae_trie::Error> for Error {
     fn from(e: ae_trie::Error) -> Self {
         Self::Trie(e)
+    }
+}
+impl From<ae_tx::storage::Error> for Error {
+    fn from(e: ae_tx::storage::Error) -> Self {
+        Self::TransactionStorage(e)
     }
 }
 impl std::fmt::Display for Error {
@@ -92,8 +98,11 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_version(2)
+    }
+    fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
-            number(1),
+            number(version),
             binary(&self.network),
             binary(self.genesis.0),
             binary(self.protocols.0),
@@ -104,7 +113,8 @@ impl Identity {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
-        if integer(&a[0])? != 1 {
+        let version = integer(&a[0])?;
+        if !matches!(version, 1 | 2) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();
@@ -117,7 +127,7 @@ impl Identity {
             protocols: hash(&a[3])?,
             execution_profile: hash(&a[4])?,
         };
-        if id.encode() != bytes {
+        if id.encode_version(version) != bytes {
             return Err(Error::Corrupt("identity encoding"));
         }
         Ok(id)
@@ -325,9 +335,13 @@ pub struct View<S> {
     source: S,
     identity: Identity,
     status: Status,
+    config: ReadConfig,
 }
 impl<S: Read> View<S> {
     pub fn load(source: S) -> Result<Self, Error> {
+        Self::load_with_config(source, ReadConfig::default())
+    }
+    pub fn load_with_config(source: S, config: ReadConfig) -> Result<Self, Error> {
         let identity = Identity::decode(
             &source
                 .get(IDENTITY)?
@@ -342,7 +356,11 @@ impl<S: Read> View<S> {
             source,
             identity,
             status,
+            config,
         })
+    }
+    pub fn config(&self) -> &ReadConfig {
+        &self.config
     }
     pub fn identity(&self) -> &Identity {
         &self.identity
@@ -357,17 +375,46 @@ impl<S: Read> View<S> {
         self.source
             .get(&key(BLOCKS, h.0))?
             .map(|b| {
-                let block = Block::decode(&b, DecodeConfig::default())
-                    .map_err(|_| Error::Corrupt("block encoding"))?;
-                if block.hash().map_err(|_| Error::Corrupt("block hash"))? != h
-                    || block
-                        .encode()
-                        .map_err(|_| Error::Corrupt("block encoding"))?
-                        != b
-                {
+                let block = blocks::decode(self, &b)?;
+                if block.hash().map_err(|_| Error::Corrupt("block hash"))? != h {
                     return Err(Error::Corrupt("block identity"));
                 }
                 Ok(block)
+            })
+            .transpose()
+    }
+    pub fn transaction(
+        &self,
+        hash: Hash256,
+    ) -> Result<Option<ae_tx::SignedTransaction<ae_tx::Transaction>>, Error> {
+        self.source
+            .get(&key(TRANSACTIONS, hash.0))?
+            .map(|b| {
+                let config = self.config.transaction_record();
+                if b.len() > config.max_record_bytes {
+                    return Err(ae_tx::storage::Error::ResourceLimit.into());
+                }
+                let tx = if b.first() == Some(&0) {
+                    ae_tx::storage::decode(&b, config)?
+                } else {
+                    // Version-1 databases stored canonical signed transport bytes.
+                    let t = ae_tx::SignedTransaction::decode_with_state_config(
+                        &b,
+                        config.transaction,
+                        config.state,
+                    )
+                    .map_err(|e| {
+                        Error::TransactionStorage(ae_tx::storage::Error::Transaction(e))
+                    })?;
+                    if t.encode() != b {
+                        return Err(Error::Corrupt("legacy transaction encoding"));
+                    }
+                    t
+                };
+                if tx.hash() != hash {
+                    return Err(Error::Corrupt("transaction hash"));
+                }
+                Ok(tx)
             })
             .transpose()
     }

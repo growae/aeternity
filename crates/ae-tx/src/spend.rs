@@ -11,7 +11,7 @@ pub struct Spend {
     ttl: Unsigned,
     nonce: Unsigned,
     payload: Vec<u8>,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
 }
 impl Spend {
     pub fn new(sender: AccountPublicKey, recipient: Id) -> Result<Self, Error> {

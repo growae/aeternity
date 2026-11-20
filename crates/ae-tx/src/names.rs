@@ -78,7 +78,7 @@ pub struct NameTransaction {
     nonce: Unsigned,
     fee: Unsigned,
     ttl: Unsigned,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
 }
 impl NameTransaction {
     pub fn new(account: AccountPublicKey, operation: NameOperation) -> Result<Self, Error> {

@@ -243,7 +243,7 @@ pub fn bootstrap<S: Read>(
     for s in stores(trees) {
         raw_nodes(&mut writes, s.nodes())?;
     }
-    store_block(&mut writes, &block, &record)?;
+    store_block(&mut writes, &block, &record, &view.config)?;
     put(&mut writes, key(CANONICAL, hash.0), vec![]);
     put(&mut writes, key(KEYS, 0u64.to_be_bytes()), hash.0.to_vec());
     put(&mut writes, key(ENDS, hash.0), vec![]);
@@ -272,22 +272,19 @@ pub fn bootstrap<S: Read>(
         limits.commit_bytes,
     )?)
 }
-fn store_block(w: &mut Writes, b: &Block, r: &Record) -> Result<(), Error> {
+fn store_block(w: &mut Writes, b: &Block, r: &Record, config: &ReadConfig) -> Result<(), Error> {
     let hash = b.hash().map_err(|_| Error::Corrupt("block hash"))?;
     let h = b.header();
-    let encoded = b.encode().map_err(|_| Error::UnsupportedBlock)?;
-    // The current schema stores canonical transport bytes. Noncanonical input
-    // can carry original transaction-size metadata that encoding would lose.
-    // Stop operationally rather than persist a different execution object.
-    let decoded = Block::decode(&encoded, DecodeConfig::default()).map_err(|e| {
-        if e.is_operational() {
-            Error::ResourceLimit
-        } else {
-            Error::UnsupportedBlock
+    let encoded = blocks::encode(b, config)?;
+    let mut transaction_records = Vec::new();
+    if let Block::Micro(original) = b {
+        for tx in &original.transactions {
+            let record = ae_tx::storage::encode(tx, config.transaction_record())?;
+            if ae_tx::storage::decode(&record, config.transaction_record())? != *tx {
+                return Err(Error::UnsupportedBlock);
+            }
+            transaction_records.push((tx.hash(), record));
         }
-    })?;
-    if decoded != *b {
-        return Err(Error::UnsupportedBlock);
     }
     put(w, key(BLOCKS, hash.0), encoded);
     put(w, key(RECORDS, hash.0), r.encode());
@@ -297,10 +294,8 @@ fn store_block(w: &mut Writes, b: &Block, r: &Record) -> Result<(), Error> {
     let mut height = h.common().height.to_be_bytes().to_vec();
     height.extend(hash.0);
     put(w, key(HEIGHTS, height), vec![]);
-    if let Block::Micro(m) = b {
-        for tx in &m.transactions {
-            put(w, key(TRANSACTIONS, tx.hash().0), tx.encode());
-        }
+    for (hash, record) in transaction_records {
+        put(w, key(TRANSACTIONS, hash.0), record);
     }
     Ok(())
 }
@@ -653,7 +648,7 @@ pub fn prepare<S: Read, O: MapOrder>(
     for s in stores(&state) {
         raw_nodes(&mut writes, s.pending())?;
     }
-    store_block(&mut writes, block, &record)?;
+    store_block(&mut writes, block, &record, &view.config)?;
     canonical(view, block, &mut change, &mut writes)?;
     if matches!(block, Block::Key(_)) {
         put(&mut writes, key(ENDS, current.0), vec![]);

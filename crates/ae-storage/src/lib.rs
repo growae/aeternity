@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use ae_chain::repository::{self as repo, Error, Identity, Read, Status, Update, View};
+use ae_chain::repository::{self as repo, Error, Identity, Read, ReadConfig, Status, Update, View};
 use ae_crypto::blake2b_256;
 use ae_trie::NodeReader;
 use ae_types::Hash256;
@@ -18,6 +18,7 @@ pub struct Database {
     identity: Identity,
     writer: Mutex<()>,
     source_id: u64,
+    config: ReadConfig,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -42,6 +43,13 @@ fn write_options() -> WriteOptions {
 }
 impl Database {
     pub fn open(path: impl AsRef<Path>, identity: Identity) -> Result<Self, Error> {
+        Self::open_with_config(path, identity, ReadConfig::default())
+    }
+    pub fn open_with_config(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+    ) -> Result<Self, Error> {
         if Identity::decode(&identity.encode())? != identity {
             return Err(Error::Identity);
         }
@@ -53,11 +61,13 @@ impl Database {
         o.set_max_write_buffer_number(2);
         o.set_max_background_jobs(2);
         let db = DB::open(&o, path).map_err(backend)?;
+        let mut upgrade = false;
         match db.get(repo::IDENTITY).map_err(backend)? {
             Some(b) => {
                 if Identity::decode(&b)? != identity {
                     return Err(Error::Identity);
                 }
+                upgrade = b != identity.encode();
             }
             None => {
                 if db
@@ -83,15 +93,30 @@ impl Database {
             identity,
             writer: Mutex::new(()),
             source_id,
+            config,
         };
         result.view()?.verify_tip()?;
+        if upgrade {
+            // Version 2 can read legacy canonical transaction values in place.
+            // Mark the new writer capability atomically only after validation;
+            // old binaries then refuse to open instead of losing metadata.
+            let mut batch = WriteBatch::default();
+            batch.put(repo::IDENTITY, result.identity.encode());
+            result
+                .db
+                .write_opt(batch, &write_options())
+                .map_err(backend)?;
+        }
         Ok(result)
     }
     pub fn view(&self) -> Result<View<Snapshot<'_>>, Error> {
-        View::load(Snapshot {
-            snapshot: Arc::new(self.db.snapshot()),
-            source_id: self.source_id,
-        })
+        View::load_with_config(
+            Snapshot {
+                snapshot: Arc::new(self.db.snapshot()),
+                source_id: self.source_id,
+            },
+            self.config.clone(),
+        )
     }
     pub fn commit(&self, update: Update) -> Result<Committed, Error> {
         self.commit_checked(update, || Ok(()))

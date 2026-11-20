@@ -87,6 +87,12 @@ pub(crate) fn encode_parts(signatures: &[Signature], bytes: Vec<u8>) -> Vec<u8> 
     .expect("typed signed transaction")
 }
 impl<T: CanonicalTransaction> SignedTransaction<T> {
+    pub(crate) fn from_stored_parts(transaction: T, signatures: Vec<Signature>) -> Self {
+        Self {
+            transaction,
+            signatures,
+        }
+    }
     pub fn new(transaction: T, mut signatures: Vec<Signature>) -> Self {
         signatures.sort();
         signatures.dedup();

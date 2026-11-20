@@ -63,7 +63,7 @@ pub struct OracleTransaction {
     nonce: Unsigned,
     fee: Unsigned,
     ttl: Unsigned,
-    wire_size: usize,
+    pub(crate) wire_size: usize,
 }
 impl OracleTransaction {
     pub fn new(account: AccountPublicKey, operation: OracleOperation) -> Result<Self, Error> {
