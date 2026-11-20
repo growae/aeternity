@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 ae-codec.workspace = true
 ae-types.workspace = true
+snow.workspace = true
+curve25519-dalek.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
