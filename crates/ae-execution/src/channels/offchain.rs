@@ -187,7 +187,11 @@ pub fn apply<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             let call = completed.call;
             insert_call(&mut next, &call)?;
             if call.return_type != ReturnType::Ok
-                && config.network.protocol_at(context.height) >= Protocol::Iris
+                && config
+                    .network
+                    .protocol_at(context.height)
+                    .map_err(Error::Profile)?
+                    >= Protocol::Iris
             {
                 tokens(
                     &mut next,

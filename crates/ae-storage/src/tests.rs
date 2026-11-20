@@ -54,7 +54,7 @@ fn plan(db: &Database) -> Update {
 }
 #[test]
 fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
-    for schema in 1..=2 {
+    for schema in 1..=3 {
         use ae_trie::Value;
         use ae_tx::{SignedTransaction, Spend, Transaction, TransactionLeaf};
         use ae_types::{AccountPublicKey, Id, IdTag};
@@ -118,7 +118,7 @@ fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records
 
 #[test]
 fn failed_legacy_validation_never_advances_the_schema_marker() {
-    for schema in 1..=2 {
+    for schema in 1..=3 {
         use ae_trie::Value;
         let dir = Temp::new();
         let id = identity();
@@ -374,7 +374,7 @@ fn finalized_record_corruption_and_future_schema_never_reinitialize_storage() {
     let List(mut fields) = ae_trie::Value::decode(&id.encode()).unwrap() else {
         panic!()
     };
-    fields[0] = Bytes(vec![4]);
+    fields[0] = Bytes(vec![5]);
     let encoded = List(fields).encode();
     db.db.put(repo::IDENTITY, &encoded).unwrap();
     drop(db);

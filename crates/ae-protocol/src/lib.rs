@@ -7,6 +7,7 @@ pub mod coinbase;
 pub mod contracts;
 pub mod names;
 pub mod oracles;
+pub mod signaling;
 
 // The configured consensus family is independent of the fork version or network ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +36,14 @@ pub enum ProfileError {
     WrongProtocol { expected: Protocol, actual: u32 },
     InvalidSchedule,
     ReservedNetworkId,
+    InvalidFork,
+    MissingForkDecision { height: u64 },
+    WrongForkDecision,
+}
+impl ProfileError {
+    pub fn is_operational(&self) -> bool {
+        !matches!(self, Self::WrongProtocol { .. })
+    }
 }
 
 impl TryFrom<u32> for Protocol {
@@ -64,6 +73,8 @@ pub struct Activation {
 pub struct NetworkProfile {
     network_id: Vec<u8>,
     activations: Vec<Activation>,
+    fork: Option<signaling::Fork>,
+    resolved: Option<(u64, u32)>,
 }
 
 pub const MAINNET_GENESIS_HASH: Hash256 = Hash256([
@@ -89,6 +100,8 @@ impl NetworkProfile {
         ];
         Self {
             network_id: id.to_vec(),
+            fork: None,
+            resolved: None,
             activations: heights
                 .into_iter()
                 .zip(protocols)
@@ -111,7 +124,37 @@ impl NetworkProfile {
         Ok(Self {
             network_id: id,
             activations,
+            fork: None,
+            resolved: None,
         })
+    }
+    pub fn with_community_fork(
+        mut self,
+        fork: Option<signaling::Fork>,
+    ) -> Result<Self, ProfileError> {
+        if let Some(fork) = fork {
+            if self.fixed_block_gas_limit().is_some() {
+                return Err(ProfileError::ReservedNetworkId);
+            }
+            fork.validate(*self.activations.last().expect("nonempty schedule"))?;
+        }
+        self.fork = fork;
+        self.resolved = None;
+        Ok(self)
+    }
+    pub fn community_fork(&self) -> Option<signaling::Fork> {
+        self.fork
+    }
+    // A resolution belongs to one height in one captured selected-chain view.
+    // Repository insertion recomputes it from its own immutable snapshot.
+    pub fn resolve(&self, height: u64, prior: signaling::Prior) -> Result<Self, ProfileError> {
+        let mut profile = self.clone();
+        profile.resolved = None;
+        if let Some(fork) = self.fork {
+            let version = fork.version_at(height, self.scheduled_protocol_at(height), prior)?;
+            profile.resolved = Some((height, version));
+        }
+        Ok(profile)
     }
     pub fn network_id(&self) -> &[u8] {
         &self.network_id
@@ -147,11 +190,25 @@ impl NetworkProfile {
     pub fn activations(&self) -> &[Activation] {
         &self.activations
     }
-    pub fn protocol_at(&self, height: u64) -> Protocol {
+    pub fn scheduled_protocol_at(&self, height: u64) -> Protocol {
         self.activations[self.activations.partition_point(|a| a.height <= height) - 1].protocol
     }
+    pub fn version_at(&self, height: u64) -> Result<u32, ProfileError> {
+        if self.fork.is_some_and(|fork| height >= fork.end) {
+            if let Some((h, version)) = self.resolved
+                && height == h
+            {
+                return Ok(version);
+            }
+            return Err(ProfileError::MissingForkDecision { height });
+        }
+        Ok(self.scheduled_protocol_at(height) as u32)
+    }
+    pub fn protocol_at(&self, height: u64) -> Result<Protocol, ProfileError> {
+        Protocol::try_from(self.version_at(height)?)
+    }
     pub fn validate_version(&self, height: u64, actual: u32) -> Result<Protocol, ProfileError> {
-        let expected = self.protocol_at(height);
+        let expected = self.protocol_at(height)?;
         if actual != expected as u32 {
             return Err(ProfileError::WrongProtocol { expected, actual });
         }
@@ -197,19 +254,22 @@ mod tests {
     fn every_public_fork_boundary_is_exact() {
         for profile in [NetworkProfile::mainnet(), NetworkProfile::uat()] {
             for (i, activation) in profile.activations().iter().enumerate() {
-                assert_eq!(profile.protocol_at(activation.height), activation.protocol);
                 assert_eq!(
-                    profile.protocol_at(activation.height + 1),
+                    profile.protocol_at(activation.height).unwrap(),
+                    activation.protocol
+                );
+                assert_eq!(
+                    profile.protocol_at(activation.height + 1).unwrap(),
                     activation.protocol
                 );
                 if i > 0 {
                     assert_eq!(
-                        profile.protocol_at(activation.height - 1),
+                        profile.protocol_at(activation.height - 1).unwrap(),
                         profile.activations()[i - 1].protocol
                     );
                 }
             }
-            assert_eq!(profile.protocol_at(u64::MAX), Protocol::Ceres);
+            assert_eq!(profile.protocol_at(u64::MAX).unwrap(), Protocol::Ceres);
             assert!(profile.validate_version(1_500_000, 7).is_err());
         }
     }

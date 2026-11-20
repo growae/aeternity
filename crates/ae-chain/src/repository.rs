@@ -14,6 +14,7 @@ mod blocks;
 mod codec;
 mod decoding;
 mod history;
+mod signaling;
 use codec::*;
 pub use decoding::ReadConfig;
 pub use history::vm_history;
@@ -35,6 +36,7 @@ pub const LOCATIONS: u8 = 9;
 pub const ENDS: u8 = 10;
 pub const EVENTS: u8 = 11;
 pub const PROOFS: u8 = 12;
+pub const SIGNALS: u8 = 13;
 pub fn key(prefix: u8, suffix: impl AsRef<[u8]>) -> Vec<u8> {
     let mut k = vec![prefix];
     k.extend_from_slice(suffix.as_ref());
@@ -53,6 +55,9 @@ pub enum Error {
     AlreadyPresent,
     Uninitialized,
     NotEmpty,
+    Protocol(ae_protocol::ProfileError),
+    NoCommunityFork,
+    NotLastSignalingBlock,
     Trie(ae_trie::Error),
 }
 impl From<ae_trie::Error> for Error {
@@ -102,7 +107,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(3)
+        self.encode_version(4)
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
@@ -118,7 +123,7 @@ impl Identity {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
         let version = integer(&a[0])?;
-        if !matches!(version, 1..=3) {
+        if !matches!(version, 1..=4) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();
@@ -144,6 +149,21 @@ fn protocols(p: &NetworkProfile) -> Hash256 {
             .map(|a| list(vec![number(a.height), number(a.protocol as u32 as u64)]))
             .collect(),
     );
+    let v = if let Some(f) = p.community_fork() {
+        list(vec![
+            binary(b"community_fork"),
+            v,
+            list(vec![
+                number(f.start),
+                number(f.end),
+                number(f.threshold),
+                number(f.info.into()),
+                number(f.version.into()),
+            ]),
+        ])
+    } else {
+        v
+    };
     blake2b_256(&v.encode())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

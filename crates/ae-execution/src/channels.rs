@@ -50,6 +50,7 @@ pub enum NativeFailure {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Profile(ae_protocol::ProfileError),
     Primitive(crate::Error),
     State(ae_state::channels::Error),
     Contract(ae_state::contracts::Error),

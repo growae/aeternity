@@ -68,6 +68,12 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
 impl<A, C> Error<A, C> {
     pub fn is_operational(&self) -> bool {
         match self {
+            Self::Admission(admission::PowError::Header(headers::Error::Protocol(e)))
+            | Self::Header(headers::Error::Protocol(e))
+                if e.is_operational() =>
+            {
+                true
+            }
             Self::Admission(admission::PowError::Body(e)) => e.is_operational(),
             Self::Header(
                 headers::Error::InvalidHistory | headers::Error::MissingHistory { .. },

@@ -502,6 +502,11 @@ pub fn prepare<S: Read, O: MapOrder>(
         view.finalized_height()?,
     )
     .map_err(|(height, top)| InsertError::Policy { height, top })?;
+    let (network, mut writes) =
+        view.resolve_protocol(config.network, header.common().height, limits.history)?;
+    if let (Block::Key(k), Some(fork)) = (block, network.community_fork()) {
+        view.insert_signal(k, fork, limits.history, &mut writes)?;
+    }
     let parent_hash = Hash256(header.common().previous_hash);
     let previous = view.require_block(parent_hash)?.header();
     let previous_key_hash = match &previous {
@@ -566,8 +571,11 @@ pub fn prepare<S: Read, O: MapOrder>(
     } else {
         Default::default()
     };
-    let (fees, fraud, events) =
-        super::history::with_history(config, vm_history, |config| -> Result<_, InsertError<S>> {
+    let (fees, fraud, events) = super::history::with_history(
+        config,
+        vm_history,
+        &network,
+        |config| -> Result<_, InsertError<S>> {
             Ok(match block {
                 Block::Micro(m) => {
                     let r = execution::pow_micro(m, &mut state, &parent, config, &rules.admission)
@@ -617,7 +625,8 @@ pub fn prepare<S: Read, O: MapOrder>(
                     )
                 }
             })
-        })?;
+        },
+    )?;
     let difficulty = match block {
         Block::Key(k) => input_record.difficulty.add(
             &Target(k.target)
@@ -659,7 +668,6 @@ pub fn prepare<S: Read, O: MapOrder>(
         }
     }
     let mut change = selection(view, block, &record, limits.ancestry)?;
-    let mut writes = Writes::new();
     raw_nodes(&mut writes, state.accounts.tree().store().pending())?;
     for s in stores(&state) {
         raw_nodes(&mut writes, s.pending())?;

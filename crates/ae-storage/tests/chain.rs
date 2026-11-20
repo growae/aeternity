@@ -632,8 +632,8 @@ fn crash_worker() {
         return;
     };
     let operation = std::env::var("AE_STORAGE_CRASH_OPERATION").unwrap();
-    let n = Network::Mainnet;
-    let db = Database::open(path, identity(n)).unwrap();
+    let (n, network, id) = crash_identity(&operation);
+    let db = Database::open(path, id).unwrap();
     if operation == "key" {
         db.update_resilience(
             ae_chain::resilience::Event::Start,
@@ -645,7 +645,6 @@ fn crash_worker() {
         .unwrap();
     }
     let view = db.view().unwrap();
-    let network = profile(n);
     let config = transactions::Config::primitives(&network);
     let plan = if operation == "policy" {
         None
@@ -706,16 +705,25 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
             let _ = self.0.wait();
         }
     }
-    let n = Network::Mainnet;
-    let network = profile(n);
-    let config = transactions::Config::primitives(&network);
-    let all = blocks(n);
-    for operation in ["genesis", "micro", "key", "policy"] {
+    for operation in ["genesis", "micro", "key", "policy", "signal"] {
+        let (n, network, id) = crash_identity(operation);
+        let config = transactions::Config::primitives(&network);
+        let all = blocks(n);
         for phase in ["before", "after", "race0", "race1", "race5", "race10"] {
             let dir = Temp::new();
-            let db = Database::open(&dir.0, identity(n)).unwrap();
+            let db = Database::open(&dir.0, id.clone()).unwrap();
             if operation != "genesis" {
-                bootstrap(&db, n);
+                db.commit(
+                    ledger::bootstrap(
+                        &db.view().unwrap(),
+                        &network,
+                        &genesis_key(n),
+                        &genesis_trees(n),
+                        Default::default(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
                 if operation == "key" {
                     db.update_resilience(
                         ae_chain::resilience::Event::Start,
@@ -727,7 +735,7 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
                     .unwrap();
                 }
                 let count = match operation {
-                    "micro" => 1,
+                    "micro" | "signal" => 1,
                     "key" => 4,
                     "policy" => all.len(),
                     _ => unreachable!(),
@@ -795,7 +803,7 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
             }
             child.0.kill().unwrap();
             child.0.wait().unwrap();
-            let db = Database::open(&dir.0, identity(n)).unwrap();
+            let db = Database::open(&dir.0, id.clone()).unwrap();
             let view = db.view().unwrap();
             let after = view.status();
             if operation == "policy" {
@@ -874,10 +882,162 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
                     }
                 );
             }
+            if operation == "signal" {
+                assert_eq!(
+                    view.signal_count(candidate).unwrap(),
+                    (after.revision != before.revision).then_some(0)
+                );
+            }
             eprintln!(
                 "Crash recovery {operation}/{phase}: revision {} -> {}",
                 before.revision, after.revision
             );
         }
+    }
+}
+
+#[test]
+fn community_signals_publish_atomically_reopen_and_bind_the_fork_configuration() {
+    use ae_protocol::{
+        Activation, Protocol,
+        signaling::{Fork, Prior},
+    };
+    let n = Network::Uat;
+    let temp = Temp::new();
+    let fork = Fork {
+        start: 2,
+        end: 4,
+        threshold: 1,
+        info: 7,
+        version: 3,
+    };
+    let network = NetworkProfile::custom(
+        b"ae_signal_replay".to_vec(),
+        vec![Activation {
+            height: 0,
+            protocol: Protocol::Roma,
+        }],
+    )
+    .unwrap()
+    .with_community_fork(Some(fork))
+    .unwrap();
+    let id = Identity::new(&network, identity(n).genesis, Hash256::ZERO);
+    let all = blocks(n);
+    assert_eq!(all.len(), 6);
+    let db = Database::open(&temp.0, id.clone()).unwrap();
+    let init = ledger::bootstrap(
+        &db.view().unwrap(),
+        &network,
+        &genesis_key(n),
+        &genesis_trees(n),
+        Limits::default(),
+    )
+    .unwrap();
+    db.commit(init).unwrap();
+    let pinned = db.view().unwrap();
+    for b in &all {
+        let view = db.view().unwrap();
+        let hash = b.hash().unwrap();
+        let height = b.header().common().height;
+        // A caller's cached decision must not override this snapshot's selected chain.
+        let stale = network.resolve(height, Prior::Missing).unwrap();
+        let config = transactions::Config::primitives(&stale);
+        let limited = ledger::Limits {
+            commit_bytes: 1,
+            ..Default::default()
+        };
+        let failure = ledger::prepare(&view, b, &config, &rules(n), limited).unwrap_err();
+        assert!(failure.is_operational());
+        assert_eq!(db.view().unwrap().status(), view.status());
+        assert_eq!(db.view().unwrap().signal_count(hash).unwrap(), None);
+        let plan = ledger::prepare(&view, b, &config, &rules(n), Limits::default()).unwrap();
+        assert_eq!(view.signal_count(hash).unwrap(), None);
+        db.commit(plan).unwrap();
+        let current = db.view().unwrap();
+        assert_eq!(
+            current.signal_count(hash).unwrap(),
+            fork.contains(height).then_some(0)
+        );
+        assert_eq!(
+            current
+                .protocol_profile(&network, height, 10)
+                .unwrap()
+                .protocol_at(height),
+            Ok(Protocol::Roma)
+        );
+        assert_eq!(
+            current.require_record(hash).unwrap().roots.state.hash().0,
+            b.header().common().state_hash
+        );
+    }
+    assert_eq!(pinned.status().revision, 1);
+    for b in &all {
+        assert_eq!(pinned.signal_count(b.hash().unwrap()).unwrap(), None);
+    }
+    drop(pinned);
+    drop(db);
+    let db = Database::open(&temp.0, id.clone()).unwrap();
+    let view = db.view().unwrap();
+    for b in &all {
+        let height = b.header().common().height;
+        assert_eq!(
+            view.signal_count(b.hash().unwrap()).unwrap(),
+            fork.contains(height).then_some(0)
+        );
+    }
+    assert_eq!(
+        view.fork_result(&network, all[2].hash().unwrap(), 0),
+        Ok(false)
+    );
+    assert_eq!(
+        view.protocol_profile(&network, 4, 0)
+            .unwrap()
+            .protocol_at(4),
+        Ok(Protocol::Roma)
+    );
+    drop(view);
+    drop(db);
+    let changed = network
+        .clone()
+        .with_community_fork(Some(Fork { info: 8, ..fork }))
+        .unwrap();
+    assert!(
+        Database::open(
+            &temp.0,
+            Identity::new(&changed, id.genesis, id.execution_profile)
+        )
+        .is_err()
+    );
+    assert!(Database::open(&temp.0, id).is_ok());
+}
+
+fn crash_identity(operation: &str) -> (Network, NetworkProfile, Identity) {
+    if operation == "signal" {
+        use ae_protocol::{Activation, Protocol, signaling::Fork};
+        let n = Network::Uat;
+        let p = NetworkProfile::custom(
+            b"ae_signal_crash".to_vec(),
+            vec![Activation {
+                height: 0,
+                protocol: Protocol::Roma,
+            }],
+        )
+        .unwrap()
+        .with_community_fork(Some(Fork {
+            start: 2,
+            end: 4,
+            threshold: 1,
+            info: 7,
+            version: 3,
+        }))
+        .unwrap();
+        let id = Identity::new(&p, identity(n).genesis, Hash256::ZERO);
+        (n, p, id)
+    } else {
+        (
+            Network::Mainnet,
+            profile(Network::Mainnet),
+            identity(Network::Mainnet),
+        )
     }
 }

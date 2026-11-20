@@ -128,6 +128,7 @@ pub fn vm_history<S: Read>(
 pub(super) fn with_history<O: MapOrder, R>(
     config: &transactions::Config<'_, O>,
     history: Arc<Snapshot>,
+    network: &ae_protocol::NetworkProfile,
     f: impl FnOnce(&transactions::Config<'_, O>) -> R,
 ) -> R {
     let fate = config.fate.map(|old| contracts::fate::Config {
@@ -146,7 +147,7 @@ pub(super) fn with_history<O: MapOrder, R>(
         a
     });
     let bound = transactions::Config {
-        network: config.network,
+        network,
         consensus: config.consensus,
         fate: fate.as_ref(),
         aevm: aevm.as_ref(),

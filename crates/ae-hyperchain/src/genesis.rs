@@ -65,6 +65,7 @@ pub struct Plan {
 }
 #[derive(Debug)]
 pub enum Error<A = MemoryStore, C = MemoryStore> {
+    Profile(ae_protocol::ProfileError),
     Transaction(ae_tx::Error),
     Account(AccountError),
     Contract(contracts::Error),
@@ -210,7 +211,10 @@ pub fn deploy<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .view()
         .pricing(
             &context.height.into(),
-            execution.network.protocol_at(context.height),
+            execution
+                .network
+                .protocol_at(context.height)
+                .map_err(Error::Profile)?,
         )
         .gas_limit;
     let funds = unsigned(number(tx.gas_price()) * gas + number(tx.amount()) + number(tx.fee()))?;

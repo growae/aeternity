@@ -122,7 +122,10 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             &c,
             *sender,
             tx.kind(),
-            config.network.protocol_at(context.height),
+            config
+                .network
+                .protocol_at(context.height)
+                .map_err(Error::Profile)?,
         )?;
         authentication::verify(
             signed,

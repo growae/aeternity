@@ -692,3 +692,89 @@ fn public_reward_policy_and_genesis_anchor_cannot_be_replaced_by_local_preferenc
     rewards::lock(&mut accounts, &0.into()).unwrap();
     assert_eq!(accounts.root_hash(), root);
 }
+
+#[test]
+fn community_fork_resolutions_apply_original_transition_states() {
+    use ae_protocol::signaling::{Fork, Prior};
+    let mut checked = 0;
+    for row in KEY["custom"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["protocol"].as_u64().unwrap() > 2)
+    {
+        let header = key_header(&row["header"]);
+        let height = header.common.height;
+        if Header::decode(&bytes(&row["previous"]), HeaderMode::ProofOfWork)
+            .unwrap()
+            .common()
+            .version
+            == header.common.version
+        {
+            continue;
+        }
+        let input = trees(&row["before"]);
+        let before = roots(&input);
+        with_context(row, |parent, config| {
+            let p = NetworkProfile::custom(
+                config.network.network_id().to_vec(),
+                vec![Activation {
+                    height: 0,
+                    protocol: Protocol::try_from(parent.headers.previous.common().version).unwrap(),
+                }],
+            )
+            .unwrap()
+            .with_community_fork(Some(Fork {
+                start: height - 1,
+                end: height,
+                threshold: 1,
+                info: 7,
+                version: header.common.version,
+            }))
+            .unwrap();
+            let unresolved = transactions::Config::primitives(&p);
+            let error = transition::pow_key(
+                &header,
+                &mut input.clone(),
+                parent,
+                &history(row),
+                &unresolved,
+                &settings(row),
+            )
+            .unwrap_err();
+            assert!(error.is_operational());
+            assert!(matches!(
+                error,
+                transition::Error::Admission(PowError::Header(
+                    ae_consensus::headers::Error::Protocol(
+                        ae_protocol::ProfileError::MissingForkDecision { .. }
+                    )
+                ))
+            ));
+            let selected = p.resolve(height, Prior::SignalingResult(true)).unwrap();
+            let bound = transactions::Config {
+                fate: config.fate,
+                aevm: config.aevm,
+                ..transactions::Config::primitives(&selected)
+            };
+            let prepared = transition::prepare(
+                &input,
+                &header,
+                parent,
+                &history(row),
+                &bound,
+                &settings(row),
+            )
+            .unwrap();
+            check(&prepared, row);
+            let failed = p.resolve(height, Prior::SignalingResult(false)).unwrap();
+            assert!(matches!(
+                failed.validate_version(height, header.common.version),
+                Err(ae_protocol::ProfileError::WrongProtocol { .. })
+            ));
+        });
+        assert_eq!(roots(&input), before);
+        checked += 1;
+    }
+    assert_eq!(checked, 24);
+}

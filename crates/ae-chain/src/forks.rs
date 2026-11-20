@@ -39,6 +39,7 @@ pub struct Migration {
 pub type CustomForks = BTreeMap<Protocol, Allocations>;
 #[derive(Debug)]
 pub enum Error<A = MemoryStore, C = MemoryStore> {
+    Profile(ae_protocol::ProfileError),
     Asset,
     ResourceLimit,
     Account(ae_state::accounts::AccountError),
@@ -239,7 +240,10 @@ pub fn apply<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .view()
         .pricing(
             &context.height.into(),
-            execution.network.protocol_at(context.height),
+            execution
+                .network
+                .protocol_at(context.height)
+                .map_err(Error::Profile)?,
         )
         .gas_limit;
     let funds = number(first.gas_price()) * first_gas * txs.len()
