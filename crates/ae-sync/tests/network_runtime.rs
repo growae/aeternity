@@ -326,6 +326,13 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     assert_eq!(facts.peer, remote.public_key());
     assert_eq!(facts.address, Ipv4Addr::LOCALHOST);
     assert_eq!(facts.kind, ae_p2p::registry::Kind::Permanent);
+    assert_eq!(h.network_id(), node.db.view().unwrap().identity().network);
+    assert!(
+        within(h.pool_counts(first_local.clone()).unwrap().wait())
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(received.message(), &ping(&node, 4321));
     within(
         first_local
@@ -351,6 +358,18 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     let (replacement_local, _) = forwarded(&mut forwarded_events).await;
     status(&mut h, |s| s.counts.accepted == 2).await;
     assert_ne!(first_local.generation(), replacement_local.generation());
+    assert_eq!(
+        within(h.pool_counts(first_local.clone()).unwrap().wait())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        within(h.pool_counts(replacement_local.clone()).unwrap().wait())
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         within(h.connection(first_local.clone()).unwrap().wait())
             .await

@@ -8,6 +8,7 @@ use ae_types::{PeerPublicKey, Unsigned};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+pub mod info;
 mod lane;
 mod service;
 pub mod snapshot;
@@ -27,6 +28,7 @@ pub struct Config {
     pub ping: ping::Config,
     pub messages: message::Limits,
     pub capabilities: Vec<ChainPoi>,
+    pub node_info: Option<info::Metadata>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -43,6 +45,7 @@ impl Default for Config {
             ping: Default::default(),
             messages: Default::default(),
             capabilities: vec![],
+            node_info: Some(info::Metadata::current()),
         }
     }
 }
@@ -67,6 +70,9 @@ impl Config {
             return Err(Error::Configuration);
         }
         self.ping.validate().map_err(Error::Ping)?;
+        if let Some(metadata) = &self.node_info {
+            metadata.validate().map_err(Error::Message)?;
+        }
         message::encode_capabilities(&self.capabilities, self.messages).map_err(Error::Message)?;
         Ok(())
     }

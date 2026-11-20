@@ -16,6 +16,69 @@ fn wait(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn discovery_counts_are_serialized_current_and_keep_unread_reply_credits() {
+    let temp = Temp::new();
+    let worker = Worker::start(
+        service(db(&temp), config()),
+        Settings {
+            requests: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let client = worker.client();
+    let rt = runtime();
+    assert_eq!(
+        rt.block_on(client.pool_counts().unwrap()).unwrap(),
+        PoolCounts::default()
+    );
+    rt.block_on(client.apply(1, Command::Add(peer(1, true))).unwrap())
+        .unwrap();
+    rt.block_on(client.apply(2, Command::Add(peer(2, false))).unwrap())
+        .unwrap();
+    let counts = client.pool_counts().unwrap();
+    assert!(matches!(client.inspect(), Err(Error::Saturated)));
+    assert_eq!(
+        rt.block_on(counts).unwrap(),
+        PoolCounts {
+            verified: 1,
+            unverified: 1
+        }
+    );
+    rt.block_on(
+        client
+            .apply(3, Command::Connect(Some(peer(2, false).id)))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rt.block_on(client.pool_counts().unwrap()).unwrap(),
+        PoolCounts {
+            verified: 1,
+            unverified: 1
+        }
+    );
+    assert_eq!(
+        rt.block_on(client.inspect().unwrap())
+            .unwrap()
+            .counts
+            .outbound,
+        2
+    );
+    rt.block_on(client.apply(4, Command::Delete(peer(2, false).id)).unwrap())
+        .unwrap();
+    assert_eq!(
+        rt.block_on(client.pool_counts().unwrap()).unwrap(),
+        PoolCounts {
+            verified: 1,
+            unverified: 0
+        }
+    );
+    worker.shutdown().unwrap();
+    assert!(matches!(client.pool_counts(), Err(Error::Stopped)));
+}
+
+#[test]
 fn dropped_observations_preserve_mutations_and_effects_and_unread_replies_hold_quotas() {
     let temp = Temp::new();
     let database = db(&temp);

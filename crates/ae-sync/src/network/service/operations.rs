@@ -488,6 +488,23 @@ impl Service {
         let result = match &mut command.work {
             Work::Policy(policy) => self.apply(policy.clone()).await,
             Work::Learn { client, peers } => self.learn(client, std::mem::take(peers)).await,
+            Work::PoolCounts { client, reply } => {
+                let result = async {
+                    if self.token(client).await?.is_none() {
+                        return Ok(None);
+                    }
+                    let ticket = self.client.pool_counts()?;
+                    self.wait(ticket).await.map(Some).map_err(Error::from)
+                }
+                .await;
+                match result {
+                    Ok(counts) => {
+                        let _ = reply.take().unwrap().send(counts);
+                        Ok(policy::Outcome::Done)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Work::Connection { client, reply } => match self.token(client).await {
                 Ok(token) => {
                     let info = token

@@ -191,6 +191,16 @@ pub struct ConnectionTicket {
     accepted: Ticket,
     result: oneshot::Receiver<Option<Connection>>,
 }
+pub struct PoolCountsTicket {
+    accepted: Ticket,
+    result: oneshot::Receiver<Option<registry::worker::PoolCounts>>,
+}
+impl PoolCountsTicket {
+    pub async fn wait(self) -> Result<Option<registry::worker::PoolCounts>, Error> {
+        self.accepted.wait().await?;
+        self.result.await.map_err(|_| Error::Closed)
+    }
+}
 impl ConnectionTicket {
     pub async fn wait(self) -> Result<Option<Connection>, Error> {
         self.accepted.wait().await?;
@@ -209,6 +219,10 @@ enum Work {
     Learn {
         client: net::Client,
         peers: Vec<policy::Info>,
+    },
+    PoolCounts {
+        client: net::Client,
+        reply: Option<oneshot::Sender<Option<registry::worker::PoolCounts>>>,
     },
 }
 struct Command {
@@ -229,6 +243,7 @@ impl Command {
 #[derive(Clone)]
 pub struct Handle {
     database: std::sync::Weak<Database>,
+    network_id: Arc<[u8]>,
     peers: pool::Reader,
     commands: mpsc::Sender<Command>,
     slots: Arc<Semaphore>,
@@ -243,6 +258,9 @@ impl Handle {
     }
     pub fn peers(&self) -> pool::Reader {
         self.peers.clone()
+    }
+    pub fn network_id(&self) -> &[u8] {
+        &self.network_id
     }
     fn submit(&self, work: Work, weight: usize) -> Result<Ticket, Error> {
         if *self.stopped.borrow() || self.commands.is_closed() {
@@ -323,6 +341,17 @@ impl Handle {
             256,
         )?;
         Ok(ConnectionTicket { accepted, result })
+    }
+    pub fn pool_counts(&self, client: net::Client) -> Result<PoolCountsTicket, Error> {
+        let (reply, result) = oneshot::channel();
+        let accepted = self.submit(
+            Work::PoolCounts {
+                client,
+                reply: Some(reply),
+            },
+            256,
+        )?;
+        Ok(PoolCountsTicket { accepted, result })
     }
     // The source is the authenticated socket address, never its saved pool
     // grouping address. Accepted rows are independent native-style additions;
@@ -409,6 +438,7 @@ pub async fn create(
     let (status, observed) = watch::channel(current.clone());
     let handle = Handle {
         database,
+        network_id: binding.network.into(),
         peers: peers.reader(),
         commands,
         slots: Arc::new(Semaphore::new(config.commands)),

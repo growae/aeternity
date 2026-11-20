@@ -358,6 +358,32 @@ impl Session {
         Ok(())
     }
     async fn serve(&mut self, received: net::Received) -> Result<(), Error> {
+        if received.message().kind() == Kind::GetNodeInfo {
+            let Some(metadata) = &self.ctx.config.node_info else {
+                return Ok(());
+            };
+            let counts = self
+                .ctx
+                .network
+                .pool_counts(self.client.clone())?
+                .wait()
+                .await?
+                .ok_or(Error::Stale)?;
+            let response = info::response(
+                Some(metadata),
+                self.ctx.network.network_id(),
+                &(counts.verified as u64).into(),
+                &(counts.unverified as u64).into(),
+                self.ctx.config.messages,
+            )?
+            .ok_or(Error::Stale)?;
+            self.current().await?;
+            self.client.send(&response)?.await?;
+            self.ctx
+                .progress
+                .send_modify(|s| s.served = s.served.saturating_add(1));
+            return Ok(());
+        }
         if !matches!(
             received.message().kind(),
             Kind::GetHeaderByHash

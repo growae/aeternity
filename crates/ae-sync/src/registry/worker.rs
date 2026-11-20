@@ -54,6 +54,11 @@ pub struct Inspection {
     pub recovery_required: bool,
     pub closed: bool,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolCounts {
+    pub verified: usize,
+    pub unverified: usize,
+}
 pub(crate) struct Frame {
     pub inspection: Inspection,
     pub delivery: Option<Delivery>,
@@ -384,6 +389,17 @@ impl Client {
     }
     pub fn inspect(&self) -> Result<Ticket<Inspection>, Error> {
         self.submit(256, |s| Ok(inspection(s)))
+    }
+    pub fn pool_counts(&self) -> Result<Ticket<PoolCounts>, Error> {
+        self.submit(256, |s| {
+            use ae_p2p::discovery::{Count, Target};
+            s.core.ready()?;
+            let pool = s.policy().pool();
+            Ok(PoolCounts {
+                verified: pool.count(Count::All, Target::Verified),
+                unverified: pool.count(Count::All, Target::Unverified),
+            })
+        })
     }
     pub(crate) fn frame(&self) -> Result<Ticket<Frame>, Error> {
         self.submit(512 + self.shared.host_bytes, |s| {

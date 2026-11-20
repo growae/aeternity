@@ -230,10 +230,10 @@ fn cap(n: u64) -> message::ChainPoi {
 }
 
 #[tokio::test]
-async fn application_rejects_a_different_database_and_stop_before_run_joins_readers() {
+async fn application_rejects_invalid_binding_or_metadata_and_stop_before_run_joins_readers() {
     let node = Node::new();
     let other = Node::new();
-    for wrong in [true, false] {
+    for (wrong, oversized) in [(true, false), (false, true), (false, false)] {
         let (identity, _) = identities();
         let (network, scheduled, pool, network_service) = network::create(
             node.db.clone(),
@@ -254,6 +254,10 @@ async fn application_rejects_a_different_database_and_stop_before_run_joins_read
             Default::default(),
         )
         .unwrap();
+        let mut application = peer::Config::default();
+        if oversized {
+            application.node_info.as_mut().unwrap().version = vec![0; 1025];
+        }
         let result = peer::create(
             if wrong {
                 other.db.clone()
@@ -263,10 +267,15 @@ async fn application_rejects_a_different_database_and_stop_before_run_joins_read
             network.clone(),
             scheduled,
             incoming,
-            Default::default(),
+            application,
         );
         if wrong {
             assert!(matches!(result, Err(peer::Error::Configuration)));
+        } else if oversized {
+            assert!(matches!(
+                result,
+                Err(peer::Error::Message(message::Error::ResourceLimit))
+            ));
         } else {
             let (handle, _events, service) = result.unwrap();
             handle.shutdown();
@@ -711,6 +720,139 @@ async fn successors_and_generations_are_served_over_the_actual_encrypted_applica
     }
     client.shutdown();
     within(task).await.unwrap();
+    stop(app).await;
+}
+
+#[tokio::test]
+async fn node_info_reports_rust_metadata_and_live_discovery_counts() {
+    let node = Node::new();
+    let app = start(&node, config(), Default::default()).await;
+    let (client, _events, task) = connect(&node, &app).await;
+    response(&client, &ping(&node, 2, true)).await;
+    let request = message(Kind::GetNodeInfo, 1, &[]);
+    let result = response(&client, &request).await;
+    let fields = body(&result).fields();
+    let metadata = peer::info::Metadata::current();
+    for (name, value) in [
+        ("version", metadata.version),
+        ("revision", metadata.revision),
+        ("vendor", metadata.vendor),
+        ("os", metadata.os),
+        (
+            "network_id",
+            node.db.view().unwrap().identity().network.clone(),
+        ),
+    ] {
+        assert_eq!(fields[name], Value::Binary(value));
+    }
+    assert_eq!(fields["verified_peers"], Value::Integer(1.into()));
+    assert_eq!(fields["unverified_peers"], Value::Integer(0.into()));
+    let mut discovered = ae_p2p::discovery::Peer {
+        id: PeerPublicKey([91; 32]),
+        address: Ipv4Addr::new(127, 0, 0, 7),
+        source: Ipv4Addr::LOCALHOST,
+        host: b"127.0.0.7".to_vec(),
+        port: 2020,
+        trusted: false,
+    };
+    within(
+        app.network
+            .command(Command::Add(discovered.clone()))
+            .unwrap()
+            .wait(),
+    )
+    .await
+    .unwrap();
+    let result = response(&client, &request).await;
+    assert_eq!(
+        body(&result).fields()["verified_peers"],
+        Value::Integer(1.into())
+    );
+    assert_eq!(
+        body(&result).fields()["unverified_peers"],
+        Value::Integer(1.into())
+    );
+    within(
+        app.network
+            .command(Command::Delete(discovered.id))
+            .unwrap()
+            .wait(),
+    )
+    .await
+    .unwrap();
+    discovered.trusted = true;
+    within(
+        app.network
+            .command(Command::Add(discovered))
+            .unwrap()
+            .wait(),
+    )
+    .await
+    .unwrap();
+    let result = response(&client, &request).await;
+    assert_eq!(
+        body(&result).fields()["verified_peers"],
+        Value::Integer(2.into())
+    );
+    assert_eq!(
+        body(&result).fields()["unverified_peers"],
+        Value::Integer(0.into())
+    );
+    assert_eq!(app.network.status().policy.unwrap().counts.inbound, 1);
+    assert_eq!(app.network.status().policy.unwrap().counts.outbound, 0);
+    client.shutdown();
+    within(task).await.unwrap();
+    stop(app).await;
+}
+
+#[tokio::test]
+async fn disabled_node_info_serves_other_requests_until_native_timeout_closes_connection() {
+    let node = Node::new();
+    let mut app = start(
+        &node,
+        config(),
+        peer::Config {
+            node_info: None,
+            ..Default::default()
+        },
+    )
+    .await;
+    let (client, _events, task) = connect(&node, &app).await;
+    response(&client, &ping(&node, 2, true)).await;
+    let request = message(Kind::GetNodeInfo, 1, &[]);
+    let pending = client
+        .request(&request, Some(Duration::from_millis(100)))
+        .unwrap();
+    let header = message(
+        Kind::GetHeaderByHash,
+        1,
+        &[(
+            "hash",
+            Value::Binary(node.db.view().unwrap().identity().genesis.0.to_vec()),
+        )],
+    );
+    assert_eq!(body(&response(&client, &header).await).kind(), Kind::Header);
+    assert!(!client.is_closed());
+    assert!(matches!(
+        within(pending).await,
+        Err(net::Error::RequestFailed(
+            ae_p2p::requests::Failure::Timeout
+        ))
+    ));
+    within(task).await.unwrap();
+    assert!(client.is_closed());
+    within(async {
+        while app.application.status().counts.served < 1 {
+            app.application.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert_eq!(app.application.status().counts.served, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), app.events.recv())
+            .await
+            .is_err()
+    );
     stop(app).await;
 }
 
