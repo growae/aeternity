@@ -172,6 +172,7 @@ pub struct Client {
     peer: PeerPublicKey,
     budget: Arc<Semaphore>,
     config: Config,
+    monitor: Monitor,
 }
 impl Client {
     pub(super) fn new(
@@ -180,6 +181,7 @@ impl Client {
         generation: Generation,
         peer: PeerPublicKey,
         config: Config,
+        monitor: Monitor,
     ) -> Self {
         Self {
             commands,
@@ -188,6 +190,7 @@ impl Client {
             peer,
             budget: Arc::new(Semaphore::new(config.outgoing_bytes)),
             config,
+            monitor,
         }
     }
     pub fn generation(&self) -> &Generation {
@@ -195,6 +198,9 @@ impl Client {
     }
     pub fn peer(&self) -> PeerPublicKey {
         self.peer
+    }
+    pub fn monitor(&self) -> Monitor {
+        self.monitor.clone()
     }
     pub fn shutdown(&self) {
         stop(&self.stop, Error::Shutdown);

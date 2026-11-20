@@ -193,6 +193,7 @@ async fn replacing_connection_preserves_authorized_session_and_rejects_stale_own
         .unwrap();
     let (mut handle, _events, task) = node.service(Config::default());
     let (old, (old_remote, _old_events, old_driver)) = pair(5, 6).await;
+    let old_monitor = old.0.monitor();
     let old_driver = tokio::spawn(old_driver.run());
     let old_id = handle
         .attach(connection(old), false)
@@ -205,6 +206,9 @@ async fn replacing_connection_preserves_authorized_session_and_rejects_stale_own
         Ok(wire::Reply::Init)
     );
     let (new, (new_remote, _new_events, new_driver)) = pair(5, 6).await;
+    let new_monitor = new.0.monitor();
+    assert_eq!(old_monitor.peer(), new_monitor.peer());
+    assert_ne!(old_monitor.generation(), new_monitor.generation());
     let new_driver = tokio::spawn(new_driver.run());
     let new_id = handle
         .attach(connection(new), false)
@@ -218,6 +222,11 @@ async fn replacing_connection_preserves_authorized_session_and_rejects_stale_own
     })
     .await;
     within(old_driver).await.unwrap();
+    assert_eq!(
+        within(old_monitor.wait()).await.reason,
+        net::Error::Shutdown
+    );
+    assert!(new_monitor.exit().is_none());
     assert!(old_remote.is_closed());
     old_remote.shutdown();
     assert_eq!(

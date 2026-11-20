@@ -8,9 +8,11 @@ use tokio::{
 };
 
 mod driver;
+mod lifecycle;
 mod queue;
 mod wire;
 pub use driver::Driver;
+pub use lifecycle::Monitor;
 pub use queue::{Client, Event, Generation, Prepared, Received, Reply, Ticket};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +109,7 @@ impl Config {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exit {
     pub generation: Generation,
     pub reason: Error,
@@ -141,9 +143,10 @@ pub async fn establish(
     let (commands, receiver) = mpsc::channel(config.commands);
     let (events, incoming) = mpsc::channel(config.events);
     let (stop, stopped) = watch::channel(None);
-    let client = Client::new(commands, stop, generation.clone(), peer, config);
+    let (guard, monitor) = lifecycle::Guard::new(peer, generation.clone());
+    let client = Client::new(commands, stop, generation.clone(), peer, config, monitor);
     let driver = Driver::new(
-        socket, crypto, receiver, events, stopped, generation, requests, config,
+        socket, crypto, receiver, events, stopped, generation, requests, config, guard,
     );
     Ok((client, Events(incoming), driver))
 }

@@ -10,6 +10,113 @@ fn init() -> Message {
         .into_message(message::Limits::default())
         .unwrap()
 }
+
+#[tokio::test]
+async fn terminal_monitor_distinguishes_shutdown_intent_and_retains_one_completed_generation() {
+    let (client, _events, driver, raw) = raw_pair(Config::default()).await;
+    let monitor = client.monitor();
+    assert_eq!(monitor.peer(), client.peer());
+    assert_eq!(monitor.generation(), client.generation());
+    assert!(monitor.exit().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), monitor.wait())
+            .await
+            .is_err()
+    );
+    assert!(!client.is_closed());
+    let mut queued = client.request(&init(), None).unwrap();
+    client.shutdown();
+    assert!(client.is_closed());
+    assert!(monitor.exit().is_none());
+    let second = monitor.clone();
+    let task = tokio::spawn(driver.run());
+    let (a, b) = within(async { tokio::join!(monitor.wait(), second.wait()) }).await;
+    assert_eq!(a, b);
+    assert_eq!(a.reason, Error::Shutdown);
+    assert_eq!(&a.generation, client.generation());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(matches!(
+        std::future::Future::poll(std::pin::Pin::new(&mut queued), &mut cx),
+        std::task::Poll::Ready(Err(Error::Closed))
+    ));
+    assert_eq!(within(task).await.unwrap(), a);
+    assert_eq!(monitor.exit(), Some(a.clone()));
+    assert_eq!(within(client.monitor().wait()).await, a);
+    let mut byte = [0];
+    assert_eq!(
+        within(wire::read(&raw.socket, &mut byte))
+            .await
+            .unwrap_err(),
+        Error::Io(io::ErrorKind::UnexpectedEof)
+    );
+}
+
+#[tokio::test]
+async fn terminal_monitor_covers_unstarted_cancelled_and_unwinding_driver_owners() {
+    for mode in ["driver", "future", "abort", "unwind"] {
+        let (client, mut events, driver, mut raw) = raw_pair(Config::default()).await;
+        let monitor = client.monitor();
+        let queued = client.request(&init(), None).unwrap();
+        match mode {
+            "driver" => drop(driver),
+            "future" => drop(driver.run()),
+            "abort" => {
+                let task = tokio::spawn(driver.run());
+                raw.send(&init()).await;
+                assert!(matches!(
+                    within(events.recv()).await,
+                    Some(Event::Message(_))
+                ));
+                task.abort();
+                assert!(within(task).await.unwrap_err().is_cancelled());
+            }
+            "unwind" => {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        let _owned = driver;
+                        panic!("injected driver owner panic");
+                    }))
+                    .is_err()
+                );
+            }
+            _ => unreachable!(),
+        }
+        let exit = within(monitor.wait()).await;
+        assert_eq!(exit.reason, Error::Cancelled, "{mode}");
+        assert_eq!(&exit.generation, client.generation());
+        assert!(client.is_closed());
+        assert!(matches!(within(queued).await, Err(Error::Closed)));
+    }
+}
+
+#[tokio::test]
+async fn terminal_observation_does_not_keep_a_connection_alive_or_depend_on_event_capacity() {
+    let (client, _events, driver, _raw) = raw_pair(Config::default()).await;
+    let monitor = client.monitor();
+    drop(client);
+    let task = tokio::spawn(driver.run());
+    assert_eq!(within(monitor.wait()).await.reason, Error::Closed);
+    within(task).await.unwrap();
+
+    let config = Config {
+        events: 1,
+        ..Default::default()
+    };
+    let (client, mut events, driver, mut raw) = raw_pair(config).await;
+    let monitor = client.monitor();
+    let task = tokio::spawn(driver.run());
+    raw.send(&init()).await;
+    raw.send(&init()).await;
+    assert_eq!(within(monitor.wait()).await.reason, Error::Backpressure);
+    assert_eq!(within(task).await.unwrap(), monitor.exit().unwrap());
+    // Queued external messages retain their own lifetime and old generation.
+    let Event::Message(held) = events.recv().await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(&held.generation, monitor.generation());
+    assert!(events.recv().await.is_none());
+    assert_eq!(within(monitor.wait()).await.reason, Error::Backpressure);
+}
 fn reply() -> Message {
     pool::Reply::Init
         .into_response(message::Limits::default())

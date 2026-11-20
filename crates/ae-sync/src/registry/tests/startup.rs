@@ -582,3 +582,145 @@ fn startup_worker_retains_cancelled_observations_and_progress_through_joined_shu
     assert_eq!(owner.next_effect().unwrap().unwrap(), &next);
     assert_eq!(client.outstanding(), (0, 0));
 }
+
+#[tokio::test]
+async fn owned_system_resolution_honors_delivery_backpressure_and_rejects_retired_callbacks() {
+    use crate::{registry::worker, resolver};
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(5), future)
+            .await
+            .expect("bounded resolver/registry integration")
+    }
+    let temp = Temp::new();
+    let database = db(&temp);
+    let mut a = peer(2, false);
+    a.host = b"localhost".to_vec();
+    let mut b = peer(3, false);
+    b.host = b"127.0.0.1".to_vec();
+    seed(&database, vec![a.clone(), b]);
+    let mut cfg = config();
+    cfg.policy.maximum_outbound = 0;
+    let owner = worker::Worker::start(service(database.clone(), cfg), Default::default()).unwrap();
+    let client = owner.client();
+    within(
+        client
+            .configure_startup(
+                0,
+                Configuration {
+                    peers: vec![uri(1, b"localhost", 3015)],
+                    ..configuration()
+                },
+                Default::default(),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        within(client.advance_startup(1, 3).unwrap())
+            .await
+            .unwrap()
+            .queued,
+        0
+    );
+    let first = within(client.next_effect().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let Effect::Resolve { token, host } = first.effect else {
+        panic!()
+    };
+    assert_eq!(host, b"localhost");
+    let resolver = resolver::Resolver::start(resolver::Settings {
+        threads: 1,
+        jobs: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let first_result = resolver.submit(token, host).unwrap();
+    assert!(within(client.acknowledge(first.id).unwrap()).await.unwrap());
+    let second = within(client.next_effect().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let Effect::Resolve {
+        token: second_token,
+        host: second_host,
+    } = second.effect.clone()
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        resolver.submit(second_token, second_host.clone()),
+        Err(resolver::Error::Busy)
+    ));
+    assert_eq!(
+        within(client.next_effect().unwrap()).await.unwrap(),
+        Some(second.clone())
+    );
+    let completion = within(first_result).await;
+    assert_eq!(completion.result, Ok(Ipv4Addr::LOCALHOST));
+    within(
+        client
+            .apply(
+                2,
+                Command::Resolved {
+                    token: completion.token,
+                    address: completion.result.ok(),
+                },
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let row = durable(&database).remove(&key(2)).unwrap();
+    assert_eq!(row.address, std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert_eq!(row.source, std::net::IpAddr::V4(a.source));
+    assert_eq!(row.host, a.host);
+    assert!(!row.trusted);
+    let delayed = resolver.submit(second_token, second_host).unwrap();
+    assert!(
+        within(client.acknowledge(second.id).unwrap())
+            .await
+            .unwrap()
+    );
+    within(client.apply(3, Command::Delete(key(3))).unwrap())
+        .await
+        .unwrap();
+    let cancel = within(client.next_effect().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancel.effect, Effect::CancelResolve(second_token));
+    assert!(
+        within(client.acknowledge(cancel.id).unwrap())
+            .await
+            .unwrap()
+    );
+    // Exercise a completion that wins the OS race after the registry retired it.
+    let completion = within(delayed).await;
+    assert_eq!(completion.token, second_token);
+    assert_eq!(
+        within(
+            client
+                .apply(
+                    4,
+                    Command::Resolved {
+                        token: completion.token,
+                        address: completion.result.ok()
+                    }
+                )
+                .unwrap()
+        )
+        .await
+        .unwrap(),
+        Outcome::Stale
+    );
+    resolver.shutdown().await;
+    let service = owner.shutdown().unwrap();
+    assert!(service.policy().pool().find(key(1)).unwrap().trusted);
+    assert!(service.policy().pool().find(key(3)).is_none());
+    assert_eq!(service.startup_status().unwrap().protected_trusted, 0);
+    assert_eq!(durable(&database).len(), 1);
+    assert_eq!(database.view().unwrap().status(), Default::default());
+}

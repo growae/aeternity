@@ -18,6 +18,10 @@ pub struct Driver {
     fragment_deadline: Option<Instant>,
     budget: Arc<Semaphore>,
     config: Config,
+    // Struct fields drop in declaration order. Keep this guard last: observers
+    // must not see completion until the socket, queues and pending replies drop,
+    // including cancellation before run() is polled and task abort/unwinding.
+    terminal: lifecycle::Guard,
 }
 impl Driver {
     #[allow(clippy::too_many_arguments)]
@@ -30,6 +34,7 @@ impl Driver {
         generation: Generation,
         requests: requests::Requests,
         config: Config,
+        terminal: lifecycle::Guard,
     ) -> Self {
         Self {
             socket,
@@ -47,6 +52,7 @@ impl Driver {
             fragment_deadline: None,
             budget: Arc::new(Semaphore::new(config.incoming_bytes)),
             config,
+            terminal,
         }
     }
     pub fn generation(&self) -> &Generation {
@@ -65,6 +71,7 @@ impl Driver {
         self.crypto.close();
         self.decoder.close();
         self.assembler.reset();
+        self.terminal.reason(reason.clone());
         Exit {
             generation: self.generation.clone(),
             reason,

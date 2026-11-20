@@ -97,6 +97,14 @@ impl<T> Drop for Pending<T> {
 pub(crate) struct Pool(Arc<Inner>);
 impl Pool {
     pub fn new(threads: usize, jobs: usize, bytes: usize) -> Result<Self, Error> {
+        Self::named("ae-sync-read", threads, jobs, bytes)
+    }
+    pub fn named(
+        name: &'static str,
+        threads: usize,
+        jobs: usize,
+        bytes: usize,
+    ) -> Result<Self, Error> {
         let maximum = Semaphore::MAX_PERMITS.min(u32::MAX as usize);
         if !(1..=32).contains(&threads)
             || jobs == 0
@@ -122,7 +130,7 @@ impl Pool {
         for index in 0..threads {
             let shared = pool.0.shared.clone();
             let thread = thread::Builder::new()
-                .name(format!("ae-sync-read-{index}"))
+                .name(format!("{name}-{index}"))
                 .spawn(move || {
                     loop {
                         let job = {
@@ -147,6 +155,20 @@ impl Pool {
                 .push(thread);
         }
         Ok(pool)
+    }
+    pub fn available(&self) -> (usize, usize) {
+        (
+            self.0.slots.available_permits(),
+            self.0.bytes.available_permits(),
+        )
+    }
+    pub fn stopped(&self) -> bool {
+        self.0
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stopped
     }
     pub fn submit<T: Send + 'static>(
         &self,
