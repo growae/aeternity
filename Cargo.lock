@@ -120,6 +120,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-p2p"
+version = "0.1.0"
+dependencies = [
+ "ae-codec",
+ "ae-types",
+ "hex",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ae-protocol"
 version = "0.1.0"
 dependencies = [
