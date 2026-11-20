@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fmt};
 
 mod overlay;
 pub mod scan;
+pub mod sync;
 mod traversal;
 pub use overlay::{Overlay, OverlayLimits};
 pub use traversal::{IteratorOptions, OwnedReadView, ReadView, TrieIterator, transaction_root};

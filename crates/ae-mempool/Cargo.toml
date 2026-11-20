@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ae-codec.workspace = true
 ae-state.workspace = true
 ae-trie.workspace = true
 num-bigint.workspace = true
@@ -16,7 +17,6 @@ ae-execution.workspace = true
 ae-crypto.workspace = true
 
 [dev-dependencies]
-ae-codec.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 
