@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod discovery;
 pub mod framing;
 pub mod message;
 pub mod noise;
