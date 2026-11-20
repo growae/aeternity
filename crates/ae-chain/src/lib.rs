@@ -6,4 +6,5 @@ pub mod forks;
 pub mod fraud;
 pub mod key;
 pub mod repository;
+pub mod resilience;
 pub mod rewards;

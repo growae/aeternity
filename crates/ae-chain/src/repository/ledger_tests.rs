@@ -202,6 +202,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
                 Update {
                     identity: id.clone(),
                     source_id: 1,
+                    policy_generation: v.resilience().generation,
                     expected: v.status,
                     change,
                     writes,
@@ -710,45 +711,8 @@ fn generation_reset_policy_and_persistent_records_reject_malformed_values() {
     }
     for height in [0, 1, 4, 5, 6, 10, 11] {
         assert_eq!(
-            check_policy(height, 10, Policy::default()).is_ok(),
+            check_policy(height, 10, Policy::default(), Default::default(), None).is_ok(),
             height >= 5
-        );
-        assert_eq!(
-            check_policy(
-                height,
-                10,
-                Policy {
-                    origin: Origin::Sync,
-                    sync: SyncPolicy::Finalized(5),
-                    ..Default::default()
-                }
-            )
-            .is_ok(),
-            height > 5
-        );
-        assert_eq!(
-            check_policy(
-                height,
-                10,
-                Policy {
-                    origin: Origin::Sync,
-                    sync: SyncPolicy::Depth(5),
-                    ..Default::default()
-                }
-            )
-            .is_ok(),
-            height >= 5
-        );
-        assert!(
-            check_policy(
-                height,
-                10,
-                Policy {
-                    origin: Origin::Sync,
-                    ..Default::default()
-                }
-            )
-            .is_ok()
         );
     }
     for bytes in [&[][..], &[0xc0], &[0xff], &[0x80]] {

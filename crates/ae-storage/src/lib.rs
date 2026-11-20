@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 use ae_chain::repository::{self as repo, Error, Identity, Read, ReadConfig, Status, Update, View};
+use ae_chain::resilience;
 use ae_crypto::blake2b_256;
 use ae_trie::NodeReader;
 use ae_types::Hash256;
@@ -16,7 +17,7 @@ static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub struct Database {
     db: DB,
     identity: Identity,
-    writer: Mutex<()>,
+    writer: Mutex<resilience::Snapshot>,
     source_id: u64,
     config: ReadConfig,
 }
@@ -24,6 +25,7 @@ pub struct Database {
 pub struct Snapshot<'a> {
     snapshot: Arc<rocksdb::Snapshot<'a>>,
     source_id: u64,
+    policy: resilience::Snapshot,
 }
 impl std::fmt::Debug for Snapshot<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,13 +93,13 @@ impl Database {
         let result = Self {
             db,
             identity,
-            writer: Mutex::new(()),
+            writer: Mutex::new(Default::default()),
             source_id,
             config,
         };
         result.view()?.verify_tip()?;
         if upgrade {
-            // Version 2 can read legacy canonical transaction values in place.
+            // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
             // old binaries then refuse to open instead of losing metadata.
             let mut batch = WriteBatch::default();
@@ -110,13 +112,92 @@ impl Database {
         Ok(result)
     }
     pub fn view(&self) -> Result<View<Snapshot<'_>>, Error> {
+        let policy = self.writer.lock().map_err(|_| backend_lock())?;
+        self.view_locked(&policy)
+    }
+    fn view_locked(&self, policy: &resilience::Snapshot) -> Result<View<Snapshot<'_>>, Error> {
         View::load_with_config(
             Snapshot {
                 snapshot: Arc::new(self.db.snapshot()),
                 source_id: self.source_id,
+                policy: *policy,
             },
             self.config.clone(),
         )
+    }
+    pub fn open_with_resilience(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        read: ReadConfig,
+        policy: resilience::Config,
+    ) -> Result<Self, Error> {
+        let db = Self::open_with_config(path, identity, read)?;
+        db.update_resilience(resilience::Event::Start, policy)?;
+        Ok(db)
+    }
+    // Config is an explicit snapshot of external configuration. A worker Start
+    // retains runtime state; reopening the database starts a fresh lifecycle.
+    pub fn update_resilience(
+        &self,
+        event: resilience::Event,
+        config: resilience::Config,
+    ) -> Result<resilience::Snapshot, Error> {
+        self.update_resilience_checked(event, config, || Ok(()))
+    }
+    fn update_resilience_checked(
+        &self,
+        event: resilience::Event,
+        config: resilience::Config,
+        check: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<resilience::Snapshot, Error> {
+        let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
+        let view = self.view_locked(&policy)?;
+        let (state, ensure) = policy.state.transition(event, config);
+        let old = view.finalized_height()?;
+        let new = if let (Some(depth), Some(tip)) = (ensure, view.status().tip) {
+            resilience::finalized_at(view.require_block(tip)?.header().common().height, depth)
+                .or(old)
+        } else {
+            old
+        };
+        if policy.state != state || old != new {
+            let generation = policy
+                .generation
+                .checked_add(1)
+                .ok_or(Error::ResourceLimit)?;
+            check()?;
+            if new != old {
+                let mut batch = WriteBatch::default();
+                batch.put(
+                    repo::FINALIZED,
+                    repo::encode_finalized(new.expect("positive finalized height"))?,
+                );
+                // An engine error can have an uncertain durable outcome. Old
+                // plans must be invalidated even when the write returns Err.
+                policy.generation = generation;
+                self.db
+                    .write_opt(batch, &write_options())
+                    .map_err(backend)?;
+            }
+            *policy = resilience::Snapshot { generation, state };
+        }
+        Ok(*policy)
+    }
+    pub fn clear_finalized_height(&self) -> Result<(), Error> {
+        let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
+        if self.view_locked(&policy)?.finalized_height()?.is_some() {
+            let generation = policy
+                .generation
+                .checked_add(1)
+                .ok_or(Error::ResourceLimit)?;
+            let mut batch = WriteBatch::default();
+            batch.delete(repo::FINALIZED);
+            policy.generation = generation;
+            self.db
+                .write_opt(batch, &write_options())
+                .map_err(backend)?;
+        }
+        Ok(())
     }
     pub fn commit(&self, update: Update) -> Result<Committed, Error> {
         self.commit_checked(update, || Ok(()))
@@ -126,12 +207,15 @@ impl Database {
         update: Update,
         mut check: impl FnMut() -> Result<(), Error>,
     ) -> Result<Committed, Error> {
-        let _guard = self
+        let guard = self
             .writer
             .lock()
             .map_err(|_| Error::Backend("poisoned chain writer".into()))?;
         if update.source_id() != self.source_id || update.identity() != &self.identity {
             return Err(Error::Identity);
+        }
+        if update.policy_generation() != guard.generation {
+            return Err(Error::Conflict);
         }
         let current = Status::decode(
             &self
@@ -188,6 +272,9 @@ impl Read for Snapshot<'_> {
     fn source_id(&self) -> u64 {
         self.source_id
     }
+    fn resilience(&self) -> resilience::Snapshot {
+        self.policy
+    }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         self.snapshot.get(key).map_err(backend)
     }
@@ -208,6 +295,9 @@ impl Read for Snapshot<'_> {
         }
         Ok(out)
     }
+}
+fn backend_lock() -> Error {
+    Error::Backend("poisoned chain writer".into())
 }
 
 #[cfg(test)]

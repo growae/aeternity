@@ -342,6 +342,114 @@ fn noncanonical_public_micro_metadata_survives_restart_and_next_key_execution() 
         next.header().common().state_hash
     );
 }
+
+#[test]
+fn real_chain_finalization_survives_restart_and_serializes_policy_changes() {
+    use ae_chain::resilience::{Config, Event};
+    let n = Network::Mainnet;
+    let temp = Temp::new();
+    let id = identity(n);
+    let net = profile(n);
+    let config = transactions::Config::primitives(&net);
+    let all = blocks(n);
+    let policy = Config {
+        depth: 1,
+        from_start: true,
+    };
+    let db =
+        Database::open_with_resilience(&temp.0, id.clone(), Default::default(), policy).unwrap();
+    bootstrap(&db, n);
+    let pinned = db.view().unwrap();
+    for b in &all {
+        let view = db.view().unwrap();
+        let before = view.finalized_height().unwrap();
+        let update = ledger::prepare(&view, b, &config, &rules(n), Default::default()).unwrap();
+        db.commit(update).unwrap();
+        let expected = if matches!(b, Block::Key(_)) {
+            b.header()
+                .common()
+                .height
+                .checked_sub(2)
+                .filter(|h| *h > 0)
+                .or(before)
+        } else {
+            before
+        };
+        assert_eq!(db.view().unwrap().finalized_height().unwrap(), expected);
+        assert_eq!(view.finalized_height().unwrap(), before);
+    }
+    assert_eq!(db.view().unwrap().finalized_height().unwrap(), Some(4));
+    assert_eq!(pinned.finalized_height().unwrap(), None);
+    drop(pinned);
+    drop(db);
+    let policy = Config {
+        depth: 3,
+        from_start: false,
+    };
+    let db = Database::open_with_resilience(&temp.0, id, Default::default(), policy).unwrap();
+    let inactive = db.view().unwrap();
+    assert_eq!(inactive.resilience().state.active_depth(), None);
+    assert_eq!(inactive.finalized_height().unwrap(), Some(4));
+    let sync = Limits {
+        policy: ledger::Policy {
+            origin: ledger::Origin::Sync,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rejects = |view: &ae_chain::repository::View<ae_storage::Snapshot<'_>>, height: u64| {
+        let Block::Key(mut candidate) = all[0].clone() else {
+            panic!()
+        };
+        candidate.common.height = height;
+        candidate.nonce += 42;
+        matches!(
+            ledger::prepare(view, &Block::Key(candidate), &config, &rules(n), sync),
+            Err(ledger::InsertError::Policy { .. })
+        )
+    };
+    for h in 1..=6 {
+        assert_eq!(rejects(&inactive, h), h <= 4);
+    }
+    db.update_resilience(Event::Synced, policy).unwrap();
+    let active = db.view().unwrap();
+    assert_eq!(active.finalized_height().unwrap(), Some(2));
+    for h in 1..=6 {
+        assert_eq!(rejects(&active, h), h < 3);
+    }
+    assert_eq!(inactive.finalized_height().unwrap(), Some(4));
+    db.update_resilience(Event::ConfigChanged, Config::default())
+        .unwrap();
+    let disabled = db.view().unwrap();
+    assert_eq!(disabled.finalized_height().unwrap(), Some(2));
+    for h in 1..=6 {
+        assert!(!rejects(&disabled, h));
+    }
+    std::thread::scope(|scope| {
+        for worker in 0..4 {
+            let db = &db;
+            scope.spawn(move || {
+                for i in 0..20 {
+                    db.update_resilience(
+                        Event::ConfigChanged,
+                        Config {
+                            depth: 1 + (worker + i) % 2,
+                            from_start: false,
+                        },
+                    )
+                    .unwrap();
+                    let view = db.view().unwrap();
+                    assert_eq!(
+                        view.finalized_height().unwrap(),
+                        Some(5 - view.resilience().state.active_depth().unwrap())
+                    );
+                }
+            });
+        }
+    });
+    assert_eq!(active.finalized_height().unwrap(), Some(2));
+    assert_eq!(disabled.resilience().state.active_depth(), None);
+}
 #[test]
 fn incomplete_or_incompatible_genesis_cannot_be_published() {
     use ae_trie::{MemoryStore, Nibbles, NodeReader, NodeWriter, Trie, Value};
@@ -526,27 +634,61 @@ fn crash_worker() {
     let operation = std::env::var("AE_STORAGE_CRASH_OPERATION").unwrap();
     let n = Network::Mainnet;
     let db = Database::open(path, identity(n)).unwrap();
+    if operation == "key" {
+        db.update_resilience(
+            ae_chain::resilience::Event::Start,
+            ae_chain::resilience::Config {
+                depth: 1,
+                from_start: true,
+            },
+        )
+        .unwrap();
+    }
     let view = db.view().unwrap();
     let network = profile(n);
     let config = transactions::Config::primitives(&network);
-    let plan = if operation == "genesis" {
-        ledger::bootstrap(
-            &view,
-            &network,
-            &genesis_key(n),
-            &genesis_trees(n),
-            Default::default(),
+    let plan = if operation == "policy" {
+        None
+    } else if operation == "genesis" {
+        Some(
+            ledger::bootstrap(
+                &view,
+                &network,
+                &genesis_key(n),
+                &genesis_trees(n),
+                Default::default(),
+            )
+            .unwrap(),
         )
-        .unwrap()
     } else {
-        ledger::prepare(&view, &blocks(n)[1], &config, &rules(n), Default::default()).unwrap()
+        Some(
+            ledger::prepare(
+                &view,
+                &blocks(n)[if operation == "key" { 4 } else { 1 }],
+                &config,
+                &rules(n),
+                Default::default(),
+            )
+            .unwrap(),
+        )
     };
     println!("AE_STORE_READY");
     std::io::stdout().flush().unwrap();
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "commit");
-    db.commit(plan).unwrap();
+    if let Some(plan) = plan {
+        db.commit(plan).unwrap();
+    } else {
+        db.update_resilience(
+            ae_chain::resilience::Event::Synced,
+            ae_chain::resilience::Config {
+                depth: 1,
+                from_start: false,
+            },
+        )
+        .unwrap();
+    }
     println!("AE_STORE_DURABLE");
     std::io::stdout().flush().unwrap();
     line.clear();
@@ -554,7 +696,7 @@ fn crash_worker() {
     panic!("worker must be killed by the parent");
 }
 #[test]
-fn killed_processes_recover_only_complete_genesis_or_micro_commits() {
+fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
     struct Worker(std::process::Child);
@@ -568,22 +710,43 @@ fn killed_processes_recover_only_complete_genesis_or_micro_commits() {
     let network = profile(n);
     let config = transactions::Config::primitives(&network);
     let all = blocks(n);
-    for operation in ["genesis", "micro"] {
+    for operation in ["genesis", "micro", "key", "policy"] {
         for phase in ["before", "after", "race0", "race1", "race5", "race10"] {
             let dir = Temp::new();
             let db = Database::open(&dir.0, identity(n)).unwrap();
-            if operation == "micro" {
+            if operation != "genesis" {
                 bootstrap(&db, n);
-                let plan = ledger::prepare(
-                    &db.view().unwrap(),
-                    &all[0],
-                    &config,
-                    &rules(n),
-                    Default::default(),
-                )
-                .unwrap();
-                db.commit(plan).unwrap();
+                if operation == "key" {
+                    db.update_resilience(
+                        ae_chain::resilience::Event::Start,
+                        ae_chain::resilience::Config {
+                            depth: 1,
+                            from_start: true,
+                        },
+                    )
+                    .unwrap();
+                }
+                let count = match operation {
+                    "micro" => 1,
+                    "key" => 4,
+                    "policy" => all.len(),
+                    _ => unreachable!(),
+                };
+                for b in &all[..count] {
+                    db.commit(
+                        ledger::prepare(
+                            &db.view().unwrap(),
+                            b,
+                            &config,
+                            &rules(n),
+                            Default::default(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
             }
+            let finalized_before = db.view().unwrap().finalized_height().unwrap();
             let before = db.view().unwrap().status();
             drop(db);
             let mut child = Worker(
@@ -635,6 +798,31 @@ fn killed_processes_recover_only_complete_genesis_or_micro_commits() {
             let db = Database::open(&dir.0, identity(n)).unwrap();
             let view = db.view().unwrap();
             let after = view.status();
+            if operation == "policy" {
+                assert_eq!(after, before);
+                let finalized = view.finalized_height().unwrap();
+                assert!(finalized == finalized_before || finalized == Some(4));
+                if phase == "before" {
+                    assert_eq!(finalized, finalized_before);
+                }
+                if phase == "after" {
+                    assert_eq!(finalized, Some(4));
+                }
+                view.verify_tip().unwrap();
+                eprintln!("Crash recovery policy/{phase}: finalized {finalized:?}");
+                continue;
+            }
+            if operation == "key" {
+                assert_eq!(
+                    view.finalized_height().unwrap(),
+                    if after.revision == before.revision {
+                        Some(1)
+                    } else {
+                        Some(2)
+                    }
+                );
+            }
+
             assert!(after.revision == before.revision || after.revision == before.revision + 1);
             if phase == "before" {
                 assert_eq!(after, before);
@@ -643,10 +831,10 @@ fn killed_processes_recover_only_complete_genesis_or_micro_commits() {
                 assert_eq!(after.revision, before.revision + 1);
             }
             view.verify_tip().unwrap();
-            let candidate = if operation == "genesis" {
-                identity(n).genesis
-            } else {
-                all[1].hash().unwrap()
+            let candidate = match operation {
+                "genesis" => identity(n).genesis,
+                "key" => all[4].hash().unwrap(),
+                _ => all[1].hash().unwrap(),
             };
             assert_eq!(
                 view.block(candidate).unwrap().is_some(),

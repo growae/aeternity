@@ -22,6 +22,7 @@ pub use ledger::{InsertError, Limits, Update, bootstrap, prepare};
 
 pub const IDENTITY: &[u8] = b"\0identity";
 pub const STATUS: &[u8] = b"\0status";
+pub const FINALIZED: &[u8] = b"\0finalized";
 pub const NODES: u8 = 1;
 pub const BLOCKS: u8 = 2;
 pub const RECORDS: u8 = 3;
@@ -75,6 +76,9 @@ impl std::error::Error for Error {}
 pub type Entries = Vec<(Vec<u8>, Vec<u8>)>;
 pub trait Read: NodeReader + Clone {
     fn source_id(&self) -> u64;
+    fn resilience(&self) -> crate::resilience::Snapshot {
+        Default::default()
+    }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
     fn prefix(&self, prefix: &[u8], limit: usize) -> Result<Entries, Error>;
 }
@@ -98,7 +102,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(2)
+        self.encode_version(3)
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
@@ -114,7 +118,7 @@ impl Identity {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
         let version = integer(&a[0])?;
-        if !matches!(version, 1 | 2) {
+        if !matches!(version, 1..=3) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();
@@ -362,6 +366,23 @@ impl<S: Read> View<S> {
     pub fn config(&self) -> &ReadConfig {
         &self.config
     }
+    pub fn resilience(&self) -> crate::resilience::Snapshot {
+        self.source.resilience()
+    }
+    pub fn finalized_height(&self) -> Result<Option<u64>, Error> {
+        self.source
+            .get(FINALIZED)?
+            .map(|b| {
+                let v = decode(&b)?;
+                let f = fields(&v, 2)?;
+                let h = integer(&f[1])?;
+                if integer(&f[0])? != 1 || encode_finalized(h)? != b {
+                    return Err(Error::Corrupt("finalized height"));
+                }
+                Ok(h)
+            })
+            .transpose()
+    }
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
@@ -505,6 +526,7 @@ impl<S: Read> View<S> {
             .collect()
     }
     pub fn verify_tip(&self) -> Result<(), Error> {
+        self.finalized_height()?;
         if let Some(h) = self.status.tip {
             let b = self.require_block(h)?;
             let r = self.require_record(h)?;
@@ -535,3 +557,9 @@ impl<S: Read> View<S> {
     }
 }
 pub type Writes = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
+pub fn encode_finalized(height: u64) -> Result<Vec<u8>, Error> {
+    if height == 0 {
+        return Err(Error::Corrupt("zero finalized height"));
+    }
+    Ok(list(vec![number(1), number(height)]).encode())
+}

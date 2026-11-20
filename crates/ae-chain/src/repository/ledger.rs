@@ -15,23 +15,29 @@ pub enum Origin {
     Sync,
 }
 #[derive(Debug, Clone, Copy)]
-pub enum SyncPolicy {
-    Unlimited,
-    Depth(u64),
-    Finalized(u64),
-}
-#[derive(Debug, Clone, Copy)]
 pub struct Policy {
     pub origin: Origin,
     pub gossip_depth: u64,
-    pub sync: SyncPolicy,
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
             origin: Origin::Gossip,
             gossip_depth: 5,
-            sync: SyncPolicy::Unlimited,
+        }
+    }
+}
+impl Policy {
+    pub fn allows(
+        self,
+        height: u64,
+        top: u64,
+        state: crate::resilience::State,
+        finalized: Option<u64>,
+    ) -> bool {
+        match self.origin {
+            Origin::Gossip => height >= top.saturating_sub(self.gossip_depth),
+            Origin::Sync => state.allows_sync(height, top, finalized),
         }
     }
 }
@@ -90,6 +96,7 @@ impl<S> InsertError<S> {
 pub struct Update {
     identity: Identity,
     source_id: u64,
+    policy_generation: u64,
     expected: Status,
     change: Change,
     writes: Writes,
@@ -103,6 +110,9 @@ impl Update {
     }
     pub fn source_id(&self) -> u64 {
         self.source_id
+    }
+    pub fn policy_generation(&self) -> u64 {
+        self.policy_generation
     }
     pub fn expected(&self) -> Status {
         self.expected
@@ -262,6 +272,7 @@ pub fn bootstrap<S: Read>(
         Update {
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
+            policy_generation: view.resilience().generation,
             expected: view.status,
             change,
             writes,
@@ -446,15 +457,14 @@ fn canonical<S: Read>(
     }
     Ok(())
 }
-fn check_policy(height: u64, top: u64, p: Policy) -> Result<(), (u64, u64)> {
-    let accepted = match p.origin {
-        Origin::Gossip => height >= top.saturating_sub(p.gossip_depth),
-        Origin::Sync => match p.sync {
-            SyncPolicy::Unlimited => true,
-            SyncPolicy::Depth(d) => height >= top.saturating_sub(d),
-            SyncPolicy::Finalized(h) => height > h,
-        },
-    };
+fn check_policy(
+    height: u64,
+    top: u64,
+    p: Policy,
+    state: crate::resilience::State,
+    finalized: Option<u64>,
+) -> Result<(), (u64, u64)> {
+    let accepted = p.allows(height, top, state, finalized);
     if accepted { Ok(()) } else { Err((height, top)) }
 }
 pub fn prepare<S: Read, O: MapOrder>(
@@ -484,8 +494,14 @@ pub fn prepare<S: Read, O: MapOrder>(
         });
     }
     let top_height = view.require_block(top)?.header().common().height;
-    check_policy(header.common().height, top_height, limits.policy)
-        .map_err(|(height, top)| InsertError::Policy { height, top })?;
+    check_policy(
+        header.common().height,
+        top_height,
+        limits.policy,
+        view.resilience().state,
+        view.finalized_height()?,
+    )
+    .map_err(|(height, top)| InsertError::Policy { height, top })?;
     let parent_hash = Hash256(header.common().previous_hash);
     let previous = view.require_block(parent_hash)?.header();
     let previous_key_hash = match &previous {
@@ -650,6 +666,15 @@ pub fn prepare<S: Read, O: MapOrder>(
     }
     store_block(&mut writes, block, &record, &view.config)?;
     canonical(view, block, &mut change, &mut writes)?;
+    if change.new_tip == current
+        && matches!(block, Block::Key(_))
+        && let Some(height) = view
+            .resilience()
+            .state
+            .key_top_finalized(header.common().height)
+    {
+        put(&mut writes, FINALIZED.to_vec(), encode_finalized(height)?);
+    }
     if matches!(block, Block::Key(_)) {
         put(&mut writes, key(ENDS, current.0), vec![]);
         writes.insert(key(ENDS, header.common().previous_key_hash), None);
@@ -668,6 +693,7 @@ pub fn prepare<S: Read, O: MapOrder>(
         Update {
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
+            policy_generation: view.resilience().generation,
             expected: view.status,
             change,
             writes,
