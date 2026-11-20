@@ -7,7 +7,9 @@ use ae_crypto::blake2b_256;
 use ae_types::Hash256;
 use std::{collections::BTreeMap, fmt};
 
+mod overlay;
 mod traversal;
+pub use overlay::{Overlay, OverlayLimits};
 pub use traversal::{IteratorOptions, OwnedReadView, ReadView, TrieIterator, transaction_root};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
