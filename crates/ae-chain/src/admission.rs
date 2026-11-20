@@ -105,6 +105,15 @@ pub enum PowError {
     Header(ae_consensus::headers::Error),
     Body(BodyError),
 }
+impl PowError {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::Body(e) => e.is_operational(),
+            Self::Header(ae_consensus::headers::Error::Protocol(e)) => e.is_operational(),
+            Self::Header(_) => false,
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct PowRules {
     pub now_ms: u64,

@@ -94,8 +94,11 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     trees: &mut Trees<A, C>,
 ) -> Result<ex::ExecutedMicro, ex::Error<A, C>> {
     configured(row, |config| {
-        with_parent(row, |parent| {
-            ex::pow_micro(&block(row), trees, parent, config, &rules())
+        let owned = transactions::owned::Owned::capture(config).unwrap();
+        owned.with_config(|config| {
+            with_parent(row, |parent| {
+                ex::pow_micro(&block(row), trees, parent, config, &rules())
+            })
         })
     })
 }

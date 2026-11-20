@@ -191,6 +191,8 @@ dependencies = [
  "ae-trie",
  "ae-tx",
  "ae-types",
+ "ae-vm-aevm",
+ "ae-vm-fate",
  "hex",
  "serde_json",
  "tokio",

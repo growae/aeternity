@@ -857,6 +857,116 @@ async fn disabled_node_info_serves_other_requests_until_native_timeout_closes_co
 }
 
 #[tokio::test]
+async fn encrypted_generation_download_commits_actual_ledger_and_rejects_foreign_owner() {
+    use ae_sync::chain::{Config, Direction, Error, Importer, Outcome};
+    let node = Node::new();
+    let app = start(&node, config(), Default::default()).await;
+    let (remote, mut events, driver) = connect(&node, &app).await;
+    let _ = response(&remote, &ping(&node, 1, false)).await;
+    let client = within(async {
+        loop {
+            let clients = app.network.peers().peers().unwrap().wait().await.unwrap();
+            if let Some(client) = clients
+                .into_iter()
+                .find(|c| c.peer() == identities().1.public_key())
+            {
+                break client;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let all = common::ledger_fixtures::blocks(&NetworkProfile::mainnet());
+    let key = &all[0];
+    let hash = key.hash().unwrap();
+    let rules = common::ledger_fixtures::rules(node.db.view().unwrap().identity().genesis);
+    let importer = Importer::new(
+        node.db.clone(),
+        common::ledger_fixtures::execution(&NetworkProfile::mainnet()),
+        rules.clone(),
+        Config::default(),
+    )
+    .unwrap();
+    let other = Node::new();
+    let foreign = Importer::new(
+        other.db.clone(),
+        common::ledger_fixtures::execution(&NetworkProfile::mainnet()),
+        rules,
+        Config::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        foreign
+            .fetch(
+                &app.network,
+                client.clone(),
+                hash,
+                Direction::Backward,
+                u64::MAX - 600_000
+            )
+            .await
+            .unwrap_err()
+            .error,
+        Error::Configuration
+    );
+    foreign.stop();
+    foreign.join().await;
+    let fetch = importer.fetch(
+        &app.network,
+        client.clone(),
+        hash,
+        Direction::Backward,
+        u64::MAX - 600_000,
+    );
+    let serve = async {
+        loop {
+            let request = incoming(&mut events).await;
+            if request.message().kind() == Kind::GetGeneration {
+                assert_eq!(
+                    request.message().fields()["hash"],
+                    Value::Binary(hash.0.to_vec())
+                );
+                let body = common::import::message(key, &[], Direction::Backward);
+                remote
+                    .send(&Message::response_ok(&body, Default::default()).unwrap())
+                    .unwrap()
+                    .await
+                    .unwrap();
+                break;
+            }
+        }
+    };
+    let (report, ()) = within(async { tokio::join!(fetch, serve) }).await;
+    let report = report.unwrap();
+    assert_eq!(report.accepted.len(), 1);
+    assert!(matches!(
+        report.accepted[0].outcome,
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(node.db.view().unwrap().require_block(hash).unwrap(), *key);
+    remote.shutdown();
+    within(driver).await.unwrap();
+    within(client.monitor().wait()).await;
+    assert_eq!(
+        importer
+            .fetch(
+                &app.network,
+                client,
+                hash,
+                Direction::Backward,
+                u64::MAX - 600_000
+            )
+            .await
+            .unwrap_err()
+            .error,
+        Error::Stale
+    );
+    importer.stop();
+    importer.join().await;
+    stop(app).await;
+}
+
+#[tokio::test]
 async fn matching_top_schedules_real_pool_sync_and_emits_generation_intent_in_order() {
     let node = Node::new();
     let mut app = start(&node, config(), Default::default()).await;

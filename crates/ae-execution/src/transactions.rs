@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 pub mod accounting;
 pub mod batch;
 mod failures;
+pub mod owned;
 mod signatures;
 mod wrappers;
 pub use signatures::{
