@@ -2,4 +2,7 @@
 pub mod admission;
 pub mod block;
 pub mod execution;
+pub mod forks;
 pub mod fraud;
+pub mod key;
+pub mod rewards;

@@ -7,8 +7,10 @@ use ae_codec::headers::{Header, HeaderMode};
 use ae_protocol::{Activation, NetworkProfile, Protocol};
 use serde_json::{Value as J, json};
 use std::sync::LazyLock;
-static DATA: LazyLock<J> = LazyLock::new(|| {
-    let d: J = serde_json::from_str(include_str!("fixtures/erlang_block_body.json")).unwrap();
+static DATA: LazyLock<J> =
+    LazyLock::new(|| unpack_fixture(include_str!("fixtures/erlang_block_body.json")));
+fn unpack_fixture(source: &str) -> J {
+    let d: J = serde_json::from_str(source).unwrap();
     fn u(v: &J, pool: &[J]) -> J {
         match v {
             J::Object(m) if m.len() == 1 && m.contains_key("$ref") => {
@@ -20,7 +22,7 @@ static DATA: LazyLock<J> = LazyLock::new(|| {
         }
     }
     u(&d["root"], d["values"].as_array().unwrap())
-});
+}
 fn atom(s: &str) -> J {
     json!(["atom", s])
 }

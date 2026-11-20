@@ -137,77 +137,29 @@ pub fn pow_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     let key = parent.headers.previous_key;
     let protocol = Protocol::try_from(key.common.version).map_err(|e| Error::Header(e.into()))?;
     let context = Context::transaction(block.header.common.height, protocol);
-    let difficulty = Target(key.target)
-        .difficulty()
-        .map_err(Error::ParentDifficulty)?;
-    let difficulty = BigInt::from_bytes_be(Sign::Plus, difficulty.as_bytes());
     let gas_limit = config
         .network
         .fixed_block_gas_limit()
         .map_or_else(|| rules.configured_gas_limit.clone(), BigInt::from);
-    let fate_context = config.fate.map(|f| {
-        let mut c = f.context.clone();
-        c.in_auth = false;
-        c.on_chain = true;
-        c.reserved_gas = 0.into();
-        c
-    });
-    let fate_env = config.fate.map(|f| {
-        let mut e = f.environment.clone();
-        e.auth_tx_hash = None;
-        e.beneficiary = key.beneficiary;
-        e.timestamp = block.header.time.into();
-        e.difficulty = difficulty.clone();
-        e.block_gas_limit = gas_limit.clone();
-        e.network_id = config.network.network_id().to_vec();
-        e.consensus = Consensus::Pow;
-        e.key_hash = block.header.common.previous_key_hash;
-        e
-    });
-    let fate = config.fate.map(|f| contracts::fate::Config {
-        context: fate_context.as_ref().expect("FATE template"),
-        order: f.order,
-        overrides: f.overrides,
-        environment: fate_env.as_ref().expect("FATE environment"),
-        history: f.history.clone(),
-        auth_tx: None,
-        metering_floor: None,
-        diagnostic_profile: f.diagnostic_profile,
-    });
-    let aevm = config.aevm.map(|a| {
-        let mut a = a.clone();
-        a.network_id = config.network.network_id().into();
-        a.environment.key_hash = block.header.common.previous_key_hash;
-        a.environment.beneficiary = AccountPublicKey(key.beneficiary);
-        a.environment.difficulty = difficulty.clone();
-        a.environment.timestamp_ms = block.header.time.into();
-        a.environment.block_gas_limit = gas_limit.clone();
-        a.environment.auth_tx_hash = None;
-        a.event_context = ae_execution::aevm_chain::EventContext::None;
-        a
-    });
-    let config = transactions::Config {
-        network: config.network,
-        consensus: ConsensusType::Pow,
-        fate: fate.as_ref(),
-        aevm: aevm.as_ref(),
-        signature_limits: config.signature_limits,
-        channel_limits: config.channel_limits,
-        channel_state_atoms: config.channel_state_atoms,
-        oracle_limits: config.oracle_limits,
-        fate_limits: config.fate_limits,
-        maximum_fate_steps: config.maximum_fate_steps,
-        aevm_limits: config.aevm_limits,
-    };
     let mut next = trees.clone();
-    let result = batch::apply_micro(
-        &block.transactions,
-        &mut next,
-        &context,
-        &config,
-        gas_limit,
-        parent.fees.clone(),
+    let result = with_block_environment(
+        config,
+        key,
+        block.header.time,
+        block.header.common.previous_key_hash,
+        &gas_limit,
+        |config| {
+            batch::apply_micro(
+                &block.transactions,
+                &mut next,
+                &context,
+                config,
+                gas_limit.clone(),
+                parent.fees.clone(),
+            )
+        },
     )
+    .map_err(Error::ParentDifficulty)?
     .map_err(Error::Transactions)?;
     let actual = next.roots().hash();
     let expected = Hash256(block.header.common.state_hash);
@@ -226,4 +178,71 @@ pub fn pow_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     };
     *trees = next;
     Ok(result)
+}
+
+pub(crate) fn with_block_environment<O: MapOrder, R>(
+    config: &transactions::Config<'_, O>,
+    key: &KeyHeader,
+    timestamp: u64,
+    key_hash: [u8; 32],
+    gas_limit: &BigInt,
+    f: impl FnOnce(&transactions::Config<'_, O>) -> R,
+) -> Result<R, TargetError> {
+    let difficulty = Target(key.target).difficulty()?;
+    let difficulty = BigInt::from_bytes_be(Sign::Plus, difficulty.as_bytes());
+    let fate_context = config.fate.map(|f| {
+        let mut c = f.context.clone();
+        c.in_auth = false;
+        c.on_chain = true;
+        c.reserved_gas = 0.into();
+        c
+    });
+    let fate_env = config.fate.map(|f| {
+        let mut e = f.environment.clone();
+        e.auth_tx_hash = None;
+        e.beneficiary = key.beneficiary;
+        e.timestamp = timestamp.into();
+        e.difficulty = difficulty.clone();
+        e.block_gas_limit = gas_limit.clone();
+        e.network_id = config.network.network_id().to_vec();
+        e.consensus = Consensus::Pow;
+        e.key_hash = key_hash;
+        e
+    });
+    let fate = config.fate.map(|f| contracts::fate::Config {
+        context: fate_context.as_ref().expect("FATE template"),
+        order: f.order,
+        overrides: f.overrides,
+        environment: fate_env.as_ref().expect("FATE environment"),
+        history: f.history.clone(),
+        auth_tx: None,
+        metering_floor: None,
+        diagnostic_profile: f.diagnostic_profile,
+    });
+    let aevm = config.aevm.map(|a| {
+        let mut a = a.clone();
+        a.network_id = config.network.network_id().into();
+        a.environment.key_hash = key_hash;
+        a.environment.beneficiary = AccountPublicKey(key.beneficiary);
+        a.environment.difficulty = difficulty.clone();
+        a.environment.timestamp_ms = timestamp.into();
+        a.environment.block_gas_limit = gas_limit.clone();
+        a.environment.auth_tx_hash = None;
+        a.event_context = ae_execution::aevm_chain::EventContext::None;
+        a
+    });
+    let config = transactions::Config {
+        network: config.network,
+        consensus: ConsensusType::Pow,
+        fate: fate.as_ref(),
+        aevm: aevm.as_ref(),
+        signature_limits: config.signature_limits,
+        channel_limits: config.channel_limits,
+        channel_state_atoms: config.channel_state_atoms,
+        oracle_limits: config.oracle_limits,
+        fate_limits: config.fate_limits,
+        maximum_fate_steps: config.maximum_fate_steps,
+        aevm_limits: config.aevm_limits,
+    };
+    Ok(f(&config))
 }

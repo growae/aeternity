@@ -677,3 +677,6 @@ fn event(v: &transactions::batch::Event) -> J {
 
 #[path = "storage.rs"]
 mod storage;
+
+#[path = "key.rs"]
+mod key;

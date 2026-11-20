@@ -17,11 +17,11 @@ ae-consensus.workspace = true
 ae-execution.workspace = true
 ae-vm-fate.workspace = true
 num-bigint.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 ae-vm-aevm.workspace = true
 hex.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true
