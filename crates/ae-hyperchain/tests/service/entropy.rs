@@ -183,6 +183,78 @@ fn entropy_reply(r: Option<Vec<u8>>) -> J {
     }
 }
 #[test]
+fn block_host_uses_live_entropy_outbox_and_selected_pin_hashes() {
+    use ae_hyperchain::{
+        block::{
+            self, Host,
+            host::{LiveHost, PinSource},
+        },
+        chain,
+    };
+    #[derive(Clone)]
+    struct Pins;
+    impl PinSource for Pins {
+        type Error = ();
+        fn is_operational(_: &()) -> bool {
+            true
+        }
+        fn get_pin(&mut self, hash: &[u8]) -> Result<Option<block::Pin>, ()> {
+            Ok((hash == key(777)).then(|| block::Pin {
+                epoch: 1.into(),
+                child_height: 3.into(),
+                child_hash: key(333).to_vec(),
+                parent_height: 7.into(),
+            }))
+        }
+    }
+    let mut pair = Pair::start(true, 64);
+    pair.post(43, 43);
+    let selected = chain::Selected::new(chain::Selection {
+        heights: BTreeMap::from([(3.into(), key(333).to_vec())]),
+        ..Default::default()
+    });
+    let mut entropy = host(&[1], ServiceLimits::default());
+    add_parent(&mut entropy);
+    entropy.set_parent_cache(Some(pair.client.clone()));
+    let mut live = LiveHost {
+        entropy,
+        selected: selected.clone(),
+        pins: Pins,
+    };
+    let mut candidate = live.clone();
+    assert_eq!(
+        candidate.entropy(&9.into()).unwrap(),
+        Some(key(41).to_vec())
+    );
+    assert!(live.entropy.outbox().is_empty());
+    assert!(
+        matches!(&candidate.entropy.outbox()[0], Output::ParentBlock {epoch,block} if epoch==&9.into() && block.hash==key(41))
+    );
+    live = candidate;
+    let pin = live.pin(&key(777)).unwrap().unwrap();
+    assert_eq!(
+        live.key_hash(&pin.child_height).unwrap(),
+        Some(pin.child_hash)
+    );
+    selected.replace(chain::Selection {
+        heights: BTreeMap::from([(3.into(), key(334).to_vec())]),
+        ..Default::default()
+    });
+    assert_eq!(live.key_hash(&3.into()).unwrap(), Some(key(334).to_vec()));
+    assert_eq!(live.key_hash(&4.into()).unwrap(), None);
+    pair.post(41, 55);
+    assert_eq!(live.entropy(&9.into()).unwrap(), Some(key(55).to_vec()));
+    pair.cache.take().unwrap().shutdown().unwrap();
+    let before = live.entropy.outbox().len();
+    assert!(matches!(
+        live.entropy(&9.into()),
+        Err(block::host::Error::Entropy(local_host::Error::ParentCache(
+            cache::Error::Closed
+        )))
+    ));
+    assert_eq!(live.entropy.outbox().len(), before);
+}
+#[test]
 fn original_entropy_queries_require_finality_and_notify_both_workers() {
     let pair = Pair::start(true, 64);
     let mut c = pair.coordinator();

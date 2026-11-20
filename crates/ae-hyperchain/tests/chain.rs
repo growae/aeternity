@@ -24,6 +24,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[path = "chain/block.rs"]
+mod block;
 #[path = "chain/genesis.rs"]
 mod genesis;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]

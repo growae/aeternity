@@ -95,6 +95,15 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     Native(Native),
     Contract(Box<consensus_contract::Error<A, C>>),
 }
+impl<A, C> Error<A, C> {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::ViewUnavailable(_) | Self::ResourceLimit => true,
+            Self::Contract(e) => !e.is_native(),
+            Self::ChainTooShort | Self::Native(_) => false,
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Staker {
     pub address: ObjectPayload,
@@ -311,6 +320,25 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder> Reader<A, C, O> 
         arguments: Vec<Value>,
     ) -> Result<Value, Error<A, C>> {
         let view = self.view(env)?;
+        self.with_execution(&view, |execution| {
+            consensus_contract::query(
+                self.profile.contracts,
+                contract,
+                &view.trees,
+                &view.context,
+                execution,
+                endpoint,
+                arguments,
+                self.profile.limits,
+            )
+            .map_err(|e| Error::Contract(Box::new(e)))
+        })
+    }
+    pub(crate) fn with_execution<T>(
+        &self,
+        view: &View<A, C>,
+        f: impl FnOnce(&transactions::Config<'_, O>) -> T,
+    ) -> T {
         let p = &self.profile;
         let vm = contracts::fate::Config {
             context: &p.context,
@@ -338,17 +366,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder> Reader<A, C, O> 
             maximum_fate_steps: p.maximum_steps,
             aevm_limits: Default::default(),
         };
-        consensus_contract::query(
-            p.contracts,
-            contract,
-            &view.trees,
-            &view.context,
-            &execution,
-            endpoint,
-            arguments,
-            p.limits,
-        )
-        .map_err(|e| Error::Contract(Box::new(e)))
+        f(&execution)
     }
     pub fn epoch(&self, env: &RunEnv<A, C>) -> Result<Value, Error<A, C>> {
         self.query(env, Contract::Election, b"epoch", vec![])
