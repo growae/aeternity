@@ -7,6 +7,7 @@ use ae_trie::{
 use ae_types::Hash256;
 use std::collections::BTreeSet;
 mod codec;
+pub mod session;
 pub use codec::{Unfold, decode_batch, encode_batch};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
