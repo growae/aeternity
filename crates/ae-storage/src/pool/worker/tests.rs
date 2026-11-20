@@ -4,6 +4,7 @@ use crate::pool::tests::{Temp, blocks, config, database, prepare, tx};
 use ae_mempool::pool::{self as policy, Event, Location, PushOutcome};
 use std::collections::BTreeSet;
 use std::sync::mpsc;
+mod gossip;
 
 fn settings() -> Settings {
     Settings {

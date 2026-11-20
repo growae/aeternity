@@ -128,12 +128,34 @@ impl Client {
             }));
             return Ok(ticket);
         }
-        self.submit(self.tx_bytes(&tx)?, move |s| {
-            s.push(tx, event, gossip_cached)
+        let bytes = self.tx_bytes(&tx)?;
+        let shared = Arc::downgrade(&self.shared);
+        self.submit(bytes, move |s| {
+            let submission = s.push(tx.clone(), event, gossip_cached)?;
+            let shared = shared
+                .upgrade()
+                .expect("executing worker owns shared state");
+            let mut control = shared.lock();
+            control.info.pool = s.inspection();
+            control.feed.publish(tx, &submission, bytes);
+            shared.signal(&mut control);
+            Ok(submission)
         })
     }
     pub fn force_push(&self, tx: Arc<Signed>) -> Result<Ticket<Submission>, Error> {
-        self.submit(self.tx_bytes(&tx)?, move |s| s.force_push(tx))
+        let bytes = self.tx_bytes(&tx)?;
+        let shared = Arc::downgrade(&self.shared);
+        self.submit(bytes, move |s| {
+            let submission = s.force_push(tx.clone())?;
+            let shared = shared
+                .upgrade()
+                .expect("executing worker owns shared state");
+            let mut control = shared.lock();
+            control.info.pool = s.inspection();
+            control.feed.publish(tx, &submission, bytes);
+            shared.signal(&mut control);
+            Ok(submission)
+        })
     }
     pub fn refresh(&self) -> Result<Ticket<Inspection>, Error> {
         self.submit(BASE_WEIGHT, |s| s.refresh())

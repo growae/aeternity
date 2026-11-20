@@ -9,8 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 mod client;
+pub mod events;
+mod gossip;
 mod reply;
 pub use client::{Client, SelectOptions};
+pub use gossip::GossipCache;
 pub use reply::Ticket;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +24,8 @@ pub struct Settings {
     pub single_request_bytes: usize,
     pub max_peek: usize,
     pub origins_interval: Option<Duration>,
+    pub event_count: usize,
+    pub event_bytes: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -30,6 +35,8 @@ impl Default for Settings {
             single_request_bytes: 16 * 1024 * 1024 + BASE_WEIGHT,
             max_peek: 100_000,
             origins_interval: Some(Duration::from_secs(30)),
+            event_count: 1024,
+            event_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -38,6 +45,8 @@ const BASE_WEIGHT: usize = 128;
 pub enum Error {
     Service(Failure),
     InvalidSettings,
+    Cache(ae_mempool::gossip::Error),
+    CacheUnavailable,
     Saturated,
     RequestTooLarge,
     Stopped,
@@ -117,6 +126,7 @@ struct Control {
     outstanding: usize,
     pending: bool,
     stop: bool,
+    feed: events::Feed,
 }
 pub(crate) struct Shared {
     control: Mutex<Control>,
@@ -124,6 +134,7 @@ pub(crate) struct Shared {
     settings: Settings,
     record: ReadConfig,
     origin: Instant,
+    gossip: GossipCache,
 }
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Control> {
@@ -154,6 +165,15 @@ impl Worker {
         config: ServiceConfig,
         settings: Settings,
     ) -> Result<Self, Error> {
+        Self::spawn_with_cache(db, network, config, settings, GossipCache::default())
+    }
+    pub fn spawn_with_cache(
+        db: Arc<Database>,
+        network: NetworkProfile,
+        config: ServiceConfig,
+        settings: Settings,
+        gossip: GossipCache,
+    ) -> Result<Self, Error> {
         if settings.requests == 0
             || settings.single_request_bytes < BASE_WEIGHT
             || settings.request_bytes < BASE_WEIGHT
@@ -183,11 +203,13 @@ impl Worker {
                 outstanding: 0,
                 pending: true,
                 stop: false,
+                feed: events::Feed::new(settings.event_count, settings.event_bytes),
             }),
             changed: Condvar::new(),
             settings,
             record: db.config.clone(),
             origin: Instant::now(),
+            gossip,
         });
         // Register before spawning, with an initial refresh pending. A commit
         // between service restoration and registration is therefore not lost.
