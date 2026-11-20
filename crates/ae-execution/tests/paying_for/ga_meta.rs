@@ -102,7 +102,7 @@ fn contract_failure(e: &contracts::Error) -> J {
         _ => json!({"kind":"ok","value":tuple(vec![atom("error"),atom(contract_reason(e))])}),
     }
 }
-fn failure<A, C>(e: &Error<A, C>) -> J {
+pub(super) fn failure<A, C>(e: &Error<A, C>) -> J {
     match e {
         Error::Contract(e) => contract_failure(e),
         Error::Aevm(e) => {
@@ -179,6 +179,16 @@ fn generalized_meta_authentication_inner_callbacks_and_historical_wrappers_match
                 assert_eq!(v[1][0], atom("ok"), "{row}");
                 check(&t, &r, &v[1][1]);
                 check_used_gas(&r.gas, &v[1][2]);
+                assert_eq!(
+                    transactions::accounting::used_gas(
+                        signed(row).transaction().view(),
+                        &50.into(),
+                        tx_context(row).protocol,
+                        &t
+                    )
+                    .unwrap(),
+                    magnitude(&r.gas)
+                );
                 check_environment(&r, &v[1][1]);
                 assert_eq!(
                     r.transaction_hash,

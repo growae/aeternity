@@ -169,6 +169,16 @@ fn ga_attachment_matches_original_admission_both_vms_accounts_calls_and_fee_sett
                 check(&t, &r, &v[1][1]);
                 check_used_gas(&r.gas, &v[1][2]);
                 let s = SignedTransaction::<Transaction>::decode(&bytes(&row["signed"])).unwrap();
+                assert_eq!(
+                    transactions::accounting::used_gas(
+                        s.transaction().view(),
+                        &50.into(),
+                        tx_context(row).protocol,
+                        &t
+                    )
+                    .unwrap(),
+                    magnitude(&r.gas)
+                );
                 assert_eq!(r.transaction_hash, Some(s.hash()));
             }
             Err(e) => {

@@ -211,6 +211,16 @@ fn sponsored_all_leaf_callbacks_both_vms_and_failure_settlement_match_original()
                 assert_eq!(v[1][0], atom("ok"), "{row}");
                 check(&t, &r, &v[1][1]);
                 check_used_gas(&r.gas, &v[1][2]);
+                assert_eq!(
+                    transactions::accounting::used_gas(
+                        signed(row).transaction().view(),
+                        &50.into(),
+                        tx_context(row).protocol,
+                        &t
+                    )
+                    .unwrap(),
+                    magnitude(&r.gas)
+                );
             }
             Err(e) => {
                 if matches!(e, Error::ContractCallContextCase(_)) {
@@ -243,6 +253,9 @@ fn sponsored_all_leaf_callbacks_both_vms_and_failure_settlement_match_original()
 
 #[path = "../../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
+
+#[path = "batch.rs"]
+mod batch;
 
 #[test]
 fn strict_and_authenticated_signer_derivation_matches_original() {

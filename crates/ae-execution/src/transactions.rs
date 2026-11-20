@@ -13,6 +13,8 @@ use ae_vm_fate::maps::{MapOrder, order::Otp26};
 use num_bigint::{BigInt, Sign};
 use std::collections::BTreeMap;
 
+pub mod accounting;
+pub mod batch;
 mod failures;
 mod signatures;
 mod wrappers;
