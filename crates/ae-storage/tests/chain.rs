@@ -1194,3 +1194,81 @@ fn rollback_reopens_and_resumes_real_public_execution_with_consistent_indexes() 
         );
     }
 }
+
+#[test]
+fn paged_scan_of_real_state_survives_live_insertion_and_rollback() {
+    use ae_trie::scan::PageLimits;
+    let n = Network::Mainnet;
+    let network = profile(n);
+    let config = transactions::Config::primitives(&network);
+    let all = blocks(n);
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity(n)).unwrap();
+    bootstrap(&db, n);
+    for b in &all[..2] {
+        db.commit(
+            ledger::prepare(
+                &db.view().unwrap(),
+                b,
+                &config,
+                &rules(n),
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let micro = all[1].hash().unwrap();
+    let old_view = db.view().unwrap();
+    let old_status = old_view.status();
+    let mut baseline = old_view.scan_state(micro, Default::default()).unwrap();
+    let mut expected = Vec::new();
+    while !baseline.is_complete() {
+        expected.extend(baseline.next_page(PageLimits::default()).unwrap());
+    }
+    let mut scan = old_view.scan_state(micro, Default::default()).unwrap();
+    let mut actual = scan
+        .next_page(PageLimits {
+            nodes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(!scan.is_complete());
+    drop(old_view);
+    for b in &all[2..] {
+        db.commit(
+            ledger::prepare(
+                &db.view().unwrap(),
+                b,
+                &config,
+                &rules(n),
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    db.rollback(
+        repo::rollback::Target::Key(all[0].hash().unwrap()),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(db.view().unwrap().block(micro).unwrap().is_none());
+    assert!(matches!(
+        db.view().unwrap().scan_state(micro, Default::default()),
+        Err(repo::Error::Missing(_))
+    ));
+    while !scan.is_complete() {
+        actual.extend(
+            scan.next_page(PageLimits {
+                nodes: 7,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(scan.revision(), old_status.revision);
+    assert_eq!(scan.block(), micro);
+    assert!(db.view().unwrap().status().revision > scan.revision());
+}

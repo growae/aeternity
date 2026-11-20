@@ -8,6 +8,7 @@ use ae_types::Hash256;
 use std::{collections::BTreeMap, fmt};
 
 mod overlay;
+pub mod scan;
 mod traversal;
 pub use overlay::{Overlay, OverlayLimits};
 pub use traversal::{IteratorOptions, OwnedReadView, ReadView, TrieIterator, transaction_root};
@@ -209,7 +210,11 @@ fn read_node<S: NodeReader>(reference: &Reference, store: &S) -> Result<Node, Er
             bytes
         }
     };
-    let Rlp::List(items) = rlp::decode_with_limits(&raw, store.decode_limits())? else {
+    decode_node(&raw, store.decode_limits())
+}
+
+fn decode_node(raw: &[u8], limits: rlp::DecodeLimits) -> Result<Node, Error> {
+    let Rlp::List(items) = rlp::decode_with_limits(raw, limits)? else {
         return Err(Error::InvalidNode);
     };
     match items.as_slice() {

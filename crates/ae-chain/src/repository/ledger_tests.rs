@@ -765,3 +765,5 @@ fn generation_reset_policy_and_persistent_records_reject_malformed_values() {
 
 #[path = "rollback_tests.rs"]
 mod rollback_tests;
+#[path = "scan_tests.rs"]
+mod scan_tests;

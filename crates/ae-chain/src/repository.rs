@@ -15,6 +15,7 @@ mod codec;
 mod decoding;
 mod history;
 pub mod rollback;
+pub mod scan;
 mod signaling;
 use codec::*;
 pub use decoding::ReadConfig;

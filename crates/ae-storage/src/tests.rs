@@ -52,6 +52,93 @@ fn plan(db: &Database) -> Update {
     )
     .unwrap()
 }
+
+#[test]
+fn full_state_scan_detects_deep_damage_and_keeps_the_original_rocksdb_snapshot() {
+    use ae_trie::scan::PageLimits;
+    let dir = Temp::new();
+    let Header::Key(header) = genesis::header(Network::Mainnet).unwrap() else {
+        panic!()
+    };
+    let id = Identity::new(
+        &NetworkProfile::mainnet(),
+        Header::Key(header.clone()).hash().unwrap(),
+        Hash256::ZERO,
+    );
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    let trees = Trees {
+        accounts: genesis::state(Network::Mainnet).unwrap().0,
+        contracts: ae_state::contracts::Contracts::new(Default::default()),
+        calls: Default::default(),
+        channels: Default::default(),
+        names: Default::default(),
+        oracles: Default::default(),
+    };
+    db.commit(
+        ledger::bootstrap(
+            &db.view().unwrap(),
+            &NetworkProfile::mainnet(),
+            &header,
+            &trees,
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let view = db.view().unwrap();
+    let mut baseline = view.scan_state(id.genesis, Default::default()).unwrap();
+    let mut expected = Vec::new();
+    while !baseline.is_complete() {
+        expected.extend(baseline.next_page(PageLimits::default()).unwrap());
+    }
+    assert!(expected.len() > 2);
+    let target = &expected[2];
+    let mut pinned = view.scan_state(id.genesis, Default::default()).unwrap();
+    let mut actual = pinned
+        .next_page(PageLimits {
+            nodes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    let original_status = view.status();
+    for bytes in [None, Some(vec![0])] {
+        match bytes {
+            None => db.db.delete(repo::key(repo::NODES, target.hash.0)).unwrap(),
+            Some(b) => db.db.put(repo::key(repo::NODES, target.hash.0), b).unwrap(),
+        }
+        let damaged = db.view().unwrap();
+        damaged.verify_tip().unwrap(); // shallow opening validation cannot see this leaf
+        let mut scan = damaged.scan_state(id.genesis, Default::default()).unwrap();
+        let before = scan.progress();
+        assert!(scan.next_page(PageLimits::default()).is_err());
+        assert_eq!(scan.progress(), before);
+        assert!(!scan.is_complete());
+        assert_eq!(damaged.status(), original_status);
+    }
+    while !pinned.is_complete() {
+        actual.extend(pinned.next_page(PageLimits::default()).unwrap());
+    }
+    assert_eq!(actual, expected);
+    db.db
+        .put(repo::key(repo::NODES, target.hash.0), &target.bytes)
+        .unwrap();
+    drop(pinned);
+    drop(baseline);
+    drop(view);
+    drop(db);
+    let reopened = Database::open(&dir.0, id.clone()).unwrap();
+    let mut scan = reopened
+        .view()
+        .unwrap()
+        .scan_state(id.genesis, Default::default())
+        .unwrap();
+    let mut actual = Vec::new();
+    while !scan.is_complete() {
+        actual.extend(scan.next_page(PageLimits::default()).unwrap());
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(reopened.view().unwrap().status(), original_status);
+}
 #[test]
 fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
     for schema in 1..=4 {
