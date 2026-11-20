@@ -111,6 +111,7 @@ dependencies = [
  "ae-execution",
  "ae-protocol",
  "ae-state",
+ "ae-trie",
  "ae-tx",
  "ae-types",
  "hex",
