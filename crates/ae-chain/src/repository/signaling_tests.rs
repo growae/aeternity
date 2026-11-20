@@ -14,6 +14,34 @@ impl NodeReader for Memory {
     }
 }
 impl Read for Memory {
+    fn visit_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut Visitor<'_>,
+    ) -> Result<(), Error> {
+        for (i, (k, v)) in self.0.range(start.to_vec()..end.to_vec()).enumerate() {
+            if i >= limit {
+                return Err(Error::ResourceLimit);
+            }
+            visit(k, v)?;
+        }
+        Ok(())
+    }
+    fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<Entries, Error> {
+        let out: Vec<_> = self
+            .0
+            .range(start.to_vec()..end.to_vec())
+            .take(limit.saturating_add(1))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if out.len() > limit {
+            Err(Error::ResourceLimit)
+        } else {
+            Ok(out)
+        }
+    }
     fn source_id(&self) -> u64 {
         1
     }

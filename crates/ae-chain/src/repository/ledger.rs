@@ -105,6 +105,27 @@ pub struct Update {
     proof: Option<fraud::Proof>,
 }
 impl Update {
+    pub(super) fn rollback<S: Read>(
+        view: &View<S>,
+        change: Change,
+        writes: Writes,
+        limit: usize,
+    ) -> Result<Self, Error> {
+        publish(
+            Self {
+                identity: view.identity.clone(),
+                source_id: view.source.source_id(),
+                policy_generation: view.resilience().generation,
+                expected: view.status,
+                change,
+                writes,
+                events: vec![],
+                key_fraud: None,
+                proof: None,
+            },
+            limit,
+        )
+    }
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
@@ -259,7 +280,9 @@ pub fn bootstrap<S: Read>(
     put(&mut writes, key(ENDS, hash.0), vec![]);
     let change = Change {
         revision: 1,
-        inserted: hash,
+        inserted: Some(hash),
+        removed: vec![],
+        discarded: vec![],
         old_tip: None,
         new_tip: hash,
         ancestor: None,
@@ -343,7 +366,9 @@ fn selection<S: Read>(
     if parent == old {
         return Ok(Change {
             revision,
-            inserted,
+            inserted: Some(inserted),
+            removed: vec![],
+            discarded: vec![],
             old_tip: Some(old),
             new_tip: inserted,
             ancestor: Some(old),
@@ -357,7 +382,9 @@ fn selection<S: Read>(
     if keep_pow_tip(&old_record.difficulty, &record.difficulty) {
         return Ok(Change {
             revision,
-            inserted,
+            inserted: Some(inserted),
+            removed: vec![],
+            discarded: vec![],
             old_tip: Some(old),
             new_tip: old,
             ancestor: None,
@@ -403,7 +430,9 @@ fn selection<S: Read>(
     attached.reverse();
     Ok(Change {
         revision,
-        inserted,
+        inserted: Some(inserted),
+        removed: vec![],
+        discarded: vec![],
         old_tip: Some(old),
         new_tip: inserted,
         ancestor: Some(ancestor),

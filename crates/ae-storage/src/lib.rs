@@ -52,6 +52,14 @@ impl Database {
         identity: Identity,
         config: ReadConfig,
     ) -> Result<Self, Error> {
+        Self::open_with_recovery_limits(path, identity, config, Default::default())
+    }
+    pub fn open_with_recovery_limits(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+        recovery: repo::rollback::Limits,
+    ) -> Result<Self, Error> {
         if Identity::decode(&identity.encode())? != identity {
             return Err(Error::Identity);
         }
@@ -109,7 +117,30 @@ impl Database {
                 .write_opt(batch, &write_options())
                 .map_err(backend)?;
         }
+        result.enforce_community_fork(recovery)?;
         Ok(result)
+    }
+    pub fn rollback(
+        &self,
+        target: repo::rollback::Target,
+        limits: repo::rollback::Limits,
+    ) -> Result<Committed, repo::rollback::Failure> {
+        let plan = repo::rollback::prepare(&self.view()?, target, limits)?;
+        Ok(self.commit(plan)?)
+    }
+    pub fn enforce_community_fork(
+        &self,
+        limits: repo::rollback::Limits,
+    ) -> Result<Option<Committed>, Error> {
+        let view = self.view()?;
+        let Some(target) = repo::rollback::community_fork_target(&view)? else {
+            return Ok(None);
+        };
+        let plan = repo::rollback::prepare(&view, target, limits).map_err(|error| match error {
+            repo::rollback::Failure::Repository(e) => e,
+            _ => Error::Corrupt("community rollback target"),
+        })?;
+        Ok(Some(self.commit(plan)?))
     }
     pub fn view(&self) -> Result<View<Snapshot<'_>>, Error> {
         let policy = self.writer.lock().map_err(|_| backend_lock())?;
@@ -269,6 +300,46 @@ impl NodeReader for Snapshot<'_> {
     }
 }
 impl Read for Snapshot<'_> {
+    fn visit_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut repo::Visitor<'_>,
+    ) -> Result<(), Error> {
+        for (count, pair) in self
+            .snapshot
+            .iterator(IteratorMode::From(start, Direction::Forward))
+            .enumerate()
+        {
+            let (k, v) = pair.map_err(backend)?;
+            if k.as_ref() >= end {
+                break;
+            }
+            if count >= limit {
+                return Err(Error::ResourceLimit);
+            }
+            visit(&k, &v)?;
+        }
+        Ok(())
+    }
+    fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<repo::Entries, Error> {
+        let mut out = vec![];
+        for pair in self
+            .snapshot
+            .iterator(IteratorMode::From(start, Direction::Forward))
+        {
+            let (k, v) = pair.map_err(backend)?;
+            if k.as_ref() >= end {
+                break;
+            }
+            if out.len() >= limit {
+                return Err(Error::ResourceLimit);
+            }
+            out.push((k.to_vec(), v.to_vec()));
+        }
+        Ok(out)
+    }
     fn source_id(&self) -> u64 {
         self.source_id
     }

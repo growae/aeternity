@@ -14,6 +14,7 @@ mod blocks;
 mod codec;
 mod decoding;
 mod history;
+pub mod rollback;
 mod signaling;
 use codec::*;
 pub use decoding::ReadConfig;
@@ -79,6 +80,7 @@ impl std::error::Error for Error {}
 // Implementations must provide immutable, consistent reads for their lifetime.
 // Prefix scans fail on exhaustion; a truncated result is never a complete view.
 pub type Entries = Vec<(Vec<u8>, Vec<u8>)>;
+pub type Visitor<'a> = dyn FnMut(&[u8], &[u8]) -> Result<(), Error> + 'a;
 pub trait Read: NodeReader + Clone {
     fn source_id(&self) -> u64;
     fn resilience(&self) -> crate::resilience::Snapshot {
@@ -86,6 +88,14 @@ pub trait Read: NodeReader + Clone {
     }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
     fn prefix(&self, prefix: &[u8], limit: usize) -> Result<Entries, Error>;
+    fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<Entries, Error>;
+    fn visit_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut Visitor<'_>,
+    ) -> Result<(), Error>;
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -107,7 +117,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(4)
+        self.encode_version(5)
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
         list(vec![
@@ -123,7 +133,7 @@ impl Identity {
         let v = decode(bytes)?;
         let a = fields(&v, 5)?;
         let version = integer(&a[0])?;
-        if !matches!(version, 1..=4) {
+        if !matches!(version, 1..=5) {
             return Err(Error::Corrupt("schema version"));
         }
         let network = blob(&a[1])?.to_vec();
@@ -294,7 +304,9 @@ impl Record {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub revision: u64,
-    pub inserted: Hash256,
+    pub inserted: Option<Hash256>,
+    pub removed: Vec<Hash256>,
+    pub discarded: Vec<Hash256>,
     pub old_tip: Option<Hash256>,
     pub new_tip: Hash256,
     pub ancestor: Option<Hash256>,
@@ -306,10 +318,17 @@ pub struct Change {
 }
 impl Change {
     pub fn encode(&self) -> Vec<u8> {
-        list(vec![
-            number(1),
+        self.encode_version(2)
+    }
+    fn encode_version(&self, version: u64) -> Vec<u8> {
+        let mut fields = vec![
+            number(version),
             number(self.revision),
-            binary(self.inserted.0),
+            if version == 1 {
+                binary(self.inserted.expect("legacy insertion").0)
+            } else {
+                optional(self.inserted)
+            },
             optional(self.old_tip),
             binary(self.new_tip.0),
             optional(self.ancestor),
@@ -322,24 +341,44 @@ impl Change {
                     .map(|(t, b)| list(vec![binary(t.0), binary(b.0)]))
                     .collect(),
             ),
-        ])
-        .encode()
+        ];
+        if version == 2 {
+            fields.push(list(self.removed.iter().map(|h| binary(h.0)).collect()));
+            fields.push(list(self.discarded.iter().map(|h| binary(h.0)).collect()));
+        }
+        list(fields).encode()
     }
     pub fn decode(b: &[u8]) -> Result<Self, Error> {
-        let v = decode(b)?;
-        let a = fields(&v, 10)?;
-        if integer(&a[0])? != 1 {
-            return Err(Error::Corrupt("event version"));
-        }
+        let value = decode(b)?;
+        let all = items(&value)?;
+        let version = integer(all.first().ok_or(Error::Corrupt("empty event"))?)?;
+        let a = fields(
+            &value,
+            match version {
+                1 => 10,
+                2 => 12,
+                _ => return Err(Error::Corrupt("event version")),
+            },
+        )?;
+        let hashes = |v: &Value| {
+            items(v)?
+                .iter()
+                .map(hash)
+                .collect::<Result<Vec<_>, Error>>()
+        };
         let c = Self {
             revision: integer(&a[1])?,
-            inserted: hash(&a[2])?,
+            inserted: if version == 1 {
+                Some(hash(&a[2])?)
+            } else {
+                optional_hash(&a[2])?
+            },
             old_tip: optional_hash(&a[3])?,
             new_tip: hash(&a[4])?,
             ancestor: optional_hash(&a[5])?,
-            detached: items(&a[6])?.iter().map(hash).collect::<Result<_, _>>()?,
-            attached: items(&a[7])?.iter().map(hash).collect::<Result<_, _>>()?,
-            requeue: items(&a[8])?.iter().map(hash).collect::<Result<_, _>>()?,
+            detached: hashes(&a[6])?,
+            attached: hashes(&a[7])?,
+            requeue: hashes(&a[8])?,
             confirm: items(&a[9])?
                 .iter()
                 .map(|p| {
@@ -347,13 +386,35 @@ impl Change {
                     Ok((hash(&a[0])?, hash(&a[1])?))
                 })
                 .collect::<Result<_, Error>>()?,
+            removed: if version == 1 {
+                vec![]
+            } else {
+                hashes(&a[10])?
+            },
+            discarded: if version == 1 {
+                vec![]
+            } else {
+                hashes(&a[11])?
+            },
         };
-        if c.encode() != b {
+        if c.removed.windows(2).any(|w| w[0] >= w[1])
+            || c.discarded.windows(2).any(|w| w[0] >= w[1])
+            || c.removed.contains(&c.new_tip)
+            || c.encode_version(version) != b
+            || (c.inserted.is_some() && (!c.removed.is_empty() || !c.discarded.is_empty()))
+            || (c.inserted.is_none()
+                && (c.old_tip.is_none()
+                    || c.ancestor != Some(c.new_tip)
+                    || !c.attached.is_empty()
+                    || !c.requeue.is_empty()
+                    || !c.confirm.is_empty()))
+        {
             return Err(Error::Corrupt("event encoding"));
         }
         Ok(c)
     }
 }
+
 #[derive(Debug, Clone)]
 pub struct View<S> {
     source: S,

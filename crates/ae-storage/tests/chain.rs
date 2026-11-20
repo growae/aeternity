@@ -648,6 +648,15 @@ fn crash_worker() {
     let config = transactions::Config::primitives(&network);
     let plan = if operation == "policy" {
         None
+    } else if operation == "rollback" {
+        Some(
+            repo::rollback::prepare(
+                &view,
+                repo::rollback::Target::Key(blocks(n)[0].hash().unwrap()),
+                Default::default(),
+            )
+            .unwrap(),
+        )
     } else if operation == "genesis" {
         Some(
             ledger::bootstrap(
@@ -690,9 +699,10 @@ fn crash_worker() {
     }
     println!("AE_STORE_DURABLE");
     std::io::stdout().flush().unwrap();
-    line.clear();
-    std::io::stdin().lock().read_line(&mut line).unwrap();
-    panic!("worker must be killed by the parent");
+    // Waiting after publication must not race a parent closing its stdin.
+    loop {
+        std::thread::park();
+    }
 }
 #[test]
 fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
@@ -705,7 +715,7 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
             let _ = self.0.wait();
         }
     }
-    for operation in ["genesis", "micro", "key", "policy", "signal"] {
+    for operation in ["genesis", "micro", "key", "policy", "signal", "rollback"] {
         let (n, network, id) = crash_identity(operation);
         let config = transactions::Config::primitives(&network);
         let all = blocks(n);
@@ -737,7 +747,7 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
                 let count = match operation {
                     "micro" | "signal" => 1,
                     "key" => 4,
-                    "policy" => all.len(),
+                    "policy" | "rollback" => all.len(),
                     _ => unreachable!(),
                 };
                 for b in &all[..count] {
@@ -820,6 +830,53 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
                 eprintln!("Crash recovery policy/{phase}: finalized {finalized:?}");
                 continue;
             }
+            if operation == "rollback" {
+                let changed = after.revision != before.revision;
+                assert!(after.revision == before.revision || after.revision == before.revision + 1);
+                if phase == "before" {
+                    assert!(!changed);
+                }
+                if phase == "after" {
+                    assert!(changed);
+                }
+                assert_eq!(
+                    after.tip,
+                    if changed {
+                        Some(all[0].hash().unwrap())
+                    } else {
+                        before.tip
+                    }
+                );
+                for b in &all[1..] {
+                    assert_eq!(view.block(b.hash().unwrap()).unwrap().is_none(), changed);
+                }
+                let Block::Micro(m) = &all[1] else { panic!() };
+                assert_eq!(
+                    view.transaction(m.transactions[0].hash())
+                        .unwrap()
+                        .is_none(),
+                    changed
+                );
+                assert_eq!(
+                    view.location(m.transactions[0].hash()).unwrap().is_none(),
+                    changed
+                );
+                if changed {
+                    assert!(
+                        view.event(after.revision)
+                            .unwrap()
+                            .unwrap()
+                            .inserted
+                            .is_none()
+                    );
+                }
+                view.verify_tip().unwrap();
+                eprintln!(
+                    "Crash recovery rollback/{phase}: revision {} -> {}",
+                    before.revision, after.revision
+                );
+                continue;
+            }
             if operation == "key" {
                 assert_eq!(
                     view.finalized_height().unwrap(),
@@ -867,7 +924,7 @@ fn killed_processes_recover_only_complete_chain_and_finalization_commits() {
                 }
                 assert_eq!(
                     view.event(after.revision).unwrap().unwrap().inserted,
-                    candidate
+                    Some(candidate)
                 );
             }
             if operation == "micro" {
@@ -1039,5 +1096,101 @@ fn crash_identity(operation: &str) -> (Network, NetworkProfile, Identity) {
             profile(Network::Mainnet),
             identity(Network::Mainnet),
         )
+    }
+}
+
+#[test]
+fn rollback_reopens_and_resumes_real_public_execution_with_consistent_indexes() {
+    use repo::rollback::{self, Target};
+    let n = Network::Mainnet;
+    let network = profile(n);
+    let config = transactions::Config::primitives(&network);
+    let all = blocks(n);
+    for target in [
+        Target::Height(0),
+        Target::Height(1),
+        Target::Key(all[0].hash().unwrap()),
+        Target::Micro(all[1].hash().unwrap()),
+        Target::Key(all[2].hash().unwrap()),
+    ] {
+        let dir = Temp::new();
+        let db = Database::open(&dir.0, identity(n)).unwrap();
+        bootstrap(&db, n);
+        for b in &all {
+            db.commit(
+                ledger::prepare(
+                    &db.view().unwrap(),
+                    b,
+                    &config,
+                    &rules(n),
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let pinned = db.view().unwrap();
+        let old = pinned.status();
+        let stale = rollback::prepare(&pinned, target, Default::default()).unwrap();
+        db.update_resilience(
+            ae_chain::resilience::Event::Synced,
+            ae_chain::resilience::Config {
+                depth: 1,
+                from_start: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(db.commit(stale), Err(repo::Error::Conflict)));
+        let committed = db.rollback(target, Default::default()).unwrap();
+        let change = committed.change();
+        assert_eq!(change.old_tip, old.tip);
+        assert_eq!(change.inserted, None);
+        assert!(change.requeue.is_empty());
+        assert_eq!(pinned.status(), old);
+        for b in &all {
+            assert!(pinned.block(b.hash().unwrap()).unwrap().is_some());
+        }
+        let current = db.view().unwrap();
+        current.verify_tip().unwrap();
+        for hash in &change.removed {
+            assert!(current.block(*hash).unwrap().is_none());
+            assert!(current.record(*hash).unwrap().is_none());
+        }
+        for hash in &change.discarded {
+            assert!(current.transaction(*hash).unwrap().is_none());
+            assert!(current.location(*hash).unwrap().is_none());
+        }
+        let tip = change.new_tip;
+        let revision = current.status().revision;
+        drop(current);
+        drop(pinned);
+        drop(db);
+        let db = Database::open(&dir.0, identity(n)).unwrap();
+        assert_eq!(
+            db.view().unwrap().status(),
+            Status {
+                revision,
+                tip: Some(tip)
+            }
+        );
+        for b in &all {
+            let view = db.view().unwrap();
+            if view.block(b.hash().unwrap()).unwrap().is_some() {
+                continue;
+            }
+            db.commit(ledger::prepare(&view, b, &config, &rules(n), Default::default()).unwrap())
+                .unwrap();
+        }
+        let view = db.view().unwrap();
+        view.verify_tip().unwrap();
+        assert_eq!(view.status().tip, Some(all.last().unwrap().hash().unwrap()));
+        for b in &all {
+            assert!(view.is_canonical(b.hash().unwrap()).unwrap());
+        }
+        let Block::Micro(m) = &all[1] else { panic!() };
+        assert_eq!(
+            view.location(m.transactions[0].hash()).unwrap(),
+            Some(all[1].hash().unwrap())
+        );
     }
 }

@@ -54,7 +54,7 @@ fn plan(db: &Database) -> Update {
 }
 #[test]
 fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
-    for schema in 1..=3 {
+    for schema in 1..=4 {
         use ae_trie::Value;
         use ae_tx::{SignedTransaction, Spend, Transaction, TransactionLeaf};
         use ae_types::{AccountPublicKey, Id, IdTag};
@@ -85,6 +85,16 @@ fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records
                 .put(repo::key(repo::BLOCKS, id.genesis.0), legacy_block)
                 .unwrap();
         }
+        // Earlier schema writers used the original ten-field insertion event.
+        let event_key = repo::key(repo::EVENTS, 1u64.to_be_bytes());
+        let Value::List(mut event) =
+            Value::decode(&db.db.get(&event_key).unwrap().unwrap()).unwrap()
+        else {
+            panic!()
+        };
+        event[0] = Value::Bytes(vec![1]);
+        event.truncate(10);
+        db.db.put(&event_key, Value::List(event).encode()).unwrap();
         db.db.put(repo::IDENTITY, &legacy).unwrap();
         db.db
             .put(
@@ -118,7 +128,7 @@ fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records
 
 #[test]
 fn failed_legacy_validation_never_advances_the_schema_marker() {
-    for schema in 1..=3 {
+    for schema in 1..=4 {
         use ae_trie::Value;
         let dir = Temp::new();
         let id = identity();
@@ -151,6 +161,16 @@ fn failed_legacy_validation_never_advances_the_schema_marker() {
                 .put(repo::key(repo::BLOCKS, id.genesis.0), legacy_block)
                 .unwrap();
         }
+        // Earlier schema writers used the original ten-field insertion event.
+        let event_key = repo::key(repo::EVENTS, 1u64.to_be_bytes());
+        let Value::List(mut event) =
+            Value::decode(&db.db.get(&event_key).unwrap().unwrap()).unwrap()
+        else {
+            panic!()
+        };
+        event[0] = Value::Bytes(vec![1]);
+        event.truncate(10);
+        db.db.put(&event_key, Value::List(event).encode()).unwrap();
         db.db.put(repo::IDENTITY, &legacy).unwrap();
         db.db.delete(repo::key(repo::NODES, root.0)).unwrap();
         drop(db);
@@ -374,11 +394,181 @@ fn finalized_record_corruption_and_future_schema_never_reinitialize_storage() {
     let List(mut fields) = ae_trie::Value::decode(&id.encode()).unwrap() else {
         panic!()
     };
-    fields[0] = Bytes(vec![5]);
+    fields[0] = Bytes(vec![6]);
     let encoded = List(fields).encode();
     db.db.put(repo::IDENTITY, &encoded).unwrap();
     drop(db);
     assert!(Database::open(&dir.0, id).is_err());
     let raw = DB::open_default(&dir.0).unwrap();
     assert_eq!(raw.get(repo::IDENTITY).unwrap(), Some(encoded));
+}
+
+#[test]
+fn startup_community_recovery_is_atomic_bounded_and_idempotent() {
+    use ae_chain::{
+        block::Block,
+        repository::{Change, Record, rollback},
+    };
+    use ae_state::StateRoots;
+    // Seed already-admitted persistence directly: this tests startup recovery,
+    // not proof of work or a historical mainnet chain replay.
+    let Header::Key(mut g) = genesis::header(Network::Uat).unwrap() else {
+        panic!()
+    };
+    g.common.state_hash = StateRoots::default().hash().0;
+    let genesis = Block::Key(g.clone());
+    let gh = genesis.hash().unwrap();
+    let mut k = g.clone();
+    k.common.height = rollback::COMMUNITY_FORK_HEIGHT;
+    k.common.previous_hash = gh.0;
+    k.common.previous_key_hash = gh.0;
+    k.time = 1000;
+    let checkpoint = Block::Key(k.clone());
+    let ch = checkpoint.hash().unwrap();
+    k.common.height += 1;
+    k.common.previous_hash = ch.0;
+    k.common.previous_key_hash = ch.0;
+    k.time = 2000;
+    let top = Block::Key(k);
+    let th = top.hash().unwrap();
+    let id = Identity::new(&NetworkProfile::mainnet(), gh, Hash256::ZERO);
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    let record = Record {
+        roots: Roots {
+            state: StateRoots::default(),
+            names: None,
+            oracles: None,
+        },
+        difficulty: 1.into(),
+        fees: 0.into(),
+        fraud: false,
+        fork: gh,
+    };
+    let mut batch = WriteBatch::default();
+    for b in [&genesis, &checkpoint, &top] {
+        let h = b.hash().unwrap();
+        let header = b.header();
+        batch.put(repo::key(repo::BLOCKS, h.0), b.encode().unwrap());
+        batch.put(repo::key(repo::RECORDS, h.0), record.encode());
+        batch.put(repo::key(repo::CANONICAL, h.0), []);
+        batch.put(
+            repo::key(repo::KEYS, header.common().height.to_be_bytes()),
+            h.0,
+        );
+        let mut indexed = header.common().height.to_be_bytes().to_vec();
+        indexed.extend(h.0);
+        batch.put(repo::key(repo::HEIGHTS, indexed), []);
+        let mut child = header.common().previous_hash.to_vec();
+        child.extend(h.0);
+        batch.put(repo::key(repo::CHILDREN, child), []);
+    }
+    batch.put(repo::key(repo::ENDS, th.0), []);
+    batch.put(
+        repo::STATUS,
+        Status {
+            revision: 1,
+            tip: Some(th),
+        }
+        .encode(),
+    );
+    batch.put(
+        repo::FINALIZED,
+        repo::encode_finalized(rollback::COMMUNITY_FORK_HEIGHT + 12).unwrap(),
+    );
+    batch.put(
+        repo::key(repo::EVENTS, 1u64.to_be_bytes()),
+        Change {
+            revision: 1,
+            inserted: Some(th),
+            removed: vec![],
+            discarded: vec![],
+            old_tip: None,
+            new_tip: th,
+            ancestor: None,
+            detached: vec![],
+            attached: vec![th],
+            requeue: vec![],
+            confirm: vec![],
+        }
+        .encode(),
+    );
+    db.db.write_opt(batch, &write_options()).unwrap();
+    let before = db.view().unwrap().source().prefix(&[], 100).unwrap();
+    let size = rollback::prepare(
+        &db.view().unwrap(),
+        rollback::Target::Height(rollback::COMMUNITY_FORK_HEIGHT),
+        Default::default(),
+    )
+    .unwrap()
+    .writes()
+    .len();
+    for failure in 0..=size {
+        let plan = rollback::prepare(
+            &db.view().unwrap(),
+            rollback::Target::Height(rollback::COMMUNITY_FORK_HEIGHT),
+            Default::default(),
+        )
+        .unwrap();
+        let mut checks = 0;
+        assert!(
+            db.commit_checked(plan, || {
+                let step = checks;
+                checks += 1;
+                if step == failure {
+                    Err(Error::Backend("injected rollback write".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(
+            db.view().unwrap().source().prefix(&[], 100).unwrap(),
+            before
+        );
+    }
+    eprintln!("Rollback failure prefixes {}", size + 1);
+    drop(db);
+    assert!(matches!(
+        Database::open_with_recovery_limits(
+            &dir.0,
+            id.clone(),
+            Default::default(),
+            rollback::Limits {
+                blocks: 0,
+                ..Default::default()
+            }
+        ),
+        Err(Error::ResourceLimit)
+    ));
+    let raw = DB::open_default(&dir.0).unwrap();
+    assert_eq!(
+        Status::decode(&raw.get(repo::STATUS).unwrap().unwrap())
+            .unwrap()
+            .tip,
+        Some(th)
+    );
+    drop(raw);
+    let db = Database::open(&dir.0, id.clone()).unwrap();
+    let v = db.view().unwrap();
+    v.verify_tip().unwrap();
+    assert_eq!(
+        v.status(),
+        Status {
+            revision: 2,
+            tip: Some(ch)
+        }
+    );
+    assert!(v.block(th).unwrap().is_none());
+    assert_eq!(v.chain_ends(10).unwrap(), vec![ch]);
+    assert_eq!(
+        v.finalized_height().unwrap(),
+        Some(rollback::COMMUNITY_FORK_HEIGHT + 12)
+    );
+    assert_eq!(v.event(2).unwrap().unwrap().removed, vec![th]);
+    drop(v);
+    drop(db);
+    let db = Database::open(&dir.0, id).unwrap();
+    assert_eq!(db.view().unwrap().status().revision, 2);
 }
