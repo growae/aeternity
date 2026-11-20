@@ -7,6 +7,7 @@ use ae_trie::Value;
 use ae_types::Unsigned;
 use std::collections::BTreeSet;
 mod service;
+pub mod worker;
 pub use service::{Config, Failure, Inspection, Service, Submission};
 pub const RECORDS: u8 = 16;
 pub const MEMBERS: u8 = 17;

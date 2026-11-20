@@ -76,7 +76,7 @@ pub(super) fn config() -> Config {
         ..Default::default()
     }
 }
-fn blocks() -> Vec<Block> {
+pub(super) fn blocks() -> Vec<Block> {
     let data: J =
         serde_json::from_str(include_str!("../../tests/fixtures/public_bootstrap.json")).unwrap();
     let mut out = vec![];
@@ -135,7 +135,7 @@ pub(super) fn tx() -> Arc<Signed> {
     };
     Arc::new(m.transactions[0].clone())
 }
-fn prepare(db: &Database, block: &Block) -> Update {
+pub(super) fn prepare(db: &Database, block: &Block) -> Update {
     let net = NetworkProfile::mainnet();
     let rules = ae_chain::key::Rules::new(
         ae_chain::admission::PowRules {

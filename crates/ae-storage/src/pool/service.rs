@@ -79,7 +79,7 @@ struct Plan {
     writes: repo::Writes,
 }
 // One owner serializes transient state; chain commits remain independent.
-// A future request worker can own this service without exposing its Pool.
+// The optional request worker owns this service without exposing its Pool.
 pub struct Service {
     db: Arc<Database>,
     network: NetworkProfile,
@@ -353,7 +353,7 @@ impl Service {
         self.finish(&stored, plan, || Ok(()))?;
         Ok(self.inspection())
     }
-    fn inspection(&self) -> Inspection {
+    pub(super) fn inspection(&self) -> Inspection {
         let (active, visited) = self.live.pool.sizes();
         Inspection {
             chain: self.live.chain,

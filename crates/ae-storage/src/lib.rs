@@ -25,6 +25,7 @@ pub struct Database {
     config: ReadConfig,
     gc_worker: Mutex<std::sync::Weak<gc::worker::Shared>>,
     pool_owner: Mutex<std::sync::Weak<()>>,
+    pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -146,6 +147,7 @@ impl Database {
             config,
             gc_worker: Mutex::new(Default::default()),
             pool_owner: Mutex::new(Default::default()),
+            pool_worker: Mutex::new(Default::default()),
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
@@ -339,6 +341,7 @@ impl Database {
         check()?;
         let result = self.db.write_opt(batch, &write_options()).map_err(backend);
         self.wake_gc();
+        self.wake_pool();
         result?;
         Ok(Committed { update })
     }
