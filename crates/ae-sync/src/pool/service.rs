@@ -3,7 +3,7 @@ use connections::{Connections, Event as PeerEvent};
 
 pub struct Service {
     db: Arc<Database>,
-    admission: worker::Client,
+    admission: crate::bindings::Admission,
     config: Config,
     commands: mpsc::Receiver<Command>,
     forwarded: mpsc::Sender<Forwarded>,
@@ -24,7 +24,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         db: Arc<Database>,
-        admission: worker::Client,
+        admission: crate::bindings::Admission,
         config: Config,
         blocking: blocking::Pool,
         commands: mpsc::Receiver<Command>,
@@ -289,10 +289,12 @@ impl Service {
     }
     fn network(&mut self, action: session::Action) {
         let key = Key::Action(action.token.clone());
-        if let Some(entry) = self.peers.current(PeerPublicKey(action.peer.0)) {
+        if let Some(entry) = self.peers.current(PeerPublicKey(action.peer.0))
+            && let Some(admission) = self.admission.snapshot().value
+        {
             let client = entry.connection.client.clone();
             let db = self.db.clone();
-            let admission = self.admission.clone();
+            let admission = admission.client;
             let jobs = self.blocking.clone();
             let config = self.config;
             self.insert_action(key, async move {

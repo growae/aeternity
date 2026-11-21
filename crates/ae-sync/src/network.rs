@@ -502,6 +502,19 @@ pub async fn create(
     network: NetworkProfile,
     config: Config,
 ) -> Result<(Handle, Events, pool::Events, Service), Error> {
+    if !admission.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
+    let admission = crate::bindings::Admission::fixed(&db, admission);
+    create_bound(db, admission, identity, network, config).await
+}
+pub(crate) async fn create_bound(
+    db: Arc<Database>,
+    admission: crate::bindings::Admission,
+    identity: Arc<noise::Identity>,
+    network: NetworkProfile,
+    config: Config,
+) -> Result<(Handle, Events, pool::Events, Service), Error> {
     config.validate()?;
     if !admission.uses_database(&db) {
         return Err(Error::Configuration);
@@ -533,7 +546,7 @@ pub async fn create(
     let resolver = resolver::Resolver::start(config.resolver)?;
     let sockets = transport::Sockets::new(identity, network, config.transport)?;
     let database = Arc::downgrade(&db);
-    let (peers, incoming, pool_service) = pool::create(db, admission, config.pool)?;
+    let (peers, incoming, pool_service) = pool::create_bound(db, admission, config.pool)?;
     let (commands, receiver) = mpsc::channel(config.commands);
     let (published, events) = mpsc::channel(config.events);
     let (stop, stopped) = watch::channel(false);

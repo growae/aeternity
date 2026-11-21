@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-fn settings() -> owner::Config {
+pub(super) fn settings() -> owner::Config {
     owner::Config {
         network: config(),
         health_interval: Duration::from_millis(5),
@@ -42,7 +42,7 @@ fn gc(node: &Node) -> Worker {
     )
     .unwrap()
 }
-async fn ready(handle: &mut owner::Handle, number: u64) -> owner::Generation {
+pub(super) async fn ready(handle: &mut owner::Handle, number: u64) -> owner::Generation {
     within(async {
         loop {
             let status = handle.status();
@@ -57,7 +57,7 @@ async fn ready(handle: &mut owner::Handle, number: u64) -> owner::Generation {
     })
     .await
 }
-async fn remote(
+pub(super) async fn remote(
     node: &Node,
     generation: &owner::Generation,
 ) -> (net::Client, net::Events, JoinHandle<net::Exit>) {
@@ -72,7 +72,7 @@ async fn remote(
     )
     .await
 }
-fn closed(g: &owner::Generation) {
+pub(super) fn closed(g: &owner::Generation) {
     assert!(g.network.status().joined);
     assert!(g.peer.status().joined);
     assert!(g.sync.status().joined);

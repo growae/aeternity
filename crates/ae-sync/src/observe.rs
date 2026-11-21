@@ -149,6 +149,7 @@ impl Handle {
 type Sample = Pin<Box<dyn Future<Output = Result<metrics::Snapshot, Error>> + Send>>;
 pub struct Service {
     sources: Sources,
+    admission: crate::bindings::Admission,
     incoming: sync::Events,
     gc: ae_storage::gc::events::Reader,
     gc_cursor: ae_storage::gc::events::Cursor,
@@ -169,8 +170,21 @@ pub fn create(
     config: Config,
     outputs: Outputs,
 ) -> Result<(Handle, Service), Error> {
+    let admission = crate::bindings::Admission::fixed(&sources.database, sources.admission.clone());
+    create_bound(sources, incoming, config, outputs, admission)
+}
+pub(crate) fn create_bound(
+    sources: Sources,
+    incoming: sync::Events,
+    config: Config,
+    outputs: Outputs,
+    admission: crate::bindings::Admission,
+) -> Result<(Handle, Service), Error> {
     config.validate()?;
     let db = &sources.database;
+    if !admission.uses_database(db) {
+        return Err(Error::Configuration);
+    }
     if !sources.sync.owns(db, &incoming)
         || !sources.network.uses_database(db)
         || !sources.peer.uses_database(db)
@@ -200,6 +214,7 @@ pub fn create(
         },
         Service {
             sources,
+            admission,
             incoming,
             gc,
             gc_cursor,
@@ -297,6 +312,13 @@ impl Service {
             if *self.stopped.borrow() {
                 break;
             }
+            if self.admission.is_closed() {
+                self.current.last_error = Some(Error::InputClosed);
+                break;
+            }
+            if let Some(bound) = self.admission.snapshot().value {
+                self.sources.admission = bound.client;
+            }
             if let Err(error) = self.drain_gc() {
                 self.current.last_error = Some(error);
                 break;
@@ -305,6 +327,7 @@ impl Service {
             tokio::select! {
                 _ = self.stopped.changed() => break,
                 _ = interval.tick() => self.sample(),
+                _ = self.admission.changed() => (),
                 _ = tokio::task::yield_now(), if self.gc_pending => (),
                 result = async { self.pending.as_mut().expect("active sample").await }, if self.pending.is_some() => {
                     self.pending = None; self.sampled(result);

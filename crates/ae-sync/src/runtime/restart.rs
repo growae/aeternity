@@ -16,7 +16,7 @@ mod tests {
     #[test]
     fn retained_attempts_match_original_otp_at_inclusive_second_boundaries() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/erlang_connection_owner.json"
+            "../../tests/fixtures/erlang_connection_owner.json"
         ))
         .unwrap();
         assert_eq!(fixture["policy"]["intensity"], 5);

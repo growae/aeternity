@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 
 mod group;
-mod restart;
+use super::restart;
 
 // This owns the currently implemented connection services. Durable admission
 // and GC workers belong to the independent worker hierarchy. Their explicit
@@ -143,6 +143,7 @@ impl Handle {
 
 pub struct Service<O, F> {
     inputs: Inputs<O>,
+    dependencies: super::workers::Bindings,
     config: Config,
     outputs: F,
     stopped: watch::Receiver<bool>,
@@ -162,6 +163,35 @@ where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
+    let dependencies = super::workers::Bindings {
+        admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
+        gc: inputs.gc.as_ref().map(|client| {
+            crate::bindings::GarbageCollection::fixed(&inputs.database, client.clone())
+        }),
+    };
+    create_with_workers(inputs, config, outputs, dependencies)
+}
+// The worker supervisor owns these bindings; connection-group restarts never
+// replace the independent worker owner or its gossip cache.
+pub fn create_with_workers<O, F>(
+    inputs: Inputs<O>,
+    config: Config,
+    outputs: F,
+    dependencies: super::workers::Bindings,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    if !dependencies.admission.uses_database(&inputs.database)
+        || dependencies
+            .gc
+            .as_ref()
+            .is_some_and(|g| !g.uses_database(&inputs.database))
+        || dependencies.gc.is_some() != inputs.gc.is_some()
+    {
+        return Err(Error::Configuration);
+    }
     if config.health_interval.is_zero()
         || config.health_interval > Duration::from_secs(1)
         || !inputs.admission.uses_database(&inputs.database)
@@ -187,6 +217,7 @@ where
         },
         Service {
             inputs,
+            dependencies,
             config,
             outputs,
             stopped,
@@ -206,15 +237,19 @@ where
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn health(&self) -> Result<(), Error> {
-        if !self.inputs.admission.info().running {
+        let pool = &self.dependencies.admission;
+        if pool.is_closed()
+            || (!pool.managed() && pool.current().is_none_or(|p| !p.client.info().running))
+        {
             return Err(Error::Dependency(Child::Gossip));
         }
-        if self
-            .inputs
-            .gc
-            .as_ref()
-            .is_some_and(|gc| gc.info().is_none_or(|i| !i.running))
-        {
+        if self.dependencies.gc.as_ref().is_some_and(|gc| {
+            gc.is_closed()
+                || (!gc.managed()
+                    && gc
+                        .current()
+                        .is_none_or(|g| g.info().is_none_or(|i| !i.running)))
+        }) {
             return Err(Error::Dependency(Child::Maintenance));
         }
         let chain = self.inputs.database.events().info();
@@ -223,6 +258,28 @@ where
             return Err(Error::RecoveryRequired);
         }
         Ok(())
+    }
+    async fn wait_dependencies(&mut self) -> Result<(), Error> {
+        loop {
+            if self.stopping() {
+                return Err(Error::Closed);
+            }
+            self.health()?;
+            if self.dependencies.admission.current().is_some()
+                && self
+                    .dependencies
+                    .gc
+                    .as_ref()
+                    .is_none_or(|g| g.current().is_some())
+            {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = self.stopped.changed() => return Err(Error::Closed),
+                _ = self.dependencies.admission.changed() => (),
+                _ = async { match &mut self.dependencies.gc { Some(gc) => gc.changed().await, None => std::future::pending().await } } => (),
+            }
+        }
     }
     fn publish(&self) {
         self.published.send_replace(self.current.clone());
@@ -240,6 +297,12 @@ where
                 self.current.error = Some(error);
                 break;
             }
+            if let Err(error) = self.wait_dependencies().await {
+                if !self.stopping() {
+                    self.current.error = Some(error);
+                }
+                break;
+            }
             let Some(number) = self.current.generation.checked_add(1) else {
                 self.current.error = Some(Error::Generation);
                 break;
@@ -249,7 +312,13 @@ where
             self.publish();
             let mut group = group::Group::new();
             let prepared = group
-                .prepare(&self.inputs, &self.config, &mut self.outputs, number)
+                .prepare(
+                    &self.inputs,
+                    &self.dependencies,
+                    &self.config,
+                    &mut self.outputs,
+                    number,
+                )
                 .await;
             let mut failure = None;
             let mut terminal = None;

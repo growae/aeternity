@@ -55,7 +55,8 @@ impl Handle {
 }
 pub struct Service {
     sync: sync::Handle,
-    gc: worker::Client,
+    gc: crate::bindings::GarbageCollection,
+    lease: Option<Arc<()>>,
     config: Config,
     stopped: watch::Receiver<bool>,
     published: watch::Sender<Status>,
@@ -67,11 +68,26 @@ pub fn create(
     gc: worker::Client,
     config: Config,
 ) -> Result<(Handle, Service), Error> {
+    if !gc.uses_database(database) || gc.info().is_none_or(|i| !i.running) {
+        return Err(Error::Configuration);
+    }
+    create_bound(
+        database,
+        sync,
+        crate::bindings::GarbageCollection::fixed(database, gc),
+        config,
+    )
+}
+pub(crate) fn create_bound(
+    database: &Arc<Database>,
+    sync: sync::Handle,
+    gc: crate::bindings::GarbageCollection,
+    config: Config,
+) -> Result<(Handle, Service), Error> {
     if config.poll_interval.is_zero()
         || Instant::now().checked_add(config.poll_interval).is_none()
         || !sync.uses_database(database)
         || !gc.uses_database(database)
-        || gc.info().is_none_or(|i| !i.running)
     {
         return Err(Error::Configuration);
     }
@@ -86,6 +102,7 @@ pub fn create(
         Service {
             sync,
             gc,
+            lease: None,
             config,
             stopped,
             published,
@@ -99,11 +116,32 @@ impl Service {
         if !source.running {
             return Err(Error::SyncClosed);
         }
-        let info = self
-            .gc
-            .info()
-            .filter(|i| i.running)
-            .ok_or(Error::GcClosed)?;
+        let snapshot = self.gc.snapshot();
+        if snapshot.closed {
+            return Err(Error::GcClosed);
+        }
+        let Some(client) = snapshot.value else {
+            self.current.gc = None;
+            return Ok(());
+        };
+        let info = client.info();
+        if !snapshot.available || info.as_ref().is_none_or(|i| !i.running) {
+            self.current.gc = info;
+            return if self.gc.managed() {
+                Ok(())
+            } else {
+                Err(Error::GcClosed)
+            };
+        }
+        let info = info.expect("running GC");
+        if self
+            .lease
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &snapshot.lease))
+        {
+            self.current.cause = None;
+            self.lease = Some(snapshot.lease);
+        }
         self.current.gc = Some(info);
         if self.current.cause.is_none()
             && let Some(cause) = source.lifecycle.gc_ready
@@ -111,12 +149,16 @@ impl Service {
             // Readiness was latched at a real completion with no active task.
             // Neither diagnostic overflow nor a late subscription may lose it.
             // Polling idle/100% progress must never manufacture this signal.
-            if !self.gc.on_sync_done(false) {
-                return Err(Error::GcClosed);
+            if !client.on_sync_done(false) {
+                return if self.gc.managed() {
+                    Ok(())
+                } else {
+                    Err(Error::GcClosed)
+                };
             }
             self.current.notifications += 1;
             self.current.cause = Some(cause);
-            self.current.gc = self.gc.info();
+            self.current.gc = client.info();
         }
         Ok(())
     }
@@ -136,6 +178,7 @@ impl Service {
                 _=self.stopped.changed()=>break,
                 result=self.sync.changed()=>if result.is_err() { self.current.last_error=Some(Error::SyncClosed);break; },
                 _=interval.tick()=>(),
+                _=self.gc.changed()=>(),
             }
         }
         self.current.running = false;

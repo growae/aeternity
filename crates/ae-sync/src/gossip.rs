@@ -328,10 +328,30 @@ pub fn create(
     consensus: ConsensusType,
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
-    config.validate()?;
     if !admission.uses_database(&db) {
         return Err(Error::Configuration);
     }
+    let binding = crate::bindings::Admission::fixed(&db, admission);
+    create_bound(db, binding, peers, incoming, network, consensus, config)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_bound(
+    db: Arc<Database>,
+    binding: crate::bindings::Admission,
+    peers: impl Into<pool::Reader>,
+    incoming: pool::Events,
+    network: NetworkProfile,
+    consensus: ConsensusType,
+    config: Config,
+) -> Result<(Handle, Events, Service), Error> {
+    config.validate()?;
+    if !binding.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
+    let snapshot = binding.snapshot();
+    let bound = snapshot.value.ok_or(Error::Configuration)?;
+    let admission = bound.client;
+
     if !db
         .view()
         .map_err(|_| Error::Storage)?
@@ -362,7 +382,7 @@ pub fn create(
         last_error: None,
     };
     let (status, view) = watch::channel(current.clone());
-    let cursor = admission.event_cursor();
+    let cursor = bound.after;
     let database = Arc::downgrade(&db);
     let context = Context {
         db,
@@ -387,6 +407,9 @@ pub fn create(
         cursor,
         jobs,
         feed_jobs,
+        binding,
+        snapshot.lease,
+        snapshot.generation,
     );
     Ok((
         Handle {

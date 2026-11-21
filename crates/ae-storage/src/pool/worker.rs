@@ -245,13 +245,16 @@ impl Worker {
         self.stop()?;
         Ok(self.info())
     }
+    // Owned shutdown may be requested without blocking the async supervisor.
+    // The owner must still call shutdown/drop to join the thread.
+    pub fn request_shutdown(&self) {
+        let mut c = self.shared.lock();
+        c.info.accepting = false;
+        c.stop = true;
+        self.shared.signal(&mut c);
+    }
     fn stop(&mut self) -> Result<(), Error> {
-        {
-            let mut c = self.shared.lock();
-            c.info.accepting = false;
-            c.stop = true;
-            self.shared.signal(&mut c);
-        }
+        self.request_shutdown();
         if let Some(join) = self.join.take() {
             join.join().map_err(|_| Error::Panicked)?;
         }

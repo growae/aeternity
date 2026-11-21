@@ -6,6 +6,7 @@ extern crate self as ae_sync;
 #[path = "../tests/common/mod.rs"]
 mod test_support;
 
+pub mod bindings;
 mod blocking;
 pub mod chain;
 pub mod conductor;

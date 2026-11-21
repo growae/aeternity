@@ -17,6 +17,8 @@ use tokio::{
 
 mod connections;
 mod operations;
+#[cfg(test)]
+mod rebinding;
 mod service;
 pub use connections::Connection;
 pub use service::Service;
@@ -289,7 +291,21 @@ pub fn create(
     admission: worker::Client,
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
+    if !admission.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
+    let binding = crate::bindings::Admission::fixed(&db, admission);
+    create_bound(db, binding, config)
+}
+pub(crate) fn create_bound(
+    db: Arc<Database>,
+    admission: crate::bindings::Admission,
+    config: Config,
+) -> Result<(Handle, Events, Service), Error> {
     config.validate()?;
+    if !admission.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
     let blocking = blocking::Pool::new(
         config.blocking_threads,
         config.blocking_jobs,

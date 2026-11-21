@@ -1,6 +1,10 @@
 use super::*;
 pub struct Service {
     context: Context,
+    binding: crate::bindings::Admission,
+    lease: Arc<()>,
+    feed_generation: u64,
+    feed_client: worker::Client,
     peers: pool::Reader,
     incoming: pool::Events,
     commands: mpsc::Receiver<Command>,
@@ -38,9 +42,16 @@ impl Service {
         cursor: worker::events::Cursor,
         jobs: blocking::Pool,
         feed_jobs: blocking::Pool,
+        binding: crate::bindings::Admission,
+        lease: Arc<()>,
+        feed_generation: u64,
     ) -> Self {
         Self {
+            feed_client: context.admission.clone(),
             context,
+            binding,
+            lease,
+            feed_generation,
             peers,
             incoming,
             commands,
@@ -86,6 +97,11 @@ impl Service {
             if *self.stopped.borrow() {
                 break;
             }
+            if self.binding.is_closed() {
+                self.current.last_error = Some(Error::Closed);
+                break;
+            }
+            self.rebind();
             if self.policies.has_changed().unwrap_or(false) {
                 self.policy();
             }
@@ -97,6 +113,7 @@ impl Service {
                     if *self.stopped.borrow() || self.stopped.has_changed().is_err() {break;}
                 },
                 _ = self.forwarded.closed() => break,
+                _ = self.binding.changed() => (),
                 _ = self.policies.changed() => {
                     self.policy();
                 },
@@ -112,6 +129,38 @@ impl Service {
                 (key,result) = self.tasks.next() => self.finished(key,result),
             }
         }
+    }
+    fn rebind(&mut self) {
+        let snapshot = self.binding.snapshot();
+        if Arc::ptr_eq(&self.lease, &snapshot.lease) {
+            return;
+        }
+        let Some(bound) = snapshot.value else {
+            return;
+        };
+        // New operations bind immediately. Already running operations retain
+        // their captured client; their accepted tickets are never resubmitted.
+        self.context.admission = bound.client.clone();
+        if self.feeding || self.sending || !self.pending.is_empty() {
+            return;
+        }
+        let recover = match self.current.feed {
+            Feed::Closed => snapshot.generation != self.feed_generation.saturating_add(1),
+            Feed::Paused(_) | Feed::Recovering => true,
+            Feed::Live => return, // Drain the retired worker's acknowledged tail.
+        };
+        if recover {
+            self.current.counts.gaps = self.current.counts.gaps.saturating_add(1);
+        }
+        self.feed_client = bound.client;
+        self.cursor = bound.after;
+        self.current.feed = if recover {
+            Feed::Recovering
+        } else {
+            Feed::Live
+        };
+        self.lease = snapshot.lease;
+        self.feed_generation = snapshot.generation;
     }
     fn policy(&mut self) {
         self.current.policy = *self.policies.borrow_and_update();
@@ -151,7 +200,7 @@ impl Service {
             }
         }
         if !self.feeding && !self.sending && self.pending.is_empty() {
-            let admission = self.context.admission.clone();
+            let admission = self.feed_client.clone();
             let jobs = self.feed_jobs.clone();
             match self.current.feed {
                 Feed::Live => {

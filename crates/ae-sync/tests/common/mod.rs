@@ -148,6 +148,11 @@ impl Node {
     pub fn client(&self) -> worker::Client {
         self.worker.as_ref().unwrap().client()
     }
+    pub fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            worker.shutdown().unwrap();
+        }
+    }
     pub fn persist(mut self) -> PathBuf {
         self.worker.take().unwrap().shutdown().unwrap();
         std::mem::take(&mut self._temporary.0)

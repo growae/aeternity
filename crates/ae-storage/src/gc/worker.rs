@@ -213,12 +213,13 @@ impl Worker {
         self.stop()?;
         Ok(self.info())
     }
+    pub fn request_shutdown(&self) {
+        let mut control = self.shared.lock();
+        control.stop = true;
+        self.shared.changed.notify_all();
+    }
     fn stop(&mut self) -> Result<(), Error> {
-        {
-            let mut control = self.shared.lock();
-            control.stop = true;
-            self.shared.changed.notify_all();
-        }
+        self.request_shutdown();
         if let Some(join) = self.join.take() {
             join.join()
                 .map_err(|_| Error::Backend("GC worker panicked".into()))?;

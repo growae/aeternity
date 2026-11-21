@@ -34,6 +34,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
     pub async fn prepare<F>(
         &mut self,
         inputs: &Inputs<O>,
+        dependencies: &super::super::workers::Bindings,
         config: &Config,
         outputs: &mut F,
         number: u64,
@@ -53,9 +54,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             )
             .map_err(|e| Failure::new(Child::Importer, e))?,
         );
-        let (network, scheduled, incoming, service) = network::create(
+        let (network, scheduled, incoming, service) = network::create_bound(
             db.clone(),
-            inputs.admission.clone(),
+            dependencies.admission.clone(),
             inputs.identity.clone(),
             network_profile.clone(),
             config.network.clone(),
@@ -67,9 +68,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Network, move || handle.shutdown(), async move {
             Failure::new(Child::Network, service.run().await.status.failure)
         });
-        let (gossip, incoming, service) = gossip::create(
+        let (gossip, incoming, service) = gossip::create_bound(
             db.clone(),
-            inputs.admission.clone(),
+            dependencies.admission.clone(),
             network.peers(),
             incoming,
             network_profile,
@@ -119,9 +120,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Propagation, move || handle.shutdown(), async move {
             Failure::new(Child::Propagation, service.run().await.last_error)
         });
-        let maintenance = if let Some(gc) = &inputs.gc {
+        let maintenance = if let Some(gc) = &dependencies.gc {
             let (handle, service) =
-                maintenance::create(db, sync.clone(), gc.clone(), config.maintenance)
+                maintenance::create_bound(db, sync.clone(), gc.clone(), config.maintenance)
                     .map_err(|e| Failure::new(Child::Maintenance, e))?;
             let stop = handle.clone();
             self.add(Child::Maintenance, move || stop.shutdown(), async move {
@@ -132,18 +133,24 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             None
         };
         let outputs = outputs().map_err(|e| Failure::new(Child::Observer, e))?;
-        let (observer, service) = observe::create(
+        let (observer, service) = observe::create_bound(
             observe::Sources {
                 database: db.clone(),
                 network: network.clone(),
                 peer: peer.clone(),
                 gossip: gossip.clone(),
                 sync: sync.clone(),
-                admission: inputs.admission.clone(),
+                admission: dependencies
+                    .admission
+                    .snapshot()
+                    .value
+                    .ok_or_else(|| Failure::new(Child::Observer, "admission unavailable"))?
+                    .client,
             },
             incoming,
             config.observer.clone(),
             outputs,
+            dependencies.admission.clone(),
         )
         .map_err(|e| Failure::new(Child::Observer, e))?;
         let handle = observer.clone();
