@@ -1,10 +1,13 @@
 use super::*;
 
-struct Poison<'a>(&'a AtomicBool);
+struct Poison<'a>(&'a Mutex<Option<Error>>);
 impl Drop for Poison<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            self.0.store(true, Ordering::Release);
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert(Error::WorkerPanicked);
         }
     }
 }
@@ -14,7 +17,12 @@ impl<O: MapOrder> Context<O> {
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
     ) -> Result<(), Error> {
-        if self.recovery.load(Ordering::Acquire) {
+        if self
+            .recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             return Err(Error::RecoveryRequired);
         }
         if self.stopped.load(Ordering::Acquire) || cancel.cancelled() {
@@ -206,8 +214,12 @@ impl<O: MapOrder> Context<O> {
                 Err(error @ repository::Error::Backend(_)) => {
                     // Never retry an uncertain publication, or let later jobs
                     // use this owner. Reopen/reconcile the database first.
-                    self.recovery.store(true, Ordering::Release);
-                    return Err(Error::CommitUncertain { hash, error });
+                    let error = Error::CommitUncertain { hash, error };
+                    self.recovery
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert_with(|| error.clone());
+                    return Err(error);
                 }
                 Err(error) => return Err(error.into()),
             }

@@ -37,7 +37,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Temporary(PathBuf);
 impl Drop for Temporary {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if !self.0.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
 pub struct Node {
@@ -53,11 +55,17 @@ impl Node {
         })
     }
     pub fn with_settings(settings: worker::Settings) -> Self {
-        let temporary = Temporary(std::env::temp_dir().join(format!(
-            "ae-pool-sync-live-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )));
+        Self::open(
+            std::env::temp_dir().join(format!(
+                "ae-pool-sync-live-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+            settings,
+        )
+    }
+    pub fn open(path: PathBuf, settings: worker::Settings) -> Self {
+        let temporary = Temporary(path);
         let profile = NetworkProfile::mainnet();
         let Header::Key(header) = genesis::header(Network::Mainnet).unwrap() else {
             panic!()
@@ -76,15 +84,17 @@ impl Node {
             names: Default::default(),
             oracles: Default::default(),
         };
-        let plan = ledger::bootstrap(
-            &db.view().unwrap(),
-            &profile,
-            &header,
-            &trees,
-            Default::default(),
-        )
-        .unwrap();
-        db.commit(plan).unwrap();
+        if db.view().unwrap().status().tip.is_none() {
+            let plan = ledger::bootstrap(
+                &db.view().unwrap(),
+                &profile,
+                &header,
+                &trees,
+                Default::default(),
+            )
+            .unwrap();
+            db.commit(plan).unwrap();
+        }
         let config = storage::Config {
             policy: ae_mempool::pool::Config {
                 minimum_miner_gas_price: 1.into(),
@@ -102,6 +112,19 @@ impl Node {
     pub fn client(&self) -> worker::Client {
         self.worker.as_ref().unwrap().client()
     }
+    pub fn persist(mut self) -> PathBuf {
+        self.worker.take().unwrap().shutdown().unwrap();
+        std::mem::take(&mut self._temporary.0)
+    }
+    pub fn reopen(self) -> Self {
+        Self::open(
+            self.persist(),
+            worker::Settings {
+                origins_interval: None,
+                ..Default::default()
+            },
+        )
+    }
     pub fn service(&self, config: Config) -> (Handle, pool::Events, JoinHandle<pool::Status>) {
         let (handle, events, service) =
             pool::create(self.db.clone(), self.client(), config).unwrap();
@@ -110,7 +133,9 @@ impl Node {
 }
 impl Drop for Node {
     fn drop(&mut self) {
-        self.worker.take().unwrap().shutdown().unwrap();
+        if let Some(worker) = self.worker.take() {
+            worker.shutdown().unwrap();
+        }
     }
 }
 pub fn transaction() -> Arc<Signed> {

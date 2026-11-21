@@ -18,7 +18,7 @@ use ae_vm_fate::maps::{MapOrder, order::Otp26};
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -162,7 +162,7 @@ struct Context<O> {
     config: Config,
     stopped: AtomicBool,
     shutdown: tokio::sync::watch::Sender<bool>,
-    recovery: AtomicBool,
+    recovery: Mutex<Option<Error>>,
     #[cfg(test)]
     commit_hook: Option<CommitHook>,
 }
@@ -242,7 +242,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 config,
                 stopped: AtomicBool::new(false),
                 shutdown: tokio::sync::watch::channel(false).0,
-                recovery: AtomicBool::new(false),
+                recovery: Mutex::new(None),
                 #[cfg(test)]
                 commit_hook: None,
             }),
@@ -250,7 +250,20 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         })
     }
     pub fn recovery_required(&self) -> bool {
-        self.context.recovery.load(Ordering::Acquire)
+        self.context
+            .recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+    pub fn recovery_reason(&self) -> Option<Error> {
+        // The first cause survives task cancellation and shutdown. It does
+        // not identify a complete committed prefix; storage must be reconciled.
+        self.context
+            .recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     pub fn available(&self) -> (usize, usize) {
         self.jobs.available()

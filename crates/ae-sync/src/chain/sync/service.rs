@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+mod tests;
 type Key = (PeerPublicKey, net::Generation);
 struct Lane {
     client: net::Client,
@@ -68,6 +70,9 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         {
             if !lane.client.is_closed() {
                 return Err(Error::Stale);
+            }
+            if lane.active.is_some() {
+                self.current.counts.cancelled = self.current.counts.cancelled.saturating_add(1);
             }
             self.tasks.remove(&(peer, lane.client.generation().clone()));
             self.lanes.remove(&peer);
@@ -188,8 +193,11 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
     }
     pub async fn run(mut self) -> Status {
         loop {
-            if self.context.importer.recovery_required() {
-                self.current.last_error = Some(Error::RecoveryRequired);
+            if let Some(error) = self.context.importer.recovery_reason() {
+                self.current.last_error = Some(Error::Import(super::super::Failure {
+                    error,
+                    progress: None,
+                }));
                 break;
             }
             self.start_ready();
@@ -228,6 +236,11 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 lane.client.monitor()
             })
             .collect();
+        self.current.counts.cancelled = self
+            .current
+            .counts
+            .cancelled
+            .saturating_add(self.tasks.len() as u64);
         self.tasks.clear();
         self.lanes.clear();
         self.ready.clear();
@@ -253,6 +266,11 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
         for lane in self.lanes.values().filter(|lane| lane.active.is_some()) {
             lane.client.shutdown();
         }
+        self.current.counts.cancelled = self
+            .current
+            .counts
+            .cancelled
+            .saturating_add(self.tasks.len() as u64);
         self.tasks.clear();
         self.context.importer.stop();
         self.context.reads.stop();

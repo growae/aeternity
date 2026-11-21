@@ -254,6 +254,8 @@ pub struct Counts {
     pub started: u64,
     pub finished: u64,
     pub failed: u64,
+    // Active sessions dropped before completion; excludes queued actions.
+    pub cancelled: u64,
     pub coalesced: u64,
     pub replaced: u64,
     pub done_announcements: u64,

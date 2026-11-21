@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::ledger_fixtures as fixtures;
 use ae_codec::headers::Header;
 use ae_protocol::NetworkProfile;
 use ae_state::{
@@ -6,8 +7,6 @@ use ae_state::{
     genesis::{self, Network},
 };
 use std::sync::{Mutex, atomic::AtomicU64};
-#[path = "../../tests/common/ledger_fixtures.rs"]
-mod fixtures;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Temporary(std::path::PathBuf);

@@ -81,6 +81,14 @@ pub(super) enum Join {
     },
 }
 impl<O> Book<O> {
+    #[cfg(test)]
+    pub fn posting_client(&self) -> Option<net::Client> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.members.values())
+            .find(|m| matches!(m.lease, Some((_, Kind::Post { .. }))))
+            .map(|m| m.client.clone())
+    }
     pub fn new() -> Self {
         Self {
             groups: vec![],
