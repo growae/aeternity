@@ -60,6 +60,8 @@ pub(super) struct Snapshot {
 }
 struct Group<O> {
     model: Scheduler,
+    statistics: statistics::Task,
+    statistics_failure: Option<statistics::Error>,
     members: BTreeMap<PeerPublicKey, Member>,
     payloads: BTreeMap<u64, Payload<O>>,
     agreed: Option<Point>,
@@ -68,11 +70,23 @@ struct Group<O> {
     finished: bool,
     failed: Option<Error>,
 }
+impl<O> Group<O> {
+    fn statistics(&self) -> statistics::Snapshot {
+        let mut snapshot = self.statistics.snapshot();
+        snapshot.failure = self.statistics_failure;
+        if snapshot.failure.is_some() {
+            snapshot.generations_per_minute = Err(statistics::Error::Stopped);
+        }
+        snapshot
+    }
+}
 pub(super) struct Book<O> {
     groups: Vec<Group<O>>,
     sequence: u64,
     top_target: u64,
     lifecycle: lifecycle::Signal,
+    statistics_terminated: u64,
+    last_statistics: Option<statistics::Snapshot>,
 }
 pub(super) enum Join {
     Joined(u64),
@@ -84,6 +98,13 @@ pub(super) enum Join {
     },
 }
 impl<O> Book<O> {
+    pub fn statistics(&self) -> statistics::Status {
+        statistics::Status {
+            tasks: self.groups.iter().map(Group::statistics).collect(),
+            terminated: self.statistics_terminated,
+            last_terminated: self.last_statistics.clone(),
+        }
+    }
     pub fn lifecycle(&self) -> (Vec<lifecycle::Task>, u64, u64) {
         (
             self.groups
@@ -125,6 +146,8 @@ impl<O> Book<O> {
             sequence: 0,
             top_target: 0,
             lifecycle: Default::default(),
+            statistics_terminated: 0,
+            last_statistics: None,
         }
     }
     pub fn number(&mut self) -> Result<u64, Error> {
@@ -148,6 +171,7 @@ impl<O> Book<O> {
         candidate: &Chain,
         client: &net::Client,
         limits: coordination::Limits,
+        now_ms: i128,
     ) -> Result<Join, Error> {
         let candidates: Vec<_> = self
             .groups
@@ -162,6 +186,13 @@ impl<O> Book<O> {
                 }
                 self.groups.push(Group {
                     model: Scheduler::new(candidate.clone(), limits)?,
+                    statistics: statistics::Task::new(
+                        candidate.id(),
+                        candidate.target(),
+                        limits.items,
+                    )
+                    .map_err(|_| Error::Configuration)?,
+                    statistics_failure: None,
                     members: BTreeMap::new(),
                     payloads: BTreeMap::new(),
                     agreed: None,
@@ -223,6 +254,9 @@ impl<O> Book<O> {
         group
             .model
             .workers(group.members.keys().copied().collect())?;
+        group
+            .statistics
+            .update_target(group.model.state().chain.target(), now_ms);
         self.top_target = self.top_target.max(candidate.target().height);
         self.lifecycle_changed();
         Ok(Join::Joined(id))
@@ -325,6 +359,19 @@ impl<O> Book<O> {
             // Retain suspect chain hints, never downloaded bodies or credits
             // after the final member has left this terminal task.
             group.payloads.clear();
+        }
+        let terminated = if ended && !group.model.state().suspect {
+            let mut snapshot = group.statistics();
+            if let Err(error) = snapshot.total.rates() {
+                snapshot.failure.get_or_insert(error);
+            }
+            Some(snapshot)
+        } else {
+            None
+        };
+        if let Some(snapshot) = terminated {
+            self.last_statistics = Some(snapshot);
+            self.statistics_terminated = self.statistics_terminated.saturating_add(1);
         }
         self.groups
             .retain(|g| !g.members.is_empty() || g.model.state().suspect);

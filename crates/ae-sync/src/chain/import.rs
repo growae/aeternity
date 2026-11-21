@@ -259,6 +259,10 @@ impl<O: MapOrder> Context<O> {
                 return Ok(Accepted {
                     hash,
                     outcome: Outcome::Present,
+                    micro_transactions: match block {
+                        Block::Micro(b) => Some(b.transactions.len() as u64),
+                        Block::Key(_) => None,
+                    },
                 });
             }
             let update = self
@@ -284,6 +288,10 @@ impl<O: MapOrder> Context<O> {
                         hash,
                         outcome: Outcome::Committed {
                             revision: committed.change().revision,
+                        },
+                        micro_transactions: match block {
+                            Block::Micro(b) => Some(b.transactions.len() as u64),
+                            Block::Key(_) => None,
                         },
                     });
                 }

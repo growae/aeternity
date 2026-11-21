@@ -484,11 +484,18 @@ async fn replacing_poster_after_generation_commit_before_book_ack_uses_actual_st
         }
     })
     .await;
+    let statistics_before_replacement =
+        running.context.shared.lock().unwrap().statistics().tasks[0].total;
     replace_poster(&node, &source, &mut running).await;
     release.send(()).unwrap();
     within(pending).await.unwrap();
     running.completed().await;
     let status = running.stop().await;
+    assert_eq!(
+        status.statistics.last_terminated.as_ref().unwrap().total,
+        statistics_before_replacement,
+        "the cancelled unacknowledged posting batch must not publish statistics"
+    );
     assert_eq!(status.counts.finished, 3, "{status:?}");
     assert_eq!(status.counts.failed, 0);
     assert_eq!(status.counts.cancelled, 1);

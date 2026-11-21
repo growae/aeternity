@@ -157,6 +157,19 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             self.current.counts.started = self.current.counts.started.saturating_add(1);
         }
     }
+    fn observe_shared(&mut self) -> u64 {
+        let book = self
+            .context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (tasks, target, transitions) = book.lifecycle();
+        self.current.statistics = book.statistics();
+        drop(book);
+        self.lifecycle.observe(tasks, target, transitions);
+        self.current.lifecycle = self.lifecycle.status();
+        target
+    }
     fn publish(&mut self) -> Result<(), Error> {
         self.current.blocks = self.blocks.status();
         self.current.active = self
@@ -174,14 +187,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .values()
             .filter(|lane| lane.pending.is_some())
             .count();
-        let (tasks, target, transitions) = self
-            .context
-            .shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .lifecycle();
-        self.lifecycle.observe(tasks, target, transitions);
-        self.current.lifecycle = self.lifecycle.status();
+        let target = self.observe_shared();
         if target != self.target {
             self.application
                 .set_sync_target(target)
@@ -298,14 +304,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             monitor.wait().await;
         }
         self.current.blocks = self.blocks.status();
-        let (tasks, target, transitions) = self
-            .context
-            .shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .lifecycle();
-        self.lifecycle.observe(tasks, target, transitions);
-        self.current.lifecycle = self.lifecycle.status();
+        self.observe_shared();
         self.current.lifecycle.pending = false;
         self.current.running = false;
         self.current.joined = true;
@@ -331,14 +330,7 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
             .cancelled
             .saturating_add(self.tasks.len() as u64);
         self.tasks.clear();
-        let (tasks, target, transitions) = self
-            .context
-            .shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .lifecycle();
-        self.lifecycle.observe(tasks, target, transitions);
-        self.current.lifecycle = self.lifecycle.status();
+        self.observe_shared();
         self.current.lifecycle.pending = false;
         self.context.importer.stop();
         self.context.reads.stop();

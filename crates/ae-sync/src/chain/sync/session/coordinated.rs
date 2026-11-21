@@ -3,6 +3,12 @@ use coordination::Chain;
 use shared::{Assignment, Join, Membership, Operation, Payload};
 
 impl<O: MapOrder + Send + Sync + 'static> Session<O> {
+    fn statistics_clock() -> i128 {
+        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_micros() as i128,
+            Err(error) => -(error.duration().as_micros() as i128),
+        }
+    }
     fn clock() -> Result<u64, Error> {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -33,7 +39,12 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                 .shared
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .join(&candidate, &self.client, limits)?;
+                .join(
+                    &candidate,
+                    &self.client,
+                    limits,
+                    Self::statistics_clock().div_euclid(1000),
+                )?;
             match join {
                 Join::Joined(task) => {
                     let member = Membership::new(self.context.clone(), self.client.clone(), task);
@@ -218,17 +229,21 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                         }
                         Operation::Post(items) => {
                             self.phase(Phase::Generation);
+                            let mut samples = Vec::with_capacity(items.len());
                             let mut items = items.into_iter();
                             let mut failed = false;
                             while let Some((item, payload)) = items.next() {
                                 let result = self.post_payload(item.point, payload).await;
                                 match result {
-                                    Ok((point, selected)) => {
+                                    Ok((point, selected, sample)) => {
                                         self.context
                                             .shared
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner())
                                             .posted(&lease, point, selected)?;
+                                        if let Some(sample) = sample {
+                                            samples.push(sample);
+                                        }
                                         self.notify();
                                     }
                                     Err(error) => {
@@ -262,7 +277,11 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                                     .shared
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .post_complete(&lease)?;
+                                    .post_complete(
+                                        &lease,
+                                        &samples,
+                                        Self::statistics_clock().div_euclid(1000),
+                                    )?;
                             }
                         }
                         Operation::Forward(hash) => {
@@ -290,7 +309,8 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
         &mut self,
         expected: Point,
         payload: Payload<O>,
-    ) -> Result<(Point, Point), Error> {
+    ) -> Result<(Point, Point, Option<statistics::Sample>), Error> {
+        let mut sample = None;
         let point = match payload {
             Payload::Local(point) => {
                 let actual = self
@@ -302,6 +322,7 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                 actual
             }
             Payload::Download(download) => {
+                let start_us = Self::statistics_clock();
                 match self
                     .context
                     .importer
@@ -309,6 +330,23 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                     .await
                 {
                     Ok(report) => {
+                        let end_us = Self::statistics_clock();
+                        sample = Some(statistics::Sample {
+                            height: expected.height,
+                            start_us,
+                            end_us,
+                            micro_blocks: report
+                                .accepted
+                                .iter()
+                                .filter(|b| b.micro_transactions.is_some())
+                                .count() as u64,
+                            transactions: report
+                                .accepted
+                                .iter()
+                                .filter_map(|b| b.micro_transactions)
+                                .sum(),
+                            work_us: None,
+                        });
                         self.accepted(&report);
                         self.progress.generations = self.progress.generations.saturating_add(1);
                     }
@@ -332,6 +370,6 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
         let selected = self.context.selected().await?;
         self.progress.selected = Some(selected);
         self.publish();
-        Ok((point, selected))
+        Ok((point, selected, sample))
     }
 }

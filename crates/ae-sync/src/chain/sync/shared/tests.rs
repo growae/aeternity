@@ -10,12 +10,12 @@ async fn posting_and_retry_height_updates_apply_only_to_exact_worker_generations
     let header = blocks[2].header();
     let chain = Chain::from_header(1, a.peer(), &header, limits).unwrap();
     assert!(matches!(
-        book.join(&chain, &a, limits).unwrap(),
+        book.join(&chain, &a, limits, 1).unwrap(),
         Join::Joined(1)
     ));
     let chain = Chain::from_header(2, b.peer(), &header, limits).unwrap();
     assert!(matches!(
-        book.join(&chain, &b, limits).unwrap(),
+        book.join(&chain, &b, limits, 2).unwrap(),
         Join::Joined(1)
     ));
     let point = Point {
@@ -44,7 +44,14 @@ async fn posting_and_retry_height_updates_apply_only_to_exact_worker_generations
         group.model = Scheduler::restore(state, limits).unwrap();
         group.members.get_mut(&a.peer()).unwrap().lease = Some((4, Kind::Post { posted: 1 }));
     }
-    book.post_complete(&lease).unwrap();
+    let before_statistics = book.statistics().tasks;
+    let stale = Lease {
+        generation: replacement.generation().clone(),
+        ..lease.clone()
+    };
+    assert_eq!(book.post_complete(&stale, &[], 4), Err(Error::Stale));
+    assert_eq!(book.statistics().tasks, before_statistics);
+    book.post_complete(&lease, &[], 4).unwrap();
     assert_eq!(book.sync_height(&a), Some(1));
     assert_eq!(book.sync_height(&b), Some(1));
     assert_eq!(book.sync_height(&replacement), None);
@@ -114,7 +121,7 @@ async fn suspect_tasks_survive_last_member_and_remain_excluded_from_global_progr
     for row in native["removed"].as_array().unwrap() {
         let candidate = Chain::from_header(1, client.peer(), &header, limits).unwrap();
         let mut book = Book::<Otp26>::new();
-        book.join(&candidate, &client, limits).unwrap();
+        book.join(&candidate, &client, limits, 3).unwrap();
         let group = book.group_mut(1).unwrap();
         let mut state = group.model.state().clone();
         state.suspect = row["suspect"].as_bool().unwrap();
@@ -136,7 +143,7 @@ async fn suspect_tasks_survive_last_member_and_remain_excluded_from_global_progr
     let candidate = Chain::from_header(1, client.peer(), &header, limits).unwrap();
     let mut book = Book::<Otp26>::new();
     assert!(matches!(
-        book.join(&candidate, &client, limits),
+        book.join(&candidate, &client, limits, 3),
         Ok(Join::Joined(1))
     ));
     let (tasks, target, transitions) = book.lifecycle();
@@ -162,9 +169,11 @@ async fn suspect_tasks_survive_last_member_and_remain_excluded_from_global_progr
     );
     assert_eq!(target, 0);
     assert_eq!(transitions, 2);
+    assert_eq!(book.statistics().terminated, 0);
+    assert_eq!(book.statistics().tasks.len(), 1);
     assert!(!lifecycle::progress(&tasks, target, 1).unwrap().syncing);
     assert!(matches!(
-        book.join(&candidate, &client, limits),
+        book.join(&candidate, &client, limits, 3),
         Err(Error::BlockedByWhitelist)
     ));
     assert_eq!(book.lifecycle().1, 0);
@@ -176,7 +185,68 @@ async fn suspect_tasks_survive_last_member_and_remain_excluded_from_global_progr
     key.nonce += 1;
     let candidate = Chain::from_header(2, client.peer(), &different, limits).unwrap();
     assert!(matches!(
-        book.join(&candidate, &client, limits),
+        book.join(&candidate, &client, limits, 3),
         Err(Error::Busy)
     ));
+}
+
+#[tokio::test]
+async fn failed_statistics_do_not_reject_a_completed_post_or_retain_terminated_tasks() {
+    let ((client, _, _driver), (_, _, _remote)) = crate::test_support::pair(7, 8).await;
+    let limits = coordination::Limits::default();
+    let blocks =
+        crate::test_support::ledger_fixtures::blocks(&ae_protocol::NetworkProfile::mainnet());
+    let mut book = Book::<Otp26>::new();
+    let candidate = Chain::from_header(1, client.peer(), &blocks[2].header(), limits).unwrap();
+    book.join(&candidate, &client, limits, 1).unwrap();
+    let point = Point {
+        height: 1,
+        hash: blocks[0].hash().unwrap(),
+    };
+    let item = Item {
+        point,
+        got: Some(Ready {
+            peer: client.peer(),
+            ticket: 1,
+        }),
+        attempts: 0,
+    };
+    let lease = Lease {
+        task: 1,
+        sequence: 4,
+        peer: client.peer(),
+        generation: client.generation().clone(),
+    };
+    {
+        let group = book.group_mut(1).unwrap();
+        let mut state = group.model.state().clone();
+        state.agreed = Some(point);
+        state.adding = vec![item];
+        group.model = Scheduler::restore(state, limits).unwrap();
+        group.members.get_mut(&client.peer()).unwrap().lease = Some((4, Kind::Post { posted: 1 }));
+    }
+    let invalid = statistics::Sample {
+        height: 1,
+        start_us: i128::MIN,
+        end_us: i128::MAX,
+        micro_blocks: 0,
+        transactions: 0,
+        work_us: None,
+    };
+    book.post_complete(&lease, &[invalid], 2).unwrap();
+    assert!(book.group(1).unwrap().model.state().adding.is_empty());
+    assert!(book.snapshot(1, &client).is_ok());
+    let status = book.statistics();
+    assert_eq!(status.tasks[0].failure, Some(statistics::Error::Overflow));
+    assert_eq!(status.tasks[0].total.generations, 0);
+    assert_eq!(status.estimate(1), Err(statistics::Error::Stopped));
+    assert_eq!(status.estimate(2), Err(statistics::Error::UnknownTask));
+    book.detach(1, &client, limits);
+    let status = book.statistics();
+    assert!(status.tasks.is_empty());
+    assert_eq!(status.terminated, 1);
+    assert_eq!(
+        status.last_terminated.unwrap().failure,
+        Some(statistics::Error::Overflow)
+    );
 }

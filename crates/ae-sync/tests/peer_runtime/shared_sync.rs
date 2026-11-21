@@ -171,7 +171,14 @@ async fn shared_downloads(scenario: Scenario, count: usize) {
         }
     }).await;
     if scenario == Scenario::Shutdown {
-        assert!(within(finish).await.joined);
+        let status = within(finish).await;
+        assert!(status.joined);
+        assert!(status.statistics.tasks.is_empty());
+        assert_eq!(status.statistics.terminated, 1);
+        assert_eq!(
+            status.statistics.last_terminated.unwrap().total.generations,
+            0
+        );
         assert_eq!(node.db.view().unwrap().status(), before);
     } else {
         // Completion schedules a policy update on the shared import worker.
@@ -206,6 +213,28 @@ async fn shared_downloads(scenario: Scenario, count: usize) {
         );
         // Exhausted coordinated tasks do not set the initial-fetch latch.
         assert!(!status.lifecycle.last_generation_in_sync);
+        assert!(status.statistics.tasks.is_empty());
+        assert_eq!(status.statistics.terminated, 1);
+        let recorded = status.statistics.last_terminated.as_ref().unwrap();
+        assert_eq!(recorded.failure, None);
+        // InvalidBody commits the first key before rejecting the second
+        // generation. That failed batch emits no statistics; only the
+        // successful retry of the second generation contributes a sample.
+        let generations = if scenario == Scenario::InvalidBody {
+            1
+        } else {
+            2
+        };
+        assert_eq!(
+            recorded.total.generations, generations,
+            "{scenario:?}: {recorded:?}"
+        );
+        assert_eq!(recorded.window_len, Some(generations as usize));
+        assert_eq!(recorded.total.micro_blocks, 1);
+        let ae_chain::block::Block::Micro(micro) = &blocks[1] else {
+            panic!()
+        };
+        assert_eq!(recorded.total.transactions, micro.transactions.len() as u64);
         assert_eq!(
             backward_requests
                 .iter()
@@ -245,6 +274,67 @@ async fn invalid_buffered_micro_body_is_refetched_after_ordered_admission_failur
 #[tokio::test]
 async fn shared_shutdown_drops_buffered_receipts_and_joins_pending_drivers() {
     shared_downloads(Scenario::Shutdown, 3).await;
+}
+
+#[tokio::test]
+async fn locally_present_generation_is_posted_without_a_statistics_sample_or_download() {
+    let node = Node::new();
+    let source = Node::new();
+    let blocks = seed(&source, 3).await;
+    let first = blocks[0].hash().unwrap();
+    let last = blocks[2].hash().unwrap();
+    let app = start(&node, config(), Default::default()).await;
+    let mut fleet = Fleet::new(&node, &app, 1).await;
+    let (mut sync, _events, finish) =
+        synchronize_with_importer(&node, app, Default::default(), Default::default());
+    response(&fleet.peers[0], &ping(&source, 1, false)).await;
+    let mut installed = false;
+    let mut downloads = vec![];
+    within(async {
+        loop {
+            let status = sync.status();
+            assert!(status.running, "{status:?}");
+            assert_eq!(status.counts.failed, 0, "{status:?}");
+            if status.counts.finished == 1 {
+                break;
+            }
+            tokio::select! {
+                _ = sync.changed() => (),
+                received = fleet.incoming.recv() => {
+                    let (index, request) = received.unwrap();
+                    // Agreement has completed at genesis. Make the first
+                    // generation available before dispatching its successor
+                    // list, exercising the real local-generation path.
+                    if request.message().kind() == Kind::GetSuccessors && !installed {
+                        seed(&node, 1).await;
+                        installed = true;
+                    }
+                    if backward(request.message()) { downloads.push(hash(request.message())); }
+                    fleet.reply(&source, index, &request).await;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(installed);
+    assert!(!downloads.contains(&first));
+    assert_eq!(downloads, vec![last]);
+    assert_eq!(node.db.view().unwrap().status().tip, Some(last));
+    let status = sync.status();
+    assert_eq!(status.statistics.terminated, 1);
+    let recorded = status.statistics.last_terminated.unwrap();
+    assert_eq!(recorded.failure, None);
+    assert_eq!(recorded.total.generations, 1);
+    assert_eq!(recorded.window_len, Some(1));
+    assert_eq!(recorded.total.micro_blocks, 1);
+    let ae_chain::block::Block::Micro(micro) = &blocks[1] else {
+        panic!()
+    };
+    assert_eq!(recorded.total.transactions, micro.transactions.len() as u64);
+    assert_eq!(recorded.newest.unwrap().height, 2);
+    sync.shutdown();
+    assert!(within(finish).await.joined);
+    fleet.join().await;
 }
 
 #[tokio::test]

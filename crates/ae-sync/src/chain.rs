@@ -146,6 +146,9 @@ pub enum Outcome {
 pub struct Accepted {
     pub hash: Hash256,
     pub outcome: Outcome,
+    // Count from the successfully handled input, including Present outcomes.
+    // None identifies a key block; this is not a canonical transaction count.
+    pub micro_transactions: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {

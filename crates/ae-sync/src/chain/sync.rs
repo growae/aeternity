@@ -26,6 +26,7 @@ pub mod lifecycle;
 mod service;
 mod session;
 mod shared;
+pub mod statistics;
 mod wire;
 pub use agreement::Point;
 pub use service::Service;
@@ -306,6 +307,7 @@ pub struct Status {
     pub last_error: Option<Error>,
     pub blocks: blocks::Status,
     pub lifecycle: lifecycle::Status,
+    pub statistics: statistics::Status,
 }
 #[derive(Clone)]
 pub struct Handle {
@@ -391,6 +393,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         last_error: None,
         blocks: Default::default(),
         lifecycle: Default::default(),
+        statistics: Default::default(),
     };
     let (status, observed) = watch::channel(current.clone());
     let context = Arc::new(Context {

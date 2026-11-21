@@ -98,7 +98,12 @@ impl<O> Book<O> {
             Some((lease.sequence, Kind::Post { posted: posted + 1 }));
         Ok(())
     }
-    pub fn post_complete(&mut self, lease: &Lease) -> Result<(), Error> {
+    pub fn post_complete(
+        &mut self,
+        lease: &Lease,
+        samples: &[statistics::Sample],
+        now_ms: i128,
+    ) -> Result<(), Error> {
         let g = self.check(lease)?;
         let Some((_, Kind::Post { posted })) = g.members[&lease.peer].lease else {
             return Err(Error::Stale);
@@ -114,6 +119,13 @@ impl<O> Book<O> {
             }
         }
         g.model.apply(ResultInput::Posted)?;
+        if g.statistics_failure.is_none()
+            && let Err(error) = g.statistics.post(samples, now_ms)
+        {
+            // Diagnostic arithmetic must never turn a durable accepted
+            // batch into a synchronization/admission failure.
+            g.statistics_failure = Some(error);
+        }
         Self::release(g, lease);
         Ok(())
     }
