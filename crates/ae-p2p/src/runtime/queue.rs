@@ -236,6 +236,7 @@ pub struct Client {
     replies: mpsc::Sender<Command>,
     finishes: mpsc::Sender<Finish>,
     stop: watch::Sender<Option<Error>>,
+    disconnect: watch::Sender<bool>,
     generation: Generation,
     peer: PeerPublicKey,
     budget: Arc<Semaphore>,
@@ -263,6 +264,7 @@ impl Client {
         replies: mpsc::Sender<Command>,
         finishes: mpsc::Sender<Finish>,
         stop: watch::Sender<Option<Error>>,
+        disconnect: watch::Sender<bool>,
         generation: Generation,
         peer: PeerPublicKey,
         config: Config,
@@ -274,6 +276,7 @@ impl Client {
             replies,
             finishes,
             stop,
+            disconnect,
             generation,
             peer,
             budget: Arc::new(Semaphore::new(config.outgoing_bytes)),
@@ -312,6 +315,19 @@ impl Client {
     }
     pub fn shutdown(&self) {
         stop(&self.stop, Error::Shutdown);
+    }
+    // Idempotent intent, independent of command/byte capacity. The driver
+    // finishes its active write and deferred ping before sending one Close.
+    // Use monitor().wait() to observe terminal resource release.
+    pub fn disconnect(&self) {
+        self.disconnect.send_if_modified(|requested| {
+            let changed = !*requested;
+            *requested = true;
+            changed
+        });
+    }
+    pub fn is_disconnecting(&self) -> bool {
+        *self.disconnect.borrow()
     }
     pub fn is_closed(&self) -> bool {
         self.commands.is_closed() || self.stop.borrow().is_some()

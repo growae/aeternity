@@ -64,7 +64,7 @@ pub(super) struct Outgoing {
     written: usize,
     pub deadline: Instant,
     pub answer: Option<queue::Answer>,
-    _budget: tokio::sync::OwnedSemaphorePermit,
+    _budget: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl Outgoing {
     pub fn new(
@@ -80,8 +80,29 @@ impl Outgoing {
             written: 0,
             deadline,
             answer,
-            _budget: budget,
+            _budget: Some(budget),
         }
+    }
+    pub fn close(deadline: Instant) -> Result<Self, Error> {
+        // One fixed-size control message has reserved capacity even when the
+        // application has exhausted its outgoing byte credits.
+        let packet = message::Message::new(
+            message::Kind::Close,
+            1,
+            Default::default(),
+            Default::default(),
+        )
+        .and_then(|message| message.encode_packet(Default::default()))
+        .map_err(Error::Message)?;
+        Ok(Self {
+            packet: packet.into(),
+            next: 0,
+            record: vec![],
+            written: 0,
+            deadline,
+            answer: None,
+            _budget: None,
+        })
     }
     pub fn prepare(&mut self, crypto: &mut noise::Transport) -> Result<(), Error> {
         if self.written != self.record.len() || self.next == self.packet.len() {

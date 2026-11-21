@@ -452,6 +452,44 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
 }
 
 #[tokio::test]
+async fn graceful_transport_exit_releases_peer_without_failure_penalty() {
+    let node = Node::new();
+    let (local, remote) = identities();
+    let (mut h, _events, mut forwarded_events, task) = start(&node, local.clone(), config()).await;
+    let (peer, _events, peer_task) = incoming(&node, &h, local.public_key(), &remote).await;
+    let request = peer.request(&ping(&node, 4321), None).unwrap();
+    let (client, received) = forwarded(&h, &mut forwarded_events).await;
+    within(
+        client
+            .finish_ping(
+                &received,
+                Some(&Message::response_ok(received.message(), Default::default()).unwrap()),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(within(request).await, Ok(net::Reply::Response(_))));
+    let monitor = client.monitor();
+    client.disconnect();
+    assert!(client.is_disconnecting());
+    assert!(!client.is_closed());
+    assert!(monitor.exit().is_none());
+    assert_eq!(
+        within(peer_task).await.unwrap().reason,
+        net::Error::RemoteClose
+    );
+    assert_eq!(within(monitor.wait()).await.reason, net::Error::LocalClose);
+    status(&mut h, |s| s.counts.closed == 1 && s.sockets == 0).await;
+    let exit = stop(&h, task).await;
+    let registry = exit.registry.unwrap();
+    let saved = registry.policy().pool().state(remote.public_key()).unwrap();
+    assert_eq!(saved.rejections, 0);
+    assert!(!saved.selected);
+    assert!(!saved.standby);
+}
+
+#[tokio::test]
 async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_response() {
     let node = Node::new();
     let (local, remote) = identities();

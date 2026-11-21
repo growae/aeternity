@@ -17,6 +17,10 @@ pub struct Driver {
     events: mpsc::Sender<Event>,
     stopped: watch::Receiver<Option<Error>>,
     stop: watch::Sender<Option<Error>>,
+    disconnect: watch::Receiver<bool>,
+    closing: bool,
+    sending_close: bool,
+    close_deadline: Option<Instant>,
     generation: Generation,
     requests: requests::Requests,
     pending: Vec<(requests::Token, Answer)>,
@@ -49,6 +53,7 @@ impl Driver {
         events: mpsc::Sender<Event>,
         stopped: watch::Receiver<Option<Error>>,
         stop: watch::Sender<Option<Error>>,
+        disconnect: watch::Receiver<bool>,
         generation: Generation,
         requests: requests::Requests,
         config: Config,
@@ -64,6 +69,10 @@ impl Driver {
             events,
             stopped,
             stop,
+            disconnect,
+            closing: false,
+            sending_close: false,
+            close_deadline: None,
             generation,
             requests,
             pending: vec![],
@@ -113,12 +122,16 @@ impl Driver {
             if let Some(reason) = self.stopped.borrow().clone() {
                 return Err(reason);
             }
-            if self.ping_wait.is_none() && !self.buffered.is_empty() {
+            self.close_if_requested()?;
+            if self.ping_wait.is_none() && !self.sending_close && !self.buffered.is_empty() {
                 let buffered = std::mem::take(&mut self.buffered);
                 self.input(&buffered)?;
             }
             let now = Instant::now();
-            if self.ping_wait.is_none() {
+            if self.close_deadline.is_some_and(|deadline| deadline <= now) {
+                return Err(Error::LocalClose);
+            }
+            if self.ping_wait.is_none() && !self.sending_close {
                 let update = self.requests.expire(now.into_std());
                 self.settle(update, None, None)?;
             }
@@ -138,11 +151,11 @@ impl Driver {
                 outgoing.prepare(&mut self.crypto)?;
             }
             let deadline = [
+                self.close_deadline,
                 self.record_deadline,
                 self.fragment_deadline,
                 self.outgoing.as_ref().map(|o| o.deadline),
-                self.ping_wait
-                    .is_none()
+                (self.ping_wait.is_none() && !self.sending_close)
                     .then(|| self.requests.next_deadline().map(Instant::from_std))
                     .flatten(),
                 self.ping_wait.as_ref().map(|p| p.deadline),
@@ -151,6 +164,9 @@ impl Driver {
             .flatten()
             .min();
             tokio::select! {
+                changed = self.disconnect.changed(), if !*self.disconnect.borrow() => {
+                    if changed.is_err() { return Err(Error::Closed); }
+                }
                 _ = self.stopped.changed() => {
                     if self.stopped.borrow().is_none() { return Err(Error::Closed); }
                 }
@@ -161,10 +177,10 @@ impl Driver {
                         None => std::future::pending::<()>().await,
                     }
                 } => (),
-                ready = self.socket.readable(), if self.ping_wait.is_none() => {
+                ready = self.socket.readable(), if self.ping_wait.is_none() && !self.sending_close => {
                     ready?;
                     match self.socket.try_read(&mut bytes) {
-                        Ok(0) => return Err(Error::Io(io::ErrorKind::UnexpectedEof)),
+                        Ok(0) => return Err(if self.closing { Error::LocalClose } else { Error::Io(io::ErrorKind::UnexpectedEof) }),
                         Ok(n) => self.input(&bytes[..n])?,
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
                         Err(e) => return Err(e.into()),
@@ -175,6 +191,10 @@ impl Driver {
                     let outgoing = self.outgoing.as_mut().expect("active output");
                     if outgoing.write(&self.socket)? {
                         let outgoing = self.outgoing.take().unwrap();
+                        if self.sending_close {
+                            self.sending_close = false;
+                            self.close_deadline = Some(Instant::now().checked_add(self.config.close_timeout).ok_or(Error::Configuration)?);
+                        }
                         if let Some(answer) = outgoing.answer {
                             if self.finishing {
                                 self.finishing = false;
@@ -185,7 +205,8 @@ impl Driver {
                         }
                     }
                 }
-                command = self.commands.recv(), if self.outgoing.is_none() && self.ping_wait.is_none() => {
+                command = self.commands.recv(), if self.outgoing.is_none() && self.ping_wait.is_none()
+                    && (!self.closing || !self.commands.is_closed() || !self.commands.is_empty()) => {
                     match command {
                         Some(command) => self.start(command)?,
                         None => return Err(Error::Closed),
@@ -202,6 +223,22 @@ impl Driver {
                 }
             }
         }
+    }
+    fn close_if_requested(&mut self) -> Result<(), Error> {
+        if self.closing
+            || !*self.disconnect.borrow()
+            || self.ping_wait.is_some()
+            || self.outgoing.is_some()
+        {
+            return Ok(());
+        }
+        let deadline = Instant::now()
+            .checked_add(self.config.write_timeout)
+            .ok_or(Error::Configuration)?;
+        self.outgoing = Some(wire::Outgoing::close(deadline)?);
+        self.closing = true;
+        self.sending_close = true;
+        Ok(())
     }
     fn finish(&mut self, finish: Finish) -> Result<(), Error> {
         if self
@@ -226,6 +263,11 @@ impl Driver {
                         return Err(error);
                     }
                 }
+            }
+            if self.closing {
+                // Native send_msg suppresses bytes while disconnecting, but
+                // the callback still commits negotiation and probe ownership.
+                return self.commit_ping(finish.answer);
             }
             self.finishing = true;
             self.outgoing = Some(wire::Outgoing::new(
@@ -321,6 +363,10 @@ impl Driver {
             answer.finish(Err(Error::Timeout));
             return Ok(());
         }
+        // A command and close intent can wake the same select. Recheck at
+        // command start, before registering/writing a new application packet.
+        // Earlier replies needed by a deferred ping remain allowed to finish.
+        self.close_if_requested()?;
         let answer = match mode {
             Mode::Send => Some(answer),
             Mode::Request { timeout, probe } => {
@@ -344,7 +390,13 @@ impl Driver {
                 }
             }
         };
-        self.outgoing = Some(wire::Outgoing::new(packet, deadline, answer, budget));
+        if self.closing {
+            if let Some(answer) = answer {
+                answer.finish(Ok(Reply::Sent));
+            }
+        } else {
+            self.outgoing = Some(wire::Outgoing::new(packet, deadline, answer, budget));
+        }
         Ok(())
     }
     fn input(&mut self, mut bytes: &[u8]) -> Result<(), Error> {
@@ -406,7 +458,11 @@ impl Driver {
                 let receipt = self.stage_ping(&update, false)?;
                 self.settle(update, Some(budget), receipt)
             }
-            message::Kind::Close => Err(Error::RemoteClose),
+            message::Kind::Close => Err(if self.closing {
+                Error::LocalClose
+            } else {
+                Error::RemoteClose
+            }),
             kind => {
                 let mut ping = None;
                 let mut receipt = None;

@@ -342,8 +342,10 @@ impl Service {
                 self.apply(policy::Command::Failed {
                     peer,
                     token,
-                    reason: if matches!(exit.reason, net::Error::RemoteClose | net::Error::Shutdown)
-                    {
+                    reason: if matches!(
+                        exit.reason,
+                        net::Error::RemoteClose | net::Error::LocalClose | net::Error::Shutdown
+                    ) {
                         policy::Failure::Closed
                     } else {
                         policy::Failure::Down
