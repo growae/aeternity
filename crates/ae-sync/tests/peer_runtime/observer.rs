@@ -29,7 +29,10 @@ async fn start_monitor(
         node,
         super::config(),
         peer::Config {
-            events: 2,
+            // The burst can produce several control events per ping before
+            // its consumer runs. Exercise diagnostic overflow below without
+            // also triggering the control queue's intentional Busy shutdown.
+            events: 256,
             ..Default::default()
         },
     )
@@ -42,7 +45,7 @@ async fn start_monitor(
         node,
         app,
         sync::Config {
-            forwarded: 2,
+            forwarded: 256,
             ..Default::default()
         },
     );
@@ -97,6 +100,17 @@ async fn await_status(
     .await
 }
 impl Running<'_> {
+    async fn ping(&self, node: &Node) -> net::Received {
+        let result = within(self.remote.request(&ping(node, 1, false), None).unwrap()).await;
+        let Ok(net::Reply::Response(received)) = result else {
+            panic!(
+                "ping {result:?}; sync {:?}; observer {:?}",
+                self.sync.status(),
+                self.observer.status()
+            );
+        };
+        received
+    }
     async fn stop(self) -> observe::Status {
         self.observer.shutdown();
         let status = within(self.task).await.unwrap();
@@ -140,10 +154,7 @@ async fn diagnostic_overflow_never_blocks_encrypted_requests_and_statsd_uses_liv
     .await;
     let start = run.observer.cursor();
     for _ in 0..40 {
-        assert_eq!(
-            body(&response(&run.remote, &ping(&node, 1, false)).await).kind(),
-            Kind::Ping
-        );
+        assert_eq!(body(&run.ping(&node).await).kind(), Kind::Ping);
     }
     let status = await_status(&mut run.observer, |s| {
         s.events >= 40
@@ -248,7 +259,7 @@ async fn blocked_log_counts_executing_job_and_udp_and_peers_keep_working() {
     let release = Release(gate.clone());
     within(gate.entered.notified()).await;
     for _ in 0..24 {
-        response(&run.remote, &ping(&node, 1, false)).await;
+        run.ping(&node).await;
     }
     let status = await_status(&mut run.observer, |s| {
         s.events >= 24
@@ -290,7 +301,7 @@ async fn sink_errors_and_panics_are_observable_without_terminating_peers() {
         )
         .await;
         for _ in 0..12 {
-            response(&run.remote, &ping(&node, 1, false)).await;
+            run.ping(&node).await;
         }
         let status = await_status(&mut run.observer, |s| {
             s.events >= 12 && s.log.as_ref().is_some_and(|l| l.failed > 0)

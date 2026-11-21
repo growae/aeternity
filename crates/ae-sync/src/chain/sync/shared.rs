@@ -85,6 +85,9 @@ pub(super) struct Book<O> {
     sequence: u64,
     top_target: u64,
     lifecycle: lifecycle::Signal,
+    events: crate::events::Channel<lifecycle::Event>,
+    feed: crate::events::Feed<lifecycle::Event>,
+    notices: lifecycle::Notices,
     statistics_terminated: u64,
     last_statistics: Option<statistics::Snapshot>,
 }
@@ -122,8 +125,49 @@ impl<O> Book<O> {
 
     fn lifecycle_changed(&mut self) {
         // Count every task transition before watch notifications can coalesce.
-        self.lifecycle
-            .update(self.groups.iter().any(|g| !g.model.state().suspect));
+        let active = self.groups.iter().any(|g| !g.model.state().suspect);
+        if self.lifecycle.update(active)
+            && let Err(error) = self.events.publish(lifecycle::Event::IsSyncing(active))
+        {
+            self.notices.error.get_or_insert(error);
+        }
+    }
+    pub fn feed(&self) -> crate::events::Feed<lifecycle::Event> {
+        self.feed.clone()
+    }
+    pub fn notices(&self) -> lifecycle::Notices {
+        lifecycle::Notices {
+            cursor: Some(self.feed.cursor()),
+            ..self.notices.clone()
+        }
+    }
+    pub fn close_events(&self) {
+        self.events.close();
+    }
+    pub fn done(
+        &mut self,
+        peer: PeerPublicKey,
+        generation: net::Generation,
+        reason: lifecycle::DoneReason,
+    ) {
+        let completion = lifecycle::PeerDone {
+            peer,
+            generation,
+            reason,
+        };
+        let syncing = self.groups.iter().any(|g| !g.model.state().suspect);
+        if let Err(error) = self.events.publish(lifecycle::Event::PeerDone {
+            completion: completion.clone(),
+            syncing,
+        }) {
+            self.notices.error.get_or_insert(error);
+            return;
+        }
+        self.notices.count = self.notices.count.saturating_add(1);
+        self.notices.last = Some(completion.clone());
+        if !syncing {
+            self.notices.gc_ready.get_or_insert(completion);
+        }
     }
     #[cfg(test)]
     pub fn posting_client(&self) -> Option<net::Client> {
@@ -140,15 +184,26 @@ impl<O> Book<O> {
             .find(|m| m.client.generation() == client.generation())
             .and_then(|m| m.sync_height)
     }
+    #[cfg(test)]
     pub fn new() -> Self {
-        Self {
+        Self::with_events(Default::default()).unwrap()
+    }
+    pub fn with_events(config: crate::events::Config) -> Result<Self, Error> {
+        if config.event_bytes < 128 {
+            return Err(Error::Configuration);
+        }
+        let (events, feed) = crate::events::channel(config).map_err(|_| Error::Configuration)?;
+        Ok(Self {
             groups: vec![],
             sequence: 0,
             top_target: 0,
             lifecycle: Default::default(),
+            events,
+            feed,
+            notices: Default::default(),
             statistics_terminated: 0,
             last_statistics: None,
-        }
+        })
     }
     pub fn number(&mut self) -> Result<u64, Error> {
         self.sequence = self.sequence.checked_add(1).ok_or(Error::ResourceLimit)?;
@@ -251,9 +306,11 @@ impl<O> Book<O> {
                 failed: None,
             },
         );
-        group
-            .model
-            .workers(group.members.keys().copied().collect())?;
+        // Native lists:keystore appends a newly registered worker. Preserve
+        // this order for height updates and disconnect/suspect/done effects.
+        let mut workers = group.model.state().workers.clone();
+        workers.push(client.peer());
+        group.model.workers(workers)?;
         group
             .statistics
             .update_target(group.model.state().chain.target(), now_ms);

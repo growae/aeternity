@@ -1568,5 +1568,7 @@ mod closing;
 #[path = "peer_runtime/preping.rs"]
 mod preping;
 
+#[path = "peer_runtime/maintenance.rs"]
+mod maintenance;
 #[path = "peer_runtime/observer.rs"]
 mod observer;

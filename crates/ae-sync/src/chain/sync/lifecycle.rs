@@ -58,6 +58,7 @@ pub fn progress(tasks: &[Task], top_target: u64, selected: u64) -> Result<Progre
 pub enum DoneReason {
     Ping,
     Exhausted,
+    Suspect,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDone {
@@ -65,8 +66,30 @@ pub struct PeerDone {
     pub generation: net::Generation,
     pub reason: DoneReason,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    IsSyncing(bool),
+    PeerDone { completion: PeerDone, syncing: bool },
+}
+impl crate::events::Event for Event {
+    fn retained_bytes(&self) -> usize {
+        128
+    }
+}
+#[derive(Debug, Clone, Default)]
+pub(super) struct Notices {
+    pub cursor: Option<crate::events::Cursor>,
+    pub count: u64,
+    pub last: Option<PeerDone>,
+    pub gc_ready: Option<PeerDone>,
+    pub error: Option<crate::events::Error>,
+}
 #[derive(Debug, Clone)]
 pub struct Status {
+    // Matches tasks, transition count and completion notices observed under
+    // the same book lock. Reconcile this snapshot, then replay after cursor.
+    // Selected-chain reads remain separately sampled operational state.
+    pub event_cursor: Option<crate::events::Cursor>,
     pub tasks: Vec<Task>,
     pub top_target: u64,
     pub selected: Option<Point>,
@@ -78,6 +101,10 @@ pub struct Status {
     // not proof of target selection, final generation success or mainnet sync.
     pub peer_completions: u64,
     pub last_peer_done: Option<PeerDone>,
+    // First actual completion observed with no non-suspect synchronization
+    // task. Retained control state survives history overflow; it is not proof
+    // of full chain synchronization or successful final-generation import.
+    pub gc_ready: Option<PeerDone>,
     pub policy: Option<resilience::Snapshot>,
     pub policy_config: Option<resilience::Config>,
     pub finalized_height: Option<u64>,
@@ -86,6 +113,7 @@ pub struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
+            event_cursor: None,
             tasks: vec![],
             top_target: 0,
             selected: None,
@@ -95,6 +123,7 @@ impl Default for Status {
             suppressed_generations: 0,
             peer_completions: 0,
             last_peer_done: None,
+            gc_ready: None,
             policy: None,
             policy_config: None,
             finalized_height: None,
@@ -109,11 +138,13 @@ pub(super) struct Signal {
     pub changes: u64,
 }
 impl Signal {
-    pub fn update(&mut self, active: bool) {
-        if self.active != active {
+    pub fn update(&mut self, active: bool) -> bool {
+        let changed = self.active != active;
+        if changed {
             self.changes = self.changes.saturating_add(1);
         }
         self.active = active;
+        changed
     }
 }
 impl Status {

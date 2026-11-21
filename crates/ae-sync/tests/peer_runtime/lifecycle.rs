@@ -26,6 +26,7 @@ async fn peer_completion_activates_policy_before_forward_success_and_success_sup
     let app = start(&node, config(), Default::default()).await;
     let (remote, mut events, driver) = connect(&node, &app).await;
     let (mut sync, _forwarded, finish) = chain_sync::synchronize(&node, app, Default::default());
+    let mut business = sync.events().subscribe(None).unwrap();
     response(&remote, &ping(&source, 1, false)).await;
     let request = within(generation_request(&mut events)).await;
     assert_eq!(native["latch"][0]["scheduled"], true);
@@ -34,6 +35,16 @@ async fn peer_completion_activates_policy_before_forward_success_and_success_sup
     })
     .await;
     assert_eq!(sync.status().lifecycle.peer_completions, 1);
+    let Some(ae_sync::events::Delivery::Event(record)) = business.recv().await else {
+        panic!()
+    };
+    assert!(
+        matches!(&record.event, sync::lifecycle::Event::PeerDone { completion, syncing: false } if completion.reason == DoneReason::Ping)
+    );
+    assert_eq!(
+        sync.status().lifecycle.gc_ready,
+        sync.status().lifecycle.last_peer_done
+    );
     assert_eq!(
         sync.status().lifecycle.last_peer_done.unwrap().reason,
         DoneReason::Ping
@@ -81,6 +92,7 @@ async fn exhausted_peer_with_failed_final_fetch_reports_completion_without_admis
     let app = start(&node, config(), Default::default()).await;
     let (remote, mut events, driver) = connect(&node, &app).await;
     let (mut sync, _forwarded, finish) = chain_sync::synchronize(&node, app, Default::default());
+    let mut business = sync.events().subscribe(None).unwrap();
     response(&remote, &ping(&source, 1, false)).await;
     within(async {
         loop {
@@ -105,6 +117,7 @@ async fn exhausted_peer_with_failed_final_fetch_reports_completion_without_admis
     let status = sync.status();
     assert_eq!(status.counts.finished, 0);
     assert_eq!(status.lifecycle.peer_completions, 1);
+    assert_eq!(status.lifecycle.gc_ready, status.lifecycle.last_peer_done);
     assert_eq!(
         status.lifecycle.last_peer_done.unwrap().reason,
         DoneReason::Exhausted
@@ -118,6 +131,22 @@ async fn exhausted_peer_with_failed_final_fetch_reports_completion_without_admis
     assert_eq!(node.db.view().unwrap().status(), before);
     sync.shutdown();
     assert!(within(finish).await.joined);
+    let mut completion_seen = false;
+    while let Some(delivery) = business.recv().await {
+        let ae_sync::events::Delivery::Event(record) = delivery else {
+            panic!()
+        };
+        if let sync::lifecycle::Event::PeerDone {
+            completion,
+            syncing,
+        } = &record.event
+        {
+            assert!(!syncing);
+            assert_eq!(completion.reason, DoneReason::Exhausted);
+            completion_seen = true;
+        }
+    }
+    assert!(completion_seen);
     within(driver).await.unwrap();
 }
 #[tokio::test]

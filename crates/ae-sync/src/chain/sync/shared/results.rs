@@ -164,7 +164,7 @@ impl<O> Book<O> {
             if let Some(m) = g.members.get_mut(&supplier) {
                 m.failed = Some(error.clone());
             }
-            let suspects = effects
+            let suspects: Vec<_> = effects
                 .into_iter()
                 .filter_map(|effect| match effect {
                     coordination::Effect::Suspect(peer) => {
@@ -177,6 +177,17 @@ impl<O> Book<O> {
                 g.failed = Some(error);
             }
             Self::release(g, lease);
+            // Native mark_workers_as_suspect emits each completion before
+            // check_is_syncing emits the resulting task-state transition.
+            // The state is already updated under this book's mutex, so a
+            // required consumer observes the post-callback progress.
+            for client in &suspects {
+                self.done(
+                    client.peer(),
+                    client.generation().clone(),
+                    lifecycle::DoneReason::Suspect,
+                );
+            }
             self.lifecycle_changed();
             Ok(suspects)
         } else {

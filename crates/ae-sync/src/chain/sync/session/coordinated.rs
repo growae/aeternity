@@ -258,6 +258,7 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                                                 error.clone(),
                                                 items.collect(),
                                             )?;
+                                        self.notify();
                                         self.context.reject(suspects).await?;
                                         // Closing a rejected/fatal task's sockets must
                                         // not replace the original typed import failure

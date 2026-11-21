@@ -41,9 +41,20 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
         status.pending = self.work.len() > 0 || !self.initialized;
         status
     }
-    pub fn observe(&mut self, tasks: Vec<Task>, top_target: u64, transitions: u64) {
+    pub fn observe(
+        &mut self,
+        tasks: Vec<Task>,
+        top_target: u64,
+        transitions: u64,
+        notices: Notices,
+    ) {
         self.status.observe(tasks, top_target);
+        self.status.event_cursor = notices.cursor;
         self.status.syncing_transitions = transitions;
+        self.status.peer_completions = notices.count;
+        self.status.last_peer_done = notices.last;
+        self.status.gc_ready = notices.gc_ready;
+        self.wants_synced |= notices.count > 0;
     }
     fn progress(&mut self) {
         self.status.progress = progress(
@@ -68,15 +79,21 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
         self.status.last_generation_in_sync = true;
     }
     pub fn done(&mut self, peer: PeerPublicKey, generation: net::Generation, reason: DoneReason) {
-        self.status.peer_completions = self.status.peer_completions.saturating_add(1);
-        self.status.last_peer_done = Some(PeerDone {
-            peer,
-            generation,
-            reason,
-        });
-        self.wants_synced = true;
+        self.context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .done(peer, generation, reason);
     }
     pub fn start(&mut self, config: resilience::Config) {
+        self.wants_synced |= self
+            .context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notices()
+            .count
+            > 0;
         if !self.policy_busy {
             let event = if !self.initialized {
                 Some(resilience::Event::Start)

@@ -189,9 +189,13 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let (tasks, target, transitions) = book.lifecycle();
+        let notices = book.notices();
+        if let Some(error) = notices.error {
+            self.current.last_error = Some(Error::Events(error));
+        }
         self.current.statistics = book.statistics();
         drop(book);
-        self.lifecycle.observe(tasks, target, transitions);
+        self.lifecycle.observe(tasks, target, transitions, notices);
         self.current.lifecycle = self.lifecycle.status();
         target
     }
@@ -213,6 +217,9 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .filter(|lane| lane.pending.is_some() || lane.replacement.is_some())
             .count();
         let target = self.observe_shared();
+        if let Some(Error::Events(error)) = self.current.last_error {
+            return Err(Error::Events(error));
+        }
         if target != self.target {
             self.application
                 .set_sync_target(target)
@@ -338,6 +345,11 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         }
         self.current.blocks = self.blocks.status();
         self.observe_shared();
+        self.context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close_events();
         self.current.lifecycle.pending = false;
         self.current.running = false;
         self.current.joined = true;
@@ -364,6 +376,11 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
             .saturating_add(self.tasks.len() as u64);
         self.tasks.clear();
         self.observe_shared();
+        self.context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close_events();
         self.current.lifecycle.pending = false;
         self.context.importer.stop();
         self.context.reads.stop();

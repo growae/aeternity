@@ -71,10 +71,45 @@ impl Shared {
 // One owned worker per database. Dropping the handle joins the thread; dropping
 // or disabling a worker never cancels durable collection or resets retention.
 pub struct Worker {
+    database: std::sync::Weak<Database>,
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
 }
+// A client identifies this exact worker lifetime without keeping its thread
+// alive or silently following a replacement registered on the same database.
+#[derive(Clone)]
+pub struct Client {
+    database: std::sync::Weak<Database>,
+    shared: std::sync::Weak<Shared>,
+}
+impl Client {
+    pub fn uses_database(&self, db: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(db))
+    }
+    pub fn info(&self) -> Option<Info> {
+        self.shared.upgrade().map(|s| s.lock().info.clone())
+    }
+    pub fn on_sync_done(&self, sync_in_progress: bool) -> bool {
+        let Some(shared) = self.shared.upgrade() else {
+            return false;
+        };
+        let mut control = shared.lock();
+        if control.stop || !control.info.running {
+            return false;
+        }
+        control.info.sync_done(sync_in_progress);
+        control.pending = true;
+        shared.signal(&mut control);
+        true
+    }
+}
 impl Worker {
+    pub fn client(&self) -> Client {
+        Client {
+            database: self.database.clone(),
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
     pub fn spawn(db: Arc<Database>, config: Config, limits: Limits) -> Result<Self, Error> {
         config.validate()?;
         if limits.rows == 0 || limits.bytes == 0 {
@@ -132,6 +167,7 @@ impl Worker {
                 Error::Backend(e.to_string())
             })?;
         Ok(Self {
+            database: Arc::downgrade(&db),
             shared,
             join: Some(join),
         })

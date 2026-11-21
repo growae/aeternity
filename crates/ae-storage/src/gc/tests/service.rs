@@ -93,12 +93,13 @@ fn worker_latches_sync_and_collects_coalesced_key_micro_generations() {
     let temp = Temp::new();
     let db = Arc::new(setup(&temp.0).0);
     let worker = Worker::spawn(db.clone(), config(), Limits::default()).unwrap();
+    let client = worker.client();
     until(&worker, |i| i.version > 0);
     let status = advance(&db, 53, false);
     until(&worker, |i| i.observed_revision == status.revision);
-    worker.on_sync_done(true);
+    assert!(client.on_sync_done(true));
     assert!(!worker.info().synced);
-    worker.on_sync_done(false);
+    assert!(client.on_sync_done(false));
     until(&worker, |i| i.synced);
     assert_eq!(db.gc_state().unwrap().epoch, 0);
     let status = advance(&db, 54, true);
@@ -107,7 +108,7 @@ fn worker_latches_sync_and_collects_coalesced_key_micro_generations() {
     });
     assert_eq!(info.state.height, 54);
     assert!(info.pages > 0 && info.state.removed > 0);
-    worker.on_sync_done(true);
+    assert!(client.on_sync_done(true));
     assert!(worker.info().synced);
     assert!(worker.set_enabled(false));
     let status = advance(&db, 104, true);
@@ -128,8 +129,34 @@ fn worker_latches_sync_and_collects_coalesced_key_micro_generations() {
         });
     }
     assert!(!worker.shutdown().unwrap().running);
+    assert!(!client.on_sync_done(false));
     assert_eq!(Arc::strong_count(&db), 1);
     db.view().unwrap().verify_tip().unwrap();
+}
+
+#[test]
+fn gc_client_is_weak_and_never_redirects_to_a_replacement_worker() {
+    let temp = Temp::new();
+    let db = Arc::new(setup(&temp.0).0);
+    let foreign_temp = Temp::new();
+    let foreign = Arc::new(setup(&foreign_temp.0).0);
+    let worker = Worker::spawn(db.clone(), config(), Limits::default()).unwrap();
+    let client = worker.client();
+    assert!(client.uses_database(&db));
+    assert!(!client.uses_database(&foreign));
+    assert!(client.on_sync_done(false));
+    assert!(client.info().unwrap().synced);
+    drop(worker);
+    assert_eq!(Arc::strong_count(&db), 1);
+    assert!(client.info().is_none());
+    let worker = Worker::spawn(db.clone(), config(), Limits::default()).unwrap();
+    assert!(!client.on_sync_done(false));
+    assert!(!worker.info().synced);
+    assert!(worker.client().on_sync_done(true));
+    assert!(!worker.info().synced);
+    assert!(worker.client().on_sync_done(false));
+    assert!(worker.info().synced);
+    worker.shutdown().unwrap();
 }
 
 #[test]

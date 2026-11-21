@@ -54,6 +54,7 @@ pub struct Config {
     pub capacity_timeout: Duration,
     pub retry_delay: Duration,
     pub messages: message::Limits,
+    pub events: crate::events::Config,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -81,6 +82,7 @@ impl Default for Config {
             capacity_timeout: Duration::from_secs(60),
             retry_delay: Duration::from_millis(25),
             messages: Default::default(),
+            events: Default::default(),
         }
     }
 }
@@ -144,6 +146,7 @@ impl Config {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Events(crate::events::Error),
     Configuration,
     Busy,
     Closed,
@@ -317,8 +320,15 @@ pub struct Handle {
     stop: watch::Sender<bool>,
     resilience: watch::Sender<ae_chain::resilience::Config>,
     status: watch::Receiver<Status>,
+    events: crate::events::Feed<lifecycle::Event>,
 }
 impl Handle {
+    pub fn events(&self) -> crate::events::Feed<lifecycle::Event> {
+        self.events.clone()
+    }
+    pub(crate) fn uses_database(&self, db: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(db))
+    }
     pub(crate) fn owns(&self, db: &Arc<Database>, events: &Events) -> bool {
         self.database.ptr_eq(&Arc::downgrade(db)) && Arc::ptr_eq(&self.event_owner, &events.owner)
     }
@@ -382,6 +392,8 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     {
         return Err(Error::Configuration);
     }
+    let book = shared::Book::with_events(config.events)?;
+    let business_events = book.feed();
     let reads = blocking::Pool::named(
         "ae-chain-sync",
         config.read_threads,
@@ -414,7 +426,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         reads,
         stopped: AtomicBool::new(false),
         wake,
-        shared: Mutex::new(shared::Book::new()),
+        shared: Mutex::new(book),
         headers: Mutex::new(BTreeMap::new()),
     });
     Ok((
@@ -424,6 +436,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
             stop,
             resilience,
             status: observed,
+            events: business_events,
         },
         Events {
             receiver: events,
