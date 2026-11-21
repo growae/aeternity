@@ -51,6 +51,9 @@ fn policy_bytes(
     Ok(bytes)
 }
 impl Client {
+    pub fn origins_interval(&self) -> Option<Duration> {
+        self.shared.settings.origins_interval
+    }
     pub fn uses_database(&self, db: &Arc<Database>) -> bool {
         self.shared.database.ptr_eq(&Arc::downgrade(db))
     }
@@ -229,6 +232,34 @@ impl Client {
     ) -> Result<Ticket<bool>, Error> {
         self.submit(sum([BASE_WEIGHT, reason.capacity()])?, move |s| {
             s.record_failure(hash, &reason, tuple)
+        })
+    }
+    pub fn ttl(&self, hash: Hash256) -> Result<Ticket<i128>, Error> {
+        self.submit(BASE_WEIGHT, move |s| s.ttl(hash))
+    }
+    pub fn shorten_ttl(&self, hash: Hash256, ttl: i128) -> Result<Ticket<i128>, Error> {
+        self.submit(BASE_WEIGHT, move |s| s.shorten_ttl(hash, ttl))
+    }
+    pub fn adjust_ttl(&self, difference: i128) -> Result<Ticket<()>, Error> {
+        self.submit(BASE_WEIGHT, move |s| s.adjust_ttl(difference))
+    }
+    pub fn note_origin(
+        &self,
+        origin: Option<AccountPublicKey>,
+        nonce: Unsigned,
+    ) -> Result<Ticket<()>, Error> {
+        self.submit(sum([BASE_WEIGHT, nonce.as_bytes().len()])?, move |s| {
+            s.note_origin(origin, nonce)
+        })
+    }
+    pub fn collect_at(
+        &self,
+        height: u64,
+        synchronized: bool,
+        limit: usize,
+    ) -> Result<Ticket<Vec<Hash256>>, Error> {
+        self.submit(BASE_WEIGHT, move |s| {
+            s.collect_at(height, synchronized, limit)
         })
     }
     pub fn collect(

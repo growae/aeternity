@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 mod service;
 pub mod sync;
 pub mod worker;
-pub use service::{Config, Failure, Inspection, Service, Submission};
+pub use service::{Config, Failure, Inspection, Maintenance, Service, Submission};
 pub const RECORDS: u8 = 16;
 pub const MEMBERS: u8 = 17;
 pub const REVISION: &[u8] = b"\0pool";

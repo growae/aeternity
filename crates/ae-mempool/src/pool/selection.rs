@@ -382,7 +382,7 @@ impl Pool {
         drop(selection);
         for (hash, expires) in expiry {
             if let Some((ttl, _)) = self.gc.get_mut(&hash) {
-                *ttl = (*ttl).min(expires);
+                *ttl = (*ttl).min(i128::from(expires));
             }
         }
         for c in &chosen {

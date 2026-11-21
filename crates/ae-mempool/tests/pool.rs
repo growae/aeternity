@@ -399,7 +399,7 @@ fn admission_matches_original_signatures_nonces_fees_payability_and_expiry() {
                 .unwrap_or(u64::MAX);
             assert_eq!(
                 p.inspect(t.hash(), Location::Pool).unwrap().expires,
-                ttl.min(10 + row["residency"].as_u64().unwrap()),
+                i128::from(ttl.min(10 + row["residency"].as_u64().unwrap())),
                 "expiry {i}"
             );
             assert_eq!(p.len(), 1);

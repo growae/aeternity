@@ -178,7 +178,7 @@ struct Entry {
 pub struct Inspection {
     pub failures: u64,
     pub visited: bool,
-    pub expires: u64,
+    pub expires: i128,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushOutcome {
@@ -194,7 +194,7 @@ pub struct Pool {
     active: BTreeMap<Key, Entry>,
     visited: BTreeMap<Key, Entry>,
     nonces: BTreeMap<Option<AccountPublicKey>, BTreeMap<Unsigned, BTreeSet<Key>>>,
-    gc: BTreeMap<Hash256, (u64, Key)>,
+    gc: BTreeMap<Hash256, (i128, Key)>,
     origins: BTreeMap<Option<AccountPublicKey>, Unsigned>,
     bytes: usize,
     gc_height: u64,
@@ -410,8 +410,8 @@ impl Pool {
             .insert(key.clone());
         self.gc
             .entry(key.hash)
-            .and_modify(|(h, _)| *h = (*h).min(expiry))
-            .or_insert((expiry, key));
+            .and_modify(|(h, _)| *h = (*h).min(i128::from(expiry)))
+            .or_insert((i128::from(expiry), key));
     }
     fn remove(&mut self, key: &Key) {
         for map in [&mut self.active, &mut self.visited] {

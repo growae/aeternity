@@ -1591,3 +1591,5 @@ mod routing_owner;
 
 #[path = "peer_runtime/analytics.rs"]
 mod analytics;
+#[path = "peer_runtime/pool_gc.rs"]
+mod pool_gc;

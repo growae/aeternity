@@ -1,4 +1,4 @@
-use crate::{analytics, bindings, blocking, routing};
+use crate::{analytics, bindings, blocking, pool_gc, routing};
 use ae_chain::repository::retention;
 use ae_protocol::NetworkProfile;
 use ae_storage::{Database, gc, pool};
@@ -17,6 +17,7 @@ pub struct GarbageCollection {
 pub struct Config {
     pub routing: Option<routing::Setup>,
     pub analytics: Option<analytics::Config>,
+    pub pool_gc: Option<pool_gc::Config>,
     pub keys: Option<crate::keys::Config>,
     pub pool: pool::Config,
     pub admission: pool::worker::Settings,
@@ -28,6 +29,7 @@ impl Default for Config {
         Self {
             routing: None,
             analytics: None,
+            pool_gc: Some(Default::default()),
             keys: None,
             pool: Default::default(),
             admission: Default::default(),
@@ -42,6 +44,7 @@ pub enum Child {
     Keys,
     Admission,
     Analytics,
+    PoolMaintenance,
     GarbageCollection,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +77,13 @@ pub struct Status {
     pub keys_generation: u64,
     pub routing_generation: u64,
     pub analytics_generation: u64,
+    pub pool_gc_generation: u64,
     pub admission: Option<pool::worker::Info>,
     pub gc: Option<gc::worker::Info>,
     pub keys: Option<crate::keys::Info>,
     pub routing: Option<routing::Info>,
     pub analytics: Option<analytics::Info>,
+    pub pool_gc: Option<pool_gc::Info>,
     pub restart_attempts: u64,
     pub last_failure: Option<Error>,
     pub error: Option<Error>,
@@ -87,6 +92,7 @@ pub struct Status {
 pub struct Bindings {
     pub routing: Option<bindings::MetricsRouting>,
     pub analytics: Option<bindings::PeerAnalytics>,
+    pub pool_gc: Option<bindings::Binding<pool_gc::Client>>,
     pub keys: Option<bindings::Binding<crate::keys::Client>>,
     pub admission: bindings::Admission,
     pub gc: Option<bindings::GarbageCollection>,
@@ -155,6 +161,9 @@ pub struct Service {
     routing: Option<routing::Worker>,
     routing_owner: Option<routing::Owner>,
     analytics: Option<analytics::Worker>,
+    pool_gc: Option<pool_gc::Worker>,
+    admission_binding: bindings::Admission,
+    pool_gc_binding: Option<bindings::Owner<pool_gc::Client>>,
     analytics_binding: Option<bindings::Owner<analytics::Client>>,
     routing_binding: Option<bindings::Owner<routing::Client>>,
     pool_binding: bindings::Owner<bindings::Pool>,
@@ -194,6 +203,13 @@ pub fn create(
     } else {
         (None, None)
     };
+    let (pool_gc_binding, pool_gc) = if config.pool_gc.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
+    let admission_binding = admission.clone();
     let (keys_binding, keys) = if config.keys.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
         (Some(owner), Some(reader))
@@ -225,6 +241,7 @@ pub fn create(
                 keys,
                 routing,
                 analytics,
+                pool_gc,
             },
         },
         Service {
@@ -238,6 +255,9 @@ pub fn create(
             routing: None,
             routing_owner: None,
             analytics: None,
+            pool_gc: None,
+            admission_binding,
+            pool_gc_binding,
             analytics_binding,
             routing_binding,
             pool_binding,
@@ -256,6 +276,7 @@ pub fn create(
     ))
 }
 enum Started {
+    PoolMaintenance(pool_gc::Worker),
     Analytics(analytics::Worker),
     Routing(routing::Worker, Option<routing::Owner>),
     Keys(crate::keys::Worker),
@@ -277,6 +298,7 @@ impl Service {
         match child {
             Child::Routing => self.current.routing_generation,
             Child::Analytics => self.current.analytics_generation,
+            Child::PoolMaintenance => self.current.pool_gc_generation,
             Child::Keys => self.current.keys_generation,
             Child::Admission => self.current.admission_generation,
             Child::GarbageCollection => self.current.gc_generation,
@@ -285,6 +307,7 @@ impl Service {
     fn publish(&mut self) {
         self.current.routing = self.routing.as_ref().map(|w| w.info());
         self.current.analytics = self.analytics.as_ref().map(|w| w.info());
+        self.current.pool_gc = self.pool_gc.as_ref().map(|w| w.info());
         self.current.keys = self.keys.as_ref().map(|w| w.info());
         self.current.admission = self.admission.as_ref().map(|w| w.info());
         self.current.gc = self.gc.as_ref().map(|w| w.info());
@@ -299,10 +322,21 @@ impl Service {
         let config = self.config.clone();
         let network = self.network.clone();
         let cache = self.cache.clone();
+        let admission_binding = self.admission_binding.clone();
         let routing_store = self.routing_owner.as_ref().map(|o| o.store());
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::PoolMaintenance => pool_gc::Worker::spawn(
+                    &db,
+                    admission_binding,
+                    config.pool_gc.ok_or(Error::Missing)?,
+                )
+                .map(Started::PoolMaintenance)
+                .map_err(|e| Error::Start {
+                    child,
+                    reason: format!("{e:?}"),
+                }),
                 Child::Analytics => {
                     analytics::Worker::spawn(config.analytics.ok_or(Error::Missing)?)
                         .map(Started::Analytics)
@@ -340,7 +374,14 @@ impl Service {
                     db,
                     network,
                     config.pool,
-                    config.admission,
+                    pool::worker::Settings {
+                        origins_interval: if config.pool_gc.is_some() {
+                            None
+                        } else {
+                            config.admission.origins_interval
+                        },
+                        ..config.admission
+                    },
                     cache,
                 )
                 .map(Started::Admission)
@@ -362,6 +403,14 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::PoolMaintenance(worker) => {
+                self.pool_gc_binding
+                    .as_ref()
+                    .expect("configured pool GC")
+                    .install(worker.client(), generation);
+                self.pool_gc = Some(worker);
+                self.current.pool_gc_generation = generation;
+            }
             Started::Analytics(worker) => {
                 self.analytics_binding
                     .as_ref()
@@ -409,6 +458,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::PoolMaintenance => {
+                if let Some(binding) = &self.pool_gc_binding {
+                    binding.withdraw();
+                }
+                self.pool_gc.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::Analytics => {
                 if let Some(binding) = &self.analytics_binding {
                     binding.withdraw();
@@ -537,6 +597,12 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
+        if self.config.pool_gc.is_some() {
+            self.start(Child::PoolMaintenance).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         if self.config.gc.is_some() {
             self.start(Child::GarbageCollection).await?;
         }
@@ -560,6 +626,8 @@ impl Service {
                 Some(Child::Admission)
             } else if self.analytics.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Analytics)
+            } else if self.pool_gc.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::PoolMaintenance)
             } else if self.gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::GarbageCollection)
             } else {
@@ -575,7 +643,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -592,6 +660,7 @@ impl Service {
             match command.child {
                 Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
                 Child::Analytics => self.analytics.as_ref().unwrap().request_shutdown(),
+                Child::PoolMaintenance => self.pool_gc.as_ref().unwrap().request_shutdown(),
                 Child::Keys => self.keys.as_ref().unwrap().request_shutdown(),
                 Child::Admission => self.admission.as_ref().unwrap().request_shutdown(),
                 Child::GarbageCollection => self.gc.as_ref().unwrap().request_shutdown(),
@@ -624,8 +693,12 @@ impl Service {
         if let Some(binding) = &self.analytics_binding {
             binding.withdraw();
         }
+        if let Some(binding) = &self.pool_gc_binding {
+            binding.withdraw();
+        }
         for child in [
             Child::GarbageCollection,
+            Child::PoolMaintenance,
             Child::Analytics,
             Child::Admission,
             Child::Keys,
@@ -636,6 +709,9 @@ impl Service {
             }
         }
         self.pool_binding.close();
+        if let Some(binding) = &self.pool_gc_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.analytics_binding {
             binding.close();
         }
@@ -666,6 +742,9 @@ impl Drop for Service {
             binding.close();
         }
         self.pool_binding.close();
+        if let Some(binding) = &self.pool_gc_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.analytics_binding {
             binding.close();
         }

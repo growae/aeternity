@@ -174,6 +174,7 @@ where
         keys: None,
         routing: None,
         analytics: None,
+        pool_gc: None,
         admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
         gc: inputs.gc.as_ref().map(|client| {
             crate::bindings::GarbageCollection::fixed(&inputs.database, client.clone())

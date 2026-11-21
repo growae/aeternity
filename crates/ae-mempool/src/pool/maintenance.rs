@@ -34,6 +34,32 @@ pub struct Reconcile<'a> {
     pub confirmed: &'a [Arc<Signed>],
 }
 impl Pool {
+    pub fn ttl(&self, hash: Hash256) -> Result<i128, Error> {
+        self.gc
+            .get(&hash)
+            .map(|(ttl, _)| *ttl)
+            .ok_or(Error::NotFound)
+    }
+    // Existing transaction keys stay attached to their original GC record.
+    pub fn shorten_ttl(&mut self, hash: Hash256, ttl: i128) -> Result<i128, Error> {
+        let (current, _) = self.gc.get_mut(&hash).ok_or(Error::NotFound)?;
+        *current = (*current).min(ttl);
+        Ok(*current)
+    }
+    pub fn adjust_ttl(&mut self, difference: i128) -> Result<(), Error> {
+        // Validate every subtraction before changing any metadata.
+        for (ttl, _) in self.gc.values() {
+            ttl.checked_sub(difference).ok_or(Error::ResourceLimit)?;
+        }
+        for (ttl, _) in self.gc.values_mut() {
+            *ttl -= difference;
+        }
+        Ok(())
+    }
+    pub fn origins_len(&self) -> usize {
+        self.origins.len()
+    }
+
     pub fn update_gc_height(&mut self, local: u64, target: u64) {
         self.gc_height = self.gc_height.max(local).max(target);
     }
@@ -133,7 +159,7 @@ impl Pool {
         }
         Ok(())
     }
-    fn note_origin(&mut self, origin: Option<AccountPublicKey>, nonce: Unsigned) {
+    pub fn note_origin(&mut self, origin: Option<AccountPublicKey>, nonce: Unsigned) {
         // The original capacity check also blocks updates to existing entries.
         if self.origins.len() < 5000 {
             self.origins
@@ -146,11 +172,20 @@ impl Pool {
         &mut self,
         height: u64,
         max: usize,
-        mut removable: impl FnMut(Hash256) -> Result<bool, Error>,
+        removable: impl FnMut(Hash256) -> Result<bool, Error>,
     ) -> Result<Vec<Hash256>, Error> {
         if height < self.gc_height {
             return Ok(vec![]);
         }
+        self.collect_at(height, max, removable)
+    }
+    // Asynchronous native gc/2 does not apply sync_gc/1's height gate.
+    pub fn collect_at(
+        &mut self,
+        height: u64,
+        max: usize,
+        mut removable: impl FnMut(Hash256) -> Result<bool, Error>,
+    ) -> Result<Vec<Hash256>, Error> {
         let mut remove = vec![];
         let mut work = 0;
         for (hash, (ttl, key)) in &self.gc {
@@ -161,7 +196,7 @@ impl Pool {
             if work > self.limits.work {
                 return Err(Error::ResourceLimit);
             }
-            if *ttl <= height && removable(*hash)? {
+            if *ttl <= i128::from(height) && removable(*hash)? {
                 remove.push(key.clone());
             }
         }

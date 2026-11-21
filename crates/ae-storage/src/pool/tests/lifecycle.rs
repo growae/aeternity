@@ -284,3 +284,51 @@ fn malformed_members_and_records_are_reported_without_dropping_membership() {
         }
     }
 }
+
+#[test]
+fn explicit_gc_signed_ttl_metrics_and_failed_commit_preserve_durable_records() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
+    let t = pending();
+    service.force_push(t.clone()).unwrap();
+    assert_eq!(service.ttl(t.hash()).unwrap(), 5);
+    service.adjust_ttl(10).unwrap();
+    assert_eq!(service.ttl(t.hash()).unwrap(), -5);
+    service.sync_target(100).unwrap();
+    assert!(service.collect_at(0, true, 100).unwrap().is_empty());
+    let mut limited = config();
+    limited.commit_bytes = 0;
+    service.recover(limited).unwrap();
+    service.adjust_ttl(10).unwrap();
+    service.sync_target(100).unwrap();
+    assert!(matches!(
+        service.collect_at(0, false, 100),
+        Err(Failure::Repository(Error::ResourceLimit))
+    ));
+    assert_eq!(service.ttl(t.hash()).unwrap(), -5);
+    assert_eq!(service.inspection().maintenance, Maintenance::default());
+    assert_eq!(
+        db.pool_view().unwrap().location(t.hash()).unwrap(),
+        Location::Pool
+    );
+    service.recover(config()).unwrap();
+    service.adjust_ttl(10).unwrap();
+    assert_eq!(service.collect_at(0, false, 100).unwrap(), vec![t.hash()]);
+    assert_eq!(service.inspection().maintenance.gced, 1);
+    assert_eq!(
+        db.pool_view().unwrap().location(t.hash()).unwrap(),
+        Location::Deleted
+    );
+    assert_eq!(
+        db.pool_view()
+            .unwrap()
+            .transaction(t.hash())
+            .unwrap()
+            .as_ref(),
+        Some(t.as_ref())
+    );
+    drop(service);
+    let mut restored = Service::start(db, NetworkProfile::mainnet(), config()).unwrap();
+    assert!(restored.peek(10, None, None).unwrap().is_empty());
+}

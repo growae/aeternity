@@ -59,12 +59,18 @@ pub struct Inspection {
     pub visited: usize,
     pub retained_record_bytes: usize,
     pub gc_height: u64,
+    pub maintenance: Maintenance,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
     pub outcome: policy::PushOutcome,
     pub chain: Status,
     pub revision: u64,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Maintenance {
+    pub gced: u64,
+    pub origin_gced: u64,
 }
 #[derive(Clone)]
 struct Live {
@@ -73,6 +79,7 @@ struct Live {
     chain: Status,
     revision: u64,
     height: u64,
+    maintenance: Maintenance,
 }
 struct Plan {
     live: Live,
@@ -142,6 +149,7 @@ fn restore<S: Read>(stored: &Stored<S>, config: &Config) -> Result<Live, Failure
         chain: stored.chain.status(),
         revision: stored.revision,
         height,
+        maintenance: Maintenance::default(),
     })
 }
 impl Service {
@@ -266,6 +274,8 @@ impl Service {
                         let gone = live.pool.collect_expired(height, usize::MAX, |h| {
                             Ok(live.members.contains(&h))
                         })?;
+                        live.maintenance.gced =
+                            live.maintenance.gced.saturating_add(gone.len() as u64);
                         for hash in gone {
                             live.members.remove(&hash);
                             collected.insert(hash);
@@ -362,6 +372,7 @@ impl Service {
             visited,
             retained_record_bytes: self.live.pool.retained_record_bytes(),
             gc_height: self.live.pool.gc_height(),
+            maintenance: self.live.maintenance,
         }
     }
     pub fn push(
@@ -525,23 +536,82 @@ impl Service {
         self.finish(&stored, plan, || Ok(()))?;
         Ok(removed)
     }
+    pub fn ttl(&mut self, hash: Hash256) -> Result<i128, Failure> {
+        self.refresh()?;
+        Ok(self.live.pool.ttl(hash)?)
+    }
+    pub fn shorten_ttl(&mut self, hash: Hash256, ttl: i128) -> Result<i128, Failure> {
+        let db = self.db.clone();
+        let stored = db.pool_view()?;
+        let mut plan = self.plan(&stored)?;
+        let value = plan.live.pool.shorten_ttl(hash, ttl)?;
+        self.finish(&stored, plan, || Ok(()))?;
+        Ok(value)
+    }
+    pub fn adjust_ttl(&mut self, difference: i128) -> Result<(), Failure> {
+        let db = self.db.clone();
+        let stored = db.pool_view()?;
+        let mut plan = self.plan(&stored)?;
+        plan.live.pool.adjust_ttl(difference)?;
+        self.finish(&stored, plan, || Ok(()))
+    }
+    pub fn note_origin(
+        &mut self,
+        origin: Option<AccountPublicKey>,
+        nonce: ae_types::Unsigned,
+    ) -> Result<(), Failure> {
+        let db = self.db.clone();
+        let stored = db.pool_view()?;
+        let mut plan = self.plan(&stored)?;
+        plan.live.pool.note_origin(origin, nonce);
+        self.finish(&stored, plan, || Ok(()))
+    }
     pub fn collect(&mut self, origins: bool, expiry_limit: usize) -> Result<Vec<Hash256>, Failure> {
+        self.collect_inner(None, true, origins, expiry_limit)
+    }
+    pub fn collect_at(
+        &mut self,
+        height: u64,
+        synchronized: bool,
+        limit: usize,
+    ) -> Result<Vec<Hash256>, Failure> {
+        self.collect_inner(Some(height), synchronized, false, limit)
+    }
+    fn collect_inner(
+        &mut self,
+        height: Option<u64>,
+        synchronized: bool,
+        origins: bool,
+        limit: usize,
+    ) -> Result<Vec<Hash256>, Failure> {
         let db = self.db.clone();
         let stored = db.pool_view()?;
         let mut plan = self.plan(&stored)?;
         let (hash, header) = tip(&stored)?;
-        let mut gone =
+        let height = height.unwrap_or(header.common().height);
+        let mut gone = if synchronized {
             plan.live
                 .pool
-                .collect_expired(header.common().height, expiry_limit, |h| {
-                    Ok(plan.live.members.contains(&h))
-                })?;
-        if origins {
+                .collect_expired(height, limit, |h| Ok(plan.live.members.contains(&h)))?
+        } else {
+            plan.live
+                .pool
+                .collect_at(height, limit, |h| Ok(plan.live.members.contains(&h)))?
+        };
+        plan.live.maintenance.gced = plan.live.maintenance.gced.saturating_add(gone.len() as u64);
+        // Empty native origin passes do not read the selected account state.
+        if origins && plan.live.pool.origins_len() != 0 {
             let trees = stored.chain.trees(hash, self.config.overlay)?;
-            gone.extend(plan.live.pool.collect_origins(
+            let removed = plan.live.pool.collect_origins(
                 |k| lookup(&trees.accounts, k),
                 |h| Ok(plan.live.members.contains(&h)),
-            )?);
+            )?;
+            plan.live.maintenance.origin_gced = plan
+                .live
+                .maintenance
+                .origin_gced
+                .saturating_add(removed.len() as u64);
+            gone.extend(removed);
         }
         for hash in &gone {
             plan.live.members.remove(hash);

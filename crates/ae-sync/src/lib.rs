@@ -19,6 +19,7 @@ pub mod network;
 pub mod observe;
 pub mod peer;
 pub mod pool;
+pub mod pool_gc;
 pub mod registry;
 pub mod resolver;
 pub mod routing;

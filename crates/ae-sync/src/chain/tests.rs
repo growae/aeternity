@@ -303,7 +303,14 @@ async fn cancelled_queued_generation_never_commits_and_unread_result_keeps_credi
     assert_eq!(importer.available(), (0, 0));
     release.send(()).unwrap();
     within(async {
-        while importer.available().0 == 0 {
+        loop {
+            // Slot and byte permits are released independently. A slot can
+            // become visible before its matching byte credit is returned.
+            let available = importer.available();
+            assert!(available.0 <= 1 && available.1 <= total / 2);
+            if available == (1, total / 2) {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })

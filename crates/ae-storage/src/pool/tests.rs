@@ -520,7 +520,7 @@ fn original_mnesia_membership_deletion_and_restart_match_at_every_operation() {
                 "gc" => {
                     for tx in service.peek(10000, None, None).unwrap() {
                         if service.inspect(tx.hash()).unwrap().expires
-                            <= step["height"].as_u64().unwrap()
+                            <= i128::from(step["height"].as_u64().unwrap())
                         {
                             service.delete(tx.hash()).unwrap();
                         }
