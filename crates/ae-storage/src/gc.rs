@@ -1,6 +1,7 @@
 use super::*;
 use repo::retention::{Config, Phase, Selection, State};
 use std::collections::BTreeMap;
+pub mod events;
 pub mod worker;
 
 #[derive(Debug, Clone, Copy)]
@@ -189,14 +190,15 @@ impl Database {
         // A failed engine write can have an uncertain durable outcome. Invalidate
         // old insertion/rollback plans even if the engine returns an error.
         policy.generation = generation;
-        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
-        self.wake_gc();
-        result?;
+        self.write_gc(batch)?;
+        self.gc_events.advance(&prior, &state, view.status());
         Ok(true)
     }
     pub fn cancel_gc(&self) -> Result<State, Error> {
         let guard = self.writer.lock().map_err(|_| backend_lock())?;
-        let mut state = self.view_locked(&guard)?.retention()?;
+        let view = self.view_locked(&guard)?;
+        let prior = view.retention()?;
+        let mut state = prior.clone();
         if state.active() {
             state.phase = Phase::Cancelled;
             state.pending = 0;
@@ -205,9 +207,8 @@ impl Database {
             batch.delete_range([repo::GC_MARKS], [repo::GC_MARKS + 1]);
             batch.delete_range([repo::GC_PENDING], [repo::GC_PENDING + 1]);
             batch.put(repo::GC_STATE, state.encode());
-            let result = self.db.write_opt(batch, &write_options()).map_err(backend);
-            self.wake_gc();
-            result?;
+            self.write_gc(batch)?;
+            self.gc_events.advance(&prior, &state, view.status());
         }
         // Cancellation never promises that previously removed state returned.
         Ok(state)
@@ -225,7 +226,8 @@ impl Database {
         }
         let guard = self.writer.lock().map_err(|_| backend_lock())?;
         let view = self.view_locked(&guard)?;
-        let mut state = view.retention()?;
+        let prior = view.retention()?;
+        let mut state = prior.clone();
         if !state.active() {
             return Ok(state);
         }
@@ -389,12 +391,39 @@ impl Database {
             return Err(Error::ResourceLimit);
         }
         check()?;
-        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
-        self.wake_gc();
-        result?;
+        self.write_gc(batch)?;
+        self.gc_events.advance(&prior, &state, view.status());
         Ok(state)
     }
-    pub(super) fn gc_barrier(&self, update: &Update, batch: &mut WriteBatch) -> Result<(), Error> {
+    fn write_gc(&self, batch: WriteBatch) -> Result<(), Error> {
+        let result = self.write_gc_engine(batch);
+        self.wake_gc();
+        if result.is_err() {
+            self.gc_events.fail(events::Failure::UncertainWrite);
+        }
+        result
+    }
+    fn write_gc_engine(&self, batch: WriteBatch) -> Result<(), Error> {
+        #[cfg(test)]
+        let failure = self.gc_write_failure.swap(0, Ordering::Relaxed);
+        #[cfg(test)]
+        if failure == 1 {
+            return Err(Error::Backend("injected GC write failure".into()));
+        }
+        self.db
+            .write_opt(batch, &write_options())
+            .map_err(backend)?;
+        #[cfg(test)]
+        if failure == 2 {
+            return Err(Error::Backend("injected GC acknowledgment loss".into()));
+        }
+        Ok(())
+    }
+    pub(super) fn gc_barrier(
+        &self,
+        update: &Update,
+        batch: &mut WriteBatch,
+    ) -> Result<Option<(State, State)>, Error> {
         let mut state = self
             .db
             .get(repo::GC_STATE)
@@ -403,8 +432,9 @@ impl Database {
             .transpose()?
             .unwrap_or_default();
         if !state.active() {
-            return Ok(());
+            return Ok(None);
         }
+        let prior = state.clone();
         let mut writes = BTreeMap::new();
         for (key, value) in update.writes() {
             let Some(value) = value else {
@@ -439,7 +469,7 @@ impl Database {
         for (key, value) in writes {
             batch.put(key, value.expect("enqueue only inserts"));
         }
-        Ok(())
+        Ok(Some((prior, state)))
     }
 }
 

@@ -12,6 +12,7 @@ use ae_state::{
 };
 use ae_trie::{Nibbles, Trie, Value};
 use std::{collections::BTreeSet, path::PathBuf};
+mod events;
 mod service;
 
 struct Temp(PathBuf);

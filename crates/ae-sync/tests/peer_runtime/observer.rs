@@ -505,3 +505,69 @@ async fn network_and_gossip_reject_admission_from_another_database() {
     drop(service);
     drop(network);
 }
+
+#[tokio::test]
+async fn observer_consumes_actual_gc_events_and_reports_history_gaps_with_progress() {
+    for retained in [true, false] {
+        let node = Node::with_notifications(ae_storage::Notifications {
+            gc: ae_storage::gc::events::Config {
+                records: if retained { 32 } else { 1 },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let log = Log::default();
+        let mut run = start_monitor(
+            &node,
+            observe::Outputs {
+                log: Some(Box::new(log.clone())),
+                statsd: None,
+            },
+            observe::Config {
+                records: 32,
+                sink_records: 32,
+                ..compact()
+            },
+        )
+        .await;
+        node.db.begin_gc(Default::default()).unwrap();
+        while node.db.gc_state().unwrap().active() {
+            node.db.gc_step(Default::default()).unwrap();
+        }
+        let status = await_status(&mut run.observer, |s| {
+            s.gc_events == if retained { 3 } else { 1 }
+        })
+        .await;
+        assert_eq!(status.gc_missed, if retained { 0 } else { 2 });
+        assert!(status.last_error.is_none(), "{status:?}");
+        assert_eq!(body(&run.ping(&node).await).kind(), Kind::Ping);
+        run.stop().await;
+        let bytes = log.0.lock().unwrap();
+        let records: Vec<serde_json::Value> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|b| !b.is_empty())
+            .map(|b| serde_json::from_slice(b).unwrap())
+            .filter(|r: &serde_json::Value| r["category"] == "gc")
+            .collect();
+        let labels: Vec<_> = records
+            .iter()
+            .map(|r| r["data"]["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            if retained {
+                vec!["gc_switch", "scans_complete", "collection_complete"]
+            } else {
+                vec!["history_gap", "collection_complete"]
+            }
+        );
+        assert_eq!(
+            records.last().unwrap()["data"]["state"]["phase"],
+            "Complete"
+        );
+        if !retained {
+            assert_eq!(records[0]["data"]["missed"], 2);
+            assert_eq!(records[0]["data"]["snapshot_sequence"], 3);
+        }
+    }
+}

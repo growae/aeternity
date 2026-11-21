@@ -65,10 +65,16 @@ impl Node {
         )
     }
     pub fn open(path: PathBuf, settings: worker::Settings) -> Self {
-        Self::open_with_events(path, settings, Default::default())
+        Self::open_with_notifications(path, settings, Default::default())
     }
     pub fn with_events(events: ae_storage::events::Config) -> Self {
-        Self::open_with_events(
+        Self::with_notifications(ae_storage::Notifications {
+            chain: events,
+            ..Default::default()
+        })
+    }
+    pub fn with_notifications(notifications: ae_storage::Notifications) -> Self {
+        Self::open_with_notifications(
             std::env::temp_dir().join(format!(
                 "ae-events-live-{}-{}",
                 std::process::id(),
@@ -78,13 +84,13 @@ impl Node {
                 origins_interval: None,
                 ..Default::default()
             },
-            events,
+            notifications,
         )
     }
-    fn open_with_events(
+    fn open_with_notifications(
         path: PathBuf,
         settings: worker::Settings,
-        events: ae_storage::events::Config,
+        notifications: ae_storage::Notifications,
     ) -> Self {
         let temporary = Temporary(path);
         let profile = NetworkProfile::mainnet();
@@ -97,12 +103,12 @@ impl Node {
             blake2b_256(b"pool-sync-runtime"),
         );
         let db = Arc::new(
-            Database::open_with_events(
+            Database::open_with_notifications(
                 &temporary.0,
                 identity,
                 Default::default(),
                 Default::default(),
-                events,
+                notifications,
             )
             .unwrap(),
         );

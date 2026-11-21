@@ -195,3 +195,53 @@ fn rollback_records_reorg_change_without_republishing_detached_blocks() {
         Origin::Received
     );
 }
+
+#[test]
+fn real_chain_commits_rearm_gc_scanning_without_publishing_a_premature_completion() {
+    use ae_chain::repository::retention::Phase;
+    use ae_storage::gc::{Limits, events::Kind};
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity(Network::Mainnet)).unwrap();
+    bootstrap(&db, Network::Mainnet);
+    let reader = db.gc_events();
+    let start = reader.cursor();
+    db.begin_gc(Default::default()).unwrap();
+    loop {
+        let s = db.gc_step(Limits::default()).unwrap();
+        if s.phase == Phase::Sweep && s.pending == 0 {
+            break;
+        }
+    }
+    let scanned = reader.cursor();
+    assert_eq!(scanned.sequence(), 2);
+    for block in blocks(Network::Mainnet).iter().take(2) {
+        insert(&db, block, ledger::Origin::Gossip);
+        assert_eq!(reader.info().state, db.gc_state().unwrap());
+        assert_eq!(reader.info().chain, db.view().unwrap().status());
+    }
+    assert!(db.gc_state().unwrap().pending > 0);
+    assert!(reader.after(&scanned, 10).unwrap().records.is_empty());
+    while db.gc_state().unwrap().active() {
+        db.gc_step(Limits::default()).unwrap();
+    }
+    let records = reader.after(&start, 10).unwrap();
+    assert_eq!(
+        records.records.iter().map(|r| r.kind).collect::<Vec<_>>(),
+        vec![
+            Kind::Switch,
+            Kind::ScansComplete,
+            Kind::ScansComplete,
+            Kind::CollectionComplete
+        ]
+    );
+    assert_eq!(records.records[2].chain, db.view().unwrap().status());
+    let tip = db.view().unwrap().status().tip.unwrap();
+    let mut scan = db
+        .view()
+        .unwrap()
+        .scan_state(tip, Default::default())
+        .unwrap();
+    while !scan.is_complete() {
+        scan.next_page(Default::default()).unwrap();
+    }
+}

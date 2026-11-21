@@ -11,6 +11,7 @@ use tokio::{sync::watch, time::Instant};
 
 mod feed;
 mod file;
+mod gc;
 pub mod metrics;
 mod sink;
 pub use feed::{Cursor, Delivery, Record, Subscription};
@@ -81,6 +82,8 @@ pub enum Error {
     Encoding,
     RecordTooLarge,
     Storage,
+    Gc(ae_storage::gc::events::Error),
+    GcClosed,
     Sample,
     Timeout,
     Io(std::io::ErrorKind),
@@ -106,6 +109,8 @@ pub struct Status {
     pub running: bool,
     pub joined: bool,
     pub events: u64,
+    pub gc_events: u64,
+    pub gc_missed: u64,
     pub samples: u64,
     pub sample_errors: u64,
     pub rejected_records: u64,
@@ -145,6 +150,9 @@ type Sample = Pin<Box<dyn Future<Output = Result<metrics::Snapshot, Error>> + Se
 pub struct Service {
     sources: Sources,
     incoming: sync::Events,
+    gc: ae_storage::gc::events::Reader,
+    gc_cursor: ae_storage::gc::events::Cursor,
+    gc_pending: bool,
     config: Config,
     stopped: watch::Receiver<bool>,
     status: watch::Sender<Status>,
@@ -171,6 +179,9 @@ pub fn create(
     {
         return Err(Error::Configuration);
     }
+    let gc = db.gc_events();
+    let gc_cursor = gc.cursor();
+    gc.after(&gc_cursor, 1).map_err(Error::Gc)?;
     let reads =
         blocking::Pool::named("ae-observer-read", 1, 1, 4096).map_err(|_| Error::Configuration)?;
     let (log, statsd) = sink::Worker::outputs(outputs, &config)?;
@@ -190,6 +201,9 @@ pub fn create(
         Service {
             sources,
             incoming,
+            gc,
+            gc_cursor,
+            gc_pending: false,
             config,
             stopped,
             status,
@@ -280,13 +294,18 @@ impl Service {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.record("observer", json!({"state":"started"}));
         loop {
-            self.publish();
             if *self.stopped.borrow() {
                 break;
             }
+            if let Err(error) = self.drain_gc() {
+                self.current.last_error = Some(error);
+                break;
+            }
+            self.publish();
             tokio::select! {
                 _ = self.stopped.changed() => break,
                 _ = interval.tick() => self.sample(),
+                _ = tokio::task::yield_now(), if self.gc_pending => (),
                 result = async { self.pending.as_mut().expect("active sample").await }, if self.pending.is_some() => {
                     self.pending = None; self.sampled(result);
                 },

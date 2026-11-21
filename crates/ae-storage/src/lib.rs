@@ -19,6 +19,12 @@ pub mod peers;
 pub mod pool;
 pub mod replay;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Notifications {
+    pub chain: events::Config,
+    pub gc: gc::events::Config,
+}
+
 pub struct Database {
     db: DB,
     identity: Identity,
@@ -30,6 +36,9 @@ pub struct Database {
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
+    gc_events: gc::events::Source,
+    #[cfg(test)]
+    gc_write_failure: std::sync::atomic::AtomicU8,
     #[cfg(test)]
     event_write_failure: std::sync::atomic::AtomicU8,
 }
@@ -97,7 +106,25 @@ impl Database {
         recovery: repo::rollback::Limits,
         events: events::Config,
     ) -> Result<Self, Error> {
-        Self::open_configured(path, identity, config, recovery, false, events)
+        Self::open_with_notifications(
+            path,
+            identity,
+            config,
+            recovery,
+            Notifications {
+                chain: events,
+                ..Default::default()
+            },
+        )
+    }
+    pub fn open_with_notifications(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+        recovery: repo::rollback::Limits,
+        notifications: Notifications,
+    ) -> Result<Self, Error> {
+        Self::open_configured(path, identity, config, recovery, false, notifications)
     }
     fn open_configured(
         path: impl AsRef<Path>,
@@ -105,9 +132,10 @@ impl Database {
         config: ReadConfig,
         recovery: repo::rollback::Limits,
         importing: bool,
-        event_config: events::Config,
+        notifications: Notifications,
     ) -> Result<Self, Error> {
-        event_config.validate()?;
+        notifications.chain.validate()?;
+        notifications.gc.validate()?;
         if Identity::decode(&identity.encode())? != identity {
             return Err(Error::Identity);
         }
@@ -177,6 +205,12 @@ impl Database {
                 .map_err(backend)?
                 .ok_or(Error::Corrupt("missing status"))?,
         )?;
+        let gc_state = db
+            .get(repo::GC_STATE)
+            .map_err(backend)?
+            .map(|b| repo::retention::State::decode(&b))
+            .transpose()?
+            .unwrap_or_default();
         let result = Self {
             db,
             identity,
@@ -187,7 +221,10 @@ impl Database {
             pool_owner: Mutex::new(Default::default()),
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
-            events: events::Source::new(event_status, event_config),
+            events: events::Source::new(event_status, notifications.chain),
+            gc_events: gc::events::Source::new(gc_state, event_status, notifications.gc),
+            #[cfg(test)]
+            gc_write_failure: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             event_write_failure: std::sync::atomic::AtomicU8::new(0),
         };
@@ -237,6 +274,18 @@ impl Database {
     pub fn view(&self) -> Result<View<Snapshot<'_>>, Error> {
         let policy = self.writer.lock().map_err(|_| backend_lock())?;
         self.view_locked(&policy)
+    }
+    pub fn gc_events(&self) -> gc::events::Reader {
+        self.gc_events.reader()
+    }
+    pub fn gc_event_snapshot(&self) -> Result<(View<Snapshot<'_>>, gc::events::Cursor), Error> {
+        let policy = self.writer.lock().map_err(|_| backend_lock())?;
+        let view = self.view_locked(&policy)?;
+        let (info, cursor) = self.gc_events.reader().snapshot();
+        if info.closed || info.state != view.retention()? {
+            return Err(Error::Backend("GC event source requires reopen".into()));
+        }
+        Ok((view, cursor))
     }
     pub fn events(&self) -> events::Reader {
         self.events.reader()
@@ -392,7 +441,7 @@ impl Database {
                 None => batch.delete(k),
             }
         }
-        self.gc_barrier(&update, &mut batch)?;
+        let gc_progress = self.gc_barrier(&update, &mut batch)?;
         if let Some((key, value)) = extra {
             batch.put(key, value);
         }
@@ -403,7 +452,18 @@ impl Database {
         self.wake_pool();
         if let Err(error) = result {
             self.events.fail(events::Failure::UncertainWrite);
+            self.gc_events.fail(gc::events::Failure::UncertainWrite);
             return Err(error);
+        }
+        if let Some((prior, next)) = gc_progress {
+            self.gc_events.advance(
+                &prior,
+                &next,
+                Status {
+                    revision: update.change().revision,
+                    tip: Some(update.change().new_tip),
+                },
+            );
         }
         self.events.publish(&update, publication);
         Ok(Committed { update })
