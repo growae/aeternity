@@ -1517,3 +1517,6 @@ fn background_gc_observes_real_commits_and_completes_without_polling_the_databas
     assert_eq!(reopened.gc_state().unwrap().phase, Phase::Complete);
     assert_eq!(reopened.view().unwrap().status().tip, Some(tip));
 }
+
+#[path = "chain/events.rs"]
+mod events;

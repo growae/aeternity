@@ -8,9 +8,9 @@ use ae_state::{
 };
 use ae_trie::{NodeWriter, Overlay, OverlayLimits};
 use std::path::PathBuf;
-struct Temp(PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 impl Temp {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(std::env::temp_dir().join(format!(
             "ae-store-unit-{}-{}",
             std::process::id(),
@@ -23,14 +23,14 @@ impl Drop for Temp {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn identity() -> Identity {
+pub(crate) fn identity() -> Identity {
     Identity::new(
         &NetworkProfile::uat(),
         genesis::header(Network::Uat).unwrap().hash().unwrap(),
         Hash256::ZERO,
     )
 }
-fn plan(db: &Database) -> Update {
+pub(crate) fn plan(db: &Database) -> Update {
     let view = db.view().unwrap();
     let Header::Key(header) = genesis::header(Network::Uat).unwrap() else {
         panic!()

@@ -230,6 +230,15 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
             );
             let pending = publish(
                 Update {
+                    publication_body: crate::publication::wire(
+                        &b,
+                        crate::publication::Origin::Received,
+                        &change,
+                    ),
+                    publication: crate::publication::Context {
+                        origin: crate::publication::Origin::Received,
+                        block: Some(crate::publication::BlockInfo::of(&b, hash)),
+                    },
                     commit_bytes: 0,
                     identity: id.clone(),
                     source_id: 1,
@@ -244,6 +253,19 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
                 1_000_000,
             )
             .unwrap();
+            let publication = crate::publication::Payload::capture(&pending, 1_000_000).unwrap();
+            let changed = row["changed"].as_bool().unwrap();
+            assert_eq!(publication.body().is_some(), changed);
+            assert_eq!(publication.effects().count(), if changed { 2 } else { 0 });
+            if let Some(body) = publication.body() {
+                assert_eq!(
+                    body.as_ref(),
+                    match &b {
+                        Block::Key(_) => b.encode().unwrap(),
+                        Block::Micro(m) => crate::block::Light::from_micro(m).encode().unwrap(),
+                    }
+                );
+            }
             db.apply(pending.writes);
             let next = View::load(db.clone()).unwrap();
             assert_eq!(entries(&next, LOCATIONS), row["locations"]);

@@ -13,6 +13,7 @@ use std::{
     },
 };
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
+pub mod events;
 pub mod gc;
 pub mod peers;
 pub mod pool;
@@ -28,6 +29,9 @@ pub struct Database {
     pool_owner: Mutex<std::sync::Weak<()>>,
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
+    events: events::Source,
+    #[cfg(test)]
+    event_write_failure: std::sync::atomic::AtomicU8,
 }
 #[derive(Clone)]
 pub struct Snapshot<'a> {
@@ -77,6 +81,33 @@ impl Database {
         recovery: repo::rollback::Limits,
         importing: bool,
     ) -> Result<Self, Error> {
+        Self::open_configured(
+            path,
+            identity,
+            config,
+            recovery,
+            importing,
+            Default::default(),
+        )
+    }
+    pub fn open_with_events(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+        recovery: repo::rollback::Limits,
+        events: events::Config,
+    ) -> Result<Self, Error> {
+        Self::open_configured(path, identity, config, recovery, false, events)
+    }
+    fn open_configured(
+        path: impl AsRef<Path>,
+        identity: Identity,
+        config: ReadConfig,
+        recovery: repo::rollback::Limits,
+        importing: bool,
+        event_config: events::Config,
+    ) -> Result<Self, Error> {
+        event_config.validate()?;
         if Identity::decode(&identity.encode())? != identity {
             return Err(Error::Identity);
         }
@@ -141,6 +172,11 @@ impl Database {
         let source_id = NEXT_SOURCE
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::ResourceLimit)?;
+        let event_status = Status::decode(
+            &db.get(repo::STATUS)
+                .map_err(backend)?
+                .ok_or(Error::Corrupt("missing status"))?,
+        )?;
         let result = Self {
             db,
             identity,
@@ -151,6 +187,9 @@ impl Database {
             pool_owner: Mutex::new(Default::default()),
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
+            events: events::Source::new(event_status, event_config),
+            #[cfg(test)]
+            event_write_failure: std::sync::atomic::AtomicU8::new(0),
         };
         result.view()?.verify_tip()?;
         result.validate_gc()?;
@@ -198,6 +237,21 @@ impl Database {
     pub fn view(&self) -> Result<View<Snapshot<'_>>, Error> {
         let policy = self.writer.lock().map_err(|_| backend_lock())?;
         self.view_locked(&policy)
+    }
+    pub fn events(&self) -> events::Reader {
+        self.events.reader()
+    }
+    // Commit and snapshot both take writer -> event-source locks. A consumer
+    // can reconcile this pinned view and then replay strictly after its cursor.
+    pub fn event_snapshot(&self) -> Result<(View<Snapshot<'_>>, events::Cursor), Error> {
+        let policy = self.writer.lock().map_err(|_| backend_lock())?;
+        let view = self.view_locked(&policy)?;
+        let reader = self.events.reader();
+        let info = reader.info();
+        if info.closed || info.status != view.status() {
+            return Err(Error::Backend("commit event source requires reopen".into()));
+        }
+        Ok((view, reader.cursor()))
     }
     fn view_locked(&self, policy: &resilience::Snapshot) -> Result<View<Snapshot<'_>>, Error> {
         View::load_with_config(
@@ -343,11 +397,32 @@ impl Database {
             batch.put(key, value);
         }
         check()?;
-        let result = self.db.write_opt(batch, &write_options()).map_err(backend);
+        let publication = self.events.prepare(&update);
+        let result = self.write_commit(batch);
         self.wake_gc();
         self.wake_pool();
-        result?;
+        if let Err(error) = result {
+            self.events.fail(events::Failure::UncertainWrite);
+            return Err(error);
+        }
+        self.events.publish(&update, publication);
         Ok(Committed { update })
+    }
+    fn write_commit(&self, batch: WriteBatch) -> Result<(), Error> {
+        #[cfg(test)]
+        let failure = self.event_write_failure.swap(0, Ordering::Relaxed);
+        #[cfg(test)]
+        if failure == 1 {
+            return Err(Error::Backend("injected unacknowledged write".into()));
+        }
+        self.db
+            .write_opt(batch, &write_options())
+            .map_err(backend)?;
+        #[cfg(test)]
+        if failure == 2 {
+            return Err(Error::Backend("injected acknowledgment loss".into()));
+        }
+        Ok(())
     }
 }
 // A receipt is available only after RocksDB acknowledges the synchronous WAL

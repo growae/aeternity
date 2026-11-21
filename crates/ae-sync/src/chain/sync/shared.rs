@@ -101,6 +101,15 @@ pub(super) enum Join {
     },
 }
 impl<O> Book<O> {
+    pub fn peers_in_sync(&self) -> Vec<PeerPublicKey> {
+        // Native peer_in_sync includes retained suspect chain hints too.
+        self.groups
+            .iter()
+            .flat_map(|g| g.model.state().chain.peers().iter().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
     pub fn statistics(&self) -> statistics::Status {
         statistics::Status {
             tasks: self.groups.iter().map(Group::statistics).collect(),

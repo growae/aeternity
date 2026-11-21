@@ -1572,3 +1572,6 @@ mod preping;
 mod maintenance;
 #[path = "peer_runtime/observer.rs"]
 mod observer;
+
+#[path = "peer_runtime/conductor.rs"]
+mod conductor;

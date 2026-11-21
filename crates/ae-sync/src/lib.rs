@@ -8,6 +8,7 @@ mod test_support;
 
 mod blocking;
 pub mod chain;
+pub mod conductor;
 pub mod events;
 pub mod gossip;
 pub mod maintenance;

@@ -45,13 +45,16 @@ impl<O: MapOrder> Context<O> {
         bytes: Vec<u8>,
         now_ms: u64,
         cancel: blocking::Cancellation,
+        origin: ledger::Origin,
     ) -> Result<Report, Failure> {
         let _poison = Poison(&self.recovery);
         let result = (|| {
             self.check(&cancel, None)?;
             let view = self.db.view()?;
             let block = Block::decode(&bytes, view.config().block()).map_err(Error::Block)?;
-            self.insert_gossip(&block, now_ms, &cancel, None)
+            let mut rules = self.rules.clone();
+            rules.admission.now_ms = now_ms;
+            self.insert(&block, &rules, &cancel, None, origin)
         })();
         Self::block_report(result)
     }

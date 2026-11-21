@@ -315,6 +315,7 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Handle {
+    membership: Weak<dyn PeerMembership>,
     database: std::sync::Weak<Database>,
     event_owner: Arc<()>,
     stop: watch::Sender<bool>,
@@ -323,6 +324,12 @@ pub struct Handle {
     events: crate::events::Feed<lifecycle::Event>,
 }
 impl Handle {
+    pub fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
+        self.membership
+            .upgrade()
+            .ok_or(Error::Closed)?
+            .peers_in_sync()
+    }
     pub fn events(&self) -> crate::events::Feed<lifecycle::Event> {
         self.events.clone()
     }
@@ -374,6 +381,21 @@ struct Context<O> {
     wake: watch::Sender<()>,
     shared: Mutex<shared::Book<O>>,
     headers: Mutex<BTreeMap<PeerPublicKey, HeaderLane>>,
+}
+trait PeerMembership: Send + Sync {
+    fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error>;
+}
+impl<O: MapOrder + Send + Sync + 'static> PeerMembership for Context<O> {
+    fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        Ok(self
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peers_in_sync())
+    }
 }
 pub fn create<O: MapOrder + Send + Sync + 'static>(
     importer: Importer<O>,
@@ -429,8 +451,10 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         shared: Mutex::new(book),
         headers: Mutex::new(BTreeMap::new()),
     });
+    let membership: Arc<dyn PeerMembership> = context.clone();
     Ok((
         Handle {
+            membership: Arc::downgrade(&membership),
             database,
             event_owner: event_owner.clone(),
             stop,

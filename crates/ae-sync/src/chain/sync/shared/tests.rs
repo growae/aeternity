@@ -52,6 +52,7 @@ async fn rejected_workers_publish_native_completion_order_and_only_idle_completi
             state.suspect = row["other"] == "suspect";
             group.model = Scheduler::restore(state, limits).unwrap();
             book.lifecycle_changed();
+            assert!(book.peers_in_sync().contains(&a.peer()));
         }
         let item = Item {
             point: Point {

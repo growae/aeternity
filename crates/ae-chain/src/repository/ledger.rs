@@ -13,6 +13,7 @@ use ae_vm_fate::maps::MapOrder;
 pub enum Origin {
     Gossip,
     Sync,
+    Created,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -36,7 +37,7 @@ impl Policy {
         finalized: Option<u64>,
     ) -> bool {
         match self.origin {
-            Origin::Gossip => height >= top.saturating_sub(self.gossip_depth),
+            Origin::Gossip | Origin::Created => height >= top.saturating_sub(self.gossip_depth),
             Origin::Sync => state.allows_sync(height, top, finalized),
         }
     }
@@ -102,6 +103,8 @@ pub struct Update {
     change: Change,
     writes: Writes,
     events: Vec<batch::Event>,
+    publication: crate::publication::Context,
+    publication_body: Option<std::sync::Arc<[u8]>>,
     key_fraud: Option<(KeyHeader, KeyHeader)>,
     proof: Option<fraud::Proof>,
 }
@@ -122,6 +125,11 @@ impl Update {
                 change,
                 writes,
                 events: vec![],
+                publication_body: None,
+                publication: crate::publication::Context {
+                    origin: crate::publication::Origin::Rollback,
+                    block: None,
+                },
                 key_fraud: None,
                 proof: None,
             },
@@ -151,6 +159,12 @@ impl Update {
     }
     pub fn events(&self) -> &[batch::Event] {
         &self.events
+    }
+    pub fn publication_body(&self) -> Option<&std::sync::Arc<[u8]>> {
+        self.publication_body.as_ref()
+    }
+    pub fn publication(&self) -> crate::publication::Context {
+        self.publication
     }
     pub fn discovered_proof(&self) -> Option<&fraud::Proof> {
         self.proof.as_ref()
@@ -307,6 +321,11 @@ pub fn bootstrap<S: Read>(
             change,
             writes,
             events: vec![],
+            publication_body: None,
+            publication: crate::publication::Context {
+                origin: crate::publication::Origin::Bootstrap,
+                block: Some(crate::publication::BlockInfo::of(&block, hash)),
+            },
             key_fraud: None,
             proof: None,
         },
@@ -735,6 +754,12 @@ pub fn prepare<S: Read, O: MapOrder>(
             );
         }
     }
+    let origin = match limits.policy.origin {
+        Origin::Gossip => crate::publication::Origin::Received,
+        Origin::Sync => crate::publication::Origin::Synced,
+        Origin::Created => crate::publication::Origin::Created,
+    };
+    let publication_body = crate::publication::wire(block, origin, &change);
     Ok(publish(
         Update {
             identity: view.identity.clone(),
@@ -745,6 +770,11 @@ pub fn prepare<S: Read, O: MapOrder>(
             change,
             writes,
             events,
+            publication_body,
+            publication: crate::publication::Context {
+                origin,
+                block: Some(crate::publication::BlockInfo::of(block, current)),
+            },
             key_fraud,
             proof,
         },

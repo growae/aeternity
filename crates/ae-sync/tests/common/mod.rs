@@ -65,6 +65,27 @@ impl Node {
         )
     }
     pub fn open(path: PathBuf, settings: worker::Settings) -> Self {
+        Self::open_with_events(path, settings, Default::default())
+    }
+    pub fn with_events(events: ae_storage::events::Config) -> Self {
+        Self::open_with_events(
+            std::env::temp_dir().join(format!(
+                "ae-events-live-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+            worker::Settings {
+                origins_interval: None,
+                ..Default::default()
+            },
+            events,
+        )
+    }
+    fn open_with_events(
+        path: PathBuf,
+        settings: worker::Settings,
+        events: ae_storage::events::Config,
+    ) -> Self {
         let temporary = Temporary(path);
         let profile = NetworkProfile::mainnet();
         let Header::Key(header) = genesis::header(Network::Mainnet).unwrap() else {
@@ -75,7 +96,16 @@ impl Node {
             Header::Key(header.clone()).hash().unwrap(),
             blake2b_256(b"pool-sync-runtime"),
         );
-        let db = Arc::new(Database::open(&temporary.0, identity).unwrap());
+        let db = Arc::new(
+            Database::open_with_events(
+                &temporary.0,
+                identity,
+                Default::default(),
+                Default::default(),
+                events,
+            )
+            .unwrap(),
+        );
         let trees = Trees {
             accounts: genesis::state(Network::Mainnet).unwrap().0,
             contracts: Default::default(),

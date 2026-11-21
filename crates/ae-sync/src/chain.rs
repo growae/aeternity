@@ -326,13 +326,24 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     // The bytes are decoded within the same joined import worker and quota as
     // generation insertion. Successful light reconstruction alone is not admission.
     pub fn import_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
+        self.import_block_with_origin(bytes, now_ms, ledger::Origin::Gossip)
+    }
+    pub fn import_created_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
+        self.import_block_with_origin(bytes, now_ms, ledger::Origin::Created)
+    }
+    fn import_block_with_origin(
+        &self,
+        bytes: Vec<u8>,
+        now_ms: u64,
+        origin: ledger::Origin,
+    ) -> Result<Ticket, Error> {
         self.check_open()?;
         if bytes.len() > self.context.config.messages.body_bytes {
             return Err(Error::Busy);
         }
         let context = self.context.clone();
         self.reserve()?
-            .submit(move |cancel| context.apply_block(bytes, now_ms, cancel))
+            .submit(move |cancel| context.apply_block(bytes, now_ms, cancel, origin))
             .map(|pending| Ticket {
                 pending,
                 timeout: self.context.config.timeout,
