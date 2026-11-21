@@ -1,4 +1,4 @@
-use crate::{bindings, blocking};
+use crate::{bindings, blocking, routing};
 use ae_chain::repository::retention;
 use ae_protocol::NetworkProfile;
 use ae_storage::{Database, gc, pool};
@@ -15,6 +15,7 @@ pub struct GarbageCollection {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub routing: Option<routing::Setup>,
     pub keys: Option<crate::keys::Config>,
     pub pool: pool::Config,
     pub admission: pool::worker::Settings,
@@ -24,6 +25,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            routing: None,
             keys: None,
             pool: Default::default(),
             admission: Default::default(),
@@ -34,6 +36,7 @@ impl Default for Config {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Child {
+    Routing,
     Keys,
     Admission,
     GarbageCollection,
@@ -66,15 +69,18 @@ pub struct Status {
     pub admission_generation: u64,
     pub gc_generation: u64,
     pub keys_generation: u64,
+    pub routing_generation: u64,
     pub admission: Option<pool::worker::Info>,
     pub gc: Option<gc::worker::Info>,
     pub keys: Option<crate::keys::Info>,
+    pub routing: Option<routing::Info>,
     pub restart_attempts: u64,
     pub last_failure: Option<Error>,
     pub error: Option<Error>,
 }
 #[derive(Clone)]
 pub struct Bindings {
+    pub routing: Option<bindings::MetricsRouting>,
     pub keys: Option<bindings::Binding<crate::keys::Client>>,
     pub admission: bindings::Admission,
     pub gc: Option<bindings::GarbageCollection>,
@@ -140,6 +146,9 @@ pub struct Service {
     admission: Option<pool::worker::Worker>,
     gc: Option<gc::worker::Worker>,
     keys: Option<crate::keys::Worker>,
+    routing: Option<routing::Worker>,
+    routing_owner: Option<routing::Owner>,
+    routing_binding: Option<bindings::Owner<routing::Client>>,
     pool_binding: bindings::Owner<bindings::Pool>,
     gc_binding: Option<bindings::Owner<gc::worker::Client>>,
     keys_binding: Option<bindings::Owner<crate::keys::Client>>,
@@ -165,6 +174,12 @@ pub fn create(
     let jobs =
         blocking::Pool::named("ae-worker-supervisor", 1, 2, 256).map_err(|_| Error::Worker)?;
     let (pool_binding, admission) = bindings::Owner::new(&database);
+    let (routing_binding, routing) = if config.routing.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
     let (keys_binding, keys) = if config.keys.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
         (Some(owner), Some(reader))
@@ -194,6 +209,7 @@ pub fn create(
                 admission,
                 gc,
                 keys,
+                routing,
             },
         },
         Service {
@@ -204,6 +220,9 @@ pub fn create(
             admission: None,
             gc: None,
             keys: None,
+            routing: None,
+            routing_owner: None,
+            routing_binding,
             pool_binding,
             gc_binding,
             keys_binding,
@@ -220,6 +239,7 @@ pub fn create(
     ))
 }
 enum Started {
+    Routing(routing::Worker, Option<routing::Owner>),
     Keys(crate::keys::Worker),
     Admission(pool::worker::Worker),
     Gc(gc::worker::Worker),
@@ -237,12 +257,14 @@ impl Service {
     }
     fn generation(&self, child: Child) -> u64 {
         match child {
+            Child::Routing => self.current.routing_generation,
             Child::Keys => self.current.keys_generation,
             Child::Admission => self.current.admission_generation,
             Child::GarbageCollection => self.current.gc_generation,
         }
     }
     fn publish(&mut self) {
+        self.current.routing = self.routing.as_ref().map(|w| w.info());
         self.current.keys = self.keys.as_ref().map(|w| w.info());
         self.current.admission = self.admission.as_ref().map(|w| w.info());
         self.current.gc = self.gc.as_ref().map(|w| w.info());
@@ -257,9 +279,29 @@ impl Service {
         let config = self.config.clone();
         let network = self.network.clone();
         let cache = self.cache.clone();
+        let routing_store = self.routing_owner.as_ref().map(|o| o.store());
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::Routing => {
+                    let start = || -> Result<Started, routing::Error> {
+                        let owner = if routing_store.is_none() {
+                            Some(routing::Owner::new(
+                                config.routing.ok_or(routing::Error::Configuration)?,
+                            )?)
+                        } else {
+                            None
+                        };
+                        let store = routing_store
+                            .or_else(|| owner.as_ref().map(|o| o.store()))
+                            .expect("configured routing");
+                        Ok(Started::Routing(routing::Worker::spawn(store)?, owner))
+                    };
+                    start().map_err(|e| Error::Start {
+                        child,
+                        reason: format!("{e:?}"),
+                    })
+                }
                 Child::Keys => crate::keys::Worker::spawn(config.keys.ok_or(Error::Missing)?)
                     .map(Started::Keys)
                     .map_err(|e| Error::Start {
@@ -292,6 +334,17 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::Routing(worker, owner) => {
+                if let Some(owner) = owner {
+                    self.routing_owner = Some(owner);
+                }
+                self.routing_binding
+                    .as_ref()
+                    .expect("configured routing")
+                    .install(worker.client(), generation);
+                self.routing = Some(worker);
+                self.current.routing_generation = generation;
+            }
             Started::Keys(worker) => {
                 self.keys_binding
                     .as_ref()
@@ -320,6 +373,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::Routing => {
+                if let Some(binding) = &self.routing_binding {
+                    binding.withdraw();
+                }
+                self.routing.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::Keys => {
                 if let Some(binding) = &self.keys_binding {
                     binding.withdraw();
@@ -404,6 +468,12 @@ impl Service {
             return Ok(());
         }
         self.healthy()?;
+        if self.config.routing.is_some() {
+            self.start(Child::Routing).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         if self.config.keys.is_some() {
             self.start(Child::Keys).await?;
         }
@@ -429,7 +499,9 @@ impl Service {
                 return Ok(());
             }
             self.healthy()?;
-            let exited = if self.keys.as_ref().is_some_and(|w| !w.info().running) {
+            let exited = if self.routing.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::Routing)
+            } else if self.keys.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Keys)
             } else if self.admission.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Admission)
@@ -448,7 +520,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -463,6 +535,7 @@ impl Service {
         #[cfg(test)]
         if command.stop_only {
             match command.child {
+                Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
                 Child::Keys => self.keys.as_ref().unwrap().request_shutdown(),
                 Child::Admission => self.admission.as_ref().unwrap().request_shutdown(),
                 Child::GarbageCollection => self.gc.as_ref().unwrap().request_shutdown(),
@@ -483,24 +556,36 @@ impl Service {
             let _ = command.reply.send(Err(Error::Closed));
         }
         self.pool_binding.withdraw();
+        if let Some(binding) = &self.routing_binding {
+            binding.withdraw();
+        }
         if let Some(binding) = &self.keys_binding {
             binding.withdraw();
         }
         if let Some(binding) = &self.gc_binding {
             binding.withdraw();
         }
-        for child in [Child::GarbageCollection, Child::Admission, Child::Keys] {
+        for child in [
+            Child::GarbageCollection,
+            Child::Admission,
+            Child::Keys,
+            Child::Routing,
+        ] {
             if let Err(error) = self.retire(child).await {
                 self.current.error.get_or_insert(error);
             }
         }
         self.pool_binding.close();
+        if let Some(binding) = &self.routing_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.keys_binding {
             binding.close();
         }
         if let Some(binding) = &self.gc_binding {
             binding.close();
         }
+        self.routing_owner.take();
         self.jobs.stop();
         self.jobs.join().await;
         self.current.running = false;
@@ -518,6 +603,9 @@ impl Drop for Service {
             binding.close();
         }
         self.pool_binding.close();
+        if let Some(binding) = &self.routing_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.gc_binding {
             binding.close();
         }

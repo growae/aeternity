@@ -25,6 +25,14 @@ async fn start_monitor(
     outputs: observe::Outputs,
     config: observe::Config,
 ) -> Running<'_> {
+    start_routed_monitor(node, outputs, config, None).await
+}
+async fn start_routed_monitor(
+    node: &Node,
+    outputs: observe::Outputs,
+    config: observe::Config,
+    routing: Option<ae_sync::routing::Client>,
+) -> Running<'_> {
     let app = start(
         node,
         super::config(),
@@ -49,19 +57,18 @@ async fn start_monitor(
             ..Default::default()
         },
     );
-    let (observer, service) = observe::create(
-        observe::Sources {
-            database: node.db.clone(),
-            network,
-            peer,
-            gossip,
-            sync: sync.clone(),
-            admission: node.client(),
-        },
-        incoming,
-        config,
-        outputs,
-    )
+    let sources = observe::Sources {
+        database: node.db.clone(),
+        network,
+        peer,
+        gossip,
+        sync: sync.clone(),
+        admission: node.client(),
+    };
+    let (observer, service) = match routing {
+        Some(client) => observe::create_with_routing(sources, incoming, config, outputs, client),
+        None => observe::create(sources, incoming, config, outputs),
+    }
     .unwrap();
     Running {
         observer,
@@ -569,5 +576,137 @@ async fn observer_consumes_actual_gc_events_and_reports_history_gaps_with_progre
             assert_eq!(records[0]["data"]["missed"], 2);
             assert_eq!(records[0]["data"]["snapshot_sequence"], 3);
         }
+    }
+}
+
+#[tokio::test]
+async fn metrics_routing_filters_real_outputs_and_preserves_snapshots_when_owner_closes() {
+    use ae_sync::routing::{self, Destination};
+    let node = Node::new();
+    let log = Log::default();
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rules = vec![
+        routing::Rule {
+            name: b"ae.epoch.aecore.chain.height".to_vec(),
+            datapoints: b"value".to_vec(),
+            actions: b"log".to_vec(),
+            ..Default::default()
+        },
+        routing::Rule {
+            name: b"ae.epoch.aecore.peers.count".to_vec(),
+            datapoints: b"value".to_vec(),
+            actions: b"send".to_vec(),
+            ..Default::default()
+        },
+        routing::Rule {
+            name: b"ae.**".to_vec(),
+            actions: b"none".to_vec(),
+            ..Default::default()
+        },
+    ];
+    let owner = routing::Owner::new(routing::Setup {
+        config: routing::Config {
+            rules,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    let worker = routing::Worker::spawn(owner.store()).unwrap();
+    let client = worker.client();
+    let mut run = start_routed_monitor(
+        &node,
+        observe::Outputs {
+            log: Some(Box::new(log.clone())),
+            statsd: Some(udp.local_addr().unwrap()),
+        },
+        observe::Config {
+            records: 128,
+            sink_records: 128,
+            ..compact()
+        },
+        Some(client.clone()),
+    )
+    .await;
+    let mut subscription = run.observer.subscribe(None).unwrap();
+    assert_eq!(body(&run.ping(&node).await).kind(), Kind::Ping);
+    let status = await_status(&mut run.observer, |s| {
+        s.samples >= 3 && s.statsd.as_ref().is_some_and(|i| i.written > 0)
+    })
+    .await;
+    assert_eq!(status.routing_errors, 0);
+    assert!(status.filtered_log > 0 && status.filtered_send > 0);
+    assert!(status.metrics.as_ref().unwrap().metrics.len() > 20);
+    let mut buffer = [0u8; 2048];
+    let (n, _) = within(udp.recv_from(&mut buffer)).await.unwrap();
+    assert!(
+        std::str::from_utf8(&buffer[..n])
+            .unwrap()
+            .starts_with("ae.epoch.aecore.peers.count.value:")
+    );
+    within(async {
+        loop {
+            if let observe::Delivery::Record(record) = subscription.recv().await.unwrap()
+                && record.category == "metrics"
+            {
+                let data: serde_json::Value = serde_json::from_slice(record.json_line()).unwrap();
+                assert!(data["data"]["metrics"].as_object().unwrap().len() > 20);
+                break;
+            }
+        }
+    })
+    .await;
+    let key = observe::metrics::Metric {
+        name: "ae.epoch.aecore.chain.height.value",
+        value: Number::Integer(0),
+    }
+    .routing()
+    .1;
+    assert!(
+        client
+            .delete(key.clone(), Destination::Log)
+            .unwrap()
+            .await
+            .unwrap()
+    );
+    client.add(key, Destination::Send).unwrap().await.unwrap();
+    within(async {
+        loop {
+            let (n, _) = udp.recv_from(&mut buffer).await.unwrap();
+            if std::str::from_utf8(&buffer[..n])
+                .unwrap()
+                .starts_with("ae.epoch.aecore.chain.height.value:")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    let before = run.observer.status().samples;
+    drop(owner);
+    let status = await_status(&mut run.observer, |s| {
+        s.routing_errors > 0 && s.samples >= before + 2
+    })
+    .await;
+    assert!(status.running && status.metrics.as_ref().unwrap().metrics.len() > 20);
+    assert!(matches!(
+        status.last_error,
+        Some(observe::Error::Routing(routing::Error::Closed))
+    ));
+    assert_eq!(body(&run.ping(&node).await).kind(), Kind::Ping);
+    run.stop().await;
+    worker.shutdown().unwrap();
+    let lines = log.0.lock().unwrap();
+    let records = lines
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_slice::<serde_json::Value>(l).unwrap())
+        .filter(|r| r["category"] == "metrics")
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    for record in records {
+        let values = record["data"]["metrics"].as_object().unwrap();
+        assert_eq!(values.len(), 1);
+        assert!(values.contains_key("ae.epoch.aecore.chain.height.value"));
     }
 }

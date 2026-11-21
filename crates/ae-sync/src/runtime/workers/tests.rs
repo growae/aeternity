@@ -335,3 +335,139 @@ async fn gossip_drains_retired_accepted_events_and_recovers_skipped_worker_gener
         assert!(within(worker_task).await.unwrap().joined);
     }
 }
+
+#[tokio::test]
+async fn actual_routing_exits_retain_parent_cache_and_share_the_native_worker_budget() {
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.routing = Some(Default::default());
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().routing.unwrap();
+    let old = binding.current().unwrap();
+    let key = routing::Key {
+        name: vec![routing::Part::atom("ae"), routing::Part::atom("epoch")],
+        datapoint: routing::Part::atom("value"),
+    };
+    old.add(key.clone(), routing::Destination::Send)
+        .unwrap()
+        .await
+        .unwrap();
+    for (i, child) in [Child::Routing, Child::Admission, Child::GarbageCollection]
+        .into_iter()
+        .cycle()
+        .take(6)
+        .enumerate()
+    {
+        let generations = |s: Status| {
+            [
+                s.routing_generation,
+                s.admission_generation,
+                s.gc_generation,
+            ]
+        };
+        let mut expected = generations(handle.status());
+        let index = i % 3;
+        stopped_child(&handle, child, expected[index]).await;
+        if i == 5 {
+            break;
+        }
+        expected[index] += 1;
+        within(async {
+            while generations(handle.status()) != expected {
+                assert!(handle.status().running);
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert_eq!(
+            binding
+                .current()
+                .unwrap()
+                .destinations(key.clone())
+                .unwrap()
+                .await,
+            Ok(Some(vec!["send".into()]))
+        );
+        assert_eq!(
+            old.destinations(key.clone()).unwrap().await,
+            Ok(Some(vec!["send".into()]))
+        );
+        assert!(matches!(
+            old.add(key.clone(), routing::Destination::Log),
+            Err(routing::Error::Stopped)
+        ));
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert_eq!(
+        (
+            status.routing_generation,
+            status.admission_generation,
+            status.gc_generation
+        ),
+        (3, 3, 2)
+    );
+    assert!(status.joined && binding.is_closed());
+    assert!(matches!(old.destinations(key), Err(routing::Error::Closed)));
+}
+#[tokio::test]
+async fn routing_start_failure_and_later_child_failure_release_the_parent_table() {
+    for fail_routing in [true, false] {
+        let mut node = Node::new();
+        node.stop_worker();
+        let mut config = settings();
+        let mut routing = routing::Setup::default();
+        if fail_routing {
+            routing.config.limits.requests = 0;
+        } else {
+            config.gc.as_mut().unwrap().limits.rows = 0;
+        }
+        config.routing = Some(routing);
+        let (handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            config,
+            Default::default(),
+        )
+        .unwrap();
+        let bindings = handle.bindings();
+        let status = service.run().await;
+        assert!(status.joined);
+        assert_eq!(status.restart_attempts, 0);
+        assert_eq!(status.routing_generation, u64::from(!fail_routing));
+        assert!(bindings.routing.as_ref().unwrap().is_closed());
+        if let Some(old) = bindings.routing.unwrap().snapshot().value {
+            assert!(matches!(
+                old.destinations(routing::Key {
+                    name: vec![],
+                    datapoint: routing::Part::atom("value")
+                }),
+                Err(routing::Error::Closed)
+            ));
+        }
+        let (mut handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            Config {
+                routing: Some(Default::default()),
+                ..settings()
+            },
+            Default::default(),
+        )
+        .unwrap();
+        let task = tokio::spawn(service.run());
+        ready(&mut handle).await;
+        handle.shutdown();
+        assert!(within(task).await.unwrap().joined);
+    }
+}

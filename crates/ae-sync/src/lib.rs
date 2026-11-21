@@ -20,6 +20,7 @@ pub mod peer;
 pub mod pool;
 pub mod registry;
 pub mod resolver;
+pub mod routing;
 pub mod runtime;
 mod tasks;
 pub mod transport;

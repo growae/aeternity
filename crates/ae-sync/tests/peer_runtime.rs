@@ -1585,3 +1585,6 @@ mod cache_owner;
 
 #[path = "peer_runtime/key_owner.rs"]
 mod key_owner;
+
+#[path = "peer_runtime/routing_owner.rs"]
+mod routing_owner;

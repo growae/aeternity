@@ -20,6 +20,21 @@ pub struct Record {
     bytes: Vec<u8>,
 }
 impl Record {
+    pub(super) fn with_data(&self, data: Value, limit: usize) -> Result<Arc<Self>, Error> {
+        let mut value: Value = serde_json::from_slice(&self.bytes).map_err(|_| Error::Encoding)?;
+        value["data"] = data;
+        let mut bytes = serde_json::to_vec(&value).map_err(|_| Error::Encoding)?;
+        bytes.push(b'\n');
+        if bytes.len() > limit {
+            return Err(Error::RecordTooLarge);
+        }
+        Ok(Arc::new(Self {
+            cursor: self.cursor.clone(),
+            category: self.category,
+            bytes,
+        }))
+    }
+
     pub fn json_line(&self) -> &[u8] {
         &self.bytes
     }

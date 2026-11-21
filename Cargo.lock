@@ -196,6 +196,7 @@ dependencies = [
  "aes",
  "ed25519-dalek",
  "hex",
+ "num-bigint",
  "rand",
  "serde_json",
  "tokio",

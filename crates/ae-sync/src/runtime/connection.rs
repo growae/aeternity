@@ -86,6 +86,7 @@ pub enum Error {
     Generation,
     Aborted,
     KeysClosed,
+    RoutingClosed,
     IdentityChanged,
 }
 impl std::fmt::Display for Error {
@@ -170,6 +171,7 @@ where
 {
     let dependencies = super::workers::Bindings {
         keys: None,
+        routing: None,
         admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
         gc: inputs.gc.as_ref().map(|client| {
             crate::bindings::GarbageCollection::fixed(&inputs.database, client.clone())
@@ -224,7 +226,11 @@ where
     {
         return Err(Error::Configuration);
     }
-    if !dependencies.admission.uses_database(&inputs.database)
+    if dependencies
+        .routing
+        .as_ref()
+        .is_some_and(|r| !r.uses_database(&inputs.database))
+        || !dependencies.admission.uses_database(&inputs.database)
         || dependencies
             .keys
             .as_ref()
@@ -283,6 +289,14 @@ where
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn health(&self) -> Result<(), Error> {
+        if self
+            .dependencies
+            .routing
+            .as_ref()
+            .is_some_and(|r| r.is_closed())
+        {
+            return Err(Error::RoutingClosed);
+        }
         if let Some(keys) = &self.dependencies.keys {
             if keys.is_closed() {
                 return Err(Error::KeysClosed);
@@ -324,6 +338,11 @@ where
             if self.dependencies.admission.current().is_some()
                 && self
                     .dependencies
+                    .routing
+                    .as_ref()
+                    .is_none_or(|r| r.current().is_some())
+                && self
+                    .dependencies
                     .keys
                     .as_ref()
                     .is_none_or(|k| k.current().is_some())
@@ -338,6 +357,7 @@ where
             tokio::select! {
                 _ = self.stopped.changed() => return Err(Error::Closed),
                 _ = self.dependencies.admission.changed() => (),
+                _ = async {match &mut self.dependencies.routing {Some(r)=>r.changed().await,None=>std::future::pending().await}}=>(),
                 _ = async { match &mut self.dependencies.keys { Some(k) => k.changed().await, None => std::future::pending().await } } => (),
                 _ = async { match &mut self.dependencies.gc { Some(gc) => gc.changed().await, None => std::future::pending().await } } => (),
             }

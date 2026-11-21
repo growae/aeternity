@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+num-bigint.workspace = true
 aes.workspace = true
 ae-crypto.workspace = true
 ed25519-dalek.workspace = true

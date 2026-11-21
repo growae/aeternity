@@ -17,6 +17,7 @@ impl Pool {
         }
     }
 }
+pub type MetricsRouting = Binding<crate::routing::Client>;
 pub type Admission = Binding<Pool>;
 pub type GarbageCollection = Binding<gc::Client>;
 
@@ -85,6 +86,11 @@ impl<T: Clone> Binding<T> {
                 closed: false,
             }),
         }
+    }
+}
+impl MetricsRouting {
+    pub(crate) fn fixed(db: &Arc<Database>, client: crate::routing::Client) -> Self {
+        Self::fixed_value(db, client)
     }
 }
 impl Admission {

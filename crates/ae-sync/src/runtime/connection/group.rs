@@ -170,6 +170,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             config.observer.clone(),
             outputs,
             dependencies.admission.clone(),
+            dependencies.routing.clone(),
         )
         .map_err(|e| Failure::new(Child::Observer, e))?;
         let handle = observer.clone();

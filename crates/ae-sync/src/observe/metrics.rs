@@ -118,6 +118,35 @@ pub struct Metric {
     pub name: &'static str,
     pub value: Number,
 }
+impl Metric {
+    pub fn routing(&self) -> (crate::routing::Entry, crate::routing::Key) {
+        use crate::routing::{Entry, Key, Part};
+        let (name, datapoint) = self.name.rsplit_once('.').unwrap_or(("", self.name));
+        let kind = match name {
+            "ae.epoch.aecore.peers.ping.success" | "ae.epoch.aecore.peers.ping.failure" => {
+                "counter"
+            }
+            "ae.epoch.aecore.chain" | "ae.epoch.aecore.tx_pool" => "probe",
+            _ => "gauge",
+        };
+        let name = if name.is_empty() {
+            vec![]
+        } else {
+            name.split('.').map(Part::atom).collect()
+        };
+        (
+            Entry {
+                name: name.clone(),
+                kind: kind.into(),
+                enabled: true,
+            },
+            Key {
+                name,
+                datapoint: Part::atom(datapoint),
+            },
+        )
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub chain_revision: u64,
@@ -126,6 +155,31 @@ pub struct Snapshot {
     pub metrics: Vec<Metric>,
 }
 impl Snapshot {
+    pub(super) fn routing(&self) -> (Vec<crate::routing::Entry>, Vec<crate::routing::Key>) {
+        self.metrics.iter().map(Metric::routing).unzip()
+    }
+    pub(super) fn filtered(
+        &self,
+        routes: &crate::routing::Routes,
+        destination: &str,
+    ) -> Result<Self, Error> {
+        if routes.len() != self.metrics.len() {
+            return Err(Error::Encoding);
+        }
+        let mut result = self.clone();
+        result.metrics = self
+            .metrics
+            .iter()
+            .zip(routes)
+            .filter(|(_, r)| {
+                r.as_ref()
+                    .is_none_or(|d| d.iter().any(|a| a == destination))
+            })
+            .map(|(m, _)| m.clone())
+            .collect();
+        Ok(result)
+    }
+
     pub fn get(&self, name: &str) -> Option<&Number> {
         self.metrics
             .iter()

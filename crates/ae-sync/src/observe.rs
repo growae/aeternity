@@ -84,6 +84,8 @@ pub enum Error {
     Storage,
     Gc(ae_storage::gc::events::Error),
     GcClosed,
+    RoutingClosed,
+    Routing(crate::routing::Error),
     Sample,
     Timeout,
     Io(std::io::ErrorKind),
@@ -113,6 +115,9 @@ pub struct Status {
     pub gc_missed: u64,
     pub samples: u64,
     pub sample_errors: u64,
+    pub routing_errors: u64,
+    pub filtered_log: u64,
+    pub filtered_send: u64,
     pub rejected_records: u64,
     pub evicted: u64,
     pub retained_records: usize,
@@ -146,10 +151,15 @@ impl Handle {
         Subscription::new(self.ring.clone(), after)
     }
 }
-type Sample = Pin<Box<dyn Future<Output = Result<metrics::Snapshot, Error>> + Send>>;
+struct Sampled {
+    metrics: metrics::Snapshot,
+    routes: Result<Option<crate::routing::Routes>, Error>,
+}
+type Sample = Pin<Box<dyn Future<Output = Result<Sampled, Error>> + Send>>;
 pub struct Service {
     sources: Sources,
     admission: crate::bindings::Admission,
+    routing: Option<crate::bindings::MetricsRouting>,
     incoming: sync::Events,
     gc: ae_storage::gc::events::Reader,
     gc_cursor: ae_storage::gc::events::Cursor,
@@ -171,7 +181,18 @@ pub fn create(
     outputs: Outputs,
 ) -> Result<(Handle, Service), Error> {
     let admission = crate::bindings::Admission::fixed(&sources.database, sources.admission.clone());
-    create_bound(sources, incoming, config, outputs, admission)
+    create_bound(sources, incoming, config, outputs, admission, None)
+}
+pub fn create_with_routing(
+    sources: Sources,
+    incoming: sync::Events,
+    config: Config,
+    outputs: Outputs,
+    client: crate::routing::Client,
+) -> Result<(Handle, Service), Error> {
+    let admission = crate::bindings::Admission::fixed(&sources.database, sources.admission.clone());
+    let routing = crate::bindings::MetricsRouting::fixed(&sources.database, client);
+    create_bound(sources, incoming, config, outputs, admission, Some(routing))
 }
 pub(crate) fn create_bound(
     sources: Sources,
@@ -179,10 +200,11 @@ pub(crate) fn create_bound(
     config: Config,
     outputs: Outputs,
     admission: crate::bindings::Admission,
+    routing: Option<crate::bindings::MetricsRouting>,
 ) -> Result<(Handle, Service), Error> {
     config.validate()?;
     let db = &sources.database;
-    if !admission.uses_database(db) {
+    if !admission.uses_database(db) || routing.as_ref().is_some_and(|r| !r.uses_database(db)) {
         return Err(Error::Configuration);
     }
     if !sources.sync.owns(db, &incoming)
@@ -215,6 +237,7 @@ pub(crate) fn create_bound(
         Service {
             sources,
             admission,
+            routing,
             incoming,
             gc,
             gc_cursor,
@@ -265,9 +288,10 @@ impl Service {
         let sources = self.sources.clone();
         let db = sources.database.clone();
         let read = self.reads.submit(4096, move |_| metrics::chain(&db));
-        let timeout = self.config.sample_timeout;
+        let routing = self.routing.clone();
+        let deadline = Instant::now() + self.config.sample_timeout;
         self.pending = Some(Box::pin(async move {
-            tokio::time::timeout(timeout, async {
+            let metrics = tokio::time::timeout_at(deadline, async {
                 let read = read.map_err(|_| Error::Sample)?;
                 let request = sources.network.metrics().map_err(|_| Error::Sample)?;
                 let (chain, registry) = tokio::join!(read, request.wait());
@@ -278,29 +302,103 @@ impl Service {
                 ))
             })
             .await
-            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Timeout)??;
+            let routes = match routing {
+                None => Ok(None),
+                Some(binding) => {
+                    let snapshot = binding.snapshot();
+                    if snapshot.closed {
+                        Err(Error::RoutingClosed)
+                    } else if let Some(client) = snapshot.value {
+                        let (entries, keys) = metrics.routing();
+                        match client.route(entries, keys) {
+                            Ok(ticket) => tokio::time::timeout_at(deadline, ticket)
+                                .await
+                                .map_err(|_| Error::Timeout)
+                                .and_then(|r| r.map(Some).map_err(Error::Routing)),
+                            Err(e) => Err(Error::Routing(e)),
+                        }
+                    } else {
+                        Err(Error::Routing(crate::routing::Error::Stopped))
+                    }
+                }
+            };
+            Ok(Sampled { metrics, routes })
         }));
     }
-    fn sampled(&mut self, result: Result<metrics::Snapshot, Error>) {
-        match result.and_then(|metrics| {
-            Ok((
-                metrics.json()?,
-                metrics.datagrams(&self.config.prefix)?,
-                metrics,
-            ))
-        }) {
-            Ok((json, datagrams, metrics)) => {
-                self.current.samples = self.current.samples.saturating_add(1);
-                self.current.metrics = Some(Arc::new(metrics));
-                self.record("metrics", json);
-                if let Some(statsd) = &self.statsd {
-                    statsd.submit(sink::Batch::Metrics(datagrams));
-                }
-            }
+    fn sampled(&mut self, result: Result<Sampled, Error>) {
+        let result = result.and_then(|sample| Ok((sample.metrics.json()?, sample)));
+        let (json, sample) = match result {
+            Ok(value) => value,
             Err(error) => {
                 self.current.sample_errors = self.current.sample_errors.saturating_add(1);
                 self.current.last_error = Some(error.clone());
                 self.record("observer", json!({"sample_error":error.to_string()}));
+                return;
+            }
+        };
+        self.current.samples = self.current.samples.saturating_add(1);
+        self.current.metrics = Some(Arc::new(sample.metrics.clone()));
+        let record =
+            self.ring
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push("metrics", json, &self.config);
+        let record = match record {
+            Ok(record) => Some(record),
+            Err(error) => {
+                self.current.rejected_records = self.current.rejected_records.saturating_add(1);
+                self.current.last_error = Some(error);
+                None
+            }
+        };
+        let route=|routes:Option<crate::routing::Routes>|->Result<(metrics::Snapshot,metrics::Snapshot),Error>{
+            match routes {Some(routes)=>Ok((sample.metrics.filtered(&routes,"log")?,sample.metrics.filtered(&routes,"send")?)),None=>Ok((sample.metrics.clone(),sample.metrics.clone()))}
+        };
+        let (logged, sent) = match sample.routes.and_then(route) {
+            Ok(value) => value,
+            Err(error) => {
+                self.current.routing_errors = self.current.routing_errors.saturating_add(1);
+                self.current.last_error = Some(error.clone());
+                self.record("observer", json!({"routing_error":error.to_string()}));
+                return;
+            }
+        };
+        self.current.filtered_log = self
+            .current
+            .filtered_log
+            .saturating_add((sample.metrics.metrics.len() - logged.metrics.len()) as u64);
+        self.current.filtered_send = self
+            .current
+            .filtered_send
+            .saturating_add((sample.metrics.metrics.len() - sent.metrics.len()) as u64);
+        if !logged.metrics.is_empty()
+            && let (Some(log), Some(record)) = (&self.log, record)
+        {
+            let output = if logged.metrics.len() == sample.metrics.metrics.len() {
+                Ok(record)
+            } else {
+                logged
+                    .json()
+                    .and_then(|data| record.with_data(data, self.config.record_bytes))
+            };
+            match output {
+                Ok(record) => log.submit(sink::Batch::Log(record)),
+                Err(error) => {
+                    self.current.rejected_records = self.current.rejected_records.saturating_add(1);
+                    self.current.last_error = Some(error);
+                }
+            }
+        }
+        if !sent.metrics.is_empty()
+            && let Some(statsd) = &self.statsd
+        {
+            match sent.datagrams(&self.config.prefix) {
+                Ok(lines) => statsd.submit(sink::Batch::Metrics(lines)),
+                Err(error) => {
+                    self.current.sample_errors = self.current.sample_errors.saturating_add(1);
+                    self.current.last_error = Some(error);
+                }
             }
         }
     }
@@ -310,6 +408,10 @@ impl Service {
         self.record("observer", json!({"state":"started"}));
         loop {
             if *self.stopped.borrow() {
+                break;
+            }
+            if self.routing.as_ref().is_some_and(|r| r.is_closed()) {
+                self.current.last_error = Some(Error::RoutingClosed);
                 break;
             }
             if self.admission.is_closed() {
@@ -328,6 +430,7 @@ impl Service {
                 _ = self.stopped.changed() => break,
                 _ = interval.tick() => self.sample(),
                 _ = self.admission.changed() => (),
+                _ = async{match &mut self.routing {Some(r)=>r.changed().await,None=>std::future::pending().await}}=>(),
                 _ = tokio::task::yield_now(), if self.gc_pending => (),
                 result = async { self.pending.as_mut().expect("active sample").await }, if self.pending.is_some() => {
                     self.pending = None; self.sampled(result);
