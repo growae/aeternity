@@ -221,6 +221,7 @@ pub struct Connection {
     pub peer: ae_types::PeerPublicKey,
     pub address: std::net::Ipv4Addr,
     pub kind: policy::Kind,
+    pub admitted: bool,
 }
 pub struct ConnectionTicket {
     accepted: Ticket,
@@ -245,6 +246,11 @@ impl ConnectionTicket {
 enum Work {
     Policy(policy::Command),
     PingReceived(net::Client),
+    FirstPing {
+        client: net::Client,
+        port: u16,
+        retirement: net::PingRetirement,
+    },
     Disconnect(net::Client),
     Suspect(net::Client),
     Synchronize(net::Client),
@@ -290,6 +296,30 @@ pub struct Handle {
     deferred_pings: bool,
 }
 impl Handle {
+    pub fn first_ping(
+        &self,
+        client: net::Client,
+        received: &net::Received,
+    ) -> Result<Ticket, Error> {
+        if received.generation != *client.generation()
+            || received.message().kind() != ae_p2p::message::Kind::Ping
+            || received.ping.is_none_or(|p| p.busy)
+        {
+            return Err(Error::Configuration);
+        }
+        let port = transport::advertised_port(received.message())?;
+        let retirement = client
+            .ping_retirement(received)
+            .map_err(|e| Error::Transport(transport::Error::Runtime(e)))?;
+        self.submit(
+            Work::FirstPing {
+                client,
+                port,
+                retirement,
+            },
+            256,
+        )
+    }
     pub fn defers_pings(&self) -> bool {
         self.deferred_pings
     }

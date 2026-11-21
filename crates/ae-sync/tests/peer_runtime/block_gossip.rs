@@ -17,10 +17,20 @@ struct Running {
     bytes: usize,
 }
 async fn run(node: &Node, settings: sync::Config, import: chain::Config) -> Running {
+    run_mode(node, settings, import, true).await
+}
+async fn run_mode(
+    node: &Node,
+    settings: sync::Config,
+    import: chain::Config,
+    admitted: bool,
+) -> Running {
     let app = start(node, config(), Default::default()).await;
     let (remote, events, driver) = connect(node, &app).await;
-    response(&remote, &ping(node, 2, true)).await;
-    admitted_client(&app, remote_peer()).await;
+    if admitted {
+        response(&remote, &ping(node, 2, true)).await;
+        admitted_client(&app, remote_peer()).await;
+    }
     let network = app.network.clone();
     let identity = app.identity.clone();
     let bytes = settings.block_bytes;
@@ -152,6 +162,57 @@ fn assert_tip(node: &Node, block: &Block) {
         view.require_record(hash).unwrap().roots.state.hash().0,
         block.header().common().state_hash
     );
+}
+#[tokio::test]
+async fn preping_full_and_light_block_gossip_validate_and_commit_before_admission() {
+    for light in [false, true] {
+        let node = Node::new();
+        let all = blocks();
+        let mut r = run_mode(&node, Default::default(), Default::default(), false).await;
+        send(&r, &all[0], false).await;
+        r.wait(|s| s.counts.accepted == 1).await;
+        assert_tip(&node, &all[0]);
+        send(&r, &all[1], light).await;
+        if light {
+            let request = expansion(&mut r.events).await;
+            assert_eq!(
+                request.message().fields()["hash"],
+                Value::Binary(all[1].hash().unwrap().0.to_vec())
+            );
+            r.remote
+                .send(&reply(&all[1], txs(&all[1])))
+                .unwrap()
+                .await
+                .unwrap();
+        }
+        r.wait(|s| s.counts.accepted == 2).await;
+        assert_tip(&node, &all[1]);
+        assert_eq!(r.network.status().counts.accepted, 0);
+        assert!(
+            within(r.network.peers().peers().unwrap().wait())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(node.db.view().unwrap().status().revision, 3);
+        let generation = response(
+            &r.remote,
+            &message(
+                Kind::GetGeneration,
+                1,
+                &[
+                    ("hash", Value::Binary(all[0].hash().unwrap().0.to_vec())),
+                    ("forward", Value::Boolean(true)),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            body(&generation).fields()["micro_blocks"],
+            Value::List(vec![Value::Binary(all[1].encode().unwrap())])
+        );
+        assert_eq!(r.stop().await.blocks.counts.committed, 2);
+    }
 }
 #[tokio::test]
 async fn encrypted_full_blocks_are_consumed_validated_and_committed_without_disconnecting_bad_gossip()

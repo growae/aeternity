@@ -23,6 +23,7 @@ pub struct Driver {
     outgoing: Option<wire::Outgoing>,
     finishing: bool,
     prepared_finish: Option<requests::Update>,
+    stop_after_ping: bool,
     ping_wait: Option<PingWait>,
     buffered: Vec<u8>,
     decoder: noise::record::Decoder,
@@ -69,6 +70,7 @@ impl Driver {
             outgoing: None,
             finishing: false,
             prepared_finish: None,
+            stop_after_ping: false,
             ping_wait: None,
             buffered: vec![],
             decoder: noise::record::Decoder::new(noise::MAX_CIPHERTEXT),
@@ -214,6 +216,7 @@ impl Driver {
             finish.answer.finish(Err(Error::Timeout));
             return Err(Error::Timeout);
         }
+        self.stop_after_ping = finish.stop_after;
         if let Some(packet) = finish.packet {
             if let Some(probe) = finish.probe {
                 match self.prepare_probe(&finish.token, &packet, probe) {
@@ -260,7 +263,7 @@ impl Driver {
         let ping = self.ping_wait.take().expect("validated ping completion");
         ping.state
             .finished
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let update = match self.prepared_finish.take() {
             Some(update) => update,
             None => self
@@ -270,7 +273,12 @@ impl Driver {
         };
         let result = self.settle(update, None, None);
         answer.finish(result.clone().map(|()| Reply::Sent));
-        result
+        result?;
+        if self.stop_after_ping || ping.state.retire.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(Error::Shutdown)
+        } else {
+            Ok(())
+        }
     }
     fn stage_ping(
         &mut self,

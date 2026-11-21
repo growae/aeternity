@@ -173,7 +173,12 @@ enum Command {
     Attach {
         connection: Box<Connection>,
         initiate: bool,
+        admitted: bool,
         permit: tokio::sync::OwnedSemaphorePermit,
+        reply: oneshot::Sender<Result<u64, Error>>,
+    },
+    Promote {
+        client: Box<net::Client>,
         reply: oneshot::Sender<Result<u64, Error>>,
     },
     Sync {
@@ -208,6 +213,27 @@ impl Handle {
         Reader(self.clone())
     }
     pub fn attach(&self, connection: Connection, initiate: bool) -> Result<Ticket<u64>, Error> {
+        self.attach_mode(connection, initiate, true)
+    }
+    pub(crate) fn attach_provisional(&self, connection: Connection) -> Result<Ticket<u64>, Error> {
+        self.attach_mode(connection, false, false)
+    }
+    pub(crate) fn promote(&self, client: net::Client) -> Result<Ticket<u64>, Error> {
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .try_send(Command::Promote {
+                client: Box::new(client),
+                reply,
+            })
+            .map_err(|_| Error::Busy)?;
+        Ok(Ticket(receiver))
+    }
+    fn attach_mode(
+        &self,
+        connection: Connection,
+        initiate: bool,
+        admitted: bool,
+    ) -> Result<Ticket<u64>, Error> {
         if *self.stop.borrow() || self.commands.is_closed() {
             return Err(Error::Closed);
         }
@@ -221,6 +247,7 @@ impl Handle {
         slot.send(Command::Attach {
             connection: Box::new(connection),
             initiate,
+            admitted,
             permit,
             reply,
         });

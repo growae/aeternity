@@ -154,6 +154,10 @@ async fn ping_receipts_reject_wrong_generation_shape_and_reuse_without_consuming
     raw.send(&ping(2)).await;
     let received = message(&mut events).await;
     let response = response(received.message());
+    assert!(matches!(
+        other.ping_retirement(&received),
+        Err(Error::InvalidPing)
+    ));
     assert!(matches!(client.send(&response), Err(Error::InvalidPing)));
     assert!(matches!(
         client.send_prepared(&Prepared::new(&response, Default::default()).unwrap()),
@@ -361,6 +365,42 @@ async fn automatic_probe_is_written_and_registered_before_following_ping() {
 }
 
 #[tokio::test]
+async fn policy_retirement_keeps_response_before_stop_and_fences_following_messages() {
+    for mode in ["retirement", "explicit", "late"] {
+        let (client, mut events, driver, mut raw) = raw_pair(managed()).await;
+        let task = tokio::spawn(driver.run());
+        let mut frames = raw.record(&ping(2).encode_packet(Default::default()).unwrap());
+        if mode != "late" {
+            frames.extend(raw.record(&init().encode_packet(Default::default()).unwrap()));
+        }
+        wire::write(&raw.socket, &frames).await.unwrap();
+        let received = message(&mut events).await;
+        let retirement = client.ping_retirement(&received).unwrap();
+        if mode == "retirement" {
+            retirement.retire();
+        }
+        let reply = response(&ping(2));
+        let ticket = if mode == "explicit" {
+            client.finish_ping_and_stop(&received, &reply).unwrap()
+        } else {
+            client.finish_ping(&received, Some(&reply)).unwrap()
+        };
+        within(ticket).await.unwrap();
+        assert_eq!(within(raw.receive()).await, reply);
+        if mode == "late" {
+            retirement.retire();
+        }
+        assert_eq!(within(task).await.unwrap().reason, Error::Shutdown);
+        selected(&mut events, 2).await;
+        assert!(within(events.recv()).await.is_none());
+        assert!(matches!(
+            client.ping_retirement(&received),
+            Err(Error::InvalidPing)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn ordinary_request_deadline_waits_until_incoming_callback_finishes() {
     let (client, mut events, driver, mut raw) = raw_pair(managed()).await;
     let task = tokio::spawn(driver.run());
@@ -423,6 +463,9 @@ async fn blocked_ping_write_expires_without_committing_negotiation() {
             raw.send(&ping(2)).await;
             message(&mut events).await
         };
+        if !probe {
+            client.ping_retirement(&received).unwrap().retire();
+        }
         let mut fields = ping(2).fields().clone();
         fields.insert("best_hash".into(), Value::Binary(vec![9; 2_000_000]));
         let large = Message::new(Kind::Ping, 2, fields, Default::default()).unwrap();

@@ -8,6 +8,7 @@ use std::{
 };
 use tokio::{net::TcpListener, time::Instant};
 
+mod admission;
 mod operations;
 
 type PoolFuture = Pin<Box<dyn Future<Output = pool::Status> + Send>>;
@@ -47,6 +48,8 @@ pub struct Service {
     ping_jobs: Tasks<policy::Token, Option<PingResult>>,
     ping_tokens: BTreeMap<policy::Token, net::Client>,
     admitted: BTreeMap<policy::Token, Admitted>,
+    provisional: BTreeMap<policy::Token, Admitted>,
+    rejected_admissions: std::collections::BTreeSet<policy::Token>,
     pending: VecDeque<Completion>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
@@ -95,6 +98,8 @@ impl Service {
             ping_jobs: Tasks::new(),
             ping_tokens: BTreeMap::new(),
             admitted: BTreeMap::new(),
+            provisional: BTreeMap::new(),
+            rejected_admissions: std::collections::BTreeSet::new(),
             pending: VecDeque::new(),
             commands,
             events,
@@ -185,6 +190,8 @@ impl Service {
         self.ping_jobs.clear();
         self.ping_tokens.clear();
         self.admitted.clear();
+        self.provisional.clear();
+        self.rejected_admissions.clear();
         if !self.current.policy.as_ref().is_some_and(|p| p.closed) {
             if let Err(error) = self.apply(policy::Command::Shutdown).await {
                 if self.current.failure.is_none() {

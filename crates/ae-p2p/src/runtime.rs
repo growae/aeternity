@@ -13,7 +13,9 @@ mod queue;
 mod wire;
 pub use driver::Driver;
 pub use lifecycle::Monitor;
-pub use queue::{Client, Event, Generation, PingObservation, Prepared, Received, Reply, Ticket};
+pub use queue::{
+    Client, Event, Generation, PingObservation, PingRetirement, Prepared, Received, Reply, Ticket,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

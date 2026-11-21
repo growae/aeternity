@@ -112,6 +112,7 @@ impl Service {
             Command::Attach {
                 connection,
                 initiate,
+                admitted,
                 permit,
                 reply,
             } => {
@@ -122,12 +123,15 @@ impl Service {
                 let id = self.next_id;
                 self.next_id = next;
                 let peer = connection.peer();
-                self.peers.add(id, *connection, permit);
+                self.peers.add(id, *connection, permit, admitted);
                 if initiate {
                     let effects = self.manager.connect(Hash256(peer.0), id);
                     self.effects(effects);
                 }
                 let _ = reply.send(Ok(id));
+            }
+            Command::Promote { client, reply } => {
+                let _ = reply.send(self.peers.promote(&client));
             }
             Command::Sync { peer, reply } => {
                 if let Some(entry) = self.peers.current(peer) {
@@ -377,7 +381,11 @@ impl Service {
                 }
             }
             PeerEvent::Message { id, peer, event } => {
-                let Some(entry) = self.peers.current(peer).filter(|e| e.id == id) else {
+                let Some(entry) = self
+                    .peers
+                    .get(id)
+                    .filter(|e| !e.connection.client.is_closed() && e.connection.peer() == peer)
+                else {
                     return;
                 };
                 let generation = match &event {

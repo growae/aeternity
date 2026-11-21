@@ -60,6 +60,22 @@ impl Received {
 pub(super) struct PingState {
     pub submitted: AtomicBool,
     pub finished: AtomicBool,
+    pub retire: AtomicBool,
+}
+pub struct PingRetirement {
+    state: Arc<PingState>,
+    stop: watch::Sender<Option<Error>>,
+}
+impl PingRetirement {
+    // A policy owner can accept a deferred Close without blocking unrelated
+    // work. Sequential consistency with commit_ping prevents a lost retirement
+    // when this request races the callback's final write/commit.
+    pub fn retire(&self) {
+        self.state.retire.store(true, Ordering::SeqCst);
+        if self.state.finished.load(Ordering::SeqCst) {
+            stop(&self.stop, Error::Shutdown);
+        }
+    }
 }
 #[derive(Debug)]
 pub(super) struct PingReceipt {
@@ -175,6 +191,7 @@ pub(super) struct Finish {
     pub deadline: Instant,
     pub answer: Answer,
     pub probe: Option<Answer>,
+    pub stop_after: bool,
     pub budget: OwnedSemaphorePermit,
 }
 
@@ -227,6 +244,19 @@ pub struct Client {
     selected_ping: Arc<AtomicU16>,
 }
 impl Client {
+    pub fn ping_retirement(&self, received: &Received) -> Result<PingRetirement, Error> {
+        let receipt = received.receipt.as_ref().ok_or(Error::InvalidPing)?;
+        if receipt.generation != self.generation
+            || !receipt.incoming
+            || receipt.state.finished.load(Ordering::Acquire)
+        {
+            return Err(Error::InvalidPing);
+        }
+        Ok(PingRetirement {
+            state: receipt.state.clone(),
+            stop: self.stop.clone(),
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         commands: mpsc::Sender<Command>,
@@ -328,7 +358,20 @@ impl Client {
         received: &Received,
         response: Option<&message::Message>,
     ) -> Result<Ticket, Error> {
-        self.finish(received, response, false)
+        self.finish(received, response, false, false)
+            .map(|(finished, _)| finished)
+    }
+    // Native first-ping policy rejection queues stop after the callback. Keep
+    // that retirement inside the fence so a coalesced next message cannot run.
+    pub fn finish_ping_and_stop(
+        &self,
+        received: &Received,
+        response: &message::Message,
+    ) -> Result<Ticket, Error> {
+        if !received.receipt.as_ref().is_some_and(|r| r.incoming) {
+            return Err(Error::InvalidPing);
+        }
+        self.finish(received, Some(response), false, true)
             .map(|(finished, _)| finished)
     }
     // First ticket completes the callback after the probe write; the second
@@ -339,7 +382,7 @@ impl Client {
         received: &Received,
         probe: &message::Message,
     ) -> Result<(Ticket, Ticket), Error> {
-        self.finish(received, Some(probe), true)
+        self.finish(received, Some(probe), true, false)
             .map(|(finished, response)| (finished, response.expect("probe response ticket")))
     }
     fn finish(
@@ -347,6 +390,7 @@ impl Client {
         received: &Received,
         packet: Option<&message::Message>,
         probe: bool,
+        stop_after: bool,
     ) -> Result<(Ticket, Option<Ticket>), Error> {
         let receipt = received.receipt.as_ref().ok_or(Error::InvalidPing)?;
         if receipt.generation != self.generation
@@ -407,6 +451,7 @@ impl Client {
             deadline,
             answer,
             probe,
+            stop_after,
             budget,
         });
         Ok((ticket, response))

@@ -71,8 +71,19 @@ pub struct Ready {
     pub inbound: bool,
     pub connection: Connection,
 }
+pub struct Authenticated {
+    pub token: Token,
+    pub address: Ipv4Addr,
+    pub deadline: Instant,
+    pub connection: Connection,
+}
 pub enum Event {
     Ready(Box<Ready>),
+    Authenticated(Box<Authenticated>),
+    AdmissionExpired {
+        token: Token,
+        peer: PeerPublicKey,
+    },
     Probe {
         token: Token,
         peer: PeerPublicKey,
@@ -98,6 +109,7 @@ enum Attempt {
 }
 enum Completed {
     Ready(Box<Ready>),
+    Authenticated(Box<Authenticated>),
     Probe,
 }
 
@@ -112,6 +124,7 @@ pub struct Sockets {
     work: Tasks<Token, Result<Completed, Error>>,
     clients: BTreeMap<Token, net::Client>,
     terminals: Tasks<Token, net::Exit>,
+    admissions: BTreeMap<Token, Instant>,
     stopped: bool,
 }
 impl Sockets {
@@ -139,6 +152,7 @@ impl Sockets {
             work: Tasks::new(),
             clients: BTreeMap::new(),
             terminals: Tasks::new(),
+            admissions: BTreeMap::new(),
             stopped: false,
         })
     }
@@ -208,6 +222,19 @@ impl Sockets {
     // this method. Every failure still requires that reservation to be retired
     // by the policy owner. Rejection drops the supplied socket immediately.
     pub fn inbound(&mut self, token: Token, socket: TcpStream) -> Result<(), Error> {
+        self.inbound_mode(token, socket, false)
+    }
+    pub(crate) fn inbound_authenticated(
+        &mut self,
+        token: Token,
+        socket: TcpStream,
+    ) -> Result<(), Error> {
+        if !self.settings.runtime.defer_pings {
+            return Err(Error::Configuration);
+        }
+        self.inbound_mode(token, socket, true)
+    }
+    fn inbound_mode(&mut self, token: Token, socket: TcpStream, early: bool) -> Result<(), Error> {
         self.reserve(token)?;
         let std::net::SocketAddr::V4(remote) = socket.peer_addr()? else {
             return Err(Error::Address);
@@ -228,8 +255,19 @@ impl Sockets {
             let id = client.peer();
             let mut connection =
                 Connection::new(client, events, driver).map_err(|_| Error::Configuration)?;
+            let deadline = Instant::now()
+                .checked_add(settings.first_ping_timeout)
+                .ok_or(Error::Configuration)?;
+            if early {
+                return Ok(Completed::Authenticated(Box::new(Authenticated {
+                    token,
+                    address,
+                    deadline,
+                    connection,
+                })));
+            }
             // Native first-ping timeout starts only after the Noise handshake.
-            let port = tokio::time::timeout(settings.first_ping_timeout, async {
+            let port = tokio::time::timeout_at(deadline, async {
                 for _ in 0..settings.pre_admission_events {
                     let event = connection.admission_event().await?;
                     let port = match &event {
@@ -267,6 +305,7 @@ impl Sockets {
     // Cancelling a pending attempt synchronously drops its socket/driver.
     // After handoff cancellation is a request; retain the slot until Closed.
     pub fn cancel(&mut self, token: Token) -> bool {
+        self.admissions.remove(&token);
         if self.attempts.remove(&token).is_some() {
             self.work.remove(&token);
             return true;
@@ -281,9 +320,26 @@ impl Sockets {
         self.stopped = true;
         self.work.clear();
         self.attempts.clear();
+        self.admissions.clear();
         for client in self.clients.values() {
             client.shutdown();
         }
+    }
+    pub(crate) fn begin_admission(&mut self, token: Token) -> bool {
+        let Some(deadline) = self.admissions.remove(&token) else {
+            return false;
+        };
+        if deadline <= Instant::now() {
+            self.cancel(token);
+            return false;
+        }
+        self.clients.get(&token).is_some_and(|c| !c.is_closed())
+    }
+    fn track(&mut self, token: Token, client: net::Client) {
+        let monitor = client.monitor();
+        self.clients.insert(token, client);
+        self.terminals
+            .insert(token, async move { monitor.wait().await });
     }
     // A Ready connection must be polled by its new owner (or dropped). Continue
     // next() after stop to observe actual handed-off driver teardown. Neither
@@ -292,16 +348,35 @@ impl Sockets {
         if self.stopped && self.occupied() == 0 {
             return None;
         }
+        let deadline = self
+            .admissions
+            .iter()
+            .min_by_key(|(_, d)| *d)
+            .map(|(token, d)| (*token, *d));
         tokio::select! {
+            _ = async {
+                match deadline {
+                    Some((_, d)) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let (token, _) = deadline.unwrap();
+                let peer = self.clients[&token].peer();
+                self.cancel(token);
+                Some(Event::AdmissionExpired { token, peer })
+            },
             (token, result) = self.work.next() => {
                 let attempt = self.attempts.remove(&token).expect("owned attempt");
                 Some(match (attempt, result) {
                     (_, Ok(Completed::Ready(ready))) => {
                         let client = ready.connection.client().clone();
-                        let monitor = client.monitor();
-                        self.clients.insert(token, client);
-                        self.terminals.insert(token, async move { monitor.wait().await });
+                        self.track(token, client);
                         Event::Ready(ready)
+                    }
+                    (_, Ok(Completed::Authenticated(ready))) => {
+                        self.track(token, ready.connection.client().clone());
+                        self.admissions.insert(token, ready.deadline);
+                        Event::Authenticated(ready)
                     }
                     (Attempt::Probe(peer), result) => Event::Probe {
                         token, peer, result: result.map(|_| ()),
@@ -318,6 +393,7 @@ impl Sockets {
                 })
             }
             (token, exit) = self.terminals.next() => {
+                self.admissions.remove(&token);
                 let client = self.clients.remove(&token).expect("owned generation");
                 debug_assert_eq!(client.generation(), &exit.generation);
                 Some(Event::Closed { token, peer: client.peer(), exit })
@@ -330,7 +406,7 @@ impl Drop for Sockets {
         self.stop();
     }
 }
-fn advertised_port(message: &ae_p2p::message::Message) -> Result<u16, Error> {
+pub(crate) fn advertised_port(message: &ae_p2p::message::Message) -> Result<u16, Error> {
     let Some(Value::Integer(port)) = message.fields().get("port") else {
         return Err(Error::InvalidPort);
     };

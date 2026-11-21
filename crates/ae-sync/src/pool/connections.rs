@@ -77,6 +77,7 @@ pub(super) struct Entry {
     pub id: u64,
     pub connection: Connection,
     pub busy: bool,
+    pub admitted: bool,
     _permit: OwnedSemaphorePermit,
 }
 pub(super) enum Event {
@@ -104,16 +105,22 @@ impl Connections {
     pub fn clients(&self) -> Vec<net::Client> {
         self.entries
             .iter()
-            .filter(|e| !e.connection.client.is_closed())
+            .filter(|e| e.admitted && !e.connection.client.is_closed())
             .map(|e| e.connection.client.clone())
             .collect()
     }
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-    pub fn add(&mut self, id: u64, connection: Connection, permit: OwnedSemaphorePermit) {
+    pub fn add(
+        &mut self,
+        id: u64,
+        connection: Connection,
+        permit: OwnedSemaphorePermit,
+        admitted: bool,
+    ) {
         for entry in &self.entries {
-            if entry.connection.peer() == connection.peer() {
+            if admitted && entry.admitted && entry.connection.peer() == connection.peer() {
                 entry.connection.client.shutdown();
             }
         }
@@ -121,14 +128,33 @@ impl Connections {
             id,
             connection,
             busy: false,
+            admitted,
             _permit: permit,
         });
     }
+    pub fn promote(&mut self, client: &net::Client) -> Result<u64, Error> {
+        let Some(index) = self.entries.iter().position(|e| {
+            e.connection.client.generation() == client.generation()
+                && e.connection.peer() == client.peer()
+                && !e.connection.client.is_closed()
+        }) else {
+            return Err(Error::NoPeer);
+        };
+        let id = self.entries[index].id;
+        self.entries[index].admitted = true;
+        for entry in &self.entries {
+            if entry.id != id && entry.admitted && entry.connection.peer() == client.peer() {
+                entry.connection.client.shutdown();
+            }
+        }
+        Ok(id)
+    }
     pub fn current(&self, peer: PeerPublicKey) -> Option<&Entry> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| entry.connection.peer() == peer && !entry.connection.client.is_closed())
+        self.entries.iter().rev().find(|entry| {
+            entry.admitted
+                && entry.connection.peer() == peer
+                && !entry.connection.client.is_closed()
+        })
     }
     pub fn get(&self, id: u64) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)

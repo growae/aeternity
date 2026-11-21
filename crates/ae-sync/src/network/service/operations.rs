@@ -108,13 +108,19 @@ impl Service {
                 true
             }
             policy::Effect::Close(token) => {
-                self.resolutions.remove(&token);
-                self.dns.remove(&token);
-                self.ready_dials.remove(&token);
-                self.ping_jobs.remove(&token);
-                self.ping_tokens.remove(&token);
-                self.sockets.cancel(token);
-                true
+                if self.rejected_admissions.remove(&token) {
+                    // Retirement is already owned by the exact ping callback.
+                    true
+                } else {
+                    self.rejected_admissions.remove(&token);
+                    self.resolutions.remove(&token);
+                    self.dns.remove(&token);
+                    self.ready_dials.remove(&token);
+                    self.ping_jobs.remove(&token);
+                    self.ping_tokens.remove(&token);
+                    self.sockets.cancel(token);
+                    true
+                }
             }
             policy::Effect::Ping { token, peer } => {
                 if let Some(client) = self
@@ -279,6 +285,13 @@ impl Service {
     async fn socket_event(&mut self, event: transport::Event) -> Result<(), Error> {
         match event {
             transport::Event::Ready(ready) => self.ready(*ready).await?,
+            transport::Event::Authenticated(ready) => self.authenticated(*ready).await?,
+            transport::Event::AdmissionExpired { token, .. } => {
+                self.provisional.remove(&token);
+                self.current.counts.rejected = self.current.counts.rejected.saturating_add(1);
+                self.apply(policy::Command::AbandonInbound(token)).await?;
+                self.refresh().await?;
+            }
             transport::Event::Probe {
                 token,
                 peer,
@@ -315,6 +328,13 @@ impl Service {
                 self.refresh().await?;
             }
             transport::Event::Closed { token, peer, exit } => {
+                self.rejected_admissions.remove(&token);
+                if self.provisional.remove(&token).is_some() {
+                    self.current.counts.closed = self.current.counts.closed.saturating_add(1);
+                    self.apply(policy::Command::AbandonInbound(token)).await?;
+                    self.refresh().await?;
+                    return Ok(());
+                }
                 self.admitted.remove(&token);
                 self.ping_tokens.remove(&token);
                 self.ping_jobs.remove(&token);
@@ -401,6 +421,7 @@ impl Service {
                         peer: peer.id,
                         address,
                         kind,
+                        admitted: true,
                     },
                 },
             );
@@ -444,13 +465,16 @@ impl Service {
             Err(error) => return Err(error),
             Ok(_) => return Err(Error::Registry("unexpected inbound reservation".into())),
         };
-        if self.sockets.inbound(token, socket).is_err() {
+        if self.sockets.inbound_authenticated(token, socket).is_err() {
             self.current.counts.rejected = self.current.counts.rejected.saturating_add(1);
             self.apply(policy::Command::AbandonInbound(token)).await?;
         }
         self.refresh().await
     }
-    async fn token(&mut self, client: &net::Client) -> Result<Option<policy::Token>, Error> {
+    pub(super) async fn token(
+        &mut self,
+        client: &net::Client,
+    ) -> Result<Option<policy::Token>, Error> {
         let token = self.admitted.iter().find_map(|(token, owned)| {
             (owned.client.peer() == client.peer()
                 && owned.client.generation() == client.generation())
@@ -494,7 +518,9 @@ impl Service {
             Work::Learn { client, peers } => self.learn(client, std::mem::take(peers)).await,
             Work::PoolCounts { client, reply } => {
                 let result = async {
-                    if self.token(client).await?.is_none() {
+                    if self.provisional_token(client).is_none()
+                        && self.token(client).await?.is_none()
+                    {
                         return Ok(None);
                     }
                     let ticket = self.client.pool_counts()?;
@@ -509,16 +535,18 @@ impl Service {
                     Err(error) => Err(error),
                 }
             }
-            Work::Connection { client, reply } => match self.token(client).await {
-                Ok(token) => {
-                    let info = token
-                        .and_then(|t| self.admitted.get(&t))
-                        .map(|a| a.connection);
+            Work::Connection { client, reply } => match self.connection_info(client).await {
+                Ok(info) => {
                     let _ = reply.take().unwrap().send(info);
                     Ok(policy::Outcome::Done)
                 }
                 Err(error) => Err(error),
             },
+            Work::FirstPing {
+                client,
+                port,
+                retirement,
+            } => self.first_ping(client, *port, retirement).await,
             Work::PingReceived(client) => match self.token(client).await {
                 Ok(Some(token)) => {
                     self.apply(policy::Command::PingDone {

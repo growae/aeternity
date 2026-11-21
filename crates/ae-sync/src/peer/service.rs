@@ -8,7 +8,7 @@ pub struct Service {
     published: watch::Sender<Status>,
     progress: watch::Receiver<Counts>,
     current: Status,
-    lanes: BTreeMap<PeerPublicKey, Lane>,
+    lanes: Vec<Lane>,
     tasks: Tasks<Key, Result<(), Error>>,
     jobs: blocking::Pool,
 }
@@ -39,7 +39,7 @@ impl Service {
             published,
             progress,
             current,
-            lanes: BTreeMap::new(),
+            lanes: Vec::new(),
             tasks: Tasks::new(),
             jobs,
         }
@@ -59,37 +59,22 @@ impl Service {
             return;
         }
         let peer = client.peer();
-        if let Some(lane) = self.lanes.get(&peer)
-            && lane.client.generation() != client.generation()
-        {
-            // Network policy is the admission authority. A delayed old input
-            // cannot displace a still-live replacement lane.
-            if !lane.client.is_closed() {
-                client.shutdown();
-                return;
+        self.lanes.retain(|lane| {
+            if lane.client.is_closed() {
+                self.tasks
+                    .remove(&(lane.client.peer(), lane.client.generation().clone()));
+                false
+            } else {
+                true
             }
-            self.tasks.remove(&(peer, lane.client.generation().clone()));
-            self.lanes.remove(&peer);
-        }
-        if !self.lanes.contains_key(&peer) {
+        });
+        let mut index = self.lanes.iter().position(|lane| {
+            lane.client.peer() == peer && lane.client.generation() == client.generation()
+        });
+        if index.is_none() {
             if self.lanes.len() >= self.context.config.connections {
                 client.shutdown();
                 self.error(Error::Busy);
-                return;
-            }
-            let attached = self
-                .context
-                .capabilities
-                .lock()
-                .map_err(|_| Error::Closed)
-                .and_then(|mut registry| {
-                    registry
-                        .attach(peer, client.generation().clone())
-                        .map_err(Error::from)
-                });
-            if let Err(error) = attached {
-                client.shutdown();
-                self.error(error);
                 return;
             }
             let (send, receive) = mpsc::channel(self.context.config.queued_per_connection);
@@ -102,18 +87,17 @@ impl Service {
                     receive,
                 ),
             );
-            self.lanes.insert(
-                peer,
-                Lane {
-                    client: client.clone(),
-                    input: send,
-                    capabilities: self.context.capabilities.clone(),
-                },
-            );
+            index = Some(self.lanes.len());
+            self.lanes.push(Lane {
+                client: client.clone(),
+                input: send,
+                capabilities: self.context.capabilities.clone(),
+            });
         }
-        if self.lanes[&peer].input.try_send(input).is_err() {
+        let index = index.unwrap();
+        if self.lanes[index].input.try_send(input).is_err() {
             self.tasks.remove(&(peer, client.generation().clone()));
-            self.lanes.remove(&peer);
+            self.lanes.swap_remove(index);
             self.error(Error::Busy);
         }
     }
@@ -140,7 +124,7 @@ impl Service {
                     None => break,
                 },
                 ((peer, generation), result) = self.tasks.next() => {
-                    if self.lanes.get(&peer).is_some_and(|l| *l.client.generation() == generation) { self.lanes.remove(&peer); }
+                    self.lanes.retain(|l| l.client.peer() != peer || *l.client.generation() != generation);
                     if let Err(error) = result {
                         self.current.counts.failed_connections = self.current.counts.failed_connections.saturating_add(1);
                         self.error(error);

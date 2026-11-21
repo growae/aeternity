@@ -52,12 +52,24 @@ pub(super) async fn run(
 }
 impl Session {
     async fn current(&mut self) -> Result<network::Connection, Error> {
-        self.ctx
+        let connection = self
+            .ctx
             .network
             .connection(self.client.clone())?
             .wait()
             .await?
-            .ok_or(Error::Stale)
+            .ok_or(Error::Stale)?;
+        if connection.admitted {
+            let mut capabilities = self.ctx.capabilities.lock().map_err(|_| Error::Closed)?;
+            // A provisional lane must never erase the admitted generation's
+            // capabilities. Recheck retirement under the registry lock so an
+            // old asynchronous lookup cannot reattach after its replacement.
+            if self.client.is_closed() {
+                return Err(Error::Stale);
+            }
+            capabilities.attach(self.client.peer(), self.client.generation().clone())?;
+        }
+        Ok(connection)
     }
     async fn local(&mut self) -> Result<ping::Local, Error> {
         let connection = self.current().await?;
@@ -285,6 +297,31 @@ impl Session {
                         .progress
                         .send_modify(|s| s.incoming_pings = s.incoming_pings.saturating_add(1));
                     let observation = received.ping.ok_or(Error::Stale)?;
+                    if !observation.busy {
+                        match self
+                            .ctx
+                            .network
+                            .first_ping(self.client.clone(), &received)?
+                            .wait()
+                            .await?
+                        {
+                            policy::Outcome::Accepted(_) => {
+                                self.current().await?;
+                            }
+                            policy::Outcome::Rejected(reason) => {
+                                let response = Message::response_error(
+                                    Kind::Ping,
+                                    admission_reason(reason).to_vec(),
+                                    self.ctx.config.messages,
+                                )?;
+                                self.client
+                                    .finish_ping_and_stop(&received, &response)?
+                                    .await?;
+                                return Ok(());
+                            }
+                            _ => return Err(Error::Stale),
+                        }
+                    }
                     let response = if observation.busy {
                         Message::response_error(
                             Kind::Ping,
@@ -454,5 +491,17 @@ impl Session {
                 .send_modify(|s| s.served = s.served.saturating_add(1));
         }
         Ok(())
+    }
+}
+
+fn admission_reason(reason: policy::Rejection) -> &'static [u8] {
+    match reason {
+        policy::Rejection::Blocked => b"blocked",
+        policy::Rejection::AlreadyConnected => b"already_connected",
+        policy::Rejection::TrustedAddressChanged => b"trusted_address_changed",
+        policy::Rejection::TrustedPending => b"trusted_pending",
+        policy::Rejection::Capacity => b"capacity",
+        policy::Rejection::Ignored => b"ignored",
+        policy::Rejection::Invalid => b"invalid",
     }
 }

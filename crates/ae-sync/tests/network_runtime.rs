@@ -172,7 +172,7 @@ async fn message(events: &mut net::Events) -> net::Received {
     })
     .await
 }
-async fn forwarded(events: &mut pool::Events) -> (net::Client, net::Received) {
+async fn unadmitted_forwarded(events: &mut pool::Events) -> (net::Client, net::Received) {
     within(async {
         loop {
             let event = events.recv().await.unwrap();
@@ -182,6 +182,16 @@ async fn forwarded(events: &mut pool::Events) -> (net::Client, net::Received) {
         }
     })
     .await
+}
+async fn forwarded(h: &network::Handle, events: &mut pool::Events) -> (net::Client, net::Received) {
+    let (client, received) = unadmitted_forwarded(events).await;
+    assert!(matches!(
+        within(h.first_ping(client.clone(), &received).unwrap().wait())
+            .await
+            .unwrap(),
+        Outcome::Accepted(_)
+    ));
+    (client, received)
 }
 async fn next_ping(events: &mut network::Events) -> network::Ping {
     within(async {
@@ -318,7 +328,7 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     let (mut h, _events, mut forwarded_events, task) = start(&node, local.clone(), config()).await;
     let (first, _events, first_task) = incoming(&node, &h, local.public_key(), &remote).await;
     let request = first.request(&ping(&node, 4321), None).unwrap();
-    let (first_local, received) = forwarded(&mut forwarded_events).await;
+    let (first_local, received) = forwarded(&h, &mut forwarded_events).await;
     let facts = within(h.connection(first_local.clone()).unwrap().wait())
         .await
         .unwrap()
@@ -358,7 +368,7 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     within(replacement.send(&ping(&node, 4322)).unwrap())
         .await
         .unwrap();
-    let (replacement_local, replacement_ping) = forwarded(&mut forwarded_events).await;
+    let (replacement_local, replacement_ping) = forwarded(&h, &mut forwarded_events).await;
     within(
         replacement_local
             .finish_ping(
@@ -442,7 +452,7 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
 }
 
 #[tokio::test]
-async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_forwarded() {
+async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_response() {
     let node = Node::new();
     let (local, remote) = identities();
     let mut c = config();
@@ -451,7 +461,7 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
     let (client, _remote_events, remote_task) =
         incoming(&node, &h, local.public_key(), &remote).await;
     let request = client.request(&ping(&node, 3015), None).unwrap();
-    let (local_client, received) = forwarded(&mut forwarded_events).await;
+    let (local_client, received) = forwarded(&h, &mut forwarded_events).await;
     let admitted_generation = local_client.generation().clone();
     assert_eq!(
         within(h.connection(local_client.clone()).unwrap().wait())
@@ -493,26 +503,35 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
     );
     let (client, _remote_events, remote_task) =
         incoming(&node, &h, local.public_key(), &remote).await;
-    within(client.send(&ping(&node, 3015)).unwrap())
+    let v1 = Message::new(
+        Kind::Ping,
+        1,
+        ping(&node, 3015).fields().clone(),
+        Default::default(),
+    )
+    .unwrap();
+    let request = client.request(&v1, None).unwrap();
+    let (blocked, received) = unadmitted_forwarded(&mut forwarded_events).await;
+    assert_ne!(blocked.generation(), &admitted_generation);
+    assert_eq!(
+        within(h.first_ping(blocked.clone(), &received).unwrap().wait())
+            .await
+            .unwrap(),
+        Outcome::Rejected(ae_p2p::registry::Rejection::Blocked)
+    );
+    let response =
+        Message::response_error(Kind::Ping, b"blocked".to_vec(), Default::default()).unwrap();
+    // The policy retirement receipt enforces stop even through the ordinary
+    // finish API, after this error response has been fully written.
+    within(blocked.finish_ping(&received, Some(&response)).unwrap())
         .await
         .unwrap();
+    let net::Reply::Response(received) = within(request).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(received.message(), &response);
     within(remote_task).await.unwrap();
     status(&mut h, |s| s.counts.rejected == 1 && s.sockets == 0).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), async {
-            while let Some(event) = forwarded_events.recv().await {
-                match event.event {
-                    net::Event::Ping { generation, .. } => {
-                        assert_eq!(generation, admitted_generation)
-                    }
-                    net::Event::Message(_) => panic!("blocked peer message was forwarded"),
-                }
-            }
-            panic!("network owner unexpectedly stopped");
-        })
-        .await
-        .is_err()
-    );
     stop(&h, task).await;
 }
 
@@ -761,6 +780,14 @@ async fn admitted_socket_composes_with_real_gossip_and_transaction_storage() {
         loop {
             let received = application.recv().await.unwrap();
             if let net::Event::Message(ping) = received.event {
+                assert!(matches!(
+                    h.first_ping(received.client.clone(), &ping)
+                        .unwrap()
+                        .wait()
+                        .await
+                        .unwrap(),
+                    Outcome::Accepted(_)
+                ));
                 received
                     .client
                     .finish_ping(
@@ -878,7 +905,7 @@ async fn saturated_socket_capacity_keeps_timers_live_and_never_dials_an_expired_
     within(client.send(&ping(&node, 3015)).unwrap())
         .await
         .unwrap();
-    let (local_client, ping) = forwarded(&mut incoming_events).await;
+    let (local_client, ping) = forwarded(&h, &mut incoming_events).await;
     within(
         local_client
             .finish_ping(
