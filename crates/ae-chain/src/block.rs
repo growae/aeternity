@@ -9,6 +9,9 @@ use ae_codec::{
 use ae_tx::{SignedTransaction, Transaction, TransactionLimits};
 use ae_types::Hash256;
 
+mod light;
+pub use light::Light;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicroBlock {
     pub header: MicroHeader,

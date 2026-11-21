@@ -81,6 +81,7 @@ pub enum Error {
     },
     Refused(Vec<u8>),
     Message(message::Error),
+    Block(ae_chain::block::Error),
     Generation(generation::Error),
     Network(network::Error),
     Runtime(net::Error),
@@ -298,6 +299,24 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             direction,
             now_ms,
         )
+    }
+    // A reconstructed or full gossip block still goes through standalone
+    // validation, gossip admission policy, execution and durable publication.
+    // The bytes are decoded within the same joined import worker and quota as
+    // generation insertion. Successful light reconstruction alone is not admission.
+    pub fn import_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
+        self.check_open()?;
+        if bytes.len() > self.context.config.messages.body_bytes {
+            return Err(Error::Busy);
+        }
+        let context = self.context.clone();
+        self.reserve()?
+            .submit(move |cancel| context.apply_block(bytes, now_ms, cancel))
+            .map(|pending| Ticket {
+                pending,
+                timeout: self.context.config.timeout,
+            })
+            .map_err(Into::into)
     }
     fn check_open(&self) -> Result<(), Error> {
         if self.context.stopped.load(Ordering::Acquire) {

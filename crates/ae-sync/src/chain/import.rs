@@ -12,6 +12,30 @@ impl Drop for Poison<'_> {
     }
 }
 impl<O: MapOrder> Context<O> {
+    pub(super) fn apply_block(
+        &self,
+        bytes: Vec<u8>,
+        now_ms: u64,
+        cancel: blocking::Cancellation,
+    ) -> Result<Report, Failure> {
+        let _poison = Poison(&self.recovery);
+        let result = (|| {
+            self.check(&cancel, None)?;
+            let view = self.db.view()?;
+            let block = Block::decode(&bytes, view.config().block()).map_err(Error::Block)?;
+            let mut rules = self.rules.clone();
+            rules.admission.now_ms = now_ms;
+            self.insert(&block, &rules, &cancel, None, ledger::Origin::Gossip)
+        })();
+        result
+            .map(|accepted| Report {
+                accepted: vec![accepted],
+            })
+            .map_err(|error| Failure {
+                progress: Some(Report::default()),
+                error,
+            })
+    }
     fn check(
         &self,
         cancel: &blocking::Cancellation,
@@ -135,7 +159,7 @@ impl<O: MapOrder> Context<O> {
         let mut rules = self.rules.clone();
         rules.admission.now_ms = now_ms;
         for block in generation.blocks() {
-            match self.insert(block, &rules, &cancel, client) {
+            match self.insert(block, &rules, &cancel, client, ledger::Origin::Sync) {
                 Ok(accepted) => progress.accepted.push(accepted),
                 Err(error) => {
                     return Err(Failure {
@@ -156,6 +180,7 @@ impl<O: MapOrder> Context<O> {
         rules: &Rules,
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
+        origin: ledger::Origin,
     ) -> Result<Accepted, Error> {
         let hash = block.hash().map_err(|_| Error::Hash)?;
         for attempt in 0..=self.config.conflicts {
@@ -189,7 +214,9 @@ impl<O: MapOrder> Context<O> {
             let update = self
                 .execution
                 .with_config(|config| {
-                    ledger::prepare(&view, block, config, rules, self.config.ledger)
+                    let mut limits = self.config.ledger;
+                    limits.policy.origin = origin;
+                    ledger::prepare(&view, block, config, rules, limits)
                 })
                 .map_err(|e| match e {
                     ledger::InsertError::Repository(error) => Error::Storage(error),

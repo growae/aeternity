@@ -4,6 +4,7 @@ pub mod block;
 pub mod execution;
 pub mod forks;
 pub mod fraud;
+pub mod gossip;
 pub mod interchange;
 pub mod key;
 pub mod repository;

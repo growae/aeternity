@@ -373,3 +373,5 @@ async fn shutdown_preserves_committed_micro_prefix_and_stops_the_next_block() {
     );
     within(importer.join()).await;
 }
+
+mod gossip;
