@@ -105,7 +105,11 @@ impl Connections {
     pub fn clients(&self) -> Vec<net::Client> {
         self.entries
             .iter()
-            .filter(|e| e.admitted && !e.connection.client.is_closed())
+            .filter(|e| {
+                e.admitted
+                    && !e.connection.client.is_closed()
+                    && !e.connection.client.is_disconnecting()
+            })
             .map(|e| e.connection.client.clone())
             .collect()
     }
@@ -121,7 +125,7 @@ impl Connections {
     ) {
         for entry in &self.entries {
             if admitted && entry.admitted && entry.connection.peer() == connection.peer() {
-                entry.connection.client.shutdown();
+                entry.connection.client.disconnect();
             }
         }
         self.entries.push(Entry {
@@ -137,6 +141,7 @@ impl Connections {
             e.connection.client.generation() == client.generation()
                 && e.connection.peer() == client.peer()
                 && !e.connection.client.is_closed()
+                && !e.connection.client.is_disconnecting()
         }) else {
             return Err(Error::NoPeer);
         };
@@ -144,7 +149,7 @@ impl Connections {
         self.entries[index].admitted = true;
         for entry in &self.entries {
             if entry.id != id && entry.admitted && entry.connection.peer() == client.peer() {
-                entry.connection.client.shutdown();
+                entry.connection.client.disconnect();
             }
         }
         Ok(id)
@@ -154,6 +159,7 @@ impl Connections {
             entry.admitted
                 && entry.connection.peer() == peer
                 && !entry.connection.client.is_closed()
+                && !entry.connection.client.is_disconnecting()
         })
     }
     pub fn get(&self, id: u64) -> Option<&Entry> {

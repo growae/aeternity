@@ -18,11 +18,23 @@ impl Service {
         if let Some(token) = self.provisional_token(client) {
             return Ok(Some(self.provisional[&token].connection));
         }
-        Ok(self
-            .token(client)
-            .await?
-            .and_then(|t| self.admitted.get(&t))
-            .map(|a| a.connection))
+        if client.is_closed() {
+            return Ok(None);
+        }
+        let Some(mut connection) = self
+            .admitted
+            .values()
+            .find(|a| {
+                a.client.peer() == client.peer() && a.client.generation() == client.generation()
+            })
+            .map(|a| a.connection)
+        else {
+            return Ok(None);
+        };
+        // Retired registry ownership does not retire the authenticated stream.
+        // Keep this generation's local facts until its terminal monitor fires.
+        connection.closing |= client.is_disconnecting() || self.token(client).await?.is_none();
+        Ok(Some(connection))
     }
     pub(super) async fn authenticated(
         &mut self,
@@ -49,6 +61,7 @@ impl Service {
                     address,
                     kind: policy::Kind::Permanent,
                     admitted: false,
+                    closing: false,
                 },
                 client: client.clone(),
             },
@@ -74,16 +87,13 @@ impl Service {
             return Ok(policy::Outcome::Stale);
         }
         let Some(token) = self.provisional_token(client) else {
-            return Ok(
-                match self
-                    .token(client)
-                    .await?
-                    .and_then(|t| self.admitted.get(&t))
-                {
-                    Some(owned) => policy::Outcome::Accepted(owned.connection.kind),
-                    None => policy::Outcome::Stale,
-                },
-            );
+            return Ok(match self.connection_info(client).await? {
+                Some(connection) if connection.admitted => {
+                    policy::Outcome::Accepted(connection.kind)
+                }
+                None => policy::Outcome::Stale,
+                Some(_) => policy::Outcome::Stale,
+            });
         };
         if !self.sockets.begin_admission(token) {
             self.sockets.cancel(token);
@@ -140,5 +150,46 @@ impl Service {
         }
         self.refresh().await?;
         Ok(outcome)
+    }
+    pub(super) async fn ping_closing(
+        &mut self,
+        client: &net::Client,
+        close: &mut Option<Box<net::PingClose>>,
+    ) -> Result<policy::Outcome, Error> {
+        let Some(connection) = self.connection_info(client).await? else {
+            return Ok(policy::Outcome::Stale);
+        };
+        if connection.kind != policy::Kind::Temporary || !connection.admitted {
+            return Err(Error::Configuration);
+        }
+        if !close.as_ref().expect("owned continuation").was_closing()
+            && let Some(token) = self.token(client).await?
+        {
+            let outcome = self
+                .apply(policy::Command::PingDone {
+                    peer: client.peer(),
+                    token,
+                })
+                .await?;
+            if outcome != policy::Outcome::Done {
+                return Ok(outcome);
+            }
+        }
+        if self.stopping || client.is_closed() {
+            return Err(Error::Closed);
+        }
+        self.admitted
+            .get_mut(&connection.token)
+            .expect("owned closing callback")
+            .connection
+            .closing = true;
+        // The response and negotiation already completed; durable policy
+        // retirement precedes releasing the driver's post-ping fence.
+        close
+            .take()
+            .expect("owned continuation")
+            .close()
+            .map_err(|e| Error::Transport(transport::Error::Runtime(e)))?;
+        Ok(policy::Outcome::Done)
     }
 }

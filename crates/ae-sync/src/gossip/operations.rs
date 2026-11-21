@@ -333,7 +333,10 @@ pub(super) async fn fanout(
             if cancel.cancelled() {
                 return Err(Error::Closed);
             }
-            let mut clients: Vec<_> = clients.into_iter().filter(|c| !c.is_closed()).collect();
+            let mut clients: Vec<_> = clients
+                .into_iter()
+                .filter(|c| !c.is_closed() && !c.is_disconnecting())
+                .collect();
             clients.sort_by_cached_key(|c| random.hash_one((round, c.peer().0)));
             clients.truncate(policy.max_peers);
             if clients.is_empty() {

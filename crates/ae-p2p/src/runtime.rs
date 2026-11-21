@@ -14,7 +14,8 @@ mod wire;
 pub use driver::Driver;
 pub use lifecycle::Monitor;
 pub use queue::{
-    Client, Event, Generation, PingObservation, PingRetirement, Prepared, Received, Reply, Ticket,
+    Client, Event, Generation, PingClose, PingObservation, PingRetirement, Prepared, Received,
+    Reply, Ticket,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,6 +5,7 @@ use message::{Kind, Message, Value};
 use std::collections::BTreeMap;
 use tokio::net::TcpListener;
 mod graceful_close;
+mod ping_close;
 mod ping_order;
 
 fn init() -> Message {

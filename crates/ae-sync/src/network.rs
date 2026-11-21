@@ -222,6 +222,7 @@ pub struct Connection {
     pub address: std::net::Ipv4Addr,
     pub kind: policy::Kind,
     pub admitted: bool,
+    pub closing: bool,
 }
 pub struct ConnectionTicket {
     accepted: Ticket,
@@ -246,6 +247,10 @@ impl ConnectionTicket {
 enum Work {
     Policy(policy::Command),
     PingReceived(net::Client),
+    PingClosing {
+        client: net::Client,
+        close: Option<Box<net::PingClose>>,
+    },
     FirstPing {
         client: net::Client,
         port: u16,
@@ -389,11 +394,27 @@ impl Handle {
             bytes.checked_add(256).ok_or(Error::Busy)?,
         )
     }
-    // Call after processing/sending the response to an unsolicited ping. The
-    // owner finds the exact admitted generation; old messages cannot reschedule
-    // or close a replacement connection with the same authenticated identity.
+    // Call after a permanent connection's unsolicited ping response completes.
+    // Temporary connections use ping_closing with the driver's continuation so
+    // registry retirement precedes Close and the next incoming callback.
     pub fn ping_received(&self, client: net::Client) -> Result<Ticket, Error> {
         self.submit(Work::PingReceived(client), 256)
+    }
+    pub fn ping_closing(
+        &self,
+        client: net::Client,
+        close: net::PingClose,
+    ) -> Result<Ticket, Error> {
+        if close.generation() != client.generation() || !close.is_ready() {
+            return Err(Error::Configuration);
+        }
+        self.submit(
+            Work::PingClosing {
+                client,
+                close: Some(Box::new(close)),
+            },
+            256,
+        )
     }
     pub fn disconnect(&self, client: net::Client) -> Result<Ticket, Error> {
         self.submit(Work::Disconnect(client), 256)

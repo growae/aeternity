@@ -221,10 +221,13 @@ async fn replacing_connection_preserves_authorized_session_and_rejects_stale_own
         s.peers == 1 && s.counts.connections_closed == 1
     })
     .await;
-    within(old_driver).await.unwrap();
+    assert_eq!(
+        within(old_driver).await.unwrap().reason,
+        net::Error::RemoteClose
+    );
     assert_eq!(
         within(old_monitor.wait()).await.reason,
-        net::Error::Shutdown
+        net::Error::LocalClose
     );
     assert!(new_monitor.exit().is_none());
     assert!(old_remote.is_closed());

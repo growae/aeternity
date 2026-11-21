@@ -6,6 +6,7 @@ struct Lane {
     client: net::Client,
     pending: Option<Action>,
     active: Option<Action>,
+    replacement: Option<(net::Client, Action)>,
     progress: watch::Receiver<Progress>,
     publish: watch::Sender<Progress>,
 }
@@ -84,12 +85,31 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         if client.is_closed() {
             return Err(Error::Stale);
         }
+        if client.is_disconnecting() {
+            // Existing work can consume crossing replies during grace, but
+            // closing callbacks must not schedule another outbound session.
+            return Ok(());
+        }
         let peer = client.peer();
-        if let Some(lane) = self.lanes.get(&peer)
+        if let Some(lane) = self.lanes.get_mut(&peer)
             && lane.client.generation() != client.generation()
         {
             if !lane.client.is_closed() {
-                return Err(Error::Stale);
+                if lane.client.is_disconnecting() {
+                    if lane.active.is_some() {
+                        // Dropping this task would cancel its request ticket
+                        // and abruptly stop the old transport. Retain one
+                        // replacement intent until the old task settles.
+                        if lane.replacement.replace((client, action)).is_some() {
+                            self.current.counts.coalesced =
+                                self.current.counts.coalesced.saturating_add(1);
+                        }
+                        lane.pending = None;
+                        return Ok(());
+                    }
+                } else {
+                    return Err(Error::Stale);
+                }
             }
             if lane.active.is_some() {
                 self.current.counts.cancelled = self.current.counts.cancelled.saturating_add(1);
@@ -110,6 +130,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                     client,
                     pending: None,
                     active: None,
+                    replacement: None,
                     progress,
                     publish,
                 },
@@ -138,6 +159,10 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 continue;
             };
             if lane.active.is_some() {
+                continue;
+            }
+            if lane.client.is_closed() || lane.client.is_disconnecting() {
+                self.lanes.remove(&peer);
                 continue;
             }
             let Some(action) = lane.pending.take() else {
@@ -185,7 +210,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         self.current.queued = self
             .lanes
             .values()
-            .filter(|lane| lane.pending.is_some())
+            .filter(|lane| lane.pending.is_some() || lane.replacement.is_some())
             .count();
         let target = self.observe_shared();
         if target != self.target {
@@ -216,6 +241,14 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         }
         self.lifecycle.refresh();
         lane.active = None;
+        if let Some((client, action)) = lane.replacement.take() {
+            lane.client = client;
+            lane.pending = Some(action);
+            self.current.counts.replaced = self.current.counts.replaced.saturating_add(1);
+        }
+        if lane.client.is_closed() || lane.client.is_disconnecting() {
+            lane.pending = None;
+        }
         if lane.pending.is_some() {
             self.ready.push_back(key.0);
         } else {

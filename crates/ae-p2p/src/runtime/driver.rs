@@ -7,6 +7,10 @@ struct PingWait {
     state: Arc<PingState>,
     deadline: Instant,
 }
+struct PostPing {
+    close: queue::ClosingPing,
+    deadline: Instant,
+}
 
 pub struct Driver {
     socket: TcpStream,
@@ -28,6 +32,8 @@ pub struct Driver {
     finishing: bool,
     prepared_finish: Option<requests::Update>,
     stop_after_ping: bool,
+    close_after_ping: Option<queue::ClosingPing>,
+    post_ping: Option<PostPing>,
     ping_wait: Option<PingWait>,
     buffered: Vec<u8>,
     decoder: noise::record::Decoder,
@@ -80,6 +86,8 @@ impl Driver {
             finishing: false,
             prepared_finish: None,
             stop_after_ping: false,
+            close_after_ping: None,
+            post_ping: None,
             ping_wait: None,
             buffered: vec![],
             decoder: noise::record::Decoder::new(noise::MAX_CIPHERTEXT),
@@ -123,7 +131,7 @@ impl Driver {
                 return Err(reason);
             }
             self.close_if_requested()?;
-            if self.ping_wait.is_none() && !self.sending_close && !self.buffered.is_empty() {
+            if !self.fenced() && !self.sending_close && !self.buffered.is_empty() {
                 let buffered = std::mem::take(&mut self.buffered);
                 self.input(&buffered)?;
             }
@@ -131,7 +139,7 @@ impl Driver {
             if self.close_deadline.is_some_and(|deadline| deadline <= now) {
                 return Err(Error::LocalClose);
             }
-            if self.ping_wait.is_none() && !self.sending_close {
+            if !self.fenced() && !self.sending_close {
                 let update = self.requests.expire(now.into_std());
                 self.settle(update, None, None)?;
             }
@@ -140,6 +148,7 @@ impl Driver {
                 self.fragment_deadline,
                 self.outgoing.as_ref().map(|o| o.deadline),
                 self.ping_wait.as_ref().map(|p| p.deadline),
+                self.post_ping.as_ref().map(|p| p.deadline),
             ]
             .into_iter()
             .flatten()
@@ -155,15 +164,22 @@ impl Driver {
                 self.record_deadline,
                 self.fragment_deadline,
                 self.outgoing.as_ref().map(|o| o.deadline),
-                (self.ping_wait.is_none() && !self.sending_close)
+                (!self.fenced() && !self.sending_close)
                     .then(|| self.requests.next_deadline().map(Instant::from_std))
                     .flatten(),
                 self.ping_wait.as_ref().map(|p| p.deadline),
+                self.post_ping.as_ref().map(|p| p.deadline),
             ]
             .into_iter()
             .flatten()
             .min();
             tokio::select! {
+                released = async { (&mut self.post_ping.as_mut().expect("post-ping fence").close.release).await }, if self.post_ping.is_some() => {
+                    if released.is_err() {
+                        return Err(self.stopped.borrow().clone().unwrap_or(Error::Cancelled));
+                    }
+                    self.post_ping = None;
+                }
                 changed = self.disconnect.changed(), if !*self.disconnect.borrow() => {
                     if changed.is_err() { return Err(Error::Closed); }
                 }
@@ -177,7 +193,7 @@ impl Driver {
                         None => std::future::pending::<()>().await,
                     }
                 } => (),
-                ready = self.socket.readable(), if self.ping_wait.is_none() && !self.sending_close => {
+                ready = self.socket.readable(), if !self.fenced() && !self.sending_close => {
                     ready?;
                     match self.socket.try_read(&mut bytes) {
                         Ok(0) => return Err(if self.closing { Error::LocalClose } else { Error::Io(io::ErrorKind::UnexpectedEof) }),
@@ -205,7 +221,7 @@ impl Driver {
                         }
                     }
                 }
-                command = self.commands.recv(), if self.outgoing.is_none() && self.ping_wait.is_none()
+                command = self.commands.recv(), if self.outgoing.is_none() && !self.fenced()
                     && (!self.closing || !self.commands.is_closed() || !self.commands.is_empty()) => {
                     match command {
                         Some(command) => self.start(command)?,
@@ -218,18 +234,17 @@ impl Driver {
                         None => return Err(Error::Closed),
                     }
                 }
-                reply = self.replies.recv(), if self.outgoing.is_none() && (!self.replies.is_closed() || !self.replies.is_empty()) => {
+                reply = self.replies.recv(), if self.outgoing.is_none() && self.post_ping.is_none() && (!self.replies.is_closed() || !self.replies.is_empty()) => {
                     if let Some(reply) = reply { self.start(reply)?; }
                 }
             }
         }
     }
+    fn fenced(&self) -> bool {
+        self.ping_wait.is_some() || self.post_ping.is_some()
+    }
     fn close_if_requested(&mut self) -> Result<(), Error> {
-        if self.closing
-            || !*self.disconnect.borrow()
-            || self.ping_wait.is_some()
-            || self.outgoing.is_some()
-        {
+        if self.closing || !*self.disconnect.borrow() || self.fenced() || self.outgoing.is_some() {
             return Ok(());
         }
         let deadline = Instant::now()
@@ -254,6 +269,7 @@ impl Driver {
             return Err(Error::Timeout);
         }
         self.stop_after_ping = finish.stop_after;
+        self.close_after_ping = finish.close_after;
         if let Some(packet) = finish.packet {
             if let Some(probe) = finish.probe {
                 match self.prepare_probe(&finish.token, &packet, probe) {
@@ -313,12 +329,25 @@ impl Driver {
                 .finish_ping(&ping.token)
                 .map_err(Error::Request)?,
         };
-        let result = self.settle(update, None, None);
-        answer.finish(result.clone().map(|()| Reply::Sent));
-        result?;
+        if let Err(error) = self.settle(update, None, None) {
+            answer.finish(Err(error.clone()));
+            return Err(error);
+        }
         if self.stop_after_ping || ping.state.retire.load(std::sync::atomic::Ordering::SeqCst) {
+            answer.finish(Ok(Reply::Sent));
             Err(Error::Shutdown)
         } else {
+            if let Some(close) = self.close_after_ping.take() {
+                close.ready.store(
+                    if self.closing { 2 } else { 1 },
+                    std::sync::atomic::Ordering::Release,
+                );
+                self.post_ping = Some(PostPing {
+                    close,
+                    deadline: ping.deadline,
+                });
+            }
+            answer.finish(Ok(Reply::Sent));
             Ok(())
         }
     }

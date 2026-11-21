@@ -52,14 +52,14 @@ pub(super) async fn run(
 }
 impl Session {
     async fn current(&mut self) -> Result<network::Connection, Error> {
-        let connection = self
+        let mut connection = self
             .ctx
             .network
             .connection(self.client.clone())?
             .wait()
             .await?
             .ok_or(Error::Stale)?;
-        if connection.admitted {
+        if connection.admitted && !connection.closing {
             let mut capabilities = self.ctx.capabilities.lock().map_err(|_| Error::Closed)?;
             // A provisional lane must never erase the admitted generation's
             // capabilities. Recheck retirement under the registry lock so an
@@ -67,7 +67,11 @@ impl Session {
             if self.client.is_closed() {
                 return Err(Error::Stale);
             }
-            capabilities.attach(self.client.peer(), self.client.generation().clone())?;
+            if self.client.is_disconnecting() {
+                connection.closing = true;
+            } else {
+                capabilities.attach(self.client.peer(), self.client.generation().clone())?;
+            }
         }
         Ok(connection)
     }
@@ -163,7 +167,7 @@ impl Session {
         let target = *self.ctx.target.borrow();
         let decision = ping::evaluate(&local, message, previous, target, self.ctx.config.ping)?;
         for effect in decision.effects {
-            self.current().await?;
+            let connection = self.current().await?;
             match effect {
                 ping::Effect::Peers(peers) => {
                     // Native workers independently drop unusable addresses.
@@ -223,11 +227,17 @@ impl Session {
                     )?;
                 }
                 ping::Effect::Capabilities(caps) => {
-                    self.ctx
+                    let registered = self
+                        .ctx
                         .capabilities
                         .lock()
                         .map_err(|_| Error::Closed)?
-                        .receive(self.client.peer(), self.client.generation(), &caps)?;
+                        .receive(self.client.peer(), self.client.generation(), &caps);
+                    match registered {
+                        Err(capabilities::Error::Stale)
+                            if connection.closing || self.client.is_disconnecting() => {}
+                        other => other?,
+                    }
                     // The original map has one key, chain_poi; last duplicate wins.
                     if let Some(chain_poi) = caps.into_iter().last() {
                         let weight = chain_poi
@@ -291,7 +301,7 @@ impl Session {
                     .insert(version, async move { (Some(ping), ticket.await) });
             }
             Input::Message(received) => {
-                self.current().await?;
+                let mut connection = self.current().await?;
                 if received.message().kind() == Kind::Ping {
                     self.ctx
                         .progress
@@ -306,7 +316,7 @@ impl Session {
                             .await?
                         {
                             policy::Outcome::Accepted(_) => {
-                                self.current().await?;
+                                connection = self.current().await?;
                             }
                             policy::Outcome::Rejected(reason) => {
                                 let response = Message::response_error(
@@ -349,8 +359,19 @@ impl Session {
                             None => unreachable!(),
                         }
                     };
-                    self.client.finish_ping(&received, Some(&response))?.await?;
-                    if !observation.busy {
+                    if !observation.busy && connection.kind == policy::Kind::Temporary {
+                        let (finished, close) =
+                            self.client.finish_ping_before_close(&received, &response)?;
+                        finished.await?;
+                        self.ctx
+                            .network
+                            .ping_closing(self.client.clone(), close)?
+                            .wait()
+                            .await?;
+                    } else {
+                        self.client.finish_ping(&received, Some(&response))?.await?;
+                    }
+                    if !observation.busy && connection.kind != policy::Kind::Temporary {
                         self.ctx
                             .network
                             .ping_received(self.client.clone())?
@@ -395,6 +416,7 @@ impl Session {
         };
         if let Some(ping) = scheduled
             && !ping.complete_and_wait(result).await
+            && !self.client.is_disconnecting()
         {
             return Err(Error::Stale);
         }

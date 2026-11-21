@@ -118,7 +118,12 @@ impl Service {
                     self.ready_dials.remove(&token);
                     self.ping_jobs.remove(&token);
                     self.ping_tokens.remove(&token);
-                    self.sockets.cancel(token);
+                    if let Some(owned) = self.admitted.get_mut(&token) {
+                        owned.connection.closing = true;
+                        owned.client.disconnect();
+                    } else {
+                        self.sockets.cancel(token);
+                    }
                     true
                 }
             }
@@ -127,7 +132,7 @@ impl Service {
                     .admitted
                     .get(&token)
                     .map(|a| &a.client)
-                    .filter(|c| c.peer() == peer && !c.is_closed())
+                    .filter(|c| c.peer() == peer && !c.is_closed() && !c.is_disconnecting())
                     .cloned()
                 {
                     if self.ping_tokens.contains_key(&token) {
@@ -424,6 +429,7 @@ impl Service {
                         address,
                         kind,
                         admitted: true,
+                        closing: false,
                     },
                 },
             );
@@ -496,10 +502,10 @@ impl Service {
         client: &net::Client,
         peers: Vec<policy::Info>,
     ) -> Result<policy::Outcome, Error> {
-        let Some(token) = self.token(client).await? else {
+        let Some(connection) = self.connection_info(client).await?.filter(|c| c.admitted) else {
             return Ok(policy::Outcome::Stale);
         };
-        let source = self.admitted[&token].connection.address;
+        let source = connection.address;
         for peer in peers {
             self.apply(policy::Command::Resolve {
                 peer,
@@ -520,9 +526,7 @@ impl Service {
             Work::Learn { client, peers } => self.learn(client, std::mem::take(peers)).await,
             Work::PoolCounts { client, reply } => {
                 let result = async {
-                    if self.provisional_token(client).is_none()
-                        && self.token(client).await?.is_none()
-                    {
+                    if self.connection_info(client).await?.is_none() {
                         return Ok(None);
                     }
                     let ticket = self.client.pool_counts()?;
@@ -549,7 +553,14 @@ impl Service {
                 port,
                 retirement,
             } => self.first_ping(client, *port, retirement).await,
+            Work::PingClosing { client, close } => self.ping_closing(client, close).await,
             Work::PingReceived(client) => match self.token(client).await {
+                Ok(Some(_)) if client.is_disconnecting() => Ok(policy::Outcome::Ignored),
+                Ok(Some(token))
+                    if self.admitted[&token].connection.kind == policy::Kind::Temporary =>
+                {
+                    Err(Error::Configuration)
+                }
                 Ok(Some(token)) => {
                     self.apply(policy::Command::PingDone {
                         peer: client.peer(),
@@ -562,7 +573,12 @@ impl Service {
             },
             Work::Disconnect(client) => match self.token(client).await {
                 Ok(Some(token)) => {
-                    self.sockets.cancel(token);
+                    self.admitted
+                        .get_mut(&token)
+                        .expect("owned connection")
+                        .connection
+                        .closing = true;
+                    client.disconnect();
                     Ok(policy::Outcome::Done)
                 }
                 Ok(None) => Ok(policy::Outcome::Stale),
@@ -573,16 +589,21 @@ impl Service {
                 Ok(None) => Ok(policy::Outcome::Stale),
                 Err(error) => Err(error),
             },
-            Work::Synchronize(client) => match self.token(client).await {
-                Ok(Some(_)) => match self.pool.synchronize(client.peer()) {
-                    Ok(ticket) => self
-                        .wait(ticket.wait())
-                        .await
-                        .map(policy::Outcome::Bool)
-                        .map_err(Error::from),
-                    Err(error) => Err(error.into()),
-                },
-                Ok(None) => Ok(policy::Outcome::Stale),
+            Work::Synchronize(client) => match self.connection_info(client).await {
+                Ok(Some(connection)) if connection.admitted && connection.closing => {
+                    Ok(policy::Outcome::Bool(false))
+                }
+                Ok(Some(connection)) if connection.admitted => {
+                    match self.pool.synchronize(client.peer()) {
+                        Ok(ticket) => self
+                            .wait(ticket.wait())
+                            .await
+                            .map(policy::Outcome::Bool)
+                            .map_err(Error::from),
+                        Err(error) => Err(error.into()),
+                    }
+                }
+                Ok(_) => Ok(policy::Outcome::Stale),
                 Err(error) => Err(error),
             },
         };

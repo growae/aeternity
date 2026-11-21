@@ -510,22 +510,26 @@ async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_respon
         ae_p2p::registry::Kind::Temporary
     );
     status(&mut h, |s| s.policy.as_ref().unwrap().counts.temporary == 1).await;
-    within(
-        local_client
-            .finish_ping(
-                &received,
-                Some(&Message::response_ok(received.message(), Default::default()).unwrap()),
-            )
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let (finished, continuation) = local_client
+        .finish_ping_before_close(
+            &received,
+            &Message::response_ok(received.message(), Default::default()).unwrap(),
+        )
+        .unwrap();
+    within(finished).await.unwrap();
     assert!(matches!(within(request).await, Ok(net::Reply::Response(_))));
     assert_eq!(
-        h.ping_received(local_client).unwrap().wait().await.unwrap(),
+        h.ping_closing(local_client, continuation)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
         Outcome::Done
     );
-    within(remote_task).await.unwrap();
+    assert_eq!(
+        within(remote_task).await.unwrap().reason,
+        net::Error::RemoteClose
+    );
     status(&mut h, |s| s.sockets == 0).await;
     command(
         &h,

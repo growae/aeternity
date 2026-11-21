@@ -2,7 +2,7 @@ use super::*;
 use std::{
     future::Future,
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU16, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
     task::{Context, Poll},
 };
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
@@ -65,6 +65,52 @@ pub(super) struct PingState {
 pub struct PingRetirement {
     state: Arc<PingState>,
     stop: watch::Sender<Option<Error>>,
+}
+pub struct PingClose {
+    generation: Generation,
+    ready: Arc<AtomicU8>,
+    release: Option<oneshot::Sender<()>>,
+    disconnect: watch::Sender<bool>,
+    stop: watch::Sender<Option<Error>>,
+}
+impl PingClose {
+    pub fn generation(&self) -> &Generation {
+        &self.generation
+    }
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire) != 0
+    }
+    pub fn was_closing(&self) -> bool {
+        self.ready.load(Ordering::Acquire) == 2
+    }
+    // The successful response/negotiation ticket must be awaited first. The
+    // owner can now notify peer policy while the callback still fences input.
+    pub fn close(mut self) -> Result<(), Error> {
+        if !self.is_ready() {
+            return Err(Error::InvalidPing);
+        }
+        self.disconnect.send_if_modified(|requested| {
+            let changed = !*requested;
+            *requested = true;
+            changed
+        });
+        self.release
+            .take()
+            .expect("owned continuation")
+            .send(())
+            .map_err(|_| Error::Closed)
+    }
+}
+impl Drop for PingClose {
+    fn drop(&mut self) {
+        if self.release.is_some() {
+            stop(&self.stop, Error::Cancelled);
+        }
+    }
+}
+pub(super) struct ClosingPing {
+    pub ready: Arc<AtomicU8>,
+    pub release: oneshot::Receiver<()>,
 }
 impl PingRetirement {
     // A policy owner can accept a deferred Close without blocking unrelated
@@ -192,6 +238,7 @@ pub(super) struct Finish {
     pub answer: Answer,
     pub probe: Option<Answer>,
     pub stop_after: bool,
+    pub close_after: Option<ClosingPing>,
     pub budget: OwnedSemaphorePermit,
 }
 
@@ -374,7 +421,7 @@ impl Client {
         received: &Received,
         response: Option<&message::Message>,
     ) -> Result<Ticket, Error> {
-        self.finish(received, response, false, false)
+        self.finish(received, response, false, false, None)
             .map(|(finished, _)| finished)
     }
     // Native first-ping policy rejection queues stop after the callback. Keep
@@ -387,7 +434,7 @@ impl Client {
         if !received.receipt.as_ref().is_some_and(|r| r.incoming) {
             return Err(Error::InvalidPing);
         }
-        self.finish(received, Some(response), false, true)
+        self.finish(received, Some(response), false, true, None)
             .map(|(finished, _)| finished)
     }
     // First ticket completes the callback after the probe write; the second
@@ -398,8 +445,41 @@ impl Client {
         received: &Received,
         probe: &message::Message,
     ) -> Result<(Ticket, Ticket), Error> {
-        self.finish(received, Some(probe), true, false)
+        self.finish(received, Some(probe), true, false, None)
             .map(|(finished, response)| (finished, response.expect("probe response ticket")))
+    }
+    pub fn finish_ping_before_close(
+        &self,
+        received: &Received,
+        response: &message::Message,
+    ) -> Result<(Ticket, PingClose), Error> {
+        if !received.receipt.as_ref().is_some_and(|r| r.incoming)
+            || received.ping.is_none_or(|p| p.busy)
+        {
+            return Err(Error::InvalidPing);
+        }
+        let (release, receiver) = oneshot::channel();
+        let ready = Arc::new(AtomicU8::new(0));
+        let (ticket, _) = self.finish(
+            received,
+            Some(response),
+            false,
+            false,
+            Some(ClosingPing {
+                ready: ready.clone(),
+                release: receiver,
+            }),
+        )?;
+        Ok((
+            ticket,
+            PingClose {
+                generation: self.generation.clone(),
+                ready,
+                release: Some(release),
+                disconnect: self.disconnect.clone(),
+                stop: self.stop.clone(),
+            },
+        ))
     }
     fn finish(
         &self,
@@ -407,6 +487,7 @@ impl Client {
         packet: Option<&message::Message>,
         probe: bool,
         stop_after: bool,
+        close_after: Option<ClosingPing>,
     ) -> Result<(Ticket, Option<Ticket>), Error> {
         let receipt = received.receipt.as_ref().ok_or(Error::InvalidPing)?;
         if receipt.generation != self.generation
@@ -468,6 +549,7 @@ impl Client {
             answer,
             probe,
             stop_after,
+            close_after,
             budget,
         });
         Ok((ticket, response))

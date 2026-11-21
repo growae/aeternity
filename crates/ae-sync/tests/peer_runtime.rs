@@ -1563,5 +1563,7 @@ mod lifecycle;
 #[path = "peer_runtime/capabilities.rs"]
 mod capabilities;
 
+#[path = "peer_runtime/closing.rs"]
+mod closing;
 #[path = "peer_runtime/preping.rs"]
 mod preping;
