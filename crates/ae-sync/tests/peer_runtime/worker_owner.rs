@@ -3,7 +3,7 @@ use ae_storage::pool::worker;
 use ae_sync::runtime::{connection as owner, workers};
 use connection_owner::{closed, ready, remote, settings};
 
-fn worker_config() -> workers::Config {
+pub(super) fn worker_config() -> workers::Config {
     workers::Config {
         admission: worker::Settings {
             origins_interval: None,
@@ -38,7 +38,7 @@ async fn running(node: &Node) -> (workers::Handle, JoinHandle<workers::Status>) 
     .await;
     (handle, task)
 }
-fn inputs(node: &Node, bindings: &workers::Bindings) -> owner::Inputs {
+pub(super) fn inputs(node: &Node, bindings: &workers::Bindings) -> owner::Inputs {
     owner::Inputs {
         database: node.db.clone(),
         admission: bindings.admission.current().unwrap().client,

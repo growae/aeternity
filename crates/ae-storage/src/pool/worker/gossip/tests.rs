@@ -24,7 +24,8 @@ fn unavailable_cache_fails_open_and_reset_recovers_a_poisoned_cache() {
     let (ready, started) = mpsc::channel();
     let (release, wait) = mpsc::channel();
     let holder = thread::spawn(move || {
-        let _guard = held.cache.lock().unwrap();
+        let instance = held.instance().unwrap();
+        let _guard = instance.lock().unwrap();
         ready.send(()).unwrap();
         wait.recv().unwrap();
     });
@@ -44,7 +45,8 @@ fn unavailable_cache_fails_open_and_reset_recovers_a_poisoned_cache() {
     let broken = cache.clone();
     assert!(
         thread::spawn(move || {
-            let _guard = broken.cache.lock().unwrap();
+            let instance = broken.instance().unwrap();
+            let _guard = instance.lock().unwrap();
             panic!("cache failure");
         })
         .join()
@@ -114,4 +116,205 @@ fn concurrent_received_duplicates_have_one_admission_and_one_notification() {
     assert_eq!(stats.miss, 1.into());
     assert_eq!(client.events_after(&cursor, 10).unwrap().events.len(), 1);
     worker.shutdown().unwrap();
+}
+
+#[test]
+fn managed_cache_has_exclusive_generations_preserves_configuration_and_rejects_stale_handles() {
+    let (cache, mut controller) = GossipCache::managed(3, 8).unwrap();
+    let hash = tx().hash();
+    assert!(!cache.check(hash));
+    assert!(!cache.check(hash));
+    assert_eq!(cache.stats(), Err(Error::CacheUnavailable));
+    assert_eq!(cache.reset(), Err(Error::CacheUnavailable));
+    let first = controller.start().unwrap();
+    let stale = first.handle();
+    assert!(matches!(
+        controller.start(),
+        Err(LifecycleError::AlreadyRunning)
+    ));
+    assert!(!cache.check(hash));
+    assert!(cache.check(hash));
+    cache.reconfigure(1).unwrap();
+    first.shutdown();
+    let second = controller.start().unwrap();
+    assert_eq!(cache.instance().unwrap().lock().unwrap().capacity(), 1);
+    assert_eq!(cache.stats().unwrap(), Default::default());
+    drop(first);
+    stale.shutdown();
+    assert!(!stale.is_running() && second.is_running());
+    assert!(!cache.check(hash));
+    assert!(cache.check(hash));
+    controller.shutdown();
+    assert!(!second.is_running());
+    assert!(!cache.check(hash));
+    assert!(matches!(controller.start(), Err(LifecycleError::Closed)));
+}
+
+#[test]
+fn captured_cache_operation_cannot_mutate_a_replacement_incarnation() {
+    let (cache, mut controller) = GossipCache::managed(3, 8).unwrap();
+    let first = controller.start().unwrap();
+    let (captured, ready) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let reader = cache.clone();
+    let hash = tx().hash();
+    assert!(!cache.check(hash));
+    let retired = cache.instance().unwrap();
+    let operation = thread::spawn(move || {
+        // This is the exact capture/lock/check sequence used by check(), with
+        // a controlled delay after capture, before the old cache is locked.
+        let instance = reader.instance().unwrap();
+        captured.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+        reader.check_instance(&instance, hash)
+    });
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    first.shutdown();
+    let second = controller.start().unwrap();
+    release.send(()).unwrap();
+    assert!(!operation.join().unwrap());
+    assert_eq!(retired.lock().unwrap().stats().hit, 0.into());
+    assert_eq!(cache.stats().unwrap(), Default::default());
+    assert!(!cache.check(hash));
+    assert!(second.is_running());
+    drop(controller);
+    assert!(!second.is_running());
+    assert_eq!(cache.stats(), Err(Error::CacheUnavailable));
+}
+
+#[test]
+fn poisoned_managed_incarnation_is_dead_and_replacement_uses_new_storage() {
+    let (cache, mut controller) = GossipCache::managed(3, 8).unwrap();
+    let first = controller.start().unwrap();
+    let broken = cache.instance().unwrap();
+    assert!(
+        thread::spawn(move || {
+            let _held = broken.lock().unwrap();
+            panic!("cache incarnation failure");
+        })
+        .join()
+        .is_err()
+    );
+    assert!(!first.is_running());
+    assert_eq!(cache.stats(), Err(Error::CacheUnavailable));
+    assert_eq!(cache.reset(), Err(Error::CacheUnavailable));
+    assert!(!cache.check(tx().hash()));
+    first.shutdown();
+    let second = controller.start().unwrap();
+    drop(first);
+    assert!(second.is_running());
+    assert_eq!(cache.stats().unwrap(), Default::default());
+    assert!(!cache.check(tx().hash()));
+    assert!(cache.check(tx().hash()));
+}
+
+#[test]
+fn admission_uses_current_cache_and_downtime_only_bypasses_the_duplicate_filter() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let (cache, mut controller) = GossipCache::managed(3, 8).unwrap();
+    let worker = Worker::spawn_with_cache(
+        db,
+        NetworkProfile::mainnet(),
+        config(),
+        Settings {
+            origins_interval: None,
+            ..Default::default()
+        },
+        cache.clone(),
+    )
+    .unwrap();
+    let client = worker.client();
+    assert!(matches!(
+        client.receive(tx()).unwrap().wait().unwrap().outcome,
+        PushOutcome::Accepted { .. }
+    ));
+    let first = controller.start().unwrap();
+    assert!(matches!(
+        client.receive(tx()).unwrap().wait(),
+        Err(Error::Service(Failure::Policy(
+            ae_mempool::pool::Error::AlreadyKnown
+        )))
+    ));
+    assert_eq!(
+        client.receive(tx()).unwrap().wait().unwrap().outcome,
+        PushOutcome::Cached
+    );
+    first.shutdown();
+    let second = controller.start().unwrap();
+    assert!(matches!(
+        client.receive(tx()).unwrap().wait(),
+        Err(Error::Service(Failure::Policy(
+            ae_mempool::pool::Error::AlreadyKnown
+        )))
+    ));
+    assert_eq!(
+        cache.stats().unwrap(),
+        Stats {
+            hit: 0.into(),
+            miss: 1.into()
+        }
+    );
+    assert_eq!(
+        client.receive(tx()).unwrap().wait().unwrap().outcome,
+        PushOutcome::Cached
+    );
+    drop(second);
+    assert!(client.receive(tx()).unwrap().wait().is_err());
+    assert!(client.info().running);
+    worker.shutdown().unwrap();
+}
+
+#[test]
+fn managed_cache_lifecycle_matches_original_registered_process() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/erlang_cache_owner.json"
+    ))
+    .unwrap();
+    let hash = |n: u64| {
+        let mut bytes = [0; 32];
+        bytes[24..].copy_from_slice(&n.to_be_bytes());
+        ae_types::Hash256(bytes)
+    };
+    for scenario in fixture["rows"].as_array().unwrap() {
+        let (cache, mut controller) =
+            GossipCache::managed(scenario["capacity"].as_u64().unwrap() as usize, 100_000).unwrap();
+        let mut owner = None;
+        for row in scenario["steps"].as_array().unwrap() {
+            match row["op"].as_str().unwrap() {
+                "absent" => {
+                    assert_eq!(cache.check(hash(9)), row["hit"].as_bool().unwrap());
+                    assert_eq!(cache.stats(), Err(Error::CacheUnavailable));
+                }
+                "start" => {
+                    owner = Some(controller.start().unwrap());
+                }
+                "check" => assert_eq!(
+                    cache.check(hash(row["hash"].as_u64().unwrap())),
+                    row["hit"].as_bool().unwrap()
+                ),
+                "capacity" => cache
+                    .reconfigure(row["capacity"].as_u64().unwrap() as usize)
+                    .unwrap(),
+                "reset" => cache.reset().unwrap(),
+                "stop" | "crash" => {
+                    drop(owner.take().unwrap());
+                }
+                other => panic!("unknown native cache operation {other}"),
+            }
+            if row.get("state").is_some() {
+                let instance = cache.instance().unwrap();
+                let current = instance.lock().unwrap();
+                let queue: Vec<_> = current
+                    .entries()
+                    .map(|h| u64::from_be_bytes(h.0[24..].try_into().unwrap()))
+                    .collect();
+                assert_eq!(
+                    serde_json::json!({"size": current.len(), "queue": queue, "hit": current.stats().hit.to_u64().unwrap().to_string(), "miss": current.stats().miss.to_u64().unwrap().to_string()}),
+                    row["state"]
+                );
+            }
+        }
+        assert!(owner.is_none());
+    }
 }

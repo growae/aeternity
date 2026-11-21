@@ -4,6 +4,7 @@ use tokio::task::{Id, JoinSet};
 
 type Run = Pin<Box<dyn Future<Output = Failure> + Send>>;
 pub(super) struct Group<O: MapOrder + Send + Sync + 'static> {
+    cache: Option<admission::CacheOwner>,
     importer: Option<chain::Importer<O>>,
     pending: Vec<(Child, Run)>,
     tasks: JoinSet<Failure>,
@@ -14,6 +15,7 @@ pub(super) struct Group<O: MapOrder + Send + Sync + 'static> {
 impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
     pub fn new() -> Self {
         Self {
+            cache: None,
             importer: None,
             pending: vec![],
             tasks: JoinSet::new(),
@@ -31,17 +33,34 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.stop.push(Box::new(stop));
         self.pending.push((child, Box::pin(run)));
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare<F>(
         &mut self,
         inputs: &Inputs<O>,
         dependencies: &super::super::workers::Bindings,
         config: &Config,
         outputs: &mut F,
+        cache: Option<&mut admission::CacheController>,
         number: u64,
     ) -> Result<Generation, Failure>
     where
         F: FnMut() -> Result<observe::Outputs, observe::Error>,
     {
+        if let Some(cache) = cache {
+            let pool = dependencies
+                .admission
+                .snapshot()
+                .value
+                .ok_or_else(|| Failure::new(Child::GossipCache, "admission unavailable"))?;
+            if !cache.uses_cache(&pool.client.gossip_cache()) {
+                return Err(Failure::new(Child::GossipCache, "foreign cache lookup"));
+            }
+            self.cache = Some(
+                cache
+                    .start()
+                    .map_err(|e| Failure::new(Child::GossipCache, e))?,
+            );
+        }
         let db = &inputs.database;
         let network_profile = inputs.execution.network().clone();
         let consensus = inputs.execution.consensus();
@@ -159,6 +178,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         });
         Ok(Generation {
             number,
+            cache: self.cache.as_ref().map(admission::CacheOwner::handle),
             network,
             gossip,
             peer,
@@ -198,6 +218,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             .as_ref()
             .is_some_and(|i| i.recovery_required())
     }
+    pub fn cache_failure(&self) -> Option<Failure> {
+        self.cache
+            .as_ref()
+            .filter(|cache| !cache.is_running())
+            .map(|_| Failure::new(Child::GossipCache, "cache stopped"))
+    }
     pub fn network_failure(&self) -> Option<Failure> {
         self.network
             .as_ref()?
@@ -226,6 +252,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         if let Some(importer) = &self.importer {
             importer.join().await;
         }
+        self.cache.take();
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Drop for Group<O> {

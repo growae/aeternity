@@ -12,7 +12,7 @@ use super::restart;
 
 // This owns the currently implemented connection services. Durable admission
 // and GC workers belong to the independent worker hierarchy. Their explicit
-// clients identify one lifetime; a dead dependency requires parent intervention.
+// fixed clients identify one lifetime; managed bindings recover independently.
 pub struct Inputs<O = Otp26> {
     pub database: Arc<Database>,
     pub admission: admission::Client,
@@ -52,6 +52,7 @@ impl Default for Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Child {
+    GossipCache,
     Importer,
     Network,
     Gossip,
@@ -111,6 +112,7 @@ pub struct Status {
 #[derive(Clone)]
 pub struct Generation {
     pub number: u64,
+    pub cache: Option<admission::CacheHandle>,
     pub network: network::Handle,
     pub gossip: gossip::Handle,
     pub peer: peer::Handle,
@@ -144,6 +146,7 @@ impl Handle {
 pub struct Service<O, F> {
     inputs: Inputs<O>,
     dependencies: super::workers::Bindings,
+    cache: Option<admission::CacheController>,
     config: Config,
     outputs: F,
     stopped: watch::Receiver<bool>,
@@ -183,6 +186,41 @@ where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
+    create_inner(inputs, config, outputs, dependencies, None)
+}
+// A managed received-transaction cache belongs to this connection group. Its
+// stable lookup remains with independent admission workers while each group
+// generation owns a fresh cache instance.
+pub fn create_with_owned_cache<O, F>(
+    inputs: Inputs<O>,
+    config: Config,
+    outputs: F,
+    dependencies: super::workers::Bindings,
+    cache: admission::CacheController,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    create_inner(inputs, config, outputs, dependencies, Some(cache))
+}
+fn create_inner<O, F>(
+    inputs: Inputs<O>,
+    config: Config,
+    outputs: F,
+    dependencies: super::workers::Bindings,
+    cache: Option<admission::CacheController>,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    if let Some(cache) = &cache
+        && let Some(pool) = dependencies.admission.current()
+        && !cache.uses_cache(&pool.client.gossip_cache())
+    {
+        return Err(Error::Configuration);
+    }
     if !dependencies.admission.uses_database(&inputs.database)
         || dependencies
             .gc
@@ -218,6 +256,7 @@ where
         Service {
             inputs,
             dependencies,
+            cache,
             config,
             outputs,
             stopped,
@@ -317,6 +356,7 @@ where
                     &self.dependencies,
                     &self.config,
                     &mut self.outputs,
+                    self.cache.as_mut(),
                     number,
                 )
                 .await;
@@ -339,6 +379,10 @@ where
                             }
                             if group.recovery_required() {
                                 terminal = Some(Error::RecoveryRequired);
+                                break;
+                            }
+                            if let Some(error) = group.cache_failure() {
+                                failure = Some(error);
                                 break;
                             }
                             if !self.current.ready && generation.network.status().ready {

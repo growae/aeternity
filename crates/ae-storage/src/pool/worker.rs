@@ -13,7 +13,7 @@ pub mod events;
 mod gossip;
 mod reply;
 pub use client::{Client, SelectOptions};
-pub use gossip::GossipCache;
+pub use gossip::{CacheController, CacheHandle, CacheOwner, GossipCache, LifecycleError};
 pub use reply::Ticket;
 
 #[derive(Debug, Clone, Copy)]

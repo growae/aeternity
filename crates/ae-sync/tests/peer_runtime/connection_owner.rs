@@ -173,6 +173,7 @@ async fn partial_construction_failures_join_every_constructed_owner_and_release_
     ] {
         let mut config = settings();
         match child {
+            owner::Child::GossipCache => unreachable!("owned cache startup is tested separately"),
             owner::Child::Importer => config.importer.blocks = 0,
             owner::Child::Network => config.network.commands = 0,
             owner::Child::Gossip => config.gossip.operations = 0,
