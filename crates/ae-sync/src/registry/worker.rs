@@ -59,6 +59,13 @@ pub struct PoolCounts {
     pub verified: usize,
     pub unverified: usize,
 }
+#[derive(Debug, Clone)]
+pub struct Metrics {
+    pub registry: Inspection,
+    pub verified: usize,
+    pub unverified: usize,
+    pub standby: usize,
+}
 pub(crate) struct Frame {
     pub inspection: Inspection,
     pub delivery: Option<Delivery>,
@@ -398,6 +405,19 @@ impl Client {
             Ok(PoolCounts {
                 verified: pool.count(Count::All, Target::Verified),
                 unverified: pool.count(Count::All, Target::Unverified),
+            })
+        })
+    }
+    pub fn metrics(&self) -> Result<Ticket<Metrics>, Error> {
+        self.submit(512, |s| {
+            use ae_p2p::discovery::{Count, Target};
+            s.core.ready()?;
+            let pool = s.policy().pool();
+            Ok(Metrics {
+                registry: inspection(s),
+                verified: pool.count(Count::All, Target::Verified),
+                unverified: pool.count(Count::All, Target::Unverified),
+                standby: pool.count(Count::Standby, Target::Both),
             })
         })
     }

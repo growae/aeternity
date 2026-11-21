@@ -129,6 +129,7 @@ struct Control {
     feed: events::Feed,
 }
 pub(crate) struct Shared {
+    database: std::sync::Weak<Database>,
     control: Mutex<Control>,
     changed: Condvar,
     settings: Settings,
@@ -185,6 +186,7 @@ impl Worker {
         }
         let service = Service::start(db.clone(), network, config)?;
         let shared = Arc::new(Shared {
+            database: Arc::downgrade(&db),
             control: Mutex::new(Control {
                 info: Info {
                     version: 0,

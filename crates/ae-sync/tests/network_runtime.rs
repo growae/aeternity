@@ -383,6 +383,18 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     .unwrap();
     status(&mut h, |s| s.counts.accepted == 2).await;
     assert_ne!(first_local.generation(), replacement_local.generation());
+    // Replacement retires policy immediately, but graceful transport closure
+    // retains callback metadata until this exact generation exits. Check stale
+    // ownership only after both the driver and network owner observe teardown.
+    assert_eq!(
+        within(first_task).await.unwrap().reason,
+        net::Error::RemoteClose
+    );
+    assert_eq!(
+        within(first_local.monitor().wait()).await.reason,
+        net::Error::LocalClose
+    );
+    status(&mut h, |s| s.counts.closed == 1 && s.sockets == 1).await;
     assert_eq!(
         within(h.pool_counts(first_local.clone()).unwrap().wait())
             .await
@@ -423,7 +435,6 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     ] {
         assert_eq!(within(ticket.wait()).await.unwrap(), Outcome::Stale);
     }
-    within(first_task).await.unwrap();
     assert!(!replacement_local.is_closed());
     assert_eq!(
         command(

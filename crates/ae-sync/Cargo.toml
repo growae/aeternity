@@ -17,13 +17,13 @@ ae-storage.workspace = true
 ae-mempool.workspace = true
 ae-types.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 ae-trie.workspace = true
 ae-vm-aevm.workspace = true
 ae-state.workspace = true
 ae-crypto.workspace = true
-serde_json.workspace = true
 hex.workspace = true
 
 [lints]

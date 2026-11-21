@@ -232,6 +232,16 @@ pub struct PoolCountsTicket {
     accepted: Ticket,
     result: oneshot::Receiver<Option<registry::worker::PoolCounts>>,
 }
+pub struct MetricsTicket {
+    accepted: Ticket,
+    result: oneshot::Receiver<registry::worker::Metrics>,
+}
+impl MetricsTicket {
+    pub async fn wait(self) -> Result<registry::worker::Metrics, Error> {
+        self.accepted.wait().await?;
+        self.result.await.map_err(|_| Error::Closed)
+    }
+}
 impl PoolCountsTicket {
     pub async fn wait(self) -> Result<Option<registry::worker::PoolCounts>, Error> {
         self.accepted.wait().await?;
@@ -245,6 +255,7 @@ impl ConnectionTicket {
     }
 }
 enum Work {
+    Metrics(Option<oneshot::Sender<registry::worker::Metrics>>),
     Policy(policy::Command),
     PingReceived(net::Client),
     PingClosing {
@@ -301,6 +312,13 @@ pub struct Handle {
     deferred_pings: bool,
 }
 impl Handle {
+    pub fn metrics(&self) -> Result<MetricsTicket, Error> {
+        let (reply, result) = oneshot::channel();
+        Ok(MetricsTicket {
+            accepted: self.submit(Work::Metrics(Some(reply)), 512)?,
+            result,
+        })
+    }
     pub fn first_ping(
         &self,
         client: net::Client,
@@ -485,6 +503,9 @@ pub async fn create(
     config: Config,
 ) -> Result<(Handle, Events, pool::Events, Service), Error> {
     config.validate()?;
+    if !admission.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
     let setup = blocking::Pool::new(1, 1, 256).map_err(|_| Error::Configuration)?;
     let store = db.clone();
     let policy_config = config.registry.clone();

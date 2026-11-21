@@ -522,6 +522,16 @@ impl Service {
             return;
         }
         let result = match &mut command.work {
+            Work::Metrics(reply) => match self.client.metrics() {
+                Ok(ticket) => match self.wait(ticket).await {
+                    Ok(metrics) => {
+                        let _ = reply.take().unwrap().send(metrics);
+                        Ok(policy::Outcome::Done)
+                    }
+                    Err(error) => Err(error.into()),
+                },
+                Err(error) => Err(error.into()),
+            },
             Work::Policy(policy) => self.apply(policy.clone()).await,
             Work::Learn { client, peers } => self.learn(client, std::mem::take(peers)).await,
             Work::PoolCounts { client, reply } => {

@@ -51,6 +51,9 @@ fn policy_bytes(
     Ok(bytes)
 }
 impl Client {
+    pub fn uses_database(&self, db: &Arc<Database>) -> bool {
+        self.shared.database.ptr_eq(&Arc::downgrade(db))
+    }
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
     }

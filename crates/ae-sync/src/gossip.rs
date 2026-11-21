@@ -204,6 +204,7 @@ enum Command {
 }
 #[derive(Clone)]
 pub struct Handle {
+    database: std::sync::Weak<Database>,
     commands: mpsc::Sender<Command>,
     bytes: Arc<Semaphore>,
     policy: watch::Sender<Policy>,
@@ -212,6 +213,9 @@ pub struct Handle {
     config: Config,
 }
 impl Handle {
+    pub(crate) fn uses_database(&self, db: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(db))
+    }
     fn reserve(
         &self,
         bytes: usize,
@@ -325,6 +329,9 @@ pub fn create(
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
     config.validate()?;
+    if !admission.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
     if !db
         .view()
         .map_err(|_| Error::Storage)?
@@ -356,6 +363,7 @@ pub fn create(
     };
     let (status, view) = watch::channel(current.clone());
     let cursor = admission.event_cursor();
+    let database = Arc::downgrade(&db);
     let context = Context {
         db,
         admission,
@@ -382,6 +390,7 @@ pub fn create(
     );
     Ok((
         Handle {
+            database,
             commands,
             bytes: Arc::new(Semaphore::new(config.command_bytes)),
             policy,

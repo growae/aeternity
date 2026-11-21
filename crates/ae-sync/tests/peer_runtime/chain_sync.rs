@@ -71,7 +71,7 @@ pub(super) fn synchronize_with_importer(
     };
     (handle, events, finish)
 }
-async fn serve_until_finished(
+pub(super) async fn serve_until_finished(
     handle: &mut sync::Handle,
     remote: &net::Client,
     events: &mut net::Events,

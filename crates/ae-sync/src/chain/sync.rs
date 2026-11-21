@@ -7,6 +7,7 @@ use ae_p2p::{
     message::{self, Details, Kind, Message, Value},
     runtime as net,
 };
+use ae_storage::Database;
 use ae_types::{Hash256, PeerPublicKey};
 use ae_vm_fate::maps::{MapOrder, order::Otp26};
 use std::{
@@ -311,11 +312,16 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Handle {
+    database: std::sync::Weak<Database>,
+    event_owner: Arc<()>,
     stop: watch::Sender<bool>,
     resilience: watch::Sender<ae_chain::resilience::Config>,
     status: watch::Receiver<Status>,
 }
 impl Handle {
+    pub(crate) fn owns(&self, db: &Arc<Database>, events: &Events) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(db)) && Arc::ptr_eq(&self.event_owner, &events.owner)
+    }
     // Updates are coalesced to the latest configuration, like a config snapshot.
     pub fn set_resilience(&self, config: ae_chain::resilience::Config) -> Result<(), Error> {
         self.resilience.send(config).map_err(|_| Error::Closed)
@@ -334,10 +340,13 @@ impl Handle {
 }
 // Retains the original application's byte permit. Capabilities, unhandled
 // messages and status events remain available to the rest of the node.
-pub struct Events(mpsc::Receiver<peer::Event>);
+pub struct Events {
+    receiver: mpsc::Receiver<peer::Event>,
+    owner: Arc<()>,
+}
 impl Events {
     pub async fn recv(&mut self) -> Option<peer::Event> {
-        self.0.recv().await
+        self.receiver.recv().await
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,6 +405,8 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         statistics: Default::default(),
     };
     let (status, observed) = watch::channel(current.clone());
+    let database = Arc::downgrade(&importer.context.db);
+    let event_owner = Arc::new(());
     let context = Arc::new(Context {
         importer: Arc::new(importer),
         network,
@@ -408,11 +419,16 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     });
     Ok((
         Handle {
+            database,
+            event_owner: event_owner.clone(),
             stop,
             resilience,
             status: observed,
         },
-        Events(events),
+        Events {
+            receiver: events,
+            owner: event_owner,
+        },
         Service::new(
             context,
             application,
