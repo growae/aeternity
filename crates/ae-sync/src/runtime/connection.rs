@@ -85,6 +85,8 @@ pub enum Error {
     RecoveryRequired,
     Generation,
     Aborted,
+    KeysClosed,
+    IdentityChanged,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -167,6 +169,7 @@ where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
     let dependencies = super::workers::Bindings {
+        keys: None,
         admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
         gc: inputs.gc.as_ref().map(|client| {
             crate::bindings::GarbageCollection::fixed(&inputs.database, client.clone())
@@ -223,6 +226,10 @@ where
     }
     if !dependencies.admission.uses_database(&inputs.database)
         || dependencies
+            .keys
+            .as_ref()
+            .is_some_and(|k| !k.uses_database(&inputs.database))
+        || dependencies
             .gc
             .as_ref()
             .is_some_and(|g| !g.uses_database(&inputs.database))
@@ -276,6 +283,16 @@ where
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn health(&self) -> Result<(), Error> {
+        if let Some(keys) = &self.dependencies.keys {
+            if keys.is_closed() {
+                return Err(Error::KeysClosed);
+            }
+            if let Some(client) = keys.current()
+                && client.info().keys.peer != self.inputs.identity.public_key()
+            {
+                return Err(Error::IdentityChanged);
+            }
+        }
         let pool = &self.dependencies.admission;
         if pool.is_closed()
             || (!pool.managed() && pool.current().is_none_or(|p| !p.client.info().running))
@@ -307,6 +324,11 @@ where
             if self.dependencies.admission.current().is_some()
                 && self
                     .dependencies
+                    .keys
+                    .as_ref()
+                    .is_none_or(|k| k.current().is_some())
+                && self
+                    .dependencies
                     .gc
                     .as_ref()
                     .is_none_or(|g| g.current().is_some())
@@ -316,6 +338,7 @@ where
             tokio::select! {
                 _ = self.stopped.changed() => return Err(Error::Closed),
                 _ = self.dependencies.admission.changed() => (),
+                _ = async { match &mut self.dependencies.keys { Some(k) => k.changed().await, None => std::future::pending().await } } => (),
                 _ = async { match &mut self.dependencies.gc { Some(gc) => gc.changed().await, None => std::future::pending().await } } => (),
             }
         }

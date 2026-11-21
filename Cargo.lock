@@ -193,9 +193,13 @@ dependencies = [
  "ae-types",
  "ae-vm-aevm",
  "ae-vm-fate",
+ "aes",
+ "ed25519-dalek",
  "hex",
+ "rand",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -262,6 +266,18 @@ checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
 dependencies = [
  "crypto-common",
  "generic-array",
+]
+
+[[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]

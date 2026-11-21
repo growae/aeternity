@@ -1582,3 +1582,6 @@ mod conductor;
 
 #[path = "peer_runtime/cache_owner.rs"]
 mod cache_owner;
+
+#[path = "peer_runtime/key_owner.rs"]
+mod key_owner;

@@ -15,6 +15,7 @@ pub struct GarbageCollection {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub keys: Option<crate::keys::Config>,
     pub pool: pool::Config,
     pub admission: pool::worker::Settings,
     pub gc: Option<GarbageCollection>,
@@ -23,6 +24,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            keys: None,
             pool: Default::default(),
             admission: Default::default(),
             gc: Some(Default::default()),
@@ -32,6 +34,7 @@ impl Default for Config {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Child {
+    Keys,
     Admission,
     GarbageCollection,
 }
@@ -62,14 +65,17 @@ pub struct Status {
     pub joined: bool,
     pub admission_generation: u64,
     pub gc_generation: u64,
+    pub keys_generation: u64,
     pub admission: Option<pool::worker::Info>,
     pub gc: Option<gc::worker::Info>,
+    pub keys: Option<crate::keys::Info>,
     pub restart_attempts: u64,
     pub last_failure: Option<Error>,
     pub error: Option<Error>,
 }
 #[derive(Clone)]
 pub struct Bindings {
+    pub keys: Option<bindings::Binding<crate::keys::Client>>,
     pub admission: bindings::Admission,
     pub gc: Option<bindings::GarbageCollection>,
 }
@@ -133,8 +139,10 @@ pub struct Service {
     cache: pool::worker::GossipCache,
     admission: Option<pool::worker::Worker>,
     gc: Option<gc::worker::Worker>,
+    keys: Option<crate::keys::Worker>,
     pool_binding: bindings::Owner<bindings::Pool>,
     gc_binding: Option<bindings::Owner<gc::worker::Client>>,
+    keys_binding: Option<bindings::Owner<crate::keys::Client>>,
     jobs: blocking::Pool,
     stopped: watch::Receiver<bool>,
     commands: mpsc::Receiver<Restart>,
@@ -157,6 +165,12 @@ pub fn create(
     let jobs =
         blocking::Pool::named("ae-worker-supervisor", 1, 2, 256).map_err(|_| Error::Worker)?;
     let (pool_binding, admission) = bindings::Owner::new(&database);
+    let (keys_binding, keys) = if config.keys.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
     let (gc_binding, gc) = match config.gc {
         Some(_) => {
             let (owner, reader) = bindings::Owner::new(&database);
@@ -176,7 +190,11 @@ pub fn create(
             stopped: stop,
             status,
             commands,
-            bindings: Bindings { admission, gc },
+            bindings: Bindings {
+                admission,
+                gc,
+                keys,
+            },
         },
         Service {
             database,
@@ -185,8 +203,10 @@ pub fn create(
             cache,
             admission: None,
             gc: None,
+            keys: None,
             pool_binding,
             gc_binding,
+            keys_binding,
             jobs,
             stopped,
             commands: receiver,
@@ -200,6 +220,7 @@ pub fn create(
     ))
 }
 enum Started {
+    Keys(crate::keys::Worker),
     Admission(pool::worker::Worker),
     Gc(gc::worker::Worker),
 }
@@ -216,11 +237,13 @@ impl Service {
     }
     fn generation(&self, child: Child) -> u64 {
         match child {
+            Child::Keys => self.current.keys_generation,
             Child::Admission => self.current.admission_generation,
             Child::GarbageCollection => self.current.gc_generation,
         }
     }
     fn publish(&mut self) {
+        self.current.keys = self.keys.as_ref().map(|w| w.info());
         self.current.admission = self.admission.as_ref().map(|w| w.info());
         self.current.gc = self.gc.as_ref().map(|w| w.info());
         self.published.send_replace(self.current.clone());
@@ -237,6 +260,12 @@ impl Service {
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::Keys => crate::keys::Worker::spawn(config.keys.ok_or(Error::Missing)?)
+                    .map(Started::Keys)
+                    .map_err(|e| Error::Start {
+                        child,
+                        reason: format!("{e:?}"),
+                    }),
                 Child::Admission => pool::worker::Worker::spawn_with_cache(
                     db,
                     network,
@@ -263,6 +292,14 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::Keys(worker) => {
+                self.keys_binding
+                    .as_ref()
+                    .expect("configured keys")
+                    .install(worker.client(), generation);
+                self.keys = Some(worker);
+                self.current.keys_generation = generation;
+            }
             Started::Admission(worker) => {
                 self.pool_binding
                     .install(bindings::Pool::new(worker.client()), generation);
@@ -283,6 +320,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::Keys => {
+                if let Some(binding) = &self.keys_binding {
+                    binding.withdraw();
+                }
+                self.keys.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::Admission => {
                 self.pool_binding.withdraw();
                 self.admission.take().map(|worker| {
@@ -314,7 +362,7 @@ impl Service {
         Ok(())
     }
     async fn replace(&mut self, child: Child) -> Result<u64, Error> {
-        // One budget belongs to this supervisor, shared by both children.
+        // One budget belongs to this supervisor, shared by all children.
         self.current.ready = false;
         self.publish();
         loop {
@@ -356,6 +404,12 @@ impl Service {
             return Ok(());
         }
         self.healthy()?;
+        if self.config.keys.is_some() {
+            self.start(Child::Keys).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         self.start(Child::Admission).await?;
         if self.stopping() {
             return Ok(());
@@ -375,7 +429,9 @@ impl Service {
                 return Ok(());
             }
             self.healthy()?;
-            let exited = if self.admission.as_ref().is_some_and(|w| !w.info().running) {
+            let exited = if self.keys.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::Keys)
+            } else if self.admission.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Admission)
             } else if self.gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::GarbageCollection)
@@ -392,7 +448,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if command.child == Child::GarbageCollection && self.config.gc.is_none() { Err(Error::Missing) }
+                    let result = if (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -407,6 +463,7 @@ impl Service {
         #[cfg(test)]
         if command.stop_only {
             match command.child {
+                Child::Keys => self.keys.as_ref().unwrap().request_shutdown(),
                 Child::Admission => self.admission.as_ref().unwrap().request_shutdown(),
                 Child::GarbageCollection => self.gc.as_ref().unwrap().request_shutdown(),
             }
@@ -426,15 +483,21 @@ impl Service {
             let _ = command.reply.send(Err(Error::Closed));
         }
         self.pool_binding.withdraw();
+        if let Some(binding) = &self.keys_binding {
+            binding.withdraw();
+        }
         if let Some(binding) = &self.gc_binding {
             binding.withdraw();
         }
-        for child in [Child::GarbageCollection, Child::Admission] {
+        for child in [Child::GarbageCollection, Child::Admission, Child::Keys] {
             if let Err(error) = self.retire(child).await {
                 self.current.error.get_or_insert(error);
             }
         }
         self.pool_binding.close();
+        if let Some(binding) = &self.keys_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.gc_binding {
             binding.close();
         }
@@ -451,6 +514,9 @@ impl Service {
 mod tests;
 impl Drop for Service {
     fn drop(&mut self) {
+        if let Some(binding) = &self.keys_binding {
+            binding.close();
+        }
         self.pool_binding.close();
         if let Some(binding) = &self.gc_binding {
             binding.close();

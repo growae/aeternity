@@ -118,6 +118,79 @@ async fn actual_worker_exits_restart_only_the_failed_child_and_share_one_native_
 }
 
 #[tokio::test]
+async fn actual_key_exits_preserve_peer_identity_and_share_all_worker_restart_budget() {
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Directory(
+        std::env::temp_dir().join(format!("ae-key-supervisor-budget-{}", std::process::id())),
+    );
+    std::fs::create_dir(&directory.0).unwrap();
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.keys = Some(crate::keys::Config::new(
+        directory.0.join("keys"),
+        b"synthetic supervisor password".to_vec(),
+    ));
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().keys.unwrap();
+    let original = binding.current().unwrap();
+    let peer = original.info().keys.peer;
+    for (index, child) in [Child::Keys, Child::Admission, Child::GarbageCollection]
+        .into_iter()
+        .cycle()
+        .take(6)
+        .enumerate()
+    {
+        let generations = |s: Status| [s.keys_generation, s.admission_generation, s.gc_generation];
+        let mut expected = generations(handle.status());
+        let child_index = index % 3;
+        stopped_child(&handle, child, expected[child_index]).await;
+        if index == 5 {
+            break;
+        }
+        expected[child_index] += 1;
+        within(async {
+            while generations(handle.status()) != expected {
+                assert!(handle.status().running, "{:?}", handle.status());
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert_eq!(binding.current().unwrap().info().keys.peer, peer);
+        assert_eq!(handle.status().restart_attempts, index as u64 + 1);
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert_eq!(
+        (
+            status.keys_generation,
+            status.admission_generation,
+            status.gc_generation
+        ),
+        (3, 3, 2)
+    );
+    assert!(status.joined && binding.is_closed() && !original.info().running);
+    assert!(matches!(
+        original.peer_identity(),
+        Err(crate::keys::Error::Stopped)
+    ));
+}
+
+#[tokio::test]
 async fn failed_replacement_starts_consume_budget_without_restarting_the_other_worker() {
     let mut node = Node::new();
     node.stop_worker();

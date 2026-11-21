@@ -12,6 +12,7 @@ pub mod chain;
 pub mod conductor;
 pub mod events;
 pub mod gossip;
+pub mod keys;
 pub mod maintenance;
 pub mod network;
 pub mod observe;

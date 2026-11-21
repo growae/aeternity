@@ -6,6 +6,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+aes.workspace = true
+ae-crypto.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+zeroize.workspace = true
 ae-chain.workspace = true
 ae-execution.workspace = true
 ae-vm-fate.workspace = true
@@ -23,7 +28,6 @@ serde_json.workspace = true
 ae-trie.workspace = true
 ae-vm-aevm.workspace = true
 ae-state.workspace = true
-ae-crypto.workspace = true
 hex.workspace = true
 
 [lints]
