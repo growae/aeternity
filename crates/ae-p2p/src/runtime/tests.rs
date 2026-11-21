@@ -344,6 +344,85 @@ async fn ping_probe_fallback_is_driven_by_runtime_timer_without_closing_connecti
     client.shutdown();
     assert_eq!(within(task).await.unwrap().reason, Error::Shutdown);
 }
+
+#[tokio::test]
+async fn configured_v2_accepts_incoming_v1_without_changing_initial_outbound_version() {
+    let (client, mut events, driver, mut raw) = raw_pair(Config {
+        minimum_ping: 2,
+        ..Default::default()
+    })
+    .await;
+    let task = tokio::spawn(driver.run());
+    raw.send(&ping(1)).await;
+    let received = message(&mut events).await;
+    assert_eq!(received.message(), &ping(1));
+    assert_eq!(received.ping.unwrap().action, requests::PingAction::None);
+    assert_eq!(client.minimum_ping_version(), 2);
+    assert_eq!(client.selected_ping_version(), None);
+    assert_eq!(client.ping_version(), 2);
+    let response = Message::response_ok(received.message(), Default::default()).unwrap();
+    within(client.send(&response).unwrap()).await.unwrap();
+    assert_eq!(within(raw.receive()).await, response);
+    raw.send(&init()).await;
+    assert_eq!(message(&mut events).await.message(), &init());
+    client.shutdown();
+    assert_eq!(within(task).await.unwrap().reason, Error::Shutdown);
+}
+
+#[tokio::test]
+async fn configured_v2_timeout_sends_and_completes_v1_fallback_on_same_encrypted_stream() {
+    let (client, mut events, driver, mut raw) = raw_pair(Config {
+        minimum_ping: 2,
+        ..Default::default()
+    })
+    .await;
+    let monitor = client.monitor();
+    let task = tokio::spawn(driver.run());
+    let first = client.request(&ping(client.ping_version()), None).unwrap();
+    assert_eq!(within(raw.receive()).await, ping(2));
+    tokio::time::pause();
+    tokio::time::advance(requests::DEFAULT_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(matches!(
+        within(first).await,
+        Err(Error::RequestFailed(requests::Failure::Timeout))
+    ));
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(Event::Ping {
+            action: requests::PingAction::Selected(1),
+            ..
+        })
+    ));
+    tokio::time::resume();
+    assert!(!client.is_closed());
+    assert!(monitor.exit().is_none());
+    assert_eq!(client.minimum_ping_version(), 2);
+    assert_eq!(client.ping_version(), 1);
+    let retry = client.request(&ping(client.ping_version()), None).unwrap();
+    assert_eq!(within(raw.receive()).await, ping(1));
+    let response = Message::response_ok(&ping(1), Default::default()).unwrap();
+    raw.send(&response).await;
+    let Reply::Response(received) = within(retry).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(received.message(), &response);
+    assert_eq!(&received.generation, client.generation());
+    assert_eq!(received.ping.unwrap().previous, Some(1));
+    assert_eq!(client.ping_version(), 1);
+    // A later v2 exchange can renegotiate; fallback is not a new minimum.
+    raw.send(&ping(2)).await;
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(Event::Ping {
+            action: requests::PingAction::Selected(2),
+            ..
+        })
+    ));
+    assert_eq!(message(&mut events).await.message(), &ping(2));
+    assert_eq!(client.ping_version(), 2);
+    client.shutdown();
+    assert_eq!(within(task).await.unwrap().reason, Error::Shutdown);
+}
 async fn message(events: &mut Events) -> Received {
     match within(events.recv()).await.unwrap() {
         Event::Message(message) => message,

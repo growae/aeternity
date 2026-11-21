@@ -1280,6 +1280,40 @@ async fn generation_download_limits_refusals_and_validation_failures_return_capa
 }
 
 #[tokio::test]
+async fn v2_minimum_admits_and_serves_legacy_ping_then_advertises_only_v2() {
+    let node = Node::new();
+    let mut c = config();
+    c.transport.runtime.minimum_ping = 2;
+    let mut app = start(&node, c, Default::default()).await;
+    let (remote, _events, task) = connect(&node, &app).await;
+    let legacy = response(&remote, &ping(&node, 1, true)).await;
+    assert_eq!(body(&legacy).version(), 1);
+    let status = observed(&mut app.events).await;
+    let peer::EventKind::Status { client, .. } = status.kind() else {
+        panic!()
+    };
+    assert_eq!(client.minimum_ping_version(), 2);
+    assert_eq!(client.ping_version(), 2);
+    assert_eq!(client.selected_ping_version(), None);
+    assert!(!client.is_closed());
+    let info = response(&remote, &message(Kind::GetNodeInfo, 1, &[])).await;
+    assert_eq!(body(&info).kind(), Kind::NodeInfo);
+    let upgraded = response(&remote, &ping(&node, 2, true)).await;
+    assert_eq!(body(&upgraded).version(), 2);
+    assert_eq!(
+        body(&upgraded).fields()["versions"],
+        Value::List(vec![Value::Record(std::collections::BTreeMap::from([
+            ("protocol".into(), Value::Binary(b"ping".to_vec())),
+            ("vsns".into(), Value::List(vec![Value::Integer(2.into())])),
+        ]))])
+    );
+    assert_eq!(client.selected_ping_version(), Some(2));
+    assert_eq!(node.db.view().unwrap().status().revision, 1);
+    stop(app).await;
+    within(task).await.unwrap();
+}
+
+#[tokio::test]
 async fn matching_top_schedules_real_pool_sync_and_emits_generation_intent_in_order() {
     let node = Node::new();
     let mut app = start(&node, config(), Default::default()).await;

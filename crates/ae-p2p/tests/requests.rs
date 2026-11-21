@@ -444,7 +444,7 @@ fn simultaneous_ping_only_blocks_matching_version_and_does_not_negotiate() {
 }
 
 #[test]
-fn ping_probe_has_separate_completion_and_respects_minimum() {
+fn ping_probe_has_separate_completion_and_native_fallback_overrides_minimum() {
     let now = Instant::now();
     let p1 = ping(1, Value::List(vec![]));
     let p2 = ping(2, Value::List(vec![]));
@@ -471,22 +471,21 @@ fn ping_probe_has_separate_completion_and_respects_minimum() {
         Error::InvalidRequest
     );
     let mut strict = Requests::new(Limits::default(), 2).unwrap();
-    assert_eq!(
-        strict.start(&p1, now, None).unwrap_err(),
-        Error::InvalidRequest
-    );
+    assert_eq!(strict.ping_version(), 2);
     let pending = strict.start(&p2, now, None).unwrap();
     let update = strict.expire(pending.deadline);
     assert_eq!(update.completions[0].result, Err(Failure::Timeout));
-    assert!(strict.is_closed());
-    assert_eq!(strict.ping_version(), 2);
-    assert!(strict.receive_ping(&p2, now).completions.is_empty());
+    assert!(!strict.is_closed());
+    assert_eq!(strict.ping_version(), 1);
+    let fallback = strict.start(&p1, pending.deadline, None).unwrap();
+    assert!(strict.contains(&fallback.token));
     let mut strict = Requests::new(Limits::default(), 2).unwrap();
     strict.start(&request(Kind::PoolInit), now, None).unwrap();
     let update = strict.receive_ping(&p1, now);
-    assert_eq!(update.error, Some(Error::NoCommonPingVersion));
-    assert_eq!(update.completions[0].result, Err(Failure::Disconnected));
-    assert!(strict.is_closed());
+    assert_eq!(update.error, None);
+    assert!(update.completions.is_empty());
+    assert!(!strict.is_closed());
+    assert_eq!(strict.ping_version(), 2);
 }
 
 #[test]

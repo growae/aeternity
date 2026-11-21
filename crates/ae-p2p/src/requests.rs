@@ -82,9 +82,9 @@ impl PingVersions {
             return Err(Error::InvalidRequest);
         }
         let version = ping.version();
-        if version < self.minimum {
-            return Err(Error::NoCommonPingVersion);
-        }
+        // The configured minimum selects initial outbound pings and the
+        // advertised versions. Native peers still accept incoming v1 pings,
+        // including after a v2 timeout has selected v1 as the fallback.
         if self.selected == Some(version) {
             return Ok(PingAction::None);
         }
@@ -249,9 +249,6 @@ impl Requests {
             return Err(Error::InvalidRequest);
         }
         let (slot, expected) = request_slot(request)?;
-        if matches!(slot, Slot::Ping(v) if v < self.ping.minimum) {
-            return Err(Error::InvalidRequest);
-        }
         if self.pending.contains_key(&slot) {
             return Err(Error::AlreadyPending);
         }
@@ -292,7 +289,7 @@ impl Requests {
         };
         let pending = self.pending.remove(&slot).unwrap();
         let mut completions = vec![complete(pending, Err(Failure::Timeout))];
-        let ping = if slot == Slot::Ping(2) && self.ping.minimum == 1 {
+        let ping = if slot == Slot::Ping(2) {
             self.ping.selected = Some(1);
             PingAction::Selected(1)
         } else {
