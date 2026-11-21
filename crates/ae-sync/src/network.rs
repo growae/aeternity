@@ -211,6 +211,7 @@ enum Work {
     Policy(policy::Command),
     PingReceived(net::Client),
     Disconnect(net::Client),
+    Suspect(net::Client),
     Synchronize(net::Client),
     Connection {
         client: net::Client,
@@ -327,6 +328,9 @@ impl Handle {
     }
     pub fn disconnect(&self, client: net::Client) -> Result<Ticket, Error> {
         self.submit(Work::Disconnect(client), 256)
+    }
+    pub fn suspect(&self, client: net::Client) -> Result<Ticket, Error> {
+        self.submit(Work::Suspect(client), 256)
     }
     pub fn synchronize(&self, client: net::Client) -> Result<Ticket, Error> {
         self.submit(Work::Synchronize(client), 256)

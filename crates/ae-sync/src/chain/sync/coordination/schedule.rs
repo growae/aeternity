@@ -79,6 +79,7 @@ pub enum Effect {
     Done(PeerPublicKey),
     Statistics { task: u64, stats: u64 },
 }
+#[derive(Clone)]
 pub struct Scheduler {
     state: State,
     limits: Limits,
@@ -265,6 +266,14 @@ impl Scheduler {
         self.next_work()
     }
     pub fn next_work(&mut self) -> Result<Work, Error> {
+        self.next_available(&[], true, true)
+    }
+    pub(crate) fn next_available(
+        &mut self,
+        leased: &[Hash256],
+        fill_allowed: bool,
+        agree_allowed: bool,
+    ) -> Result<Work, Error> {
         self.update(|s, l| {
             loop {
                 // Original pp_sync_task evaluates an invalid pending-list printer
@@ -273,7 +282,11 @@ impl Scheduler {
                     return Ok(Work::Break);
                 }
                 let Some(agreed) = s.agreed else {
-                    return Ok(Work::Agree);
+                    return Ok(if agree_allowed {
+                        Work::Agree
+                    } else {
+                        Work::Break
+                    });
                 };
                 let prefix = s.pool.iter().take_while(|i| i.got.is_some()).count();
                 if prefix > 0 {
@@ -292,17 +305,20 @@ impl Scheduler {
                     return Ok(Work::Post(s.adding.clone()));
                 }
                 if !s.pool.is_empty() {
-                    if matches!(s.next_pool, NextPool::None) && s.workers.len() > 2 {
+                    if fill_allowed && matches!(s.next_pool, NextPool::None) && s.workers.len() > 2
+                    {
                         return Ok(fill(s, agreed, l));
                     }
-                    let index = s
+                    let Some(index) = s
                         .pool
                         .iter()
                         .enumerate()
-                        .filter(|(_, i)| i.got.is_none())
+                        .filter(|(_, i)| i.got.is_none() && !leased.contains(&i.point.hash))
                         .min_by_key(|(_, i)| (i.attempts, i.point.height))
                         .map(|(i, _)| i)
-                        .ok_or(Error::State)?;
+                    else {
+                        return Ok(Work::Break);
+                    };
                     let item = &mut s.pool[index];
                     item.attempts = item.attempts.checked_add(1).ok_or(Error::Overflow)?;
                     return Ok(Work::Generation(item.point));
@@ -320,7 +336,11 @@ impl Scheduler {
                     s.pool = items;
                     continue;
                 }
-                return Ok(fill(s, agreed, l));
+                return Ok(if fill_allowed {
+                    fill(s, agreed, l)
+                } else {
+                    Work::Break
+                });
             }
         })
     }

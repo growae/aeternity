@@ -534,6 +534,11 @@ impl Service {
                 Ok(None) => Ok(policy::Outcome::Stale),
                 Err(error) => Err(error),
             },
+            Work::Suspect(client) => match self.token(client).await {
+                Ok(Some(_)) => self.apply(policy::Command::Suspect(client.peer())).await,
+                Ok(None) => Ok(policy::Outcome::Stale),
+                Err(error) => Err(error),
+            },
             Work::Synchronize(client) => match self.token(client).await {
                 Ok(Some(_)) => match self.pool.synchronize(client.peer()) {
                     Ok(ticket) => self

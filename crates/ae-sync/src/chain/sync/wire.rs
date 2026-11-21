@@ -104,6 +104,28 @@ fn response(message: &Message, kind: Kind) -> Result<&Message, Error> {
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Context<O> {
+    pub(super) async fn reject(&self, clients: Vec<net::Client>) -> Result<(), Error> {
+        let mut failed = None;
+        for client in clients {
+            // The network owner resolves this exact generation before applying
+            // the registry policy. A late rejection cannot penalize its replacement.
+            let result = tokio::time::timeout(self.config.timeout, async {
+                self.network.suspect(client.clone())?.wait().await
+            })
+            .await;
+            client.shutdown();
+            match result {
+                Ok(Ok(_)) => (),
+                Ok(Err(e)) => {
+                    failed.get_or_insert(Error::Network(e));
+                }
+                Err(_) => {
+                    failed.get_or_insert(Error::Timeout);
+                }
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
     fn weight(&self) -> usize {
         self.config.messages.body_bytes + self.config.messages.work_bytes
     }
@@ -184,15 +206,67 @@ impl<O: MapOrder + Send + Sync + 'static> Context<O> {
         client: &net::Client,
         hash: Hash256,
     ) -> Result<Header, Error> {
-        let checkpoints = self.importer.context.rules.checkpoints.clone();
-        self.request(
+        self.request_header(
             client,
             Kind::GetHeaderByHash,
             BTreeMap::from([("hash".into(), Value::Binary(hash.0.to_vec()))]),
-            Kind::Header,
-            move |m, _| header(m, &checkpoints),
         )
         .await
+    }
+    pub(super) async fn header_at(
+        &self,
+        client: &net::Client,
+        height: u64,
+        top: Hash256,
+    ) -> Result<Header, Error> {
+        self.request_header(
+            client,
+            Kind::GetHeaderByHeight,
+            BTreeMap::from([
+                ("height".into(), Value::Integer(height.into())),
+                ("top_hash".into(), Value::Binary(top.0.to_vec())),
+            ]),
+        )
+        .await
+    }
+    async fn request_header(
+        &self,
+        client: &net::Client,
+        kind: Kind,
+        fields: BTreeMap<String, Value>,
+    ) -> Result<Header, Error> {
+        let lane = {
+            let mut headers = self.headers.lock().unwrap_or_else(|e| e.into_inner());
+            headers.retain(|_, (_, weak)| weak.strong_count() > 0);
+            if let Some((generation, weak)) = headers.get(&client.peer())
+                && generation == client.generation()
+                && let Some(lane) = weak.upgrade()
+            {
+                lane
+            } else {
+                if !headers.contains_key(&client.peer()) && headers.len() >= self.config.peers {
+                    return Err(Error::Busy);
+                }
+                let lane = Arc::new(tokio::sync::Mutex::new(()));
+                headers.insert(
+                    client.peer(),
+                    (client.generation().clone(), Arc::downgrade(&lane)),
+                );
+                lane
+            }
+        };
+        // Task identification can query a peer already running agreement.
+        // Both wire operations occupy the same native Header response slot.
+        tokio::time::timeout(self.config.timeout, async {
+            let _guard = lane.lock().await;
+            let checkpoints = self.importer.context.rules.checkpoints.clone();
+            self.request(client, kind, fields, Kind::Header, move |m, _| {
+                header(m, &checkpoints)
+            })
+            .await
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
     }
     pub(super) async fn header_by_height(
         &self,
@@ -200,18 +274,28 @@ impl<O: MapOrder + Send + Sync + 'static> Context<O> {
         height: u64,
         top: Hash256,
     ) -> Result<Hash256, Error> {
-        let checkpoints = self.importer.context.rules.checkpoints.clone();
-        self.request(
-            client,
-            Kind::GetHeaderByHeight,
-            BTreeMap::from([
-                ("height".into(), Value::Integer(height.into())),
-                ("top_hash".into(), Value::Binary(top.0.to_vec())),
-            ]),
-            Kind::Header,
-            move |m, _| header(m, &checkpoints)?.hash().map_err(|_| Error::Header),
-        )
+        self.header_at(client, height, top)
+            .await?
+            .hash()
+            .map_err(|_| Error::Header)
+    }
+    pub(super) async fn inspect(
+        &self,
+        download: super::super::Download<O>,
+        now_ms: u64,
+    ) -> Result<super::super::Download<O>, Error> {
+        let importer = self.importer.clone();
+        tokio::time::timeout(self.config.timeout, async {
+            self.reads
+                .submit_wait(self.weight(), move |cancel| {
+                    importer.inspect_download(download, now_ms, cancel)
+                })
+                .await?
+                .await?
+                .map_err(Error::Import)
+        })
         .await
+        .map_err(|_| Error::Timeout)?
     }
     pub(super) async fn successors(
         &self,

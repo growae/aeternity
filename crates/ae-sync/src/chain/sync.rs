@@ -12,7 +12,7 @@ use ae_vm_fate::maps::{MapOrder, order::Otp26};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        Arc,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -23,6 +23,7 @@ pub mod agreement;
 pub mod coordination;
 mod service;
 mod session;
+mod shared;
 mod wire;
 pub use agreement::Point;
 pub use service::Service;
@@ -35,6 +36,9 @@ pub struct Config {
     pub headers: usize,
     pub maximum_successors: usize,
     pub probes: usize,
+    pub chain_hints: usize,
+    pub queued_headers: usize,
+    pub forward_chunks: usize,
     pub read_threads: usize,
     pub read_jobs: usize,
     pub read_bytes: usize,
@@ -52,6 +56,9 @@ impl Default for Config {
             headers: 100,
             maximum_successors: 4096,
             probes: 256,
+            chain_hints: 4096,
+            queued_headers: 8192,
+            forward_chunks: 15,
             read_threads: 2,
             read_jobs: 8,
             read_bytes: 128 << 20,
@@ -63,7 +70,20 @@ impl Default for Config {
     }
 }
 impl Config {
+    fn coordination_limits(&self) -> coordination::Limits {
+        coordination::Limits {
+            hints: self.chain_hints,
+            peers: self.peers,
+            items: self.queued_headers,
+            chunk: self.headers,
+            forward_chunks: self.forward_chunks,
+        }
+    }
+
     fn validate(&self) -> Result<(), Error> {
+        self.coordination_limits()
+            .validate()
+            .map_err(|_| Error::Configuration)?;
         if [
             self.peers,
             self.concurrent,
@@ -112,6 +132,7 @@ pub enum Error {
     MalformedResponse,
     ApplicationClosed,
     Refused(Vec<u8>),
+    Coordination(coordination::Error),
     Message(message::Error),
     Network(network::Error),
     Runtime(net::Error),
@@ -124,6 +145,11 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+impl From<coordination::Error> for Error {
+    fn from(e: coordination::Error) -> Self {
+        Self::Coordination(e)
+    }
+}
 impl From<repository::Error> for Error {
     fn from(e: repository::Error) -> Self {
         Self::Storage(e)
@@ -158,6 +184,8 @@ impl From<blocking::Error> for Error {
 pub enum Phase {
     Queued,
     Header,
+    Matching,
+    Waiting,
     Agreement,
     Successors,
     Generation,
@@ -167,6 +195,9 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Progress {
     pub phase: Phase,
+    pub task: Option<u64>,
+    pub members: usize,
+    pub buffered: usize,
     // Header announcements and agreement search positions are not admission.
     pub target: Option<Point>,
     pub agreed: Option<Point>,
@@ -183,6 +214,9 @@ impl Default for Progress {
     fn default() -> Self {
         Self {
             phase: Phase::Queued,
+            task: None,
+            members: 0,
+            buffered: 0,
             target: None,
             agreed: None,
             cursor: None,
@@ -265,6 +299,7 @@ enum Action {
     Start(Hash256),
     Forward(Hash256),
 }
+type HeaderLane = (net::Generation, Weak<tokio::sync::Mutex<()>>);
 struct Context<O> {
     importer: Arc<Importer<O>>,
     network: network::Handle,
@@ -272,6 +307,8 @@ struct Context<O> {
     reads: blocking::Pool,
     stopped: AtomicBool,
     wake: watch::Sender<()>,
+    shared: Mutex<shared::Book<O>>,
+    headers: Mutex<BTreeMap<PeerPublicKey, HeaderLane>>,
 }
 pub fn create<O: MapOrder + Send + Sync + 'static>(
     importer: Importer<O>,
@@ -312,6 +349,8 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         reads,
         stopped: AtomicBool::new(false),
         wake,
+        shared: Mutex::new(shared::Book::new()),
+        headers: Mutex::new(BTreeMap::new()),
     });
     Ok((
         Handle {

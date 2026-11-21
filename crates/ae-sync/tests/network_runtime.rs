@@ -393,6 +393,7 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
             }],
         )
         .unwrap(),
+        h.suspect(first_local.clone()).unwrap(),
         h.disconnect(first_local).unwrap(),
     ] {
         assert_eq!(within(ticket.wait()).await.unwrap(), Outcome::Stale);
@@ -414,9 +415,15 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
             port: 4322
         }])
     );
+    assert_eq!(
+        within(h.suspect(replacement_local).unwrap().wait())
+            .await
+            .unwrap(),
+        Outcome::Done
+    );
+    within(replacement_task).await.unwrap();
     let exit = stop(&h, task).await;
     assert_eq!(exit.registry.unwrap().saved_peers().count(), 1);
-    within(replacement_task).await.unwrap();
 }
 
 #[tokio::test]

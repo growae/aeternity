@@ -56,6 +56,60 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         }
         Ok(())
     }
+    pub(super) fn reserve_download(
+        &self,
+        owner: &network::Handle,
+        client: &net::Client,
+    ) -> Result<blocking::Reservation, Error> {
+        self.check_open()?;
+        if !owner.uses_database(&self.context.db) {
+            return Err(Error::Configuration);
+        }
+        let limits = self.context.config.messages;
+        let transport = client.message_limits();
+        if transport.body_bytes > limits.body_bytes
+            || transport.work_bytes > limits.work_bytes
+            || transport.items > limits.items
+            || transport.depth > limits.depth
+        {
+            return Err(Error::Configuration);
+        }
+        self.reserve()
+    }
+    pub(super) fn download_weight(&self) -> usize {
+        (self.context.config.messages.body_bytes + self.context.config.messages.work_bytes).max(1)
+    }
+    pub(super) fn inspect_download(
+        &self,
+        download: Download<O>,
+        now_ms: u64,
+        cancel: blocking::Cancellation,
+    ) -> Result<Download<O>, Failure> {
+        if !Arc::ptr_eq(&self.context, &download.owner) {
+            return Err(empty(Error::Configuration));
+        }
+        let Download {
+            owner,
+            reservation,
+            live,
+            requested,
+            direction,
+        } = download;
+        let input = Input::Live(live);
+        self.context
+            .decode(&input, requested, direction, now_ms, &cancel)
+            .map_err(empty)?;
+        let Input::Live(live) = input else {
+            unreachable!()
+        };
+        Ok(Download {
+            owner,
+            reservation,
+            live,
+            requested,
+            direction,
+        })
+    }
     pub async fn download(
         &self,
         owner: &network::Handle,
@@ -63,21 +117,20 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         requested: Hash256,
         direction: Direction,
     ) -> Result<Download<O>, Failure> {
+        let reservation = self.reserve_download(owner, &client).map_err(empty)?;
+        self.download_reserved(owner, client, requested, direction, reservation)
+            .await
+    }
+    pub(super) async fn download_reserved(
+        &self,
+        owner: &network::Handle,
+        client: net::Client,
+        requested: Hash256,
+        direction: Direction,
+        reservation: blocking::Reservation,
+    ) -> Result<Download<O>, Failure> {
         let operation = async {
-            self.check_open().map_err(empty)?;
-            if !owner.uses_database(&self.context.db) {
-                return Err(empty(Error::Configuration));
-            }
             let limits = self.context.config.messages;
-            let transport = client.message_limits();
-            if transport.body_bytes > limits.body_bytes
-                || transport.work_bytes > limits.work_bytes
-                || transport.items > limits.items
-                || transport.depth > limits.depth
-            {
-                return Err(empty(Error::Configuration));
-            }
-            let reservation = self.reserve().map_err(empty)?;
             let mut shutdown = self.context.shutdown.subscribe();
             let receive = async {
                 self.admitted(owner, &client).await.map_err(empty)?;

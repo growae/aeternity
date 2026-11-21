@@ -2,7 +2,7 @@ use super::*;
 use ae_chain::block::Block;
 use ae_sync::chain::{self, sync};
 
-async fn seed(node: &Node, count: usize) -> Vec<Block> {
+pub(super) async fn seed(node: &Node, count: usize) -> Vec<Block> {
     let all = common::ledger_fixtures::blocks(&NetworkProfile::mainnet());
     let importer = download_importer(node, Default::default());
     let mut last = &all[0];
@@ -38,8 +38,20 @@ fn synchronize(
     sync::Events,
     impl std::future::Future<Output = sync::Status>,
 ) {
+    synchronize_with_importer(node, app, config, Default::default())
+}
+pub(super) fn synchronize_with_importer(
+    node: &Node,
+    app: App,
+    config: sync::Config,
+    importer: chain::Config,
+) -> (
+    sync::Handle,
+    sync::Events,
+    impl std::future::Future<Output = sync::Status>,
+) {
     let (handle, events, service) = sync::create(
-        download_importer(node, Default::default()),
+        download_importer(node, importer),
         app.network.clone(),
         app.application.clone(),
         app.events,

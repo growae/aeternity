@@ -25,6 +25,85 @@ impl<O: MapOrder> Context<O> {
         }
         Ok(())
     }
+    pub(super) fn decode(
+        &self,
+        input: &Input,
+        requested: Hash256,
+        direction: Direction,
+        now_ms: u64,
+        cancel: &blocking::Cancellation,
+    ) -> Result<generation::Generation, Error> {
+        self.check(cancel, None)?;
+        let owned;
+        let message = match input {
+            Input::Packet(bytes) => {
+                owned = Message::decode_packet(bytes, self.config.messages)?;
+                &owned
+            }
+            Input::Live(live) => {
+                self.check(cancel, Some(&live.client))?;
+                // A driver may have different limits from this importer.
+                // Recheck the retained envelope inside our work budget.
+                live.received
+                    .message()
+                    .encode_packet(self.config.messages)?;
+                live.received.message()
+            }
+        };
+        let body = if message.kind() == Kind::Response {
+            match message.details() {
+                Details::Response {
+                    kind: Kind::Generation,
+                    message: Some(Ok(body)),
+                } => body.as_ref(),
+                Details::Response {
+                    kind: Kind::Generation,
+                    message: None,
+                } => {
+                    let Some(Value::Binary(reason)) = message.fields().get("reason") else {
+                        return Err(Error::Generation(generation::Error::Message));
+                    };
+                    return Err(Error::Refused(reason.clone()));
+                }
+                Details::Response {
+                    message: Some(Err(error)),
+                    ..
+                } => return Err(Error::Message(error.clone())),
+                _ => return Err(Error::Generation(generation::Error::Message)),
+            }
+        } else {
+            message
+        };
+        let view = self.db.view()?;
+        let generation = generation::Generation::decode(
+            body,
+            direction,
+            view.config().block(),
+            self.config.blocks,
+        )
+        .map_err(Error::Generation)?;
+        let height = generation.key().header().common().height;
+        if height > 0 {
+            let network = view.protocol_profile(
+                self.execution.network(),
+                height,
+                self.config.ledger.history,
+            )?;
+            let mut rules = self.rules.admission.clone();
+            rules.now_ms = now_ms;
+            self.whitelist(generation.key())?;
+            ae_chain::admission::validate_pow(generation.key(), &network, None, &rules).map_err(
+                |e| Error::Validation {
+                    operational: e.is_operational(),
+                    reason: format!("{e:?}"),
+                },
+            )?;
+        }
+        generation
+            .check(requested, view.config().mode)
+            .map_err(Error::Generation)?;
+        Ok(generation)
+    }
     pub(super) fn apply(
         &self,
         input: Input,
@@ -35,81 +114,12 @@ impl<O: MapOrder> Context<O> {
     ) -> Result<Report, Failure> {
         let _poison = Poison(&self.recovery);
         let mut progress = Report::default();
-        let operation = || -> Result<generation::Generation, Error> {
-            self.check(&cancel, None)?;
-            let owned;
-            let message = match &input {
-                Input::Packet(bytes) => {
-                    owned = Message::decode_packet(bytes, self.config.messages)?;
-                    &owned
-                }
-                Input::Live(live) => {
-                    self.check(&cancel, Some(&live.client))?;
-                    // A driver may have different limits from this importer.
-                    // Recheck the retained envelope inside our work budget.
-                    live.received
-                        .message()
-                        .encode_packet(self.config.messages)?;
-                    live.received.message()
-                }
-            };
-            let body = if message.kind() == Kind::Response {
-                match message.details() {
-                    Details::Response {
-                        kind: Kind::Generation,
-                        message: Some(Ok(body)),
-                    } => body.as_ref(),
-                    Details::Response {
-                        kind: Kind::Generation,
-                        message: None,
-                    } => {
-                        let Some(Value::Binary(reason)) = message.fields().get("reason") else {
-                            return Err(Error::Generation(generation::Error::Message));
-                        };
-                        return Err(Error::Refused(reason.clone()));
-                    }
-                    Details::Response {
-                        message: Some(Err(error)),
-                        ..
-                    } => return Err(Error::Message(error.clone())),
-                    _ => return Err(Error::Generation(generation::Error::Message)),
-                }
-            } else {
-                message
-            };
-            let view = self.db.view()?;
-            let generation = generation::Generation::decode(
-                body,
-                direction,
-                view.config().block(),
-                self.config.blocks,
-            )
-            .map_err(Error::Generation)?;
-            let height = generation.key().header().common().height;
-            if height > 0 {
-                let network = view.protocol_profile(
-                    self.execution.network(),
-                    height,
-                    self.config.ledger.history,
-                )?;
-                let mut rules = self.rules.admission.clone();
-                rules.now_ms = now_ms;
-                self.whitelist(generation.key())?;
-                ae_chain::admission::validate_pow(generation.key(), &network, None, &rules)
-                    .map_err(|e| Error::Validation {
-                        operational: e.is_operational(),
-                        reason: format!("{e:?}"),
-                    })?;
-            }
-            generation
-                .check(requested, view.config().mode)
-                .map_err(Error::Generation)?;
-            Ok(generation)
-        };
-        let generation = operation().map_err(|error| Failure {
-            progress: Some(progress.clone()),
-            error,
-        })?;
+        let generation = self
+            .decode(&input, requested, direction, now_ms, &cancel)
+            .map_err(|error| Failure {
+                progress: Some(progress.clone()),
+                error,
+            })?;
         let client = match &input {
             Input::Live(live) => Some(&live.client),
             _ => None,

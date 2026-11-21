@@ -1,6 +1,7 @@
 use super::super::Direction;
 use super::*;
 use agreement::{Probe, Search, Step};
+mod coordinated;
 
 struct Session<O> {
     context: Arc<Context<O>>,
@@ -10,8 +11,10 @@ struct Session<O> {
 }
 impl<O: MapOrder + Send + Sync + 'static> Session<O> {
     fn publish(&self) {
-        self.published.send_replace(self.progress.clone());
-        self.context.wake.send_replace(());
+        if *self.published.borrow() != self.progress {
+            self.published.send_replace(self.progress.clone());
+            self.context.wake.send_replace(());
+        }
     }
     fn phase(&mut self, phase: Phase) {
         self.progress.phase = phase;
@@ -126,62 +129,7 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
         self.phase(Phase::Header);
         self.progress.queries = self.progress.queries.saturating_add(1);
         let header = self.context.header_by_hash(&self.client, announced).await?;
-        let target = wire::target(&header)?;
-        self.progress.target = Some(target);
-        self.publish();
-        let agreement = self.agree(target).await?;
-        self.progress.agreed = Some(agreement);
-        // Search heights are remote announcements. Subsequent progress is
-        // measured from the stored header, including microblocks and retained
-        // side branches. Agreement itself does not require a key header.
-        let mut cursor = self.context.anchor(agreement.hash).await?;
-        self.progress.cursor = Some(cursor);
-        loop {
-            self.phase(Phase::Successors);
-            self.progress.queries = self.progress.queries.saturating_add(1);
-            let successors = self
-                .context
-                .successors(&self.client, cursor.hash, target.hash)
-                .await?;
-            if successors.is_empty() {
-                self.generation(cursor.hash, Direction::Forward).await?;
-                let hash = target.hash;
-                let (target_selected, selected) = self
-                    .context
-                    .read(move |db| {
-                        let view = db.view()?;
-                        let top = view.status().tip.ok_or(repository::Error::Uninitialized)?;
-                        let selected = Point {
-                            height: view.require_block(top)?.header().common().height,
-                            hash: top,
-                        };
-                        Ok((view.is_canonical(hash)?, selected))
-                    })
-                    .await?;
-                self.progress.selected = Some(selected);
-                return Ok(Finish::Exhausted { target_selected });
-            }
-            for announced in successors {
-                let point = if let Some(point) = self.context.stored_key(announced.hash).await? {
-                    self.progress.present = self.progress.present.saturating_add(1);
-                    point
-                } else {
-                    self.generation(announced.hash, Direction::Backward).await?;
-                    self.context
-                        .stored_key(announced.hash)
-                        .await?
-                        .ok_or(repository::Error::Missing(announced.hash))?
-                };
-                // An operational liveness bound, not a new consensus rule:
-                // known/repeated hashes must not keep a peer task cycling.
-                if point.height <= cursor.height {
-                    return Err(Error::NoProgress);
-                }
-                cursor = point;
-                self.progress.cursor = Some(cursor);
-                self.publish();
-            }
-        }
+        self.coordinate(header).await
     }
     async fn operation(&mut self, action: Action) -> Result<Finish, Error> {
         match action {
