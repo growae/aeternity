@@ -23,6 +23,8 @@ pub struct Service<O: MapOrder + Send + Sync + 'static = Otp26> {
     tasks: Tasks<Key, Completion>,
     target: u64,
     blocks: blocks::Owner<O>,
+    lifecycle: lifecycle::Owner<O>,
+    policy_config: watch::Receiver<ae_chain::resilience::Config>,
 }
 impl<O: MapOrder + Send + Sync + 'static> Service<O> {
     #[allow(clippy::too_many_arguments)]
@@ -35,9 +37,12 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         changed: watch::Receiver<()>,
         published: watch::Sender<Status>,
         current: Status,
+        policy_config: watch::Receiver<ae_chain::resilience::Config>,
     ) -> Self {
         Self {
             blocks: blocks::Owner::new(context.clone()),
+            lifecycle: lifecycle::Owner::new(context.clone()),
+            policy_config,
             context,
             application,
             incoming,
@@ -53,14 +58,27 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         }
     }
     fn route(&mut self, client: net::Client, intent: &peer::ChainIntent) -> Result<(), Error> {
+        if client.is_closed() {
+            return Err(Error::Stale);
+        }
         let hash = |raw: &[u8]| raw.try_into().map(Hash256).map_err(|_| Error::Hash);
         let action = match intent {
             peer::ChainIntent::Done => {
                 self.current.counts.done_announcements =
                     self.current.counts.done_announcements.saturating_add(1);
+                self.lifecycle.done(
+                    client.peer(),
+                    client.generation().clone(),
+                    lifecycle::DoneReason::Ping,
+                );
                 return Ok(());
             }
-            peer::ChainIntent::Generation(bytes) => Action::Forward(hash(bytes)?),
+            peer::ChainIntent::Generation(bytes) => {
+                if self.lifecycle.suppress_generation() {
+                    return Ok(());
+                }
+                Action::Forward(hash(bytes)?)
+            }
             peer::ChainIntent::Start { best, .. } => Action::Start(hash(best)?),
         };
         if client.is_closed() {
@@ -156,13 +174,14 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .values()
             .filter(|lane| lane.pending.is_some())
             .count();
-        let target = self
-            .current
-            .active
-            .iter()
-            .filter_map(|a| a.progress.target.map(|p| p.height))
-            .max()
-            .unwrap_or(0);
+        let (tasks, target, transitions) = self
+            .context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lifecycle();
+        self.lifecycle.observe(tasks, target, transitions);
+        self.current.lifecycle = self.lifecycle.status();
         if target != self.target {
             self.application
                 .set_sync_target(target)
@@ -179,6 +198,17 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         if *lane.client.generation() != key.1 {
             return;
         }
+        if matches!(completion.result, Ok(Finish::Forward { .. })) {
+            self.lifecycle.generation_fetched();
+        }
+        if completion.progress.peer_exhausted {
+            self.lifecycle.done(
+                completion.peer,
+                completion.generation.clone(),
+                lifecycle::DoneReason::Exhausted,
+            );
+        }
+        self.lifecycle.refresh();
         lane.active = None;
         if lane.pending.is_some() {
             self.ready.push_back(key.0);
@@ -195,6 +225,8 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         self.current.last = Some(completion);
     }
     pub async fn run(mut self) -> Status {
+        let mut refresh = tokio::time::interval(self.context.config.refresh_interval);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if let Some(error) = self.context.importer.recovery_reason() {
                 self.current.last_error = Some(Error::Import(super::super::Failure {
@@ -203,7 +235,11 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 }));
                 break;
             }
-            self.start_ready();
+            self.lifecycle
+                .start(*self.policy_config.borrow_and_update());
+            if self.lifecycle.ready() {
+                self.start_ready();
+            }
             if let Err(error) = self.publish() {
                 self.current.last_error = Some(error);
                 break;
@@ -215,7 +251,10 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 _ = self.stopped.changed() => break,
                 _ = self.forwarded.closed() => break,
                 _ = self.changed.changed() => (),
-                event = self.incoming.recv() => match event {
+                _ = refresh.tick() => self.lifecycle.refresh(),
+                _ = self.policy_config.changed() => (),
+                result = self.lifecycle.next() => if let Err(error) = result { self.current.last_error = Some(error); break; },
+                event = self.incoming.recv(), if self.lifecycle.ready() => match event {
                     None => break,
                     Some(event) => {
                         if blocks::Owner::<O>::handles(&event) { self.blocks.route(event); continue; }
@@ -227,7 +266,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                         if self.forwarded.try_send(event).is_err() { self.current.last_error = Some(Error::Busy); break; }
                     },
                 },
-                _ = self.blocks.next() => (),
+                _ = self.blocks.next() => self.lifecycle.refresh(),
                 (key, completion) = self.tasks.next() => self.finish(key, completion),
             }
         }
@@ -242,6 +281,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             })
             .collect();
         monitors.extend(self.blocks.cancel());
+        self.lifecycle.cancel();
         self.current.counts.cancelled = self
             .current
             .counts
@@ -258,6 +298,15 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             monitor.wait().await;
         }
         self.current.blocks = self.blocks.status();
+        let (tasks, target, transitions) = self
+            .context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lifecycle();
+        self.lifecycle.observe(tasks, target, transitions);
+        self.current.lifecycle = self.lifecycle.status();
+        self.current.lifecycle.pending = false;
         self.current.running = false;
         self.current.joined = true;
         self.current.active.clear();
@@ -269,6 +318,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
 }
 impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
     fn drop(&mut self) {
+        self.lifecycle.cancel();
         self.blocks.cancel();
         self.current.blocks = self.blocks.status();
         self.context.stopped.store(true, Ordering::Release);
@@ -281,6 +331,15 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
             .cancelled
             .saturating_add(self.tasks.len() as u64);
         self.tasks.clear();
+        let (tasks, target, transitions) = self
+            .context
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lifecycle();
+        self.lifecycle.observe(tasks, target, transitions);
+        self.current.lifecycle = self.lifecycle.status();
+        self.current.lifecycle.pending = false;
         self.context.importer.stop();
         self.context.reads.stop();
         let _ = self.application.set_sync_target(0);

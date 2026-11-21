@@ -1361,3 +1361,6 @@ mod staged_download;
 
 #[path = "peer_runtime/block_gossip.rs"]
 mod block_gossip;
+
+#[path = "peer_runtime/lifecycle.rs"]
+mod lifecycle;

@@ -29,7 +29,7 @@ pub(super) async fn seed(node: &Node, count: usize) -> Vec<Block> {
     importer.join().await;
     all
 }
-fn synchronize(
+pub(super) fn synchronize(
     node: &Node,
     app: App,
     config: sync::Config,
@@ -204,7 +204,7 @@ async fn actual_sync_consumes_start_intents_agrees_batches_imports_and_forwards_
     }
 }
 #[tokio::test]
-async fn empty_successors_cannot_claim_target_selected_or_enable_resilience() {
+async fn empty_successors_signal_peer_completion_without_claiming_target_selection() {
     let node = Node::new();
     let source = Node::new();
     seed(&source, usize::MAX).await;
@@ -223,7 +223,20 @@ async fn empty_successors_cannot_claim_target_selected_or_enable_resilience() {
     );
     assert_eq!(completion.progress.committed, 0);
     assert_eq!(node.db.view().unwrap().status(), before);
-    assert!(!node.db.view().unwrap().resilience().state.synchronized());
+    within(async {
+        while !sync
+            .status()
+            .lifecycle
+            .policy
+            .is_some_and(|p| p.state.synchronized())
+        {
+            sync.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(node.db.view().unwrap().resilience().state.synchronized());
+    assert!(!sync.status().lifecycle.last_generation_in_sync);
+    assert_eq!(sync.status().lifecycle.peer_completions, 1);
     sync.shutdown();
     assert!(within(finish).await.joined);
     within(driver).await.unwrap();

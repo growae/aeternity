@@ -28,6 +28,7 @@ mod download;
 pub use download::Download;
 pub mod generation;
 mod import;
+mod policy;
 pub mod sync;
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,9 @@ pub enum Error {
     Validation {
         operational: bool,
         reason: String,
+    },
+    PolicyUncertain {
+        error: repository::Error,
     },
     CommitUncertain {
         hash: Hash256,
@@ -166,10 +170,22 @@ struct Context<O> {
     recovery: Mutex<Option<Error>>,
     #[cfg(test)]
     commit_hook: Option<CommitHook>,
+    #[cfg(test)]
+    policy_hook: Option<PolicyHook>,
 }
 #[cfg(test)]
 type CommitHook = Arc<
     dyn Fn(&Database, repository::Update) -> Result<ae_storage::Committed, repository::Error>
+        + Send
+        + Sync,
+>;
+#[cfg(test)]
+type PolicyHook = Arc<
+    dyn Fn(
+            &Database,
+            ae_chain::resilience::Event,
+            ae_chain::resilience::Config,
+        ) -> Result<ae_chain::resilience::Snapshot, repository::Error>
         + Send
         + Sync,
 >;
@@ -246,6 +262,8 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 recovery: Mutex::new(None),
                 #[cfg(test)]
                 commit_hook: None,
+                #[cfg(test)]
+                policy_hook: None,
             }),
             jobs,
         })

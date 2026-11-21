@@ -22,6 +22,7 @@ use tokio::sync::{mpsc, watch};
 pub mod agreement;
 pub mod blocks;
 pub mod coordination;
+pub mod lifecycle;
 mod service;
 mod session;
 mod shared;
@@ -40,6 +41,8 @@ pub struct Config {
     pub chain_hints: usize,
     pub queued_headers: usize,
     pub forward_chunks: usize,
+    pub resilience: ae_chain::resilience::Config,
+    pub refresh_interval: Duration,
     pub block_jobs: usize,
     pub block_bytes: usize,
     pub read_threads: usize,
@@ -62,6 +65,11 @@ impl Default for Config {
             chain_hints: 4096,
             queued_headers: 8192,
             forward_chunks: 15,
+            resilience: ae_chain::resilience::Config {
+                depth: 100,
+                from_start: false,
+            },
+            refresh_interval: Duration::from_secs(1),
             block_jobs: 8,
             block_bytes: 256 << 20,
             read_threads: 2,
@@ -119,7 +127,12 @@ impl Config {
         {
             return Err(Error::Configuration);
         }
-        for duration in [self.timeout, self.capacity_timeout, self.retry_delay] {
+        for duration in [
+            self.timeout,
+            self.capacity_timeout,
+            self.retry_delay,
+            self.refresh_interval,
+        ] {
             if duration.is_zero() || tokio::time::Instant::now().checked_add(duration).is_none() {
                 return Err(Error::Configuration);
             }
@@ -156,6 +169,7 @@ pub enum Error {
     Runtime(net::Error),
     Storage(repository::Error),
     Import(super::Failure),
+    Policy(super::Error),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -227,6 +241,7 @@ pub struct Progress {
     pub committed: u64,
     pub present: u64,
     pub retries: u64,
+    pub peer_exhausted: bool,
 }
 impl Default for Progress {
     fn default() -> Self {
@@ -244,6 +259,7 @@ impl Default for Progress {
             committed: 0,
             present: 0,
             retries: 0,
+            peer_exhausted: false,
         }
     }
 }
@@ -289,13 +305,20 @@ pub struct Status {
     pub last: Option<Completion>,
     pub last_error: Option<Error>,
     pub blocks: blocks::Status,
+    pub lifecycle: lifecycle::Status,
 }
 #[derive(Clone)]
 pub struct Handle {
     stop: watch::Sender<bool>,
+    resilience: watch::Sender<ae_chain::resilience::Config>,
     status: watch::Receiver<Status>,
 }
 impl Handle {
+    // Updates are coalesced to the latest configuration, like a config snapshot.
+    pub fn set_resilience(&self, config: ae_chain::resilience::Config) -> Result<(), Error> {
+        self.resilience.send(config).map_err(|_| Error::Closed)
+    }
+
     pub fn shutdown(&self) {
         self.stop.send_replace(true);
     }
@@ -356,6 +379,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     )?;
     let (send, events) = mpsc::channel(config.forwarded);
     let (stop, stopped) = watch::channel(false);
+    let (resilience, policy_config) = watch::channel(config.resilience);
     let (wake, changed) = watch::channel(());
     let current = Status {
         running: true,
@@ -366,6 +390,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         last: None,
         last_error: None,
         blocks: Default::default(),
+        lifecycle: Default::default(),
     };
     let (status, observed) = watch::channel(current.clone());
     let context = Arc::new(Context {
@@ -381,6 +406,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     Ok((
         Handle {
             stop,
+            resilience,
             status: observed,
         },
         Events(events),
@@ -393,6 +419,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
             changed,
             status,
             current,
+            policy_config,
         ),
     ))
 }

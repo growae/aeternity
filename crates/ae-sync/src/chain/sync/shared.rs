@@ -71,6 +71,8 @@ struct Group<O> {
 pub(super) struct Book<O> {
     groups: Vec<Group<O>>,
     sequence: u64,
+    top_target: u64,
+    lifecycle: lifecycle::Signal,
 }
 pub(super) enum Join {
     Joined(u64),
@@ -82,6 +84,26 @@ pub(super) enum Join {
     },
 }
 impl<O> Book<O> {
+    pub fn lifecycle(&self) -> (Vec<lifecycle::Task>, u64, u64) {
+        (
+            self.groups
+                .iter()
+                .map(|g| lifecycle::Task {
+                    id: g.model.state().chain.id(),
+                    target: g.model.state().chain.target().height,
+                    suspect: g.model.state().suspect,
+                })
+                .collect(),
+            self.top_target,
+            self.lifecycle.changes,
+        )
+    }
+
+    fn lifecycle_changed(&mut self) {
+        // Count every task transition before watch notifications can coalesce.
+        self.lifecycle
+            .update(self.groups.iter().any(|g| !g.model.state().suspect));
+    }
     #[cfg(test)]
     pub fn posting_client(&self) -> Option<net::Client> {
         self.groups
@@ -101,6 +123,8 @@ impl<O> Book<O> {
         Self {
             groups: vec![],
             sequence: 0,
+            top_target: 0,
+            lifecycle: Default::default(),
         }
     }
     pub fn number(&mut self) -> Result<u64, Error> {
@@ -128,7 +152,7 @@ impl<O> Book<O> {
         let candidates: Vec<_> = self
             .groups
             .iter()
-            .filter(|g| !g.finished && g.failed.is_none())
+            .filter(|g| !g.finished && (g.failed.is_none() || g.model.state().suspect))
             .map(|g| g.model.state().chain.clone())
             .collect();
         let id = match coordination::match_tasks(candidate, &candidates) {
@@ -180,6 +204,9 @@ impl<O> Book<O> {
             }
         };
         let group = self.group_mut(id)?;
+        if group.model.state().suspect {
+            return Err(group.failed.clone().unwrap_or(Error::BlockedByWhitelist));
+        }
         if group.members.contains_key(&client.peer()) {
             return Err(Error::Stale);
         }
@@ -196,6 +223,8 @@ impl<O> Book<O> {
         group
             .model
             .workers(group.members.keys().copied().collect())?;
+        self.top_target = self.top_target.max(candidate.target().height);
+        self.lifecycle_changed();
         Ok(Join::Joined(id))
     }
     pub fn add_hint(
@@ -291,7 +320,24 @@ impl<O> Book<O> {
         }
         group.members.remove(&client.peer());
         let _ = group.model.remove_peer(client.peer());
-        self.groups.retain(|g| !g.members.is_empty());
+        let ended = group.members.is_empty();
+        if ended {
+            // Retain suspect chain hints, never downloaded bodies or credits
+            // after the final member has left this terminal task.
+            group.payloads.clear();
+        }
+        self.groups
+            .retain(|g| !g.members.is_empty() || g.model.state().suspect);
+        if ended {
+            self.top_target = self
+                .groups
+                .iter()
+                .filter(|g| !g.model.state().suspect)
+                .map(|g| g.model.state().chain.target().height)
+                .max()
+                .unwrap_or(0);
+        }
+        self.lifecycle_changed();
     }
 }
 pub(super) struct Membership<O: MapOrder + Send + Sync + 'static> {

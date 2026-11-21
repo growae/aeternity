@@ -174,6 +174,23 @@ async fn shared_downloads(scenario: Scenario, count: usize) {
         assert!(within(finish).await.joined);
         assert_eq!(node.db.view().unwrap().status(), before);
     } else {
+        // Completion schedules a policy update on the shared import worker.
+        // Observe its acknowledgment before checking the database state.
+        within(async {
+            loop {
+                let status = sync.status();
+                assert!(status.running, "{scenario:?}: {status:?}");
+                if status
+                    .lifecycle
+                    .policy
+                    .is_some_and(|p| p.state.synchronized())
+                {
+                    break;
+                }
+                sync.changed().await.unwrap();
+            }
+        })
+        .await;
         let status = sync.status();
         assert_eq!(
             status.counts.failed,
@@ -182,7 +199,13 @@ async fn shared_downloads(scenario: Scenario, count: usize) {
         );
         assert!(status.counts.finished > 0);
         assert_eq!(node.db.view().unwrap().status().tip, Some(last));
-        assert!(!node.db.view().unwrap().resilience().state.synchronized());
+        assert!(node.db.view().unwrap().resilience().state.synchronized());
+        assert_eq!(
+            node.db.view().unwrap().resilience().state.active_depth(),
+            Some(100)
+        );
+        // Exhausted coordinated tasks do not set the initial-fetch latch.
+        assert!(!status.lifecycle.last_generation_in_sync);
         assert_eq!(
             backward_requests
                 .iter()

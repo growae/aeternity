@@ -168,7 +168,21 @@ async fn killed_shared_owners_reopen_complete_prefixes_and_resume() {
         resumed.completed().await;
         let status = resumed.stop().await;
         assert_eq!(status.counts.failed, 0, "{name}: {status:?}");
-        assert_eq!(status.counts.finished, 3);
+        // Peers arriving after a successful initial forward fetch are
+        // deliberately suppressed, including when an earlier peer has
+        // already resumed an incomplete recovered prefix to the target.
+        if prefix == 3 || status.lifecycle.suppressed_generations > 0 {
+            assert!(
+                status.lifecycle.last_generation_in_sync,
+                "{name}: {status:?}"
+            );
+        }
+        assert!((1..=3).contains(&status.counts.finished));
+        assert_eq!(
+            status.counts.finished + status.lifecycle.suppressed_generations,
+            3,
+            "{name}: {status:?}"
+        );
         assert_eq!(
             node.db.view().unwrap().status().tip,
             Some(blocks[2].hash().unwrap())

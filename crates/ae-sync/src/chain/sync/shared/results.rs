@@ -35,7 +35,9 @@ impl<O> Book<O> {
             return Err(Error::Stale);
         };
         if points.is_empty() {
-            g.members.get_mut(&lease.peer).expect("member").exhausted = Some(from);
+            let member = g.members.get_mut(&lease.peer).expect("member");
+            member.exhausted = Some(from);
+            member.sync_height = None;
             let mut state = g.model.state().clone();
             state.next_pool = NextPool::None;
             g.model = Scheduler::restore(state, limits)?;
@@ -163,6 +165,7 @@ impl<O> Book<O> {
                 g.failed = Some(error);
             }
             Self::release(g, lease);
+            self.lifecycle_changed();
             Ok(suspects)
         } else {
             g.failed = Some(error);

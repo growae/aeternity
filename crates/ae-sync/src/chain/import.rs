@@ -12,6 +12,34 @@ impl Drop for Poison<'_> {
     }
 }
 impl<O: MapOrder> Context<O> {
+    pub(super) fn apply_policy(
+        &self,
+        event: ae_chain::resilience::Event,
+        config: ae_chain::resilience::Config,
+        cancel: blocking::Cancellation,
+    ) -> Result<ae_chain::resilience::Snapshot, Error> {
+        let _poison = Poison(&self.recovery);
+        self.check(&cancel, None)?;
+        let update = || self.db.update_resilience(event, config);
+        #[cfg(test)]
+        let update = || match &self.policy_hook {
+            Some(hook) => hook(&self.db, event, config),
+            None => update(),
+        };
+        update().map_err(|error| {
+            if matches!(error, repository::Error::Backend(_)) {
+                let error = Error::PolicyUncertain { error };
+                self.recovery
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(|| error.clone());
+                error
+            } else {
+                Error::Storage(error)
+            }
+        })
+    }
+
     pub(super) fn apply_block(
         &self,
         bytes: Vec<u8>,

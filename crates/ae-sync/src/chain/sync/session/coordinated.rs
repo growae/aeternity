@@ -132,6 +132,8 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                         .await?;
                     self.progress.selected = Some(selected);
                     self.publish();
+                    self.progress.peer_exhausted = true;
+                    self.publish();
                     return Ok(Finish::Exhausted {
                         target_selected: canonical,
                     });
@@ -264,7 +266,13 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
                             }
                         }
                         Operation::Forward(hash) => {
-                            self.generation(hash, Direction::Forward).await?;
+                            // Native completion follows an empty successor reply even
+                            // if its final forward fetch returns an ordinary error.
+                            // Preserve that signal separately from admission success.
+                            let result = self.generation(hash, Direction::Forward).await;
+                            self.progress.peer_exhausted = true;
+                            self.publish();
+                            result?;
                             let selected = self.context.selected().await?;
                             self.context
                                 .shared

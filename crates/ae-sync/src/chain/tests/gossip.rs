@@ -214,3 +214,64 @@ async fn standalone_gossip_uncertain_commit_quarantines_generation_import_too() 
     importer.stop();
     importer.join().await;
 }
+
+#[tokio::test]
+async fn resilience_lost_acknowledgment_quarantines_all_shared_import_paths() {
+    use ae_chain::resilience::{Config, Event};
+    for panic in [false, true] {
+        let (_temp, mut importer) = setup(Default::default());
+        Arc::get_mut(&mut importer.context).unwrap().policy_hook =
+            Some(Arc::new(move |db, event, config| {
+                db.update_resilience(event, config)?;
+                if panic {
+                    panic!("policy worker after publication");
+                }
+                Err(repository::Error::Backend(
+                    "policy acknowledgment lost".into(),
+                ))
+            }));
+        let config = Config {
+            depth: 1,
+            from_start: false,
+        };
+        let error = within(importer.policy(Event::Synced, config))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::WorkerPanicked | Error::PolicyUncertain { .. }
+        ));
+        assert!(
+            importer
+                .context
+                .db
+                .view()
+                .unwrap()
+                .resilience()
+                .state
+                .synchronized()
+        );
+        assert_eq!(importer.recovery_reason(), Some(error.clone()));
+        let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+        assert!(matches!(
+            importer.import_block(blocks[0].encode().unwrap(), NOW),
+            Err(Error::RecoveryRequired)
+        ));
+        assert!(matches!(
+            importer.import(
+                packet(&blocks[0], &[], Direction::Backward),
+                blocks[0].hash().unwrap(),
+                Direction::Backward,
+                NOW
+            ),
+            Err(Error::RecoveryRequired)
+        ));
+        assert_eq!(
+            within(importer.policy(Event::ConfigChanged, config)).await,
+            Err(Error::RecoveryRequired)
+        );
+        assert_eq!(importer.recovery_reason(), Some(error));
+        importer.stop();
+        importer.join().await;
+    }
+}

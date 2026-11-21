@@ -208,9 +208,18 @@ impl Running {
     }
     async fn completed(&mut self) {
         within(async {
-            while self.handle.status().counts.finished + self.handle.status().counts.failed < 3
-                && self.handle.status().running
-            {
+            loop {
+                let status = self.handle.status();
+                // Once the initial forward generation succeeds, later peers
+                // can be accounted for by the global latch without a fetch.
+                if status.counts.finished
+                    + status.counts.failed
+                    + status.lifecycle.suppressed_generations
+                    >= 3
+                    || !status.running
+                {
+                    break;
+                }
                 self.handle.changed().await.unwrap();
             }
         })
