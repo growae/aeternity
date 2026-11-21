@@ -81,7 +81,7 @@ pub(super) fn successors(
         })
         .collect()
 }
-fn response(message: &Message, kind: Kind) -> Result<&Message, Error> {
+pub(super) fn response(message: &Message, kind: Kind) -> Result<&Message, Error> {
     match message.details() {
         Details::Response {
             kind: actual,

@@ -23,10 +23,32 @@ impl<O: MapOrder> Context<O> {
             self.check(&cancel, None)?;
             let view = self.db.view()?;
             let block = Block::decode(&bytes, view.config().block()).map_err(Error::Block)?;
-            let mut rules = self.rules.clone();
-            rules.admission.now_ms = now_ms;
-            self.insert(&block, &rules, &cancel, None, ledger::Origin::Gossip)
+            self.insert_gossip(&block, now_ms, &cancel, None)
         })();
+        Self::block_report(result)
+    }
+    pub(super) fn apply_received_block(
+        &self,
+        block: Block,
+        now_ms: u64,
+        cancel: blocking::Cancellation,
+        client: &net::Client,
+    ) -> Result<Report, Failure> {
+        let _poison = Poison(&self.recovery);
+        Self::block_report(self.insert_gossip(&block, now_ms, &cancel, Some(client)))
+    }
+    fn insert_gossip(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        cancel: &blocking::Cancellation,
+        client: Option<&net::Client>,
+    ) -> Result<Accepted, Error> {
+        let mut rules = self.rules.clone();
+        rules.admission.now_ms = now_ms;
+        self.insert(block, &rules, cancel, client, ledger::Origin::Gossip)
+    }
+    fn block_report(result: Result<Accepted, Error>) -> Result<Report, Failure> {
         result
             .map(|accepted| Report {
                 accepted: vec![accepted],

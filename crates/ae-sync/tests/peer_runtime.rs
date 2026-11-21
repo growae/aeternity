@@ -1358,3 +1358,6 @@ mod shared_sync;
 
 #[path = "peer_runtime/staged_download.rs"]
 mod staged_download;
+
+#[path = "peer_runtime/block_gossip.rs"]
+mod block_gossip;

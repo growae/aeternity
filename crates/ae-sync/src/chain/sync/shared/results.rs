@@ -104,6 +104,13 @@ impl<O> Book<O> {
         if posted != g.model.state().adding.len() {
             return Err(Error::Stale);
         }
+        // Native post_blocks reports the last scheduled item height, even
+        // for local generations. This gate is not a canonical progress claim.
+        if let Some(last) = g.model.state().adding.last() {
+            for member in g.members.values_mut() {
+                member.sync_height = Some(last.point.height);
+            }
+        }
         g.model.apply(ResultInput::Posted)?;
         Self::release(g, lease);
         Ok(())
@@ -126,6 +133,11 @@ impl<O> Book<O> {
         let rejected = matches!(&error,Error::Import(f)if matches!(f.error,chain::Error::Policy{..}|chain::Error::BlockedByWhitelist));
         let retry = matches!(&error,Error::Import(f)if f.progress.is_some() && matches!(f.error,chain::Error::Validation{operational:false,..}|chain::Error::Generation(_)|chain::Error::Stale));
         if rejected || retry {
+            if !rejected {
+                for member in g.members.values_mut() {
+                    member.sync_height = Some(item.point.height);
+                }
+            }
             let effects = g.model.apply(ResultInput::PostError {
                 peer: supplier,
                 height: item.point.height,
@@ -170,6 +182,7 @@ impl<O> Book<O> {
         }
         g.selected = Some(selected);
         g.finished = true;
+        g.members.get_mut(&lease.peer).expect("member").sync_height = None;
         Self::release(g, lease);
         Ok(())
     }

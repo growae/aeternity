@@ -20,6 +20,7 @@ use std::{
 use tokio::sync::{mpsc, watch};
 
 pub mod agreement;
+pub mod blocks;
 pub mod coordination;
 mod service;
 mod session;
@@ -39,6 +40,8 @@ pub struct Config {
     pub chain_hints: usize,
     pub queued_headers: usize,
     pub forward_chunks: usize,
+    pub block_jobs: usize,
+    pub block_bytes: usize,
     pub read_threads: usize,
     pub read_jobs: usize,
     pub read_bytes: usize,
@@ -59,6 +62,8 @@ impl Default for Config {
             chain_hints: 4096,
             queued_headers: 8192,
             forward_chunks: 15,
+            block_jobs: 8,
+            block_bytes: 256 << 20,
             read_threads: 2,
             read_jobs: 8,
             read_bytes: 128 << 20,
@@ -80,6 +85,13 @@ impl Config {
         }
     }
 
+    fn block_weight(&self) -> Option<usize> {
+        self.messages
+            .body_bytes
+            .checked_add(self.messages.work_bytes)?
+            .checked_mul(3)
+    }
+
     fn validate(&self) -> Result<(), Error> {
         self.coordination_limits()
             .validate()
@@ -90,9 +102,12 @@ impl Config {
             self.forwarded,
             self.maximum_successors,
             self.probes,
+            self.block_jobs,
         ]
         .iter()
         .any(|n| *n == 0 || *n > 65_536)
+            || self.block_bytes > 1 << 30
+            || self.block_bytes < self.block_weight().unwrap_or(usize::MAX)
             || self.concurrent > self.peers
             || self.headers == 0
             || self.headers > self.maximum_successors
@@ -121,8 +136,11 @@ pub enum Error {
     Timeout,
     Clock,
     Header,
+    Block(ae_chain::block::Error),
+    Gossip(ae_chain::gossip::Error),
     Hash,
     KeyExpected,
+    MicroExpected,
     NoProgress,
     ResourceLimit,
     WorkerPanicked,
@@ -270,6 +288,7 @@ pub struct Status {
     pub counts: Counts,
     pub last: Option<Completion>,
     pub last_error: Option<Error>,
+    pub blocks: blocks::Status,
 }
 #[derive(Clone)]
 pub struct Handle {
@@ -322,6 +341,10 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     config.validate()?;
     if !network.uses_database(&importer.context.db)
         || !application.uses_database(&importer.context.db)
+        || importer
+            .download_weight()
+            .checked_mul(3)
+            .is_none_or(|n| n > config.block_bytes)
     {
         return Err(Error::Configuration);
     }
@@ -342,6 +365,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         counts: Counts::default(),
         last: None,
         last_error: None,
+        blocks: Default::default(),
     };
     let (status, observed) = watch::channel(current.clone());
     let context = Arc::new(Context {

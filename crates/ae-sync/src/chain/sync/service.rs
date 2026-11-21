@@ -22,6 +22,7 @@ pub struct Service<O: MapOrder + Send + Sync + 'static = Otp26> {
     ready: VecDeque<PeerPublicKey>,
     tasks: Tasks<Key, Completion>,
     target: u64,
+    blocks: blocks::Owner<O>,
 }
 impl<O: MapOrder + Send + Sync + 'static> Service<O> {
     #[allow(clippy::too_many_arguments)]
@@ -36,6 +37,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         current: Status,
     ) -> Self {
         Self {
+            blocks: blocks::Owner::new(context.clone()),
             context,
             application,
             incoming,
@@ -138,6 +140,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         }
     }
     fn publish(&mut self) -> Result<(), Error> {
+        self.current.blocks = self.blocks.status();
         self.current.active = self
             .lanes
             .iter()
@@ -215,6 +218,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 event = self.incoming.recv() => match event {
                     None => break,
                     Some(event) => {
+                        if blocks::Owner::<O>::handles(&event) { self.blocks.route(event); continue; }
                         if let peer::EventKind::Chain { client, intent } = event.kind()
                             && let Err(error) = self.route(client.clone(), intent) {
                                 self.current.counts.refused = self.current.counts.refused.saturating_add(1);
@@ -223,11 +227,12 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                         if self.forwarded.try_send(event).is_err() { self.current.last_error = Some(Error::Busy); break; }
                     },
                 },
+                _ = self.blocks.next() => (),
                 (key, completion) = self.tasks.next() => self.finish(key, completion),
             }
         }
         self.context.stopped.store(true, Ordering::Release);
-        let monitors: Vec<_> = self
+        let mut monitors: Vec<_> = self
             .lanes
             .values()
             .filter(|l| l.active.is_some())
@@ -236,6 +241,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 lane.client.monitor()
             })
             .collect();
+        monitors.extend(self.blocks.cancel());
         self.current.counts.cancelled = self
             .current
             .counts
@@ -251,6 +257,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         for monitor in monitors {
             monitor.wait().await;
         }
+        self.current.blocks = self.blocks.status();
         self.current.running = false;
         self.current.joined = true;
         self.current.active.clear();
@@ -262,6 +269,8 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
 }
 impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
     fn drop(&mut self) {
+        self.blocks.cancel();
+        self.current.blocks = self.blocks.status();
         self.context.stopped.store(true, Ordering::Release);
         for lane in self.lanes.values().filter(|lane| lane.active.is_some()) {
             lane.client.shutdown();

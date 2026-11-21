@@ -160,6 +160,9 @@ pub struct Event {
     _bytes: OwnedSemaphorePermit,
 }
 impl Event {
+    pub(crate) fn into_kind(self) -> EventKind {
+        self.kind
+    }
     pub fn kind(&self) -> &EventKind {
         &self.kind
     }

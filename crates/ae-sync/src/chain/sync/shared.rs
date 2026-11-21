@@ -25,6 +25,7 @@ struct Member {
     client: net::Client,
     lease: Option<(u64, Kind)>,
     exhausted: Option<Hash256>,
+    sync_height: Option<u64>,
     failed: Option<Error>,
 }
 pub(super) enum Payload<O> {
@@ -88,6 +89,13 @@ impl<O> Book<O> {
             .flat_map(|g| g.members.values())
             .find(|m| matches!(m.lease, Some((_, Kind::Post { .. }))))
             .map(|m| m.client.clone())
+    }
+    pub fn sync_height(&self, client: &net::Client) -> Option<u64> {
+        self.groups
+            .iter()
+            .filter_map(|g| g.members.get(&client.peer()))
+            .find(|m| m.client.generation() == client.generation())
+            .and_then(|m| m.sync_height)
     }
     pub fn new() -> Self {
         Self {
@@ -181,6 +189,7 @@ impl<O> Book<O> {
                 client: client.clone(),
                 lease: None,
                 exhausted: None,
+                sync_height: None,
                 failed: None,
             },
         );
@@ -313,3 +322,6 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Membership<O> {
         self.context.wake.send_replace(());
     }
 }
+
+#[cfg(test)]
+mod tests;
