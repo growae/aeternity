@@ -211,6 +211,7 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Handle {
+    db: Arc<Database>,
     stop: watch::Sender<bool>,
     target: watch::Sender<u64>,
     status: watch::Receiver<Status>,
@@ -219,7 +220,8 @@ impl Handle {
     pub fn shutdown(&self) {
         self.stop.send_replace(true);
     }
-    // Supplied by the chain synchronizer. A peer's claimed height never sets it.
+    // A tracked header target supplied by the synchronizer, not a selected
+    // height or proof of block validity. Ping announcements do not set it.
     pub fn set_sync_target(&self, height: u64) -> Result<(), Error> {
         if *self.stop.borrow() || !self.status.borrow().running {
             return Err(Error::Closed);
@@ -229,6 +231,9 @@ impl Handle {
     }
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
+    }
+    pub(crate) fn uses_database(&self, db: &Arc<Database>) -> bool {
+        Arc::ptr_eq(&self.db, db)
     }
     pub async fn changed(&mut self) -> Result<Status, Error> {
         self.status.changed().await.map_err(|_| Error::Closed)?;
@@ -294,7 +299,7 @@ pub fn create(
     let (status, observed) = watch::channel(current.clone());
     let (progress, _) = watch::channel(Counts::default());
     let context = Context {
-        db,
+        db: db.clone(),
         network,
         storage_bytes: Arc::new(Semaphore::new(config.blocking_bytes)),
         config: Arc::new(config),
@@ -304,6 +309,7 @@ pub fn create(
     };
     Ok((
         Handle {
+            db,
             stop,
             target,
             status: observed,

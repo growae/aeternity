@@ -1350,3 +1350,6 @@ async fn output_capacity_and_abrupt_application_drop_close_owned_connections() {
         }
     }
 }
+
+#[path = "peer_runtime/chain_sync.rs"]
+mod chain_sync;

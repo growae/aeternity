@@ -220,6 +220,9 @@ impl Pool {
         bytes: usize,
         operation: impl FnOnce(Cancellation) -> T + Send + 'static,
     ) -> Result<Pending<T>, Error> {
+        self.reserve_wait(bytes).await?.submit(operation)
+    }
+    pub async fn reserve_wait(&self, bytes: usize) -> Result<Reservation<'_>, Error> {
         let weight = u32::try_from(bytes.max(1)).map_err(|_| Error::Busy)?;
         if bytes.max(1) > self.0.byte_limit {
             return Err(Error::Busy);
@@ -238,7 +241,11 @@ impl Pool {
             .acquire_many_owned(weight)
             .await
             .map_err(|_| Error::Stopped)?;
-        self.enqueue(slot, bytes, operation)
+        Ok(Reservation {
+            pool: self,
+            slot,
+            bytes,
+        })
     }
     fn enqueue<T: Send + 'static>(
         &self,

@@ -26,6 +26,7 @@ use std::{
 
 pub mod generation;
 mod import;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 pub use generation::Direction;
