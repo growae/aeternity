@@ -424,6 +424,8 @@ impl Service {
                 Admitted {
                     client,
                     connection: Connection {
+                        host: peer.host.clone(),
+                        port: peer.port,
                         token,
                         peer: peer.id,
                         address,

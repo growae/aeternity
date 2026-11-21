@@ -471,3 +471,144 @@ async fn routing_start_failure_and_later_child_failure_release_the_parent_table(
         assert!(within(task).await.unwrap().joined);
     }
 }
+
+#[tokio::test]
+async fn actual_analytics_exits_reset_stats_and_share_worker_restart_budget() {
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.analytics = Some(analytics::Config {
+        enabled: true,
+        ..Default::default()
+    });
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().analytics.unwrap();
+    let old = binding.current().unwrap();
+    for (i, child) in [Child::Analytics, Child::Admission, Child::GarbageCollection]
+        .into_iter()
+        .cycle()
+        .take(6)
+        .enumerate()
+    {
+        let current = binding.current().unwrap();
+        current
+            .log(
+                analytics::Announcement {
+                    peer: ae_types::PeerPublicKey([7; 32]),
+                    host: analytics::Host::Binary(b"localhost".to_vec()),
+                    port: 3015u64.into(),
+                    genesis: vec![1; 32],
+                    top: vec![2; 32],
+                    difficulty: 1u64.into(),
+                    temporary: true,
+                },
+                None,
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        let generations = |s: Status| {
+            [
+                s.analytics_generation,
+                s.admission_generation,
+                s.gc_generation,
+            ]
+        };
+        let mut expected = generations(handle.status());
+        let index = i % 3;
+        stopped_child(&handle, child, expected[index]).await;
+        if i == 5 {
+            break;
+        }
+        expected[index] += 1;
+        within(async {
+            while generations(handle.status()) != expected {
+                assert!(handle.status().running);
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert_eq!(
+            binding
+                .current()
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .await
+                .unwrap()
+                .stats
+                .len(),
+            usize::from(index != 0)
+        );
+        assert!(matches!(old.snapshot(), Err(analytics::Error::Closed)));
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert_eq!(
+        (
+            status.analytics_generation,
+            status.admission_generation,
+            status.gc_generation
+        ),
+        (3, 3, 2)
+    );
+    assert!(status.joined && binding.is_closed());
+}
+#[tokio::test]
+async fn analytics_start_failure_and_later_child_failure_unwind_started_owners() {
+    for fail_analytics in [true, false] {
+        let mut node = Node::new();
+        node.stop_worker();
+        let mut config = settings();
+        let mut analytics = analytics::Config {
+            enabled: true,
+            ..Default::default()
+        };
+        if fail_analytics {
+            analytics.limits.requests = 0;
+        } else {
+            config.gc.as_mut().unwrap().limits.rows = 0;
+        }
+        config.analytics = Some(analytics);
+        let (handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            config,
+            Default::default(),
+        )
+        .unwrap();
+        let bindings = handle.bindings();
+        let status = service.run().await;
+        assert!(status.joined);
+        assert_eq!(status.restart_attempts, 0);
+        assert_eq!(status.analytics_generation, u64::from(!fail_analytics));
+        assert!(bindings.analytics.as_ref().unwrap().is_closed());
+        if let Some(old) = bindings.analytics.unwrap().snapshot().value {
+            assert!(old.info().joined);
+            assert!(matches!(old.snapshot(), Err(analytics::Error::Closed)));
+        }
+        let (mut handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            Config {
+                analytics: Some(Default::default()),
+                ..settings()
+            },
+            Default::default(),
+        )
+        .unwrap();
+        let task = tokio::spawn(service.run());
+        ready(&mut handle).await;
+        handle.shutdown();
+        assert!(within(task).await.unwrap().joined);
+    }
+}

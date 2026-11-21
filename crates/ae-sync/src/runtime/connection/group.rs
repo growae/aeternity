@@ -73,12 +73,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             )
             .map_err(|e| Failure::new(Child::Importer, e))?,
         );
+        let mut network_config = config.network.clone();
+        if let Some(analytics) = dependencies.analytics.as_ref().and_then(|a| a.current()) {
+            crate::analytics::configure_network(
+                &mut network_config.registry.policy,
+                analytics.enabled(),
+            );
+        }
         let (network, scheduled, incoming, service) = network::create_bound(
             db.clone(),
             dependencies.admission.clone(),
             inputs.identity.clone(),
             network_profile.clone(),
-            config.network.clone(),
+            network_config,
         )
         .await
         .map_err(|e| Failure::new(Child::Network, e))?;
@@ -101,12 +108,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Gossip, move || handle.shutdown(), async move {
             Failure::new(Child::Gossip, service.run().await.last_error)
         });
-        let (peer, incoming, service) = peer::create(
+        let (peer, incoming, service) = peer::create_bound(
             db.clone(),
             network.clone(),
             scheduled,
             incoming,
             config.peer.clone(),
+            dependencies.analytics.clone(),
         )
         .map_err(|e| Failure::new(Child::Peer, e))?;
         let handle = peer.clone();

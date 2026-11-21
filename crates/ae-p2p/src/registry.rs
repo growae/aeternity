@@ -93,9 +93,11 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
+        let direction_limit = if self.analytics { 1_000_000 } else { 65_536 };
+        if self.maximum_inbound > direction_limit || self.maximum_outbound > direction_limit {
+            return Err(Error::Configuration);
+        }
         for n in [
-            self.maximum_inbound,
-            self.maximum_outbound,
             self.maximum_probes,
             self.maximum_temporary,
             self.maximum_pending_inbound,

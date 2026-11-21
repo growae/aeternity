@@ -215,8 +215,10 @@ impl Ticket {
         self.0.await.map_err(|_| Error::Closed)?.result
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
+    pub host: Vec<u8>,
+    pub port: u16,
     pub token: policy::Token,
     pub peer: ae_types::PeerPublicKey,
     pub address: std::net::Ipv4Addr,

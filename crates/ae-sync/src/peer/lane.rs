@@ -211,6 +211,36 @@ impl Session {
                     best,
                     difficulty,
                 } => {
+                    if let Some(binding) = &self.ctx.analytics {
+                        let accepted = binding.current().and_then(|owner| {
+                            owner
+                                .log(
+                                    crate::analytics::Announcement {
+                                        peer: self.client.peer(),
+                                        host: crate::analytics::Host::Binary(
+                                            connection.host.clone(),
+                                        ),
+                                        port: u64::from(connection.port).into(),
+                                        genesis: genesis.clone(),
+                                        top: best.clone(),
+                                        difficulty: difficulty.clone(),
+                                        temporary,
+                                    },
+                                    Some(self.client.clone()),
+                                )
+                                .ok()
+                        });
+                        self.ctx.progress.send_modify(|s| {
+                            if accepted.is_some() {
+                                s.analytics_submitted = s.analytics_submitted.saturating_add(1)
+                            } else {
+                                s.analytics_rejected = s.analytics_rejected.saturating_add(1)
+                            }
+                        });
+                        // Dropping this local acknowledgement never cancels or replays
+                        // the accepted analytics update or its exact-driver probe.
+                        drop(accepted);
+                    }
                     let weight = genesis
                         .len()
                         .saturating_add(best.len())

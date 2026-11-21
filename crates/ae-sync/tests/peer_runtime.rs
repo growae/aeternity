@@ -1588,3 +1588,6 @@ mod key_owner;
 
 #[path = "peer_runtime/routing_owner.rs"]
 mod routing_owner;
+
+#[path = "peer_runtime/analytics.rs"]
+mod analytics;

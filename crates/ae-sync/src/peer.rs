@@ -217,6 +217,8 @@ pub struct Counts {
     pub rejected: u64,
     pub served: u64,
     pub failed_connections: u64,
+    pub analytics_submitted: u64,
+    pub analytics_rejected: u64,
 }
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -308,6 +310,7 @@ enum Input {
 }
 #[derive(Clone)]
 struct Context {
+    analytics: Option<crate::bindings::PeerAnalytics>,
     db: Arc<Database>,
     network: network::Handle,
     config: Arc<Config>,
@@ -340,6 +343,30 @@ pub fn create(
     incoming: gossip::Events,
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
+    create_bound(db, network, scheduled, incoming, config, None)
+}
+pub fn create_with_analytics(
+    db: Arc<Database>,
+    network: network::Handle,
+    scheduled: network::Events,
+    incoming: gossip::Events,
+    config: Config,
+    analytics: crate::analytics::Client,
+) -> Result<(Handle, Events, Service), Error> {
+    let binding = crate::bindings::PeerAnalytics::fixed(&db, analytics);
+    create_bound(db, network, scheduled, incoming, config, Some(binding))
+}
+pub(crate) fn create_bound(
+    db: Arc<Database>,
+    network: network::Handle,
+    scheduled: network::Events,
+    incoming: gossip::Events,
+    config: Config,
+    analytics: Option<crate::bindings::PeerAnalytics>,
+) -> Result<(Handle, Events, Service), Error> {
+    if analytics.as_ref().is_some_and(|a| !a.uses_database(&db)) {
+        return Err(Error::Configuration);
+    }
     config.validate()?;
     if !network.uses_database(&db) || !network.defers_pings() {
         return Err(Error::Configuration);
@@ -374,6 +401,7 @@ pub fn create(
     let (status, observed) = watch::channel(current.clone());
     let (progress, _) = watch::channel(Counts::default());
     let context = Context {
+        analytics,
         db: db.clone(),
         network,
         storage_bytes: Arc::new(Semaphore::new(config.blocking_bytes)),

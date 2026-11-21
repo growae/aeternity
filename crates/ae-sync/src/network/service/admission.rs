@@ -16,7 +16,7 @@ impl Service {
         client: &net::Client,
     ) -> Result<Option<Connection>, Error> {
         if let Some(token) = self.provisional_token(client) {
-            return Ok(Some(self.provisional[&token].connection));
+            return Ok(Some(self.provisional[&token].connection.clone()));
         }
         if client.is_closed() {
             return Ok(None);
@@ -27,7 +27,7 @@ impl Service {
             .find(|a| {
                 a.client.peer() == client.peer() && a.client.generation() == client.generation()
             })
-            .map(|a| a.connection)
+            .map(|a| a.connection.clone())
         else {
             return Ok(None);
         };
@@ -56,6 +56,8 @@ impl Service {
             token,
             Admitted {
                 connection: Connection {
+                    host: address.to_string().into_bytes(),
+                    port: 0,
                     token,
                     peer: client.peer(),
                     address,
@@ -132,6 +134,7 @@ impl Service {
                     return Ok(policy::Outcome::Stale);
                 }
                 owned.connection.kind = kind;
+                owned.connection.port = port;
                 owned.connection.admitted = true;
                 self.admitted.insert(token, owned);
                 self.current.counts.accepted = self.current.counts.accepted.saturating_add(1);
