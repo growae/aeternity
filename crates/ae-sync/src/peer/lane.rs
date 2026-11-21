@@ -312,7 +312,7 @@ impl Session {
                             None => unreachable!(),
                         }
                     };
-                    self.client.send(&response)?.await?;
+                    self.client.finish_ping(&received, Some(&response))?.await?;
                     if !observation.busy {
                         self.ctx
                             .network
@@ -356,18 +356,21 @@ impl Session {
             Details::Response { message: None, .. } => false,
             _ => return Err(Error::Stale),
         };
-        if let Some(ping) = scheduled {
-            ping.complete(result);
-        }
-        if observation.action == PingAction::ProbeV2
-            && self.client.selected_ping_version().is_none()
+        if let Some(ping) = scheduled
+            && !ping.complete_and_wait(result).await
         {
+            return Err(Error::Stale);
+        }
+        if observation.action == PingAction::ProbeV2 {
             let message = self.ping(2, None).await?;
-            let ticket = self.client.probe(&message)?;
+            let (finished, ticket) = self.client.finish_ping_with_probe(&received, &message)?;
+            finished.await?;
             self.ctx
                 .progress
                 .send_modify(|s| s.probes = s.probes.saturating_add(1));
             self.requests.insert(2, async move { (None, ticket.await) });
+        } else {
+            self.client.finish_ping(&received, None)?.await?;
         }
         Ok(())
     }

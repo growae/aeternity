@@ -4,6 +4,7 @@ use ae_types::Hash256;
 use message::{Kind, Message, Value};
 use std::collections::BTreeMap;
 use tokio::net::TcpListener;
+mod ping_order;
 
 fn init() -> Message {
     pool::Request::Init

@@ -25,6 +25,7 @@ pub enum Error {
     Timeout,
     Backpressure,
     RemoteClose,
+    InvalidPing,
     Request(requests::Error),
     RequestFailed(requests::Failure),
     Noise(noise::Error),
@@ -62,6 +63,8 @@ pub struct Config {
     pub fragments: framing::Limits,
     pub requests: requests::Limits,
     pub minimum_ping: u16,
+    pub defer_pings: bool,
+    pub ping_timeout: Duration,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -77,6 +80,8 @@ impl Default for Config {
             fragments: framing::Limits::default(),
             requests: requests::Limits::default(),
             minimum_ping: 1,
+            defer_pings: false,
+            ping_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -101,6 +106,7 @@ impl Config {
             self.handshake_timeout,
             self.write_timeout,
             self.partial_timeout,
+            self.ping_timeout,
         ] {
             if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
                 return Err(Error::Configuration);
@@ -142,13 +148,19 @@ pub async fn establish(
     let peer: PeerPublicKey = crypto.peer();
     let generation = Generation::new();
     let (commands, receiver) = mpsc::channel(config.commands);
+    // Earlier non-ping callbacks may still need to send replies while a ping
+    // waits in their application queue. They share the outgoing byte budget.
+    let (replies, reply_commands) = mpsc::channel(config.commands);
+    let (finishes, finishing) = mpsc::channel(1);
     let (events, incoming) = mpsc::channel(config.events);
     let (stop, stopped) = watch::channel(None);
     let (guard, monitor) = lifecycle::Guard::new(peer, generation.clone());
     let selected_ping = Arc::new(std::sync::atomic::AtomicU16::new(0));
     let client = Client::new(
         commands,
-        stop,
+        replies,
+        finishes,
+        stop.clone(),
         generation.clone(),
         peer,
         config,
@@ -159,8 +171,11 @@ pub async fn establish(
         socket,
         crypto,
         receiver,
+        reply_commands,
+        finishing,
         events,
         stopped,
+        stop,
         generation,
         requests,
         config,

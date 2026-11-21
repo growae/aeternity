@@ -34,6 +34,7 @@ pub struct Received {
     pub ping: Option<PingObservation>,
     message: message::Message,
     _budget: OwnedSemaphorePermit,
+    receipt: Option<PingReceipt>,
 }
 impl Received {
     pub fn message(&self) -> &message::Message {
@@ -44,12 +45,37 @@ impl Received {
         generation: Generation,
         budget: OwnedSemaphorePermit,
         ping: Option<PingObservation>,
+        receipt: Option<PingReceipt>,
     ) -> Self {
         Self {
             message,
             generation,
             ping,
             _budget: budget,
+            receipt,
+        }
+    }
+}
+#[derive(Debug, Default)]
+pub(super) struct PingState {
+    pub submitted: AtomicBool,
+    pub finished: AtomicBool,
+}
+#[derive(Debug)]
+pub(super) struct PingReceipt {
+    pub token: requests::Token,
+    pub generation: Generation,
+    pub state: Arc<PingState>,
+    pub incoming: bool,
+    pub probe_required: bool,
+    pub stop: watch::Sender<Option<Error>>,
+}
+impl Drop for PingReceipt {
+    fn drop(&mut self) {
+        if !self.state.submitted.load(Ordering::Acquire)
+            && !self.state.finished.load(Ordering::Acquire)
+        {
+            stop(&self.stop, Error::Cancelled);
         }
     }
 }
@@ -143,11 +169,20 @@ pub(super) struct Command {
     pub answer: Answer,
     pub budget: OwnedSemaphorePermit,
 }
+pub(super) struct Finish {
+    pub token: requests::Token,
+    pub packet: Option<Arc<[u8]>>,
+    pub deadline: Instant,
+    pub answer: Answer,
+    pub probe: Option<Answer>,
+    pub budget: OwnedSemaphorePermit,
+}
 
 #[derive(Debug, Clone)]
 pub struct Prepared {
     packet: Arc<[u8]>,
     limits: message::Limits,
+    response: Option<message::Kind>,
 }
 impl Prepared {
     pub fn new(message: &message::Message, limits: message::Limits) -> Result<Self, Error> {
@@ -157,6 +192,10 @@ impl Prepared {
                 .map_err(Error::Message)?
                 .into(),
             limits,
+            response: match message.details() {
+                message::Details::Response { kind, .. } => Some(*kind),
+                _ => None,
+            },
         })
     }
     pub fn bytes(&self) -> usize {
@@ -177,6 +216,8 @@ impl Prepared {
 #[derive(Clone)]
 pub struct Client {
     commands: mpsc::Sender<Command>,
+    replies: mpsc::Sender<Command>,
+    finishes: mpsc::Sender<Finish>,
     stop: watch::Sender<Option<Error>>,
     generation: Generation,
     peer: PeerPublicKey,
@@ -186,8 +227,11 @@ pub struct Client {
     selected_ping: Arc<AtomicU16>,
 }
 impl Client {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         commands: mpsc::Sender<Command>,
+        replies: mpsc::Sender<Command>,
+        finishes: mpsc::Sender<Finish>,
         stop: watch::Sender<Option<Error>>,
         generation: Generation,
         peer: PeerPublicKey,
@@ -197,6 +241,8 @@ impl Client {
     ) -> Self {
         Self {
             commands,
+            replies,
+            finishes,
             stop,
             generation,
             peer,
@@ -228,6 +274,9 @@ impl Client {
     pub fn minimum_ping_version(&self) -> u16 {
         self.config.minimum_ping
     }
+    pub fn defers_pings(&self) -> bool {
+        self.config.defer_pings
+    }
     pub fn message_limits(&self) -> message::Limits {
         self.config.messages
     }
@@ -241,7 +290,10 @@ impl Client {
         self.submit(message, Mode::Send)
     }
     pub fn send_prepared(&self, prepared: &Prepared) -> Result<Ticket, Error> {
-        let slot = self.reserve()?;
+        if self.config.defer_pings && prepared.response == Some(message::Kind::Ping) {
+            return Err(Error::InvalidPing);
+        }
+        let slot = self.reserve(prepared.response.is_some())?;
         prepared.validate(self.config.messages)?;
         self.submit_packet(prepared.packet.clone(), Mode::Send, slot)
     }
@@ -267,17 +319,121 @@ impl Client {
             },
         )
     }
-    fn reserve(&self) -> Result<mpsc::Permit<'_, Command>, Error> {
+    // The application has completed this ping's effects. An incoming ping
+    // requires its response here; a solicited response requires no packet,
+    // except an initial v1 response, which requires finish_ping_with_probe.
+    // Version selection follows the completed write, before the ticket resolves.
+    pub fn finish_ping(
+        &self,
+        received: &Received,
+        response: Option<&message::Message>,
+    ) -> Result<Ticket, Error> {
+        self.finish(received, response, false)
+            .map(|(finished, _)| finished)
+    }
+    // First ticket completes the callback after the probe write; the second
+    // owns the probe response. The callback keeps later reads/requests fenced
+    // while the application constructs the probe and while it is written.
+    pub fn finish_ping_with_probe(
+        &self,
+        received: &Received,
+        probe: &message::Message,
+    ) -> Result<(Ticket, Ticket), Error> {
+        self.finish(received, Some(probe), true)
+            .map(|(finished, response)| (finished, response.expect("probe response ticket")))
+    }
+    fn finish(
+        &self,
+        received: &Received,
+        packet: Option<&message::Message>,
+        probe: bool,
+    ) -> Result<(Ticket, Option<Ticket>), Error> {
+        let receipt = received.receipt.as_ref().ok_or(Error::InvalidPing)?;
+        if receipt.generation != self.generation
+            || receipt.probe_required != probe
+            || (receipt.incoming || probe) != packet.is_some()
+            || receipt.state.finished.load(Ordering::Acquire)
+        {
+            return Err(Error::InvalidPing);
+        }
         if self.is_closed() {
             return Err(Error::Closed);
         }
-        self.commands.try_reserve().map_err(|e| match e {
+        if let Some(packet) = packet {
+            if probe {
+                if receipt.incoming || packet.kind() != message::Kind::Ping || packet.version() != 2
+                {
+                    return Err(Error::InvalidPing);
+                }
+            } else {
+                match packet.details() {
+                    message::Details::Response {
+                        kind: message::Kind::Ping,
+                        message,
+                    } if message.as_ref().is_none_or(|body| {
+                        body.as_ref()
+                            .is_ok_and(|body| body.version() == received.message().version())
+                    }) => {}
+                    _ => return Err(Error::InvalidPing),
+                }
+            }
+        }
+        let slot = self.finishes.try_reserve().map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => Error::Busy,
+            mpsc::error::TrySendError::Closed(_) => Error::Closed,
+        })?;
+        let packet = packet
+            .map(|m| Prepared::new(m, self.config.messages).map(|p| p.packet))
+            .transpose()?;
+        let budget = self.packet_budget(packet.as_deref().unwrap_or_default())?;
+        let deadline = Instant::now()
+            .checked_add(self.config.write_timeout)
+            .ok_or(Error::Configuration)?;
+        receipt
+            .state
+            .submitted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::InvalidPing)?;
+        let (answer, ticket) = self.answer();
+        let (probe, response) = if probe {
+            let (answer, ticket) = self.answer();
+            (Some(answer), Some(ticket))
+        } else {
+            (None, None)
+        };
+        slot.send(Finish {
+            token: receipt.token.clone(),
+            packet,
+            deadline,
+            answer,
+            probe,
+            budget,
+        });
+        Ok((ticket, response))
+    }
+    fn reserve(&self, reply: bool) -> Result<mpsc::Permit<'_, Command>, Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        let queue = if reply && self.config.defer_pings {
+            &self.replies
+        } else {
+            &self.commands
+        };
+        queue.try_reserve().map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => Error::Busy,
             mpsc::error::TrySendError::Closed(_) => Error::Closed,
         })
     }
     fn submit(&self, message: &message::Message, mode: Mode) -> Result<Ticket, Error> {
-        let slot = self.reserve()?;
+        let response = match (&mode, message.details()) {
+            (Mode::Send, message::Details::Response { kind, .. }) => Some(*kind),
+            _ => None,
+        };
+        if self.config.defer_pings && response == Some(message::Kind::Ping) {
+            return Err(Error::InvalidPing);
+        }
+        let slot = self.reserve(response.is_some())?;
         let prepared = Prepared::new(message, self.config.messages)?;
         self.submit_packet(prepared.packet, mode, slot)
     }
@@ -287,6 +443,21 @@ impl Client {
         mode: Mode,
         slot: mpsc::Permit<'_, Command>,
     ) -> Result<Ticket, Error> {
+        let budget = self.packet_budget(&packet)?;
+        let deadline = Instant::now()
+            .checked_add(self.config.write_timeout)
+            .ok_or(Error::Configuration)?;
+        let (answer, ticket) = self.answer();
+        slot.send(Command {
+            packet,
+            mode,
+            deadline,
+            answer,
+            budget,
+        });
+        Ok(ticket)
+    }
+    fn packet_budget(&self, packet: &[u8]) -> Result<OwnedSemaphorePermit, Error> {
         if packet.len() > self.config.fragments.message_bytes {
             return Err(Error::Frame(framing::Error::ResourceLimit));
         }
@@ -299,31 +470,25 @@ impl Client {
             return Err(Error::Frame(framing::Error::ResourceLimit));
         }
         let bytes = u32::try_from(packet.len()).map_err(|_| Error::Busy)?;
-        let budget = self
-            .budget
+        self.budget
             .clone()
             .try_acquire_many_owned(bytes)
-            .map_err(|_| Error::Busy)?;
-        let deadline = Instant::now()
-            .checked_add(self.config.write_timeout)
-            .ok_or(Error::Configuration)?;
+            .map_err(|_| Error::Busy)
+    }
+    fn answer(&self) -> (Answer, Ticket) {
         let (sender, reply) = oneshot::channel();
         let finished = Arc::new(AtomicBool::new(false));
-        slot.send(Command {
-            packet,
-            mode,
-            deadline,
-            answer: Answer {
+        (
+            Answer {
                 sender: Some(sender),
                 finished: finished.clone(),
             },
-            budget,
-        });
-        Ok(Ticket {
-            reply,
-            finished,
-            stop: self.stop.clone(),
-            generation: self.generation.clone(),
-        })
+            Ticket {
+                reply,
+                finished,
+                stop: self.stop.clone(),
+                generation: self.generation.clone(),
+            },
+        )
     }
 }

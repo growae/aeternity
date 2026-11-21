@@ -56,7 +56,7 @@ pub enum PingAction {
     Selected(u16),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PingVersions {
     minimum: u16,
     selected: Option<u16>,
@@ -164,13 +164,20 @@ pub struct Update {
     pub ping: PingAction,
     pub ping_before: Option<u16>,
     pub ping_busy: bool,
+    pub ping_deferred: Option<Token>,
     pub error: Option<Error>,
+}
+struct Negotiation {
+    token: Token,
+    selected: Option<u16>,
+    result: Result<PingAction, Error>,
 }
 pub struct Requests {
     limits: Limits,
     pending: BTreeMap<Slot, Pending>,
     closed: bool,
     ping: PingVersions,
+    negotiation: Option<Negotiation>,
 }
 impl Requests {
     pub fn new(limits: Limits, minimum_ping: u16) -> Result<Self, Error> {
@@ -179,6 +186,7 @@ impl Requests {
             pending: BTreeMap::new(),
             closed: false,
             ping: PingVersions::new(minimum_ping)?,
+            negotiation: None,
         })
     }
     pub fn is_closed(&self) -> bool {
@@ -194,6 +202,9 @@ impl Requests {
         self.pending.values().any(|p| p.token == *token)
     }
     pub fn next_deadline(&self) -> Option<Instant> {
+        if self.negotiation.is_some() {
+            return None;
+        }
         self.pending.values().map(|p| p.deadline).min()
     }
     pub fn ping_version(&self) -> u16 {
@@ -203,6 +214,18 @@ impl Requests {
         self.ping.selected()
     }
     pub fn receive_ping(&mut self, ping: &Message, now: Instant) -> Update {
+        self.incoming_ping(ping, now, false)
+    }
+    pub fn receive_ping_deferred(&mut self, ping: &Message, now: Instant) -> Update {
+        self.incoming_ping(ping, now, true)
+    }
+    fn incoming_ping(&mut self, ping: &Message, now: Instant, defer: bool) -> Update {
+        if self.negotiation.is_some() {
+            return Update {
+                error: Some(Error::AlreadyPending),
+                ..Default::default()
+            };
+        }
         let mut update = self.expire(now);
         if self.closed {
             return update;
@@ -210,6 +233,13 @@ impl Requests {
         update.ping_before = self.ping.selected();
         if ping.kind() == Kind::Ping && self.pending.contains_key(&Slot::Ping(ping.version())) {
             update.ping_busy = true;
+            if defer {
+                self.stage(None, false, &mut update);
+            }
+            return update;
+        }
+        if defer {
+            self.stage(Some(ping), false, &mut update);
             return update;
         }
         match self.ping.observe(ping, false) {
@@ -220,6 +250,42 @@ impl Requests {
             }
         }
         update
+    }
+    fn stage(&mut self, ping: Option<&Message>, solicited: bool, update: &mut Update) {
+        let mut next = self.ping;
+        let result = ping.map_or(Ok(PingAction::None), |ping| next.observe(ping, solicited));
+        let token = Token(Arc::new(()));
+        update.ping = result.clone().unwrap_or_default();
+        update.ping_deferred = Some(token.clone());
+        self.negotiation = Some(Negotiation {
+            token,
+            selected: next.selected,
+            result,
+        });
+    }
+    pub fn finish_ping(&mut self, token: &Token) -> Result<Update, Error> {
+        if self.closed {
+            return Err(Error::Disconnected);
+        }
+        if self.negotiation.as_ref().is_none_or(|n| n.token != *token) {
+            return Err(Error::InvalidRequest);
+        }
+        let negotiation = self.negotiation.take().unwrap();
+        let mut update = Update {
+            ping_before: self.ping.selected,
+            ..Default::default()
+        };
+        match negotiation.result {
+            Ok(action) => {
+                self.ping.selected = negotiation.selected;
+                update.ping = action;
+            }
+            Err(error) => {
+                update.error = Some(error);
+                update.completions.extend(self.disconnect());
+            }
+        }
+        Ok(update)
     }
     pub fn start(
         &mut self,
@@ -244,6 +310,9 @@ impl Requests {
     ) -> Result<Started, Error> {
         if self.closed {
             return Err(Error::Disconnected);
+        }
+        if self.negotiation.is_some() {
+            return Err(Error::AlreadyPending);
         }
         if timeout.is_some() && request.kind() != Kind::GetNodeInfo {
             return Err(Error::InvalidRequest);
@@ -279,6 +348,9 @@ impl Requests {
         Ok(Started { token, deadline })
     }
     pub fn timeout(&mut self, token: &Token, now: Instant) -> Update {
+        if self.negotiation.is_some() {
+            return Update::default();
+        }
         let Some(slot) = self
             .pending
             .iter()
@@ -301,11 +373,15 @@ impl Requests {
             ping,
             ping_before: None,
             ping_busy: false,
+            ping_deferred: None,
             error: None,
         }
     }
     pub fn expire(&mut self, now: Instant) -> Update {
         let mut update = Update::default();
+        if self.negotiation.is_some() {
+            return update;
+        }
         while let Some(pending) = self.pending.values().min_by_key(|p| p.deadline) {
             if pending.deadline > now {
                 break;
@@ -321,12 +397,25 @@ impl Requests {
     }
     pub fn disconnect(&mut self) -> Vec<Completion> {
         self.closed = true;
+        self.negotiation = None;
         std::mem::take(&mut self.pending)
             .into_values()
             .map(|p| complete(p, Err(Failure::Disconnected)))
             .collect()
     }
     pub fn receive_response(&mut self, envelope: Message, now: Instant) -> Update {
+        self.response(envelope, now, false)
+    }
+    pub fn receive_response_deferred(&mut self, envelope: Message, now: Instant) -> Update {
+        self.response(envelope, now, true)
+    }
+    fn response(&mut self, envelope: Message, now: Instant, defer: bool) -> Update {
+        if self.negotiation.is_some() {
+            return Update {
+                error: Some(Error::AlreadyPending),
+                ..Default::default()
+            };
+        }
         let mut update = self.expire(now);
         if self.closed {
             return update;
@@ -353,7 +442,9 @@ impl Requests {
         if *kind == Kind::Ping {
             update.ping_before = self.ping.selected();
         }
-        if let Some(body) = body.filter(|b| b.kind() == Kind::Ping) {
+        if defer && *kind == Kind::Ping {
+            self.stage(body, true, &mut update);
+        } else if let Some(body) = body.filter(|b| b.kind() == Kind::Ping) {
             match self.ping.observe(body, true) {
                 Ok(action) => update.ping = action,
                 Err(error) => {

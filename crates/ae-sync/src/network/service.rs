@@ -20,7 +20,7 @@ enum Completion {
     Socket(transport::Event),
     Ping {
         token: policy::Token,
-        outcome: Option<bool>,
+        outcome: Option<PingResult>,
     },
 }
 struct Admitted {
@@ -44,7 +44,7 @@ pub struct Service {
     ready_dials: BTreeMap<policy::Token, (Peer, bool)>,
     dial_retry: Instant,
     dns: Tasks<policy::Token, resolver::Completion>,
-    ping_jobs: Tasks<policy::Token, Option<bool>>,
+    ping_jobs: Tasks<policy::Token, Option<PingResult>>,
     ping_tokens: BTreeMap<policy::Token, net::Client>,
     admitted: BTreeMap<policy::Token, Admitted>,
     pending: VecDeque<Completion>,

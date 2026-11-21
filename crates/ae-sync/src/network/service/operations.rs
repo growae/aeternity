@@ -241,12 +241,13 @@ impl Service {
                 }
             }
             Completion::Socket(event) => self.socket_event(event).await?,
-            Completion::Ping { token, outcome } => {
+            Completion::Ping { token, mut outcome } => {
                 let Some(client) = self.ping_tokens.remove(&token) else {
                     return Ok(());
                 };
-                let command = if let Some(success) = outcome {
-                    let count = if success {
+                let processed = outcome.as_mut().and_then(|result| result.processed.take());
+                let command = if let Some(result) = outcome {
+                    let count = if result.success {
                         &mut self.current.counts.pings_completed
                     } else {
                         &mut self.current.counts.pings_failed
@@ -268,6 +269,9 @@ impl Service {
                 };
                 self.apply(command).await?;
                 self.refresh().await?;
+                if let Some(processed) = processed {
+                    let _ = processed.send(());
+                }
             }
         }
         Ok(())

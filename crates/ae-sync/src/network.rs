@@ -40,7 +40,13 @@ impl Default for Config {
             startup: Default::default(),
             startup_limits: Default::default(),
             resolver: Default::default(),
-            transport: Default::default(),
+            transport: transport::Settings {
+                runtime: net::Config {
+                    defer_pings: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             pool: pool::Config {
                 peers: 512,
                 ..Default::default()
@@ -150,13 +156,42 @@ pub struct Ping {
     pub token: policy::Token,
     pub client: net::Client,
     pub deadline: tokio::time::Instant,
-    reply: oneshot::Sender<bool>,
+    reply: oneshot::Sender<PingResult>,
+}
+struct PingResult {
+    success: bool,
+    processed: Option<oneshot::Sender<()>>,
 }
 impl Ping {
     // Both completed outcomes reschedule, as native log_ping does. Abandonment
     // or an application deadline instead retires the connection generation.
     pub fn complete(self, success: bool) -> bool {
-        self.reply.send(success).is_ok()
+        self.reply
+            .send(PingResult {
+                success,
+                processed: None,
+            })
+            .is_ok()
+    }
+    // A deferred wire callback must retain its owner until the result is
+    // recorded. Otherwise a subsequent negotiation failure can retire the
+    // connection and discard an already delivered caller result.
+    pub async fn complete_and_wait(self, success: bool) -> bool {
+        let (processed, receiver) = oneshot::channel();
+        if self
+            .reply
+            .send(PingResult {
+                success,
+                processed: Some(processed),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout_at(self.deadline, receiver).await,
+            Ok(Ok(()))
+        )
     }
 }
 pub enum Event {
@@ -252,8 +287,12 @@ pub struct Handle {
     stopped: watch::Sender<bool>,
     status: watch::Receiver<Status>,
     maximum_host_bytes: usize,
+    deferred_pings: bool,
 }
 impl Handle {
+    pub fn defers_pings(&self) -> bool {
+        self.deferred_pings
+    }
     pub(crate) fn uses_database(&self, database: &Arc<Database>) -> bool {
         self.database.ptr_eq(&Arc::downgrade(database))
     }
@@ -450,6 +489,7 @@ pub async fn create(
         stopped: stop,
         status: observed,
         maximum_host_bytes: config.registry.policy.pool.maximum_host_bytes,
+        deferred_pings: config.transport.runtime.defer_pings,
     };
     let service = Service::new(
         config,

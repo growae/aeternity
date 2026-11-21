@@ -1,17 +1,30 @@
 use super::*;
-use queue::{Answer, Command, Mode};
+use queue::{Answer, Command, Finish, Mode, PingReceipt, PingState};
 use tokio::sync::OwnedSemaphorePermit;
+
+struct PingWait {
+    token: requests::Token,
+    state: Arc<PingState>,
+    deadline: Instant,
+}
 
 pub struct Driver {
     socket: TcpStream,
     crypto: noise::Transport,
     commands: mpsc::Receiver<Command>,
+    replies: mpsc::Receiver<Command>,
+    finishes: mpsc::Receiver<Finish>,
     events: mpsc::Sender<Event>,
     stopped: watch::Receiver<Option<Error>>,
+    stop: watch::Sender<Option<Error>>,
     generation: Generation,
     requests: requests::Requests,
     pending: Vec<(requests::Token, Answer)>,
     outgoing: Option<wire::Outgoing>,
+    finishing: bool,
+    prepared_finish: Option<requests::Update>,
+    ping_wait: Option<PingWait>,
+    buffered: Vec<u8>,
     decoder: noise::record::Decoder,
     assembler: framing::Assembler,
     record_deadline: Option<Instant>,
@@ -30,8 +43,11 @@ impl Driver {
         socket: TcpStream,
         crypto: noise::Transport,
         commands: mpsc::Receiver<Command>,
+        replies: mpsc::Receiver<Command>,
+        finishes: mpsc::Receiver<Finish>,
         events: mpsc::Sender<Event>,
         stopped: watch::Receiver<Option<Error>>,
+        stop: watch::Sender<Option<Error>>,
         generation: Generation,
         requests: requests::Requests,
         config: Config,
@@ -42,12 +58,19 @@ impl Driver {
             socket,
             crypto,
             commands,
+            replies,
+            finishes,
             events,
             stopped,
+            stop,
             generation,
             requests,
             pending: vec![],
             outgoing: None,
+            finishing: false,
+            prepared_finish: None,
+            ping_wait: None,
+            buffered: vec![],
             decoder: noise::record::Decoder::new(noise::MAX_CIPHERTEXT),
             assembler: framing::Assembler::new(config.fragments),
             record_deadline: None,
@@ -69,8 +92,10 @@ impl Driver {
             completions: self.requests.disconnect(),
             ..Default::default()
         };
-        let _ = self.settle(update, None);
+        let _ = self.settle(update, None, None);
         self.commands.close();
+        self.replies.close();
+        self.finishes.close();
         self.crypto.close();
         self.decoder.close();
         self.assembler.reset();
@@ -86,13 +111,20 @@ impl Driver {
             if let Some(reason) = self.stopped.borrow().clone() {
                 return Err(reason);
             }
+            if self.ping_wait.is_none() && !self.buffered.is_empty() {
+                let buffered = std::mem::take(&mut self.buffered);
+                self.input(&buffered)?;
+            }
             let now = Instant::now();
-            let update = self.requests.expire(now.into_std());
-            self.settle(update, None)?;
+            if self.ping_wait.is_none() {
+                let update = self.requests.expire(now.into_std());
+                self.settle(update, None, None)?;
+            }
             if [
                 self.record_deadline,
                 self.fragment_deadline,
                 self.outgoing.as_ref().map(|o| o.deadline),
+                self.ping_wait.as_ref().map(|p| p.deadline),
             ]
             .into_iter()
             .flatten()
@@ -107,7 +139,11 @@ impl Driver {
                 self.record_deadline,
                 self.fragment_deadline,
                 self.outgoing.as_ref().map(|o| o.deadline),
-                self.requests.next_deadline().map(Instant::from_std),
+                self.ping_wait
+                    .is_none()
+                    .then(|| self.requests.next_deadline().map(Instant::from_std))
+                    .flatten(),
+                self.ping_wait.as_ref().map(|p| p.deadline),
             ]
             .into_iter()
             .flatten()
@@ -123,7 +159,7 @@ impl Driver {
                         None => std::future::pending::<()>().await,
                     }
                 } => (),
-                ready = self.socket.readable() => {
+                ready = self.socket.readable(), if self.ping_wait.is_none() => {
                     ready?;
                     match self.socket.try_read(&mut bytes) {
                         Ok(0) => return Err(Error::Io(io::ErrorKind::UnexpectedEof)),
@@ -137,17 +173,133 @@ impl Driver {
                     let outgoing = self.outgoing.as_mut().expect("active output");
                     if outgoing.write(&self.socket)? {
                         let outgoing = self.outgoing.take().unwrap();
-                        if let Some(answer) = outgoing.answer { answer.finish(Ok(Reply::Sent)); }
+                        if let Some(answer) = outgoing.answer {
+                            if self.finishing {
+                                self.finishing = false;
+                                self.commit_ping(answer)?;
+                            } else {
+                                answer.finish(Ok(Reply::Sent));
+                            }
+                        }
                     }
                 }
-                command = self.commands.recv(), if self.outgoing.is_none() => {
+                command = self.commands.recv(), if self.outgoing.is_none() && self.ping_wait.is_none() => {
                     match command {
                         Some(command) => self.start(command)?,
                         None => return Err(Error::Closed),
                     }
                 }
+                finish = self.finishes.recv(), if self.outgoing.is_none() && self.ping_wait.is_some() => {
+                    match finish {
+                        Some(finish) => self.finish(finish)?,
+                        None => return Err(Error::Closed),
+                    }
+                }
+                reply = self.replies.recv(), if self.outgoing.is_none() && (!self.replies.is_closed() || !self.replies.is_empty()) => {
+                    if let Some(reply) = reply { self.start(reply)?; }
+                }
             }
         }
+    }
+    fn finish(&mut self, finish: Finish) -> Result<(), Error> {
+        if self
+            .ping_wait
+            .as_ref()
+            .is_none_or(|p| p.token != finish.token)
+        {
+            finish.answer.finish(Err(Error::InvalidPing));
+            return Ok(());
+        }
+        if finish.deadline <= Instant::now() {
+            finish.answer.finish(Err(Error::Timeout));
+            return Err(Error::Timeout);
+        }
+        if let Some(packet) = finish.packet {
+            if let Some(probe) = finish.probe {
+                match self.prepare_probe(&finish.token, &packet, probe) {
+                    Ok(update) => self.prepared_finish = Some(update),
+                    Err(error) => {
+                        finish.answer.finish(Err(error.clone()));
+                        return Err(error);
+                    }
+                }
+            }
+            self.finishing = true;
+            self.outgoing = Some(wire::Outgoing::new(
+                packet,
+                finish.deadline,
+                Some(finish.answer),
+                finish.budget,
+            ));
+            Ok(())
+        } else {
+            self.commit_ping(finish.answer)
+        }
+    }
+    fn prepare_probe(
+        &mut self,
+        token: &requests::Token,
+        packet: &[u8],
+        answer: Answer,
+    ) -> Result<requests::Update, Error> {
+        let request = message::Message::decode_packet(packet, self.config.messages)
+            .map_err(Error::Message)?;
+        let update = self.requests.finish_ping(token).map_err(Error::Request)?;
+        if update.ping != requests::PingAction::ProbeV2 {
+            self.settle(update, None, None)?;
+            return Err(Error::InvalidPing);
+        }
+        let pending = self
+            .requests
+            .start_probe(&request, Instant::now().into_std())
+            .map_err(Error::Request)?;
+        self.pending.push((pending.token, answer));
+        Ok(update)
+    }
+    fn commit_ping(&mut self, answer: Answer) -> Result<(), Error> {
+        let ping = self.ping_wait.take().expect("validated ping completion");
+        ping.state
+            .finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        let update = match self.prepared_finish.take() {
+            Some(update) => update,
+            None => self
+                .requests
+                .finish_ping(&ping.token)
+                .map_err(Error::Request)?,
+        };
+        let result = self.settle(update, None, None);
+        answer.finish(result.clone().map(|()| Reply::Sent));
+        result
+    }
+    fn stage_ping(
+        &mut self,
+        update: &requests::Update,
+        incoming: bool,
+    ) -> Result<Option<PingReceipt>, Error> {
+        let Some(token) = &update.ping_deferred else {
+            return Ok(None);
+        };
+        if self.ping_wait.is_some() {
+            return Err(Error::InvalidPing);
+        }
+        let deadline = Instant::now()
+            .checked_add(self.config.ping_timeout)
+            .ok_or(Error::Configuration)?;
+        let state = Arc::new(PingState::default());
+        self.ping_wait = Some(PingWait {
+            token: token.clone(),
+            state: state.clone(),
+            deadline,
+        });
+        Ok(Some(PingReceipt {
+            token: token.clone(),
+            generation: self.generation.clone(),
+            state,
+            incoming,
+            probe_required: update.ping == requests::PingAction::ProbeV2,
+            stop: self.stop.clone(),
+        }))
     }
     fn start(&mut self, command: Command) -> Result<(), Error> {
         let Command {
@@ -214,6 +366,13 @@ impl Driver {
                 }
                 if let Some(packet) = packet {
                     self.message(packet)?;
+                    if self.ping_wait.is_some() {
+                        // At most the unconsumed tail of one 8192-byte read.
+                        // Keep ciphertext order and let socket backpressure
+                        // bound later traffic while the application finishes.
+                        self.buffered = bytes.to_vec();
+                        break;
+                    }
                 }
             }
         }
@@ -231,26 +390,38 @@ impl Driver {
         let now = Instant::now().into_std();
         match message.kind() {
             message::Kind::Response => {
-                let update = self.requests.receive_response(message, now);
-                self.settle(update, Some(budget))
+                let update = if self.config.defer_pings {
+                    self.requests.receive_response_deferred(message, now)
+                } else {
+                    self.requests.receive_response(message, now)
+                };
+                let receipt = self.stage_ping(&update, false)?;
+                self.settle(update, Some(budget), receipt)
             }
             message::Kind::Close => Err(Error::RemoteClose),
             kind => {
                 let mut ping = None;
+                let mut receipt = None;
                 if kind == message::Kind::Ping {
-                    let update = self.requests.receive_ping(&message, now);
+                    let update = if self.config.defer_pings {
+                        self.requests.receive_ping_deferred(&message, now)
+                    } else {
+                        self.requests.receive_ping(&message, now)
+                    };
                     ping = Some(PingObservation {
                         previous: update.ping_before,
                         action: update.ping,
                         busy: update.ping_busy,
                     });
-                    self.settle(update, None)?;
+                    receipt = self.stage_ping(&update, true)?;
+                    self.settle(update, None, None)?;
                 }
                 self.event(Event::Message(Received::new(
                     message,
                     self.generation.clone(),
                     budget,
                     ping,
+                    receipt,
                 )))
             }
         }
@@ -259,6 +430,7 @@ impl Driver {
         &mut self,
         update: requests::Update,
         mut budget: Option<OwnedSemaphorePermit>,
+        mut receipt: Option<PingReceipt>,
     ) -> Result<(), Error> {
         self.selected_ping.store(
             self.requests.selected_ping_version().unwrap_or(0),
@@ -291,6 +463,7 @@ impl Driver {
                             self.generation.clone(),
                             budget.take().expect("one wire response"),
                             ping,
+                            receipt.take(),
                         )))
                     }
                     Err(error) => Err(Error::RequestFailed(error)),
@@ -298,7 +471,7 @@ impl Driver {
                 answer.finish(reply);
             }
         }
-        if update.ping != requests::PingAction::None {
+        if update.ping_deferred.is_none() && update.ping != requests::PingAction::None {
             self.event(Event::Ping {
                 generation: self.generation.clone(),
                 action: update.ping,

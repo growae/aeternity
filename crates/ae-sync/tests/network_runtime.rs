@@ -336,7 +336,10 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     assert_eq!(received.message(), &ping(&node, 4321));
     within(
         first_local
-            .send(&Message::response_ok(received.message(), Default::default()).unwrap())
+            .finish_ping(
+                &received,
+                Some(&Message::response_ok(received.message(), Default::default()).unwrap()),
+            )
             .unwrap(),
     )
     .await
@@ -355,7 +358,19 @@ async fn admitted_ping_is_responded_and_old_generation_cannot_affect_replacement
     within(replacement.send(&ping(&node, 4322)).unwrap())
         .await
         .unwrap();
-    let (replacement_local, _) = forwarded(&mut forwarded_events).await;
+    let (replacement_local, replacement_ping) = forwarded(&mut forwarded_events).await;
+    within(
+        replacement_local
+            .finish_ping(
+                &replacement_ping,
+                Some(
+                    &Message::response_ok(replacement_ping.message(), Default::default()).unwrap(),
+                ),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     status(&mut h, |s| s.counts.accepted == 2).await;
     assert_ne!(first_local.generation(), replacement_local.generation());
     assert_eq!(
@@ -437,6 +452,7 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
         incoming(&node, &h, local.public_key(), &remote).await;
     let request = client.request(&ping(&node, 3015), None).unwrap();
     let (local_client, received) = forwarded(&mut forwarded_events).await;
+    let admitted_generation = local_client.generation().clone();
     assert_eq!(
         within(h.connection(local_client.clone()).unwrap().wait())
             .await
@@ -448,7 +464,10 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
     status(&mut h, |s| s.policy.as_ref().unwrap().counts.temporary == 1).await;
     within(
         local_client
-            .send(&Message::response_ok(received.message(), Default::default()).unwrap())
+            .finish_ping(
+                &received,
+                Some(&Message::response_ok(received.message(), Default::default()).unwrap()),
+            )
             .unwrap(),
     )
     .await
@@ -480,9 +499,19 @@ async fn inbound_temporary_is_closed_after_reply_and_blocked_identity_is_not_for
     within(remote_task).await.unwrap();
     status(&mut h, |s| s.counts.rejected == 1 && s.sockets == 0).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), forwarded_events.recv())
-            .await
-            .is_err()
+        tokio::time::timeout(Duration::from_millis(30), async {
+            while let Some(event) = forwarded_events.recv().await {
+                match event.event {
+                    net::Event::Ping { generation, .. } => {
+                        assert_eq!(generation, admitted_generation)
+                    }
+                    net::Event::Message(_) => panic!("blocked peer message was forwarded"),
+                }
+            }
+            panic!("network owner unexpectedly stopped");
+        })
+        .await
+        .is_err()
     );
     stop(&h, task).await;
 }
@@ -562,7 +591,11 @@ async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_
         panic!()
     };
     assert_eq!(refused.message().fields()["result"], Value::Boolean(false));
-    assert!(first.complete(false));
+    let first_client = first.client.clone();
+    assert!(within(first.complete_and_wait(false)).await);
+    within(first_client.finish_ping(&refused, None).unwrap())
+        .await
+        .unwrap();
     let second = next_ping(&mut events).await;
     assert_eq!(second.client.generation(), &generation);
     assert!(!second.client.is_closed());
@@ -575,8 +608,14 @@ async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_
     )
     .await
     .unwrap();
-    assert!(matches!(within(request).await, Ok(net::Reply::Response(_))));
-    assert!(second.complete(true));
+    let net::Reply::Response(accepted) = within(request).await.unwrap() else {
+        panic!()
+    };
+    let second_client = second.client.clone();
+    assert!(within(second.complete_and_wait(true)).await);
+    within(second_client.finish_ping(&accepted, None).unwrap())
+        .await
+        .unwrap();
     status(&mut h, |s| {
         s.counts.pings_completed == 1 && s.counts.pings_failed == 1
     })
@@ -689,7 +728,7 @@ async fn abandoned_or_expired_ping_closes_exact_driver_and_late_reply_is_rejecte
         };
         within(monitor.wait()).await;
         if let Some(ping) = held {
-            assert!(!ping.complete(true));
+            assert!(!within(ping.complete_and_wait(true)).await);
         }
         status(&mut h, |s| s.counts.pings_failed == 1).await;
         stop(&h, task).await;
@@ -721,7 +760,16 @@ async fn admitted_socket_composes_with_real_gossip_and_transaction_storage() {
     within(async {
         loop {
             let received = application.recv().await.unwrap();
-            if matches!(received.event, net::Event::Message(_)) {
+            if let net::Event::Message(ping) = received.event {
+                received
+                    .client
+                    .finish_ping(
+                        &ping,
+                        Some(&Message::response_ok(ping.message(), Default::default()).unwrap()),
+                    )
+                    .unwrap()
+                    .await
+                    .unwrap();
                 break;
             }
         }
@@ -804,7 +852,7 @@ async fn restart_feeds_saved_peer_through_owned_startup_resolution_and_automatic
     let s = status(&mut h, |s| s.counts.dialed == 1 && s.resolutions == 0).await;
     assert!(s.startup.unwrap().ready);
     let exit = stop(&h, task).await;
-    assert!(!ping.complete(true));
+    assert!(!within(ping.complete_and_wait(true)).await);
     let registry = exit.registry.unwrap();
     let restored = registry.policy().pool().find(saved.id).unwrap();
     assert_eq!(restored.address, Ipv4Addr::LOCALHOST);
@@ -830,7 +878,17 @@ async fn saturated_socket_capacity_keeps_timers_live_and_never_dials_an_expired_
     within(client.send(&ping(&node, 3015)).unwrap())
         .await
         .unwrap();
-    let (local_client, _) = forwarded(&mut incoming_events).await;
+    let (local_client, ping) = forwarded(&mut incoming_events).await;
+    within(
+        local_client
+            .finish_ping(
+                &ping,
+                Some(&Message::response_ok(ping.message(), Default::default()).unwrap()),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     status(&mut h, |s| s.counts.accepted == 1).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let other = noise::Identity::from_secret([3; 32]);

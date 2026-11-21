@@ -233,14 +233,21 @@ fn cap(n: u64) -> message::ChainPoi {
 async fn application_rejects_invalid_binding_or_metadata_and_stop_before_run_joins_readers() {
     let node = Node::new();
     let other = Node::new();
-    for (wrong, oversized) in [(true, false), (false, true), (false, false)] {
+    for (wrong, oversized, deferred) in [
+        (true, false, true),
+        (false, true, true),
+        (false, false, false),
+        (false, false, true),
+    ] {
         let (identity, _) = identities();
+        let mut network_config = config();
+        network_config.transport.runtime.defer_pings = deferred;
         let (network, scheduled, pool, network_service) = network::create(
             node.db.clone(),
             node.client(),
             identity,
             NetworkProfile::mainnet(),
-            config(),
+            network_config,
         )
         .await
         .unwrap();
@@ -269,7 +276,7 @@ async fn application_rejects_invalid_binding_or_metadata_and_stop_before_run_joi
             incoming,
             application,
         );
-        if wrong {
+        if wrong || !deferred {
             assert!(matches!(result, Err(peer::Error::Configuration)));
         } else if oversized {
             assert!(matches!(
@@ -1276,6 +1283,160 @@ async fn generation_download_limits_refusals_and_validation_failures_return_capa
     importer.join().await;
     remote.shutdown();
     within(driver).await.unwrap();
+    stop(app).await;
+}
+
+#[tokio::test]
+async fn request_queued_before_first_ping_can_reply_while_negotiation_is_deferred() {
+    let node = Node::new();
+    let app = start(&node, config(), Default::default()).await;
+    let (remote, _events, task) = connect(&node, &app).await;
+    let info = remote
+        .request(&message(Kind::GetNodeInfo, 1, &[]), None)
+        .unwrap();
+    let pool = remote
+        .request(&message(Kind::PoolInit, 1, &[]), None)
+        .unwrap();
+    let first_ping = remote.request(&ping(&node, 2, true), None).unwrap();
+    let (info, pool, first_ping) = within(async { tokio::join!(info, pool, first_ping) }).await;
+    let net::Reply::Response(info) = info.unwrap() else {
+        panic!()
+    };
+    let net::Reply::Response(first_ping) = first_ping.unwrap() else {
+        panic!()
+    };
+    let net::Reply::Response(pool) = pool.unwrap() else {
+        panic!()
+    };
+    assert_eq!(body(&info).kind(), Kind::NodeInfo);
+    assert_eq!(body(&pool).kind(), Kind::PoolInit);
+    assert_eq!(body(&first_ping).kind(), Kind::Ping);
+    assert!(!remote.is_closed());
+    assert_eq!(remote.selected_ping_version(), Some(2));
+    stop(app).await;
+    within(task).await.unwrap();
+}
+
+#[tokio::test]
+async fn incompatible_ping_negotiation_preserves_application_effects_and_response_before_close() {
+    let node = Node::new();
+    let mut app = start(&node, config(), Default::default()).await;
+    let (remote, _events, task) = connect(&node, &app).await;
+    let versions = |values| {
+        Value::List(vec![Value::Record(std::collections::BTreeMap::from([
+            ("protocol".into(), Value::Binary(b"ping".to_vec())),
+            ("vsns".into(), Value::List(values)),
+        ]))])
+    };
+    let initial = alter(
+        &ping(&node, 2, true),
+        &[("versions", versions(vec![Value::Integer(1.into())]))],
+    );
+    assert_eq!(body(&response(&remote, &initial).await).version(), 2);
+    // Node-info completion establishes that initial negotiation has finished.
+    assert_eq!(
+        body(&response(&remote, &message(Kind::GetNodeInfo, 1, &[])).await).kind(),
+        Kind::NodeInfo
+    );
+    let advertised = cap(12);
+    let incompatible = alter(
+        &ping(&node, 2, true),
+        &[
+            ("versions", versions(vec![])),
+            (
+                "capabilities",
+                Value::Binary(
+                    message::encode_capabilities(
+                        std::slice::from_ref(&advertised),
+                        Default::default(),
+                    )
+                    .unwrap(),
+                ),
+            ),
+        ],
+    );
+    let answered = response(&remote, &incompatible).await;
+    assert_eq!(body(&answered).kind(), Kind::Ping);
+    assert_eq!(body(&answered).version(), 2);
+    let status = observed(&mut app.events).await;
+    let peer::EventKind::Status { client, .. } = status.kind() else {
+        panic!()
+    };
+    assert_eq!(client.selected_ping_version(), Some(1));
+    assert!(
+        matches!(observed(&mut app.events).await.kind(), peer::EventKind::Capabilities { client: source, chain_poi } if source.generation() == client.generation() && *chain_poi == advertised)
+    );
+    assert_eq!(
+        within(client.monitor().wait()).await.reason,
+        net::Error::Request(ae_p2p::requests::Error::NoCommonPingVersion)
+    );
+    within(task).await.unwrap();
+    assert!(app.application.status().running);
+    assert_eq!(node.db.view().unwrap().status().revision, 1);
+    stop(app).await;
+}
+
+#[tokio::test]
+async fn scheduled_ping_caller_completes_before_incompatible_initial_v2_retires_connection() {
+    let node = Node::new();
+    let mut c = config();
+    c.transport.runtime.minimum_ping = 2;
+    c.registry.policy.maximum_outbound = 1;
+    c.registry.policy.ping_interval = 60_000;
+    let mut app = start(&node, c, Default::default()).await;
+    let (_, remote) = identities();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let info = ae_p2p::discovery::Peer {
+        id: remote.public_key(),
+        address: Ipv4Addr::LOCALHOST,
+        source: Ipv4Addr::LOCALHOST,
+        host: b"127.0.0.1".to_vec(),
+        port: listener.local_addr().unwrap().port(),
+        trusted: false,
+    };
+    app.network
+        .command(Command::Add(info.clone()))
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    app.network
+        .command(Command::Connect(Some(info.id)))
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (socket, _) = within(listener.accept()).await.unwrap();
+    let (client, mut events, remote_task) =
+        establish(&node, socket, &remote, noise::Role::Responder).await;
+    assert_eq!(incoming(&mut events).await.message().version(), 2);
+    let incompatible = alter(
+        &ping(&node, 2, true),
+        &[(
+            "versions",
+            Value::List(vec![Value::Record(std::collections::BTreeMap::from([
+                ("protocol".into(), Value::Binary(b"ping".to_vec())),
+                ("vsns".into(), Value::List(vec![])),
+            ]))]),
+        )],
+    );
+    within(
+        client
+            .send(&Message::response_ok(&incompatible, Default::default()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    within(remote_task).await.unwrap();
+    within(async {
+        while app.network.status().counts.pings_completed == 0 {
+            app.network.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert_eq!(app.network.status().counts.pings_completed, 1);
+    assert_eq!(app.network.status().counts.pings_failed, 0);
+    assert!(app.application.status().running);
     stop(app).await;
 }
 

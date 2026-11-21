@@ -341,7 +341,7 @@ pub fn create(
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
     config.validate()?;
-    if !network.uses_database(&db) {
+    if !network.uses_database(&db) || !network.defers_pings() {
         return Err(Error::Configuration);
     }
     let mut registry = capabilities::Registry::new(config.capability_limits)?;
