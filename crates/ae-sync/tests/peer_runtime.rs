@@ -1,4 +1,6 @@
 mod common;
+#[path = "peer_runtime/connection_owner.rs"]
+mod connection_owner;
 use ae_p2p::{
     message::{self, Details, Kind, Message, Value},
     noise, ping,

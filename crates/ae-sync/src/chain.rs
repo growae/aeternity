@@ -215,6 +215,14 @@ impl Ticket {
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
+    // The runtime owner retains the same importer lifetime through service
+    // shutdown so a late uncertain commit cannot be hidden by task teardown.
+    pub(crate) fn shared(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            jobs: self.jobs.clone(),
+        }
+    }
     pub fn new(
         db: Arc<Database>,
         execution: Owned<O>,

@@ -139,6 +139,7 @@ async fn uncertain_commit_before_or_after_durable_write_quarantines_the_owner() 
                     "injected uncertain acknowledgment".into(),
                 ))
             }));
+        let retained = importer.shared();
         let all = fixtures::blocks(&NetworkProfile::mainnet());
         let hash = all[0].hash().unwrap();
         let p = packet(&all[0], &[], Direction::Backward);
@@ -168,6 +169,11 @@ async fn uncertain_commit_before_or_after_durable_write_quarantines_the_owner() 
         ));
         importer.stop();
         importer.join().await;
+        drop(importer);
+        retained.join().await;
+        assert!(
+            matches!(retained.recovery_reason(), Some(Error::CommitUncertain { hash: h, .. }) if h == hash)
+        );
     }
 }
 
