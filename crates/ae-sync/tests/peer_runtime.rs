@@ -1364,3 +1364,6 @@ mod block_gossip;
 
 #[path = "peer_runtime/lifecycle.rs"]
 mod lifecycle;
+
+#[path = "peer_runtime/capabilities.rs"]
+mod capabilities;

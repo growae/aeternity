@@ -108,7 +108,7 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
             let context = self.context.clone();
             self.work.insert(Key::View, async move {
                 context
-                    .read(|db| {
+                    .read_when_available(|db| {
                         let view = db.view()?;
                         let hash = view.status().tip.ok_or(SyncError::NoProgress)?;
                         let point = Point {
@@ -148,5 +148,98 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
         self.view_busy = false;
         self.refresh = false;
         self.status.pending = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        chain,
+        test_support::{Node, ledger_fixtures as fixtures, within},
+    };
+    use ae_p2p::noise;
+    use ae_protocol::NetworkProfile;
+
+    #[tokio::test]
+    async fn lifecycle_view_waits_for_peer_capacity_and_cancellation_refunds_its_slot() {
+        let node = Node::new();
+        let profile = NetworkProfile::mainnet();
+        let importer = chain::Importer::new(
+            node.db.clone(),
+            fixtures::execution(&profile),
+            fixtures::rules(node.db.view().unwrap().identity().genesis),
+            Default::default(),
+        )
+        .unwrap();
+        let mut settings = network::Config {
+            listen: None,
+            ..Default::default()
+        };
+        settings.startup.include_default_peers = false;
+        settings.registry.policy.maximum_outbound = 0;
+        settings.registry.policy.maximum_probes = 0;
+        let (network, _events, _pool, network_service) = network::create(
+            node.db.clone(),
+            node.client(),
+            Arc::new(noise::Identity::from_secret([1; 32])),
+            profile,
+            settings,
+        )
+        .await
+        .unwrap();
+        let config = Config {
+            read_jobs: 2,
+            read_bytes: 80 << 20,
+            timeout: std::time::Duration::from_millis(250),
+            ..Default::default()
+        };
+        let reads = blocking::Pool::new(1, config.read_jobs, config.read_bytes).unwrap();
+        let (wake, _) = watch::channel(());
+        let context = Arc::new(Context {
+            importer: Arc::new(importer),
+            network: network.clone(),
+            config,
+            reads,
+            stopped: AtomicBool::new(false),
+            wake,
+            shared: Mutex::new(shared::Book::new()),
+            headers: Mutex::new(BTreeMap::new()),
+        });
+        let held = context.reads.reserve(context.config.read_bytes).unwrap();
+        let mut owner = Owner::new(context.clone());
+        owner.start(context.config.resilience);
+        within(owner.next()).await.unwrap();
+        assert!(owner.ready());
+        owner.start(context.config.resilience);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(600), owner.next())
+                .await
+                .is_err()
+        );
+        assert!(owner.status().pending);
+        assert!(owner.status().selected.is_none());
+        drop(held);
+        within(owner.next()).await.unwrap();
+        assert_eq!(owner.status().selected.unwrap().height, 0);
+        let held = context.reads.reserve(context.config.read_bytes).unwrap();
+        owner.refresh();
+        owner.start(context.config.resilience);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(600), owner.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(context.reads.available(), (0, 0));
+        owner.cancel();
+        assert_eq!(context.reads.available(), (1, 0));
+        drop(held);
+        assert_eq!(context.reads.available(), (2, context.config.read_bytes));
+        context.reads.stop();
+        context.reads.join().await;
+        context.importer.stop();
+        context.importer.join().await;
+        network.shutdown();
+        assert!(network_service.run().await.status.joined);
     }
 }

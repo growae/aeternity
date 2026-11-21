@@ -12,6 +12,13 @@ pub struct Service {
     tasks: Tasks<Key, Result<(), Error>>,
     jobs: blocking::Pool,
 }
+impl Drop for Service {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.context.capabilities.lock() {
+            registry.close();
+        }
+    }
+}
 impl Service {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -70,6 +77,21 @@ impl Service {
                 self.error(Error::Busy);
                 return;
             }
+            let attached = self
+                .context
+                .capabilities
+                .lock()
+                .map_err(|_| Error::Closed)
+                .and_then(|mut registry| {
+                    registry
+                        .attach(peer, client.generation().clone())
+                        .map_err(Error::from)
+                });
+            if let Err(error) = attached {
+                client.shutdown();
+                self.error(error);
+                return;
+            }
             let (send, receive) = mpsc::channel(self.context.config.queued_per_connection);
             self.tasks.insert(
                 (peer, client.generation().clone()),
@@ -85,6 +107,7 @@ impl Service {
                 Lane {
                     client: client.clone(),
                     input: send,
+                    capabilities: self.context.capabilities.clone(),
                 },
             );
         }

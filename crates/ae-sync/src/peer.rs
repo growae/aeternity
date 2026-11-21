@@ -5,9 +5,14 @@ use ae_p2p::{
 };
 use ae_storage::Database;
 use ae_types::{PeerPublicKey, Unsigned};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+pub mod capabilities;
 pub mod info;
 mod lane;
 mod service;
@@ -28,6 +33,7 @@ pub struct Config {
     pub ping: ping::Config,
     pub messages: message::Limits,
     pub capabilities: Vec<ChainPoi>,
+    pub capability_limits: capabilities::Limits,
     pub node_info: Option<info::Metadata>,
 }
 impl Default for Config {
@@ -45,6 +51,7 @@ impl Default for Config {
             ping: Default::default(),
             messages: Default::default(),
             capabilities: vec![],
+            capability_limits: Default::default(),
             node_info: Some(info::Metadata::current()),
         }
     }
@@ -70,6 +77,7 @@ impl Config {
             return Err(Error::Configuration);
         }
         self.ping.validate().map_err(Error::Ping)?;
+        self.capability_limits.validate()?;
         if let Some(metadata) = &self.node_info {
             metadata.validate().map_err(Error::Message)?;
         }
@@ -85,6 +93,7 @@ pub enum Error {
     Stale,
     Timeout,
     MalformedCapabilities,
+    Capabilities(capabilities::Error),
     Storage(String),
     Network(network::Error),
     Runtime(net::Error),
@@ -97,6 +106,11 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+impl From<capabilities::Error> for Error {
+    fn from(e: capabilities::Error) -> Self {
+        Self::Capabilities(e)
+    }
+}
 impl From<network::Error> for Error {
     fn from(e: network::Error) -> Self {
         Self::Network(e)
@@ -218,10 +232,55 @@ pub struct Handle {
     stop: watch::Sender<bool>,
     target: watch::Sender<u64>,
     status: watch::Receiver<Status>,
+    capabilities: CapabilityStore,
 }
+type CapabilityStore = Arc<Mutex<capabilities::Registry<net::Generation>>>;
 impl Handle {
     pub fn shutdown(&self) {
+        if let Ok(mut registry) = self.capabilities.lock() {
+            registry.close();
+        }
         self.stop.send_replace(true);
+    }
+    pub fn set_capability(&self, key: &str, value: &capabilities::Value) -> Result<(), Error> {
+        self.capabilities
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .set(key, value)?;
+        Ok(())
+    }
+    pub fn delete_capability(&self, key: &str) -> Result<(), Error> {
+        self.capabilities
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .delete(key)?;
+        Ok(())
+    }
+    pub fn capability(&self, key: &str) -> Result<Option<capabilities::Value>, Error> {
+        Ok(self
+            .capabilities
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .get(key)
+            .cloned())
+    }
+    pub fn capabilities(&self) -> Result<BTreeMap<String, capabilities::Value>, Error> {
+        Ok(self
+            .capabilities
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .local()
+            .clone())
+    }
+    pub fn peers_with_capability(
+        &self,
+        key: &str,
+    ) -> Result<Vec<capabilities::PeerValue<net::Generation>>, Error> {
+        Ok(self
+            .capabilities
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .peers_with(key))
     }
     // A tracked header target supplied by the synchronizer, not a selected
     // height or proof of block validity. Ping announcements do not set it.
@@ -256,14 +315,19 @@ struct Context {
     target: watch::Receiver<u64>,
     progress: watch::Sender<Counts>,
     storage_bytes: Arc<Semaphore>,
+    capabilities: CapabilityStore,
 }
 struct Lane {
     client: net::Client,
     input: mpsc::Sender<Input>,
+    capabilities: CapabilityStore,
 }
 impl Drop for Lane {
     fn drop(&mut self) {
         self.client.shutdown();
+        if let Ok(mut registry) = self.capabilities.lock() {
+            registry.remove(self.client.peer(), self.client.generation());
+        }
     }
 }
 
@@ -280,6 +344,14 @@ pub fn create(
     if !network.uses_database(&db) {
         return Err(Error::Configuration);
     }
+    let mut registry = capabilities::Registry::new(config.capability_limits)?;
+    if let Some(last) = config.capabilities.last() {
+        registry.set(
+            capabilities::CHAIN_POI,
+            &capabilities::Value::ChainPoi(vec![last.clone()]),
+        )?;
+    }
+    let capabilities = Arc::new(Mutex::new(registry));
     let jobs = blocking::Pool::new(
         config.blocking_threads,
         config.blocking_jobs,
@@ -309,6 +381,7 @@ pub fn create(
         published,
         target: targets,
         progress,
+        capabilities: capabilities.clone(),
     };
     Ok((
         Handle {
@@ -316,6 +389,7 @@ pub fn create(
             stop,
             target,
             status: observed,
+            capabilities,
         },
         Events(events),
         Service::new(context, scheduled, incoming, stopped, status, current, jobs),

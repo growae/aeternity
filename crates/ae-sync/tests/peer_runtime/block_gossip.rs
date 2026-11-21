@@ -390,7 +390,15 @@ async fn expansion_timeout_closes_only_its_connection_and_replacement_can_import
         .await
         .unwrap();
     let status = r.wait(|s| s.counts.failed == 1).await;
-    let old = status.last.unwrap().generation;
+    let completion = status.last.unwrap();
+    assert!(matches!(
+        completion.result,
+        Err(sync::Error::Import(chain::Failure {
+            progress: None,
+            error: chain::Error::Timeout,
+        }))
+    ));
+    let old = completion.generation;
     within(r.driver).await.unwrap();
     assert_tip(&node, &all[0]);
     let socket = TcpStream::connect(r.network.status().listening.unwrap())

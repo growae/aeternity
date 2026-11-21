@@ -120,10 +120,19 @@ impl Session {
                 _ => return Err(Error::Stale),
             }
         };
+        let capabilities = if version == 2 {
+            self.ctx
+                .capabilities
+                .lock()
+                .map_err(|_| Error::Closed)?
+                .wire()?
+        } else {
+            vec![]
+        };
         Ok(ping::encode(
             &local,
             peers,
-            &self.ctx.config.capabilities,
+            &capabilities,
             ping::Encoding {
                 version,
                 minimum_version: self.client.minimum_ping_version(),
@@ -202,6 +211,11 @@ impl Session {
                     )?;
                 }
                 ping::Effect::Capabilities(caps) => {
+                    self.ctx
+                        .capabilities
+                        .lock()
+                        .map_err(|_| Error::Closed)?
+                        .receive(self.client.peer(), self.client.generation(), &caps)?;
                     // The original map has one key, chain_poi; last duplicate wins.
                     if let Some(chain_poi) = caps.into_iter().last() {
                         let weight = chain_poi

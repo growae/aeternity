@@ -159,6 +159,22 @@ impl<O: MapOrder + Send + Sync + 'static> Context<O> {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    // There is only one owned lifecycle view at a time. Peer requests reserve
+    // this same capacity while awaiting replies; that backpressure must not
+    // terminate the global owner. Cancellation still drops the waiting permit,
+    // and actual database work retains its normal bounded execution lifetime.
+    pub(super) async fn read_when_available<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Database) -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let reserved = self.reads.reserve_wait(self.weight()).await?;
+        let db = self.importer.context.db.clone();
+        tokio::time::timeout(self.config.timeout, async {
+            reserved.submit(move |_| f(&db))?.await?
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
     pub(super) async fn request<T: Send + 'static>(
         &self,
         client: &net::Client,
