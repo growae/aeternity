@@ -95,12 +95,12 @@ impl<T> Drop for Pending<T> {
 }
 #[derive(Clone)]
 pub(crate) struct Pool(Arc<Inner>);
-pub(crate) struct Reservation<'a> {
-    pool: &'a Pool,
+pub(crate) struct Reservation {
+    pool: Pool,
     slot: OwnedSemaphorePermit,
     bytes: OwnedSemaphorePermit,
 }
-impl Reservation<'_> {
+impl Reservation {
     pub fn submit<T: Send + 'static>(
         self,
         operation: impl FnOnce(Cancellation) -> T + Send + 'static,
@@ -192,7 +192,7 @@ impl Pool {
     }
     // A caller can charge work before acquiring input from an external peer.
     // Moving this reservation into the job does not release/reacquire capacity.
-    pub fn reserve(&self, bytes: usize) -> Result<Reservation<'_>, Error> {
+    pub fn reserve(&self, bytes: usize) -> Result<Reservation, Error> {
         if self.stopped() {
             return Err(Error::Stopped);
         }
@@ -210,7 +210,7 @@ impl Pool {
             .try_acquire_many_owned(weight)
             .map_err(|_| Error::Busy)?;
         Ok(Reservation {
-            pool: self,
+            pool: self.clone(),
             slot,
             bytes,
         })
@@ -222,7 +222,7 @@ impl Pool {
     ) -> Result<Pending<T>, Error> {
         self.reserve_wait(bytes).await?.submit(operation)
     }
-    pub async fn reserve_wait(&self, bytes: usize) -> Result<Reservation<'_>, Error> {
+    pub async fn reserve_wait(&self, bytes: usize) -> Result<Reservation, Error> {
         let weight = u32::try_from(bytes.max(1)).map_err(|_| Error::Busy)?;
         if bytes.max(1) > self.0.byte_limit {
             return Err(Error::Busy);
@@ -242,7 +242,7 @@ impl Pool {
             .await
             .map_err(|_| Error::Stopped)?;
         Ok(Reservation {
-            pool: self,
+            pool: self.clone(),
             slot,
             bytes,
         })

@@ -24,6 +24,8 @@ use std::{
     time::Duration,
 };
 
+mod download;
+pub use download::Download;
 pub mod generation;
 mod import;
 pub mod sync;
@@ -293,7 +295,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         }
         Ok(())
     }
-    fn reserve(&self) -> Result<blocking::Reservation<'_>, Error> {
+    fn reserve(&self) -> Result<blocking::Reservation, Error> {
         self.check_open()?;
         let weight = self
             .context
@@ -306,7 +308,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     }
     fn submit(
         &self,
-        reservation: blocking::Reservation<'_>,
+        reservation: blocking::Reservation,
         input: Input,
         requested: Hash256,
         direction: Direction,
@@ -321,110 +323,6 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 timeout: self.context.config.timeout,
             })
             .map_err(Into::into)
-    }
-    pub async fn fetch(
-        &self,
-        owner: &network::Handle,
-        client: net::Client,
-        requested: Hash256,
-        direction: Direction,
-        now_ms: u64,
-    ) -> Result<Report, Failure> {
-        let empty = |error| Failure {
-            progress: Some(Report::default()),
-            error,
-        };
-        self.check_open().map_err(empty)?;
-        if !owner.uses_database(&self.context.db) {
-            return Err(empty(Error::Configuration));
-        }
-        let limits = self.context.config.messages;
-        let transport = client.message_limits();
-        // The driver decodes the response before handing it to the importer.
-        // Its limits must fit the capacity reserved here, not just the later
-        // re-encoding check in the blocking worker.
-        if transport.body_bytes > limits.body_bytes
-            || transport.work_bytes > limits.work_bytes
-            || transport.items > limits.items
-            || transport.depth > limits.depth
-        {
-            return Err(empty(Error::Configuration));
-        }
-        let reservation = self.reserve().map_err(empty)?;
-        let mut shutdown = self.context.shutdown.subscribe();
-        let download = async {
-            if client.is_closed()
-                || owner
-                    .connection(client.clone())
-                    .map_err(|e| empty(e.into()))?
-                    .wait()
-                    .await
-                    .map_err(|e| empty(e.into()))?
-                    .is_none()
-            {
-                return Err(empty(Error::Stale));
-            }
-            let request = Message::new(
-                Kind::GetGeneration,
-                1,
-                BTreeMap::from([
-                    ("hash".into(), Value::Binary(requested.0.to_vec())),
-                    (
-                        "forward".into(),
-                        Value::Boolean(direction == Direction::Forward),
-                    ),
-                ]),
-                self.context.config.messages,
-            )
-            .map_err(|e| empty(e.into()))?;
-            let reply = client
-                .request(&request, None)
-                .map_err(|e| empty(e.into()))?
-                .await
-                .map_err(|e| empty(e.into()))?;
-            let net::Reply::Response(received) = reply else {
-                return Err(empty(Error::Stale));
-            };
-            if received.generation != *client.generation()
-                || client.is_closed()
-                || owner
-                    .connection(client.clone())
-                    .map_err(|e| empty(e.into()))?
-                    .wait()
-                    .await
-                    .map_err(|e| empty(e.into()))?
-                    .is_none()
-            {
-                return Err(empty(Error::Stale));
-            }
-            Ok(Live { received, client })
-        };
-        let operation = async {
-            let live = tokio::select! {
-                biased;
-                _ = shutdown.wait_for(|stopped| *stopped) => return Err(empty(Error::Closed)),
-                result = download => result?,
-            };
-            self.submit(
-                reservation,
-                Input::Live(Box::new(live)),
-                requested,
-                direction,
-                now_ms,
-            )
-            .map_err(empty)?
-            .wait()
-            .await
-        };
-        // Dropping the accepted import wait signals cancellation; a block
-        // already at its durable commit boundary can still finish. Callers
-        // must inspect the database, never infer rollback from a timeout.
-        tokio::time::timeout(self.context.config.timeout, operation)
-            .await
-            .map_err(|_| Failure {
-                progress: None,
-                error: Error::Timeout,
-            })?
     }
 }
 impl<O> Drop for Importer<O> {

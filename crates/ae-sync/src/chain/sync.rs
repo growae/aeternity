@@ -20,6 +20,7 @@ use std::{
 use tokio::sync::{mpsc, watch};
 
 pub mod agreement;
+pub mod coordination;
 mod service;
 mod session;
 mod wire;
