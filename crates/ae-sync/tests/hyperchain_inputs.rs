@@ -688,3 +688,60 @@ async fn missing_parent_requests_and_effect_limits_are_retryable_without_block_w
     next.stop();
     next.join().await;
 }
+
+#[tokio::test]
+async fn remote_pin_capture_replays_native_finalized_chains_without_unneeded_rpc() {
+    use ae_sync::parent_pins::{Chain, Node, Service};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let service = Service::spawn(
+        vec![
+            Node::new(
+                Chain::Aeternity,
+                &format!("http://{}", listener.local_addr().unwrap()),
+                None,
+            )
+            .unwrap(),
+        ],
+        Default::default(),
+    )
+    .unwrap();
+    let pair = Pair::new(false);
+    for index in 0..7 {
+        let node = fixture::Node::new(index);
+        let pins = scoped::RemotePins {
+            execution: node.config.clone(),
+            client: service.client(),
+            limits: Default::default(),
+        };
+        let parents = scoped::Cached {
+            cache: pair.client.clone(),
+            pins,
+            parent_start: 1.into(),
+            parent_length: 5.into(),
+            limits: Default::default(),
+        };
+        let (importer, mut accepted) = Importer::new_hyperchain_scoped(
+            node.db.clone(),
+            node.config.clone(),
+            parents,
+            Default::default(),
+        )
+        .unwrap();
+        for (i, block) in node.blocks().into_iter().enumerate() {
+            within(
+                importer
+                    .import_block(block.encode().unwrap(), NOW)
+                    .unwrap()
+                    .wait(),
+            )
+            .await
+            .unwrap();
+            node.check(i);
+            accepted.take().unwrap().drain();
+        }
+        importer.stop();
+        importer.join().await;
+    }
+    assert!(listener.accept().is_err()); // all retained finalized fixtures have no pin
+}

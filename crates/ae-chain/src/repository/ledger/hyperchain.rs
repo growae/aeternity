@@ -206,3 +206,95 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     *host = staged;
     Ok(update)
 }
+
+#[derive(Debug)]
+pub enum PinRequestError<S> {
+    Repository(Error),
+    Query(chain::Error<Overlay<S>, Overlay<S>>),
+    Transform(crate::key::Error<Overlay<S>, Overlay<S>>),
+}
+impl<S> PinRequestError<S> {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::Repository(_) => true,
+            Self::Query(e) => e.is_operational(),
+            Self::Transform(e) => e.is_operational(),
+        }
+    }
+}
+// Resolve from the incoming predecessor hash, not the currently selected tip.
+// The shared key transform includes expiry and protocol migrations before the
+// election contract is queried with native pre-transform context semantics.
+pub fn hyperchain_pin_request<S: Read, O: MapOrder + Clone>(
+    view: &View<S>,
+    block: &Block,
+    config: &HyperchainConfig<O>,
+) -> Result<Option<Vec<u8>>, PinRequestError<S>> {
+    use PinRequestError as E;
+    let Block::Key(k) = block else {
+        return Ok(None);
+    };
+    if k.common.height == 0 {
+        return Ok(None);
+    }
+    if view.identity != config.identity
+        || view.identity.consensus != ConsensusType::Pos
+        || !view.identity.matches(&config.profile.network)
+        || view.identity.genesis != config.rules.genesis_hash
+    {
+        return Err(E::Repository(Error::Identity));
+    }
+    let network = view
+        .resolve_protocol(
+            &config.profile.network,
+            k.common.height,
+            config.limits.history,
+        )
+        .map_err(E::Repository)?
+        .0;
+    let mut profile = config.profile.as_ref().clone();
+    profile.network = network;
+    let reader = super::super::hyperchain::reader(
+        view.clone(),
+        &config.identity,
+        Arc::new(profile),
+        super::super::hyperchain::Config {
+            overlays: config.limits.overlay,
+            maximum_history_headers: config.limits.history,
+            configured_block_gas_limit: config.rules.configured_gas_limit.clone(),
+            aevm: config.aevm.clone(),
+        },
+    )
+    .map_err(E::Repository)?;
+    let parent_hash = Hash256(k.common.previous_hash);
+    let previous = view
+        .require_block(parent_hash)
+        .map_err(E::Repository)?
+        .header();
+    let key_hash = match &previous {
+        Header::Key(_) => parent_hash,
+        Header::Micro(m) => Hash256(m.common.previous_key_hash),
+    };
+    let previous_key = require_key(view, key_hash).map_err(E::Repository)?;
+    let input = view.require_record(parent_hash).map_err(E::Repository)?;
+    let parent_view = reader
+        .view(&chain::RunEnv::Hash(parent_hash.0.to_vec()))
+        .map_err(E::Query)?;
+    let parent = hc::Parent {
+        header: &previous,
+        key: &previous_key,
+        view: &parent_view,
+        fees: &input.fees,
+        execution_history: Arc::new(
+            super::super::vm_history(view, k, config.limits.history).map_err(E::Repository)?,
+        ),
+    };
+    let prepared = hc::input_trees(&reader, &parent, k, &config.rules).map_err(E::Transform)?;
+    let result = consensus::pin_request(&reader, &parent_view, &prepared.trees, k.common.height)
+        .map_err(E::Query)?;
+    // Other native pin_info values are rejected by execution before Host::pin.
+    Ok(match result {
+        Some(ae_vm_fate::value::Value::Bytes(hash)) => Some(hash),
+        _ => None,
+    })
+}

@@ -589,3 +589,136 @@ fn context_binding_history_and_write_limits_preserve_inputs_and_allow_retry() {
         Err(repo::Error::Identity)
     ));
 }
+
+#[test]
+fn pin_preflight_uses_incoming_predecessor_even_when_selected_tip_changes() {
+    // Lookup fixture assembled from original contract states, not an admitted
+    // signed chain. Durable signed pin-success blocks remain separate evidence.
+    fn extend(memory: &mut Memory, mut parent: Hash256) -> (Hash256, Vec<(u64, Hash256)>) {
+        let view = memory.view();
+        let h = view.require_block(parent).unwrap().header();
+        let mut previous_key = match h {
+            Header::Key(_) => parent,
+            Header::Micro(m) => Hash256(m.common.previous_key_hash),
+        };
+        let Block::Key(mut k) = view.require_block(previous_key).unwrap() else {
+            panic!()
+        };
+        let record = view.require_record(parent).unwrap();
+        let mut chain = vec![(k.common.height, previous_key)];
+        for height in (k.common.height + 1)..6 {
+            k.common.height = height;
+            k.common.previous_hash = parent.0;
+            k.common.previous_key_hash = previous_key.0;
+            k.common.state_hash = record.roots.state.hash().0;
+            k.time += 1;
+            let b = Block::Key(k.clone());
+            parent = b.hash().unwrap();
+            previous_key = parent;
+            memory.put(repo::key(repo::BLOCKS, parent.0), b.encode().unwrap());
+            memory.put(repo::key(repo::RECORDS, parent.0), record.encode());
+            chain.push((height, parent));
+        }
+        (parent, chain)
+    }
+    let pinned = super::unpack(include_str!("../fixtures/erlang_hc_block.json"));
+    for row in DATA["rows"].as_array().unwrap() {
+        let (mut memory, id) = prepare(row, false);
+        let pin_row = pinned["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["protocol"] == row["protocol"])
+            .unwrap();
+        let t = trees(&pin_row["pin_initial"]);
+        let selected = memory.view().status().tip.unwrap();
+        let native_side = row["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "side")
+            .unwrap();
+        let Header::Key(mut header) =
+            Header::decode(&bytes(&native_side["header"]), HeaderMode::Hyperchain).unwrap()
+        else {
+            panic!()
+        };
+        header.common.state_hash = t.roots().hash().0;
+        let parent = Block::Key(header.clone());
+        let hash = parent.hash().unwrap();
+        memory.put(repo::key(repo::BLOCKS, hash.0), parent.encode().unwrap());
+        memory.put(
+            repo::key(repo::RECORDS, hash.0),
+            repo::Record {
+                roots: repo::Roots::of(&t),
+                difficulty: 1.into(),
+                fees: 0.into(),
+                fraud: false,
+                fork: id.genesis,
+            }
+            .encode(),
+        );
+        for store in [
+            t.accounts.tree().store(),
+            t.contracts.tree().store(),
+            t.calls.tree().store(),
+        ] {
+            for (h, v) in store.nodes() {
+                memory.put(repo::key(repo::NODES, h.0), v.clone());
+            }
+        }
+        let mut profile = genesis::reader(state(row)).profile.as_ref().clone();
+        profile.maximum_steps = 1_000_000;
+        let config = repo::HyperchainConfig {
+            identity: id.clone(),
+            profile: Arc::new(profile),
+            rules: ae_chain::hyperchain::Rules::new(
+                id.genesis,
+                ae_hyperchain::block::Config {
+                    parent_epoch_length: 5.into(),
+                    parent_start: 1.into(),
+                    parent_finality: 2.into(),
+                    pin_sync_margin: 1.into(),
+                    child_block_time: 4.into(),
+                    cache_limits: Default::default(),
+                },
+            ),
+            aevm: None,
+            limits: Default::default(),
+        };
+        let (hash, side_chain) = extend(&mut memory, hash);
+        let (old_tip, _) = extend(&mut memory, selected);
+        header.common.height = 6;
+        header.common.previous_hash = hash.0;
+        header.common.previous_key_hash = hash.0;
+        let side = Block::Key(header.clone());
+        let before = memory.view();
+        let query = |view: &repo::View<Memory>, block: &Block| {
+            repo::ledger::hyperchain_pin_request(view, block, &config).unwrap()
+        };
+        assert_eq!(query(&before, &side), Some(super::key(777).to_vec()));
+        header.common.previous_hash = old_tip.0;
+        header.common.previous_key_hash = old_tip.0;
+        let old_branch = Block::Key(header);
+        assert_eq!(query(&before, &old_branch), None);
+        memory.put(
+            repo::STATUS.to_vec(),
+            repo::Status {
+                revision: 4,
+                tip: Some(hash),
+            }
+            .encode(),
+        );
+        for (height, hash) in &side_chain {
+            memory.put(repo::key(repo::KEYS, height.to_be_bytes()), hash.0.to_vec());
+        }
+        assert_eq!(query(&memory.view(), &old_branch), None);
+        assert_eq!(query(&memory.view(), &side), Some(super::key(777).to_vec()));
+        assert_eq!(before.status().tip, Some(selected));
+        memory.failure = Some(repo::key(repo::RECORDS, hash.0));
+        let error =
+            repo::ledger::hyperchain_pin_request(&memory.view(), &side, &config).unwrap_err();
+        assert!(error.is_operational());
+        assert_eq!(query(&before, &side), Some(super::key(777).to_vec()));
+    }
+}

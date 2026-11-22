@@ -11,6 +11,7 @@ pub trait ParentInputs: Send + Sync + 'static {
     type Error: std::fmt::Debug;
     type HostError: std::fmt::Debug;
     type Host<'db>: Host<Error = Self::HostError>;
+    // Runs under the storage writer: only nonblocking lifetime checks, no I/O.
     fn check(&self) -> Result<(), Self::Error>;
     fn capture<'db>(
         &self,
@@ -152,6 +153,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
 // populate this snapshot before execution, never from Host::pin itself.
 pub trait PinInputs: Send + Sync + 'static {
     type Error: std::fmt::Debug;
+    // Runs under the storage writer: only nonblocking lifetime checks, no I/O.
     fn check(&self) -> Result<(), Self::Error>;
     fn capture(
         &self,
@@ -223,5 +225,47 @@ impl<P: PinInputs> ParentInputs for Cached<P> {
     }
     fn detach(host: Self::Host<'_>) -> inputs::Effects {
         host.into_effects()
+    }
+}
+
+// One fixed service incarnation; check() is atomic and safe under the writer.
+pub struct RemotePins<O> {
+    pub execution: ledger::HyperchainConfig<O>,
+    pub client: crate::parent_pins::Client,
+    pub limits: inputs::Limits,
+}
+#[derive(Debug)]
+pub enum RemotePinError {
+    Service(crate::parent_pins::Error),
+    Query(String),
+    Inputs(inputs::InputError),
+}
+impl<O: MapOrder + Clone + Send + Sync + 'static> PinInputs for RemotePins<O> {
+    type Error = RemotePinError;
+    fn check(&self) -> Result<(), Self::Error> {
+        self.client.check().map_err(RemotePinError::Service)
+    }
+    fn capture(
+        &self,
+        child: &repository::View<Snapshot<'_>>,
+        block: &Block,
+    ) -> Result<Arc<inputs::Pins>, Self::Error> {
+        self.check()?;
+        let hash = match ledger::hyperchain_pin_request(child, block, &self.execution) {
+            Ok(hash) => hash,
+            Err(e) if !e.is_operational() => None, // execution reproduces native rejection
+            Err(e) => return Err(RemotePinError::Query(format!("{e:?}"))),
+        };
+        let mut pins = inputs::Pins::default();
+        if let Some(hash) = hash {
+            if hash.len() > self.limits.maximum_pin_bytes || self.limits.maximum_pin_entries == 0 {
+                return Err(RemotePinError::Inputs(inputs::InputError::ResourceLimit));
+            }
+            let pin = self.client.fetch(&hash).map_err(RemotePinError::Service)?;
+            pins.insert(hash, pin, self.limits)
+                .map_err(RemotePinError::Inputs)?;
+        }
+        self.check()?;
+        Ok(Arc::new(pins))
     }
 }

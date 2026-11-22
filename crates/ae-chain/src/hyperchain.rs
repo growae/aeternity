@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod transition;
 mod validation;
 pub use transition::execute;
+pub(crate) use transition::input_trees;
 pub use validation::{keep_tip, score, standalone};
 
 #[derive(Debug)]

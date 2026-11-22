@@ -329,9 +329,7 @@ impl State {
         if height == 0 {
             return Ok(result);
         }
-        let mut view = previous.clone();
-        view.context.height = height;
-        view.trees = Arc::new(trees.clone());
+        let mut view = input_view(previous, trees, height);
         let env = RunEnv::View(Arc::new(view.clone()));
         let info = reader.epoch_info(&env).map_err(Error::Chain)?;
         let h = BigInt::from(height);
@@ -477,4 +475,36 @@ impl State {
         result.events.push(Event::NewEpoch(next));
         Ok(result)
     }
+}
+
+fn input_view<A: NodeWriter + Clone, C: NodeWriter + Clone>(
+    previous: &View<A, C>,
+    trees: &Trees<A, C>,
+    height: u64,
+) -> View<A, C> {
+    let mut view = previous.clone();
+    view.context.height = height;
+    view.trees = Arc::new(trees.clone());
+    view
+}
+// Read-only acquisition preflight. Leader/cache effects remain in execution.
+// A native query failure can be deferred to the normal execution path; local
+// resource/storage failures must abort capture. Call only for non-genesis keys.
+pub fn pin_request<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    S: chain::Source<A, C>,
+>(
+    reader: &Reader<A, C, O, S>,
+    previous: &View<A, C>,
+    trees: &Trees<A, C>,
+    height: u64,
+) -> Result<Option<Value>, chain::Error<A, C>> {
+    let env = RunEnv::View(Arc::new(input_view(previous, trees, height)));
+    let info = reader.epoch_info(&env)?;
+    if BigInt::from(height) != info.last || BigInt::from(height) < info.first {
+        return Ok(None);
+    }
+    reader.pin_info(&env)
 }

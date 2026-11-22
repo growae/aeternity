@@ -509,3 +509,26 @@ fn operational_failures_roll_back_schedules_host_effects_and_reward_roots() {
     assert!(host.pin_reads.is_empty());
     apply(&r, row, op, &mut s, &mut proof_host(op), &t);
 }
+
+#[test]
+fn pin_acquisition_preflight_matches_native_pretransform_inputs() {
+    for row in BLOCK["rows"].as_array().unwrap() {
+        let r = reader(row);
+        let trees = trees(&row["pin_initial"]);
+        let op = &row["pin_cases"][0];
+        let previous = previous(row, op, &trees);
+        assert_eq!(
+            b::pin_request(&r, &previous, &trees, 6).unwrap(),
+            Some(Value::Bytes(key(777).to_vec()))
+        );
+        for height in [0, 1, 3, 5, 7, 9] {
+            assert_eq!(b::pin_request(&r, &previous, &trees, height).unwrap(), None);
+        }
+        // Query reads remain immutable, including the old context height.
+        check(&trees, &row["pin_initial"]);
+        assert_eq!(
+            previous.context.height,
+            op["previous"]["height"].as_u64().unwrap()
+        );
+    }
+}

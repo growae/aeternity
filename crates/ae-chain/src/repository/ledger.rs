@@ -10,7 +10,9 @@ use ae_trie::MemoryStore;
 use ae_vm_fate::maps::MapOrder;
 #[path = "ledger/hyperchain.rs"]
 mod hyperchain_insert;
-pub use hyperchain_insert::{HyperchainConfig, HyperchainError, prepare_hyperchain};
+pub use hyperchain_insert::{
+    HyperchainConfig, HyperchainError, PinRequestError, hyperchain_pin_request, prepare_hyperchain,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Origin {

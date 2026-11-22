@@ -234,32 +234,7 @@ fn execute_inner<
         wait_ms: None,
     };
     if let Block::Key(k) = block {
-        let p = execution::Parent {
-            headers: ae_consensus::headers::Context {
-                previous: parent.header,
-                previous_key: parent.key,
-                recent_keys: &[],
-            },
-            previous_generation: execution::PreviousGeneration::Missing,
-            fees: rewards::number(&incoming),
-            reported_fraud: false,
-        };
-        let prepared = reader
-            .with_execution(&current, |cfg| {
-                key::pre_transform(
-                    &out.trees,
-                    k,
-                    &p,
-                    cfg,
-                    key::TransformRules {
-                        gas: &gas,
-                        custom_forks: &rules.custom_forks,
-                        fork_limits: rules.fork_limits,
-                        max_calls: rules.max_calls,
-                    },
-                )
-            })
-            .map_err(Error::Transform)?;
+        let prepared = input_trees(&reader, parent, k, rules).map_err(Error::Transform)?;
         out.trees = prepared.trees;
         out.fees = prepared.fees;
     }
@@ -309,4 +284,60 @@ fn execute_inner<
     }
     validation::root(&out.trees, &h)?;
     Ok(out)
+}
+
+pub(crate) fn input_trees<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    S: chain::Source<A, C>,
+>(
+    reader: &Reader<A, C, O, S>,
+    parent: &Parent<'_, A, C>,
+    k: &KeyHeader,
+    rules: &Rules,
+) -> Result<key::Transformed<A, C>, key::Error<A, C>> {
+    let incoming = if matches!(parent.header, Header::Key(_)) {
+        0.into()
+    } else {
+        parent.fees.clone()
+    };
+    let p = execution::Parent {
+        headers: ae_consensus::headers::Context {
+            previous: parent.header,
+            previous_key: parent.key,
+            recent_keys: &[],
+        },
+        previous_generation: execution::PreviousGeneration::Missing,
+        fees: rewards::number(&incoming),
+        reported_fraud: false,
+    };
+    let gas = reader
+        .profile
+        .network
+        .block_gas_limit(&rules.configured_gas_limit);
+    // pre_transform installs its incoming block environment for migrations;
+    // expiry and gas fees use the exact predecessor trees in both paths.
+    let hash = Header::Key(k.clone())
+        .hash()
+        .map_err(key::Error::Encoding)?;
+    let current =
+        frame::<(), _, _>(parent, k, k.common.height, k.time, hash, &gas).map_err(|e| match e {
+            Error::Protocol(p) => key::Error::Header(p.into()),
+            _ => unreachable!("frame protocol"),
+        })?;
+    reader.with_execution(&current, |cfg| {
+        key::pre_transform(
+            &parent.view.trees,
+            k,
+            &p,
+            cfg,
+            key::TransformRules {
+                gas: &gas,
+                custom_forks: &rules.custom_forks,
+                fork_limits: rules.fork_limits,
+                max_calls: rules.max_calls,
+            },
+        )
+    })
 }

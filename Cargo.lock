@@ -203,6 +203,7 @@ dependencies = [
  "ae-vm-aevm",
  "ae-vm-fate",
  "aes",
+ "base64 0.22.1",
  "ed25519-dalek",
  "hex",
  "httparse",
