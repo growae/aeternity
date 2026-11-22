@@ -147,6 +147,29 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         }
         Ok(std::mem::take(&mut live.host))
     }
+    // Nonblocking transfer for an external delivery loop. Refused batches
+    // stay in the owner; no candidate state is exposed during execution.
+    pub fn try_take_host_if(
+        &self,
+        accept: impl FnOnce(&H) -> bool,
+    ) -> Result<Option<H>, repo::Error>
+    where
+        H: Default,
+    {
+        let mut live = match self.live.try_lock() {
+            Ok(live) => live,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(repo::Error::Backend("poisoned Hyperchain owner".into()));
+            }
+        };
+        if live.failed || self.database.events().info().failure.is_some() {
+            return Err(repo::Error::Backend(
+                "Hyperchain storage requires reopen".into(),
+            ));
+        }
+        Ok(accept(&live.host).then(|| std::mem::take(&mut live.host)))
+    }
     pub fn insert_scoped<G, I: Inputs<H, G>>(
         &self,
         block: &Block,

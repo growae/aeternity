@@ -85,6 +85,13 @@ pub struct Accepted<O, H> {
     owner: Weak<storage::Owner<O, H>>,
 }
 impl<O: MapOrder + Clone, H: Clone + Default> Accepted<O, H> {
+    pub fn try_take_if(&mut self, accept: impl FnOnce(&H) -> bool) -> Result<Option<H>, Error> {
+        self.owner
+            .upgrade()
+            .ok_or(Error::Closed)?
+            .try_take_host_if(accept)
+            .map_err(Error::Storage)
+    }
     pub fn take(&mut self) -> Result<H, Error> {
         self.owner
             .upgrade()

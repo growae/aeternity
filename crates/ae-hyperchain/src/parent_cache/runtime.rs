@@ -151,6 +151,14 @@ pub struct Call {
     receiver: Receiver<Result<Reply, Error>>,
 }
 impl Call {
+    // Outer failure means the accepted command has no observed result.
+    pub fn try_reply(&mut self) -> Result<Option<Result<Reply, Error>>, Error> {
+        match self.receiver.try_recv() {
+            Ok(reply) => Ok(Some(reply)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(Error::Closed),
+        }
+    }
     pub fn wait(self, timeout: Duration) -> Result<Reply, Error> {
         self.receiver.recv_timeout(timeout).map_err(call_error)?
     }

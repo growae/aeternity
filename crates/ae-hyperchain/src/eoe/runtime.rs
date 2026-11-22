@@ -21,6 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod client;
+pub use client::{Call, CallError, Client};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub command_capacity: usize,
@@ -86,8 +89,15 @@ pub enum SubmitError<A = MemoryStore, C = MemoryStore> {
     Disconnected(Box<Command<A, C>>),
     ResourceLimit(Box<Command<A, C>>),
 }
+enum ReplyTo {
+    Stream(u64),
+    Caller {
+        reply: SyncSender<Result<Applied, coordinator::Error>>,
+        _credit: Arc<client::Credit>,
+    },
+}
 struct Request<A, C> {
-    sequence: u64,
+    reply: ReplyTo,
     command: Command<A, C>,
 }
 pub struct Runtime<A = MemoryStore, C = MemoryStore> {
@@ -96,6 +106,7 @@ pub struct Runtime<A = MemoryStore, C = MemoryStore> {
     worker: Option<JoinHandle<()>>,
     maximum_command_bytes: usize,
     stop: Arc<AtomicBool>,
+    control: Arc<client::Control>,
 }
 impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send + Sync + 'static>
     Runtime<A, C>
@@ -120,25 +131,46 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
         let stop = Arc::new(AtomicBool::new(false));
         coordinator.set_shutdown(stop.clone());
         let worker_stop = stop.clone();
+        let control = Arc::new(client::Control::new(stop.clone(), config));
+        let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name("ae-hc-eoe".into())
-            .spawn(move || run(coordinator, order, config, commands, outputs, worker_stop))?;
+            .spawn(move || {
+                struct End(Arc<client::Control>);
+                impl Drop for End {
+                    fn drop(&mut self) {
+                        self.0.alive.store(false, Ordering::Release);
+                    }
+                }
+                let _end = End(worker_control);
+                run(coordinator, order, config, commands, outputs, worker_stop)
+            })?;
         Ok(Self {
             sender: Some(sender),
             receiver: Some(receiver),
             worker: Some(worker),
             maximum_command_bytes: config.maximum_command_bytes,
             stop,
+            control,
         })
     }
 }
 impl<A, C> Runtime<A, C> {
+    pub fn client(&self) -> Client<A, C> {
+        Client {
+            sender: self.sender.as_ref().expect("live runtime").clone(),
+            control: self.control.clone(),
+        }
+    }
     // Nonblocking submission returns ownership on pressure or disconnection.
     pub fn try_submit(
         &self,
         sequence: u64,
         command: Command<A, C>,
     ) -> Result<(), SubmitError<A, C>> {
+        if !self.control.alive.load(Ordering::Acquire) || self.stop.load(Ordering::Acquire) {
+            return Err(SubmitError::Disconnected(Box::new(command)));
+        }
         if command_size(&command, self.maximum_command_bytes).is_err() {
             return Err(SubmitError::ResourceLimit(Box::new(command)));
         }
@@ -146,7 +178,10 @@ impl<A, C> Runtime<A, C> {
             return Err(SubmitError::Disconnected(Box::new(command)));
         };
         sender
-            .try_send(Request { sequence, command })
+            .try_send(Request {
+                reply: ReplyTo::Stream(sequence),
+                command,
+            })
             .map_err(|e| match e {
                 TrySendError::Full(r) => SubmitError::Full(Box::new(r.command)),
                 TrySendError::Disconnected(r) => SubmitError::Disconnected(Box::new(r.command)),
@@ -257,7 +292,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
             )
         };
         match commands.recv_timeout(wait) {
-            Ok(Request { sequence, command }) => {
+            Ok(Request { reply, command }) => {
                 let now = start_ms.saturating_add(
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 );
@@ -269,7 +304,18 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                 if retry && result.is_ok() {
                     blocked = false;
                 }
-                if outputs.send(Output::Applied { sequence, result }).is_err() || stop {
+                let disconnected = match reply {
+                    ReplyTo::Stream(sequence) => {
+                        outputs.send(Output::Applied { sequence, result }).is_err()
+                    }
+                    ReplyTo::Caller { reply, .. } => {
+                        // The one-slot private reply cannot block on an unread
+                        // completion. Losing a caller does not stop the owner.
+                        let _ = reply.try_send(result);
+                        false
+                    }
+                };
+                if disconnected || stop {
                     return;
                 }
             }

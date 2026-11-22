@@ -664,3 +664,187 @@ fn background_runtime_reports_resource_stop_once_and_resumes_after_configuration
 
 #[path = "entropy.rs"]
 mod entropy;
+
+fn addressed(client: &runtime::Client, command: runtime::Command) -> runtime::Call {
+    match client.call(command) {
+        Ok(call) => call,
+        Err(_) => panic!("addressed command refused"),
+    }
+}
+#[test]
+fn addressed_receipts_preserve_original_vote_and_finalize_outputs() {
+    let mut h = host(&[1, 2, 3], ServiceLimits::default());
+    add_parent(&mut h);
+    let rt = runtime::Runtime::spawn(
+        Coordinator::new(h, 1000.into(), api::Config::default()),
+        otp_order::profile(&COORDINATOR["profile"]),
+        runtime::Config::default(),
+    )
+    .unwrap();
+    let client = rt.client();
+    assert_eq!(
+        addressed(&client, runtime::Command::Negotiate(negotiation(7)))
+            .wait(Duration::from_secs(2))
+            .unwrap()
+            .unwrap(),
+        runtime::Applied::Unit
+    );
+    let mut votes = vec![];
+    while votes.len() < 10 {
+        match rt.recv_timeout(Duration::from_secs(2)).unwrap() {
+            runtime::Output::Service(ServiceOutput::Publication(Output::Vote {
+                signed, ..
+            })) => votes.push(signed.encode()),
+            other => panic!("unexpected shared output {other:?}"),
+        }
+    }
+    let row = COORDINATOR["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "local")
+        .unwrap();
+    votes.sort();
+    assert_eq!(list(votes.iter().map(bin).collect()), row["events"]);
+    addressed(
+        &client,
+        runtime::Command::Finalize {
+            request: 77,
+            view: Arc::new(trees(5)),
+        },
+    )
+    .wait(Duration::from_secs(2))
+    .unwrap()
+    .unwrap();
+    loop {
+        match rt.recv_timeout(Duration::from_secs(2)).unwrap() {
+            runtime::Output::Service(ServiceOutput::Finalized {
+                request: 77,
+                replies,
+            }) => {
+                assert_eq!(pair_json(&replies), row["result"]);
+                break;
+            }
+            runtime::Output::Service(ServiceOutput::Publication(_)) => {}
+            other => panic!("unexpected shared output {other:?}"),
+        }
+    }
+    assert_eq!(client.outstanding(), 0);
+    rt.shutdown().unwrap();
+    assert!(client.is_closed());
+    assert!(matches!(
+        client.call(runtime::Command::Retry),
+        Err(runtime::SubmitError::Disconnected(_))
+    ));
+}
+#[test]
+fn unread_addressed_receipts_keep_capacity_and_abandoned_callers_do_not_stop_worker() {
+    let rt = runtime::Runtime::spawn(
+        Coordinator::new(
+            host(&[], ServiceLimits::default()),
+            1000.into(),
+            api::Config::default(),
+        ),
+        otp_order::profile(&COORDINATOR["profile"]),
+        runtime::Config {
+            command_capacity: 2,
+            output_capacity: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let client = rt.client();
+    let one = addressed(&client, runtime::Command::Retry);
+    let two = addressed(&client, runtime::Command::Retry);
+    // A legacy stream barrier proves both private replies are already queued.
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match rt.try_submit(99, runtime::Command::Retry) {
+            Ok(()) => break,
+            Err(runtime::SubmitError::Full(_)) => {
+                assert!(std::time::Instant::now() < until);
+                std::thread::yield_now();
+            }
+            _ => panic!("runtime stopped"),
+        }
+    }
+    assert_eq!(
+        rt.recv_timeout(Duration::from_secs(2)).unwrap(),
+        runtime::Output::Applied {
+            sequence: 99,
+            result: Ok(runtime::Applied::Unit)
+        }
+    );
+    assert_eq!(client.outstanding(), 2);
+    assert!(matches!(
+        client.call(runtime::Command::Retry),
+        Err(runtime::SubmitError::Full(_))
+    ));
+    drop(one);
+    assert_eq!(client.outstanding(), 1);
+    drop(addressed(&client, runtime::Command::Retry));
+    drop(two);
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while client.outstanding() > 0 {
+        assert!(std::time::Instant::now() < until);
+        std::thread::yield_now();
+    }
+    addressed(&client, runtime::Command::Retry)
+        .wait(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    rt.shutdown().unwrap();
+}
+#[test]
+fn shutdown_returns_unknown_receipt_and_fixed_clients_cannot_follow_replacement() {
+    let rt = runtime::Runtime::spawn(
+        Coordinator::new(
+            host(&[1, 2, 3], ServiceLimits::default()),
+            1000.into(),
+            api::Config::default(),
+        ),
+        otp_order::profile(&COORDINATOR["profile"]),
+        runtime::Config {
+            command_capacity: 2,
+            output_capacity: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let client = rt.client();
+    addressed(&client, runtime::Command::Negotiate(negotiation(7)))
+        .wait(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        rt.recv_timeout(Duration::from_secs(2)).unwrap(),
+        runtime::Output::Service(ServiceOutput::Publication(_))
+    ));
+    let mut pending = addressed(&client, runtime::Command::Retry);
+    assert_eq!(pending.try_reply(), Ok(None));
+    rt.shutdown().unwrap();
+    assert_eq!(pending.try_reply(), Err(runtime::CallError::Closed));
+    assert_eq!(client.outstanding(), 1);
+    drop(pending);
+    assert_eq!(client.outstanding(), 0);
+    let replacement = runtime::Runtime::spawn(
+        Coordinator::new(
+            host(&[], ServiceLimits::default()),
+            1000.into(),
+            api::Config::default(),
+        ),
+        otp_order::profile(&COORDINATOR["profile"]),
+        runtime::Config::default(),
+    )
+    .unwrap();
+    assert!(client.is_closed());
+    assert!(matches!(
+        client.call(runtime::Command::Retry),
+        Err(runtime::SubmitError::Disconnected(_))
+    ));
+    addressed(&replacement.client(), runtime::Command::Stop)
+        .wait(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    replacement.shutdown().unwrap();
+}

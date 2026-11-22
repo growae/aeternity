@@ -47,6 +47,9 @@ pub struct Effects {
     bytes: usize,
 }
 impl Effects {
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
     pub fn entries(&self) -> &[Effect] {
         &self.entries
     }
