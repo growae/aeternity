@@ -181,6 +181,7 @@ async fn authenticated_requests_finish_before_any_first_ping_and_remain_outside_
     assert!(
         app.application
             .peers_with_capability(CHAIN_POI)
+            .await
             .unwrap()
             .is_empty()
     );
@@ -255,7 +256,11 @@ async fn provisional_same_key_does_not_replace_admitted_peer_or_its_capabilities
     );
     response(&old, &announced).await;
     response(&old, &announced).await;
-    let before = app.application.peers_with_capability(CHAIN_POI).unwrap();
+    let before = app
+        .application
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
     assert_eq!(before.len(), 1);
     let (provisional, _events, provisional_task) = connect(&node, &app).await;
     assert_eq!(
@@ -268,7 +273,10 @@ async fn provisional_same_key_does_not_replace_admitted_peer_or_its_capabilities
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].generation(), &before[0].generation);
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap(),
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap(),
         before
     );
     assert!(!old.is_closed());
@@ -279,7 +287,10 @@ async fn provisional_same_key_does_not_replace_admitted_peer_or_its_capabilities
         Kind::NodeInfo
     );
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap(),
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap(),
         before
     );
     let (replacement, _events, replacement_task) = connect(&node, &app).await;
@@ -291,7 +302,11 @@ async fn provisional_same_key_does_not_replace_admitted_peer_or_its_capabilities
     .await;
     within(old_task).await.unwrap();
     response(&replacement, &announced).await;
-    let after = app.application.peers_with_capability(CHAIN_POI).unwrap();
+    let after = app
+        .application
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
     assert_eq!(after.len(), 1);
     assert_ne!(after[0].generation, before[0].generation);
     assert_eq!(after[0].value, before[0].value);

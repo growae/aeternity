@@ -482,7 +482,11 @@ async fn old_closing_callbacks_and_cleanup_do_not_replace_new_generation_capabil
     old.send(&[capabilities(&node, 7, 4321)]).await;
     old.next().await;
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap()[0].value,
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()[0]
+            .value,
         ae_sync::peer::capabilities::Value::ChainPoi(vec![cap(7)])
     );
     let mut new = Raw::connect(&node, &app).await;
@@ -492,7 +496,11 @@ async fn old_closing_callbacks_and_cleanup_do_not_replace_new_generation_capabil
     new.next().await;
     assert_eq!(old.next().await.kind(), Kind::Close);
     closing(&app, &old_client).await;
-    let fresh = app.application.peers_with_capability(CHAIN_POI).unwrap();
+    let fresh = app
+        .application
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
     assert_eq!(fresh.len(), 1);
     assert_eq!(
         fresh[0].value,
@@ -507,14 +515,20 @@ async fn old_closing_callbacks_and_cleanup_do_not_replace_new_generation_capabil
     served(&mut app, 1).await;
     old.quiet().await;
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap(),
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap(),
         fresh
     );
     acknowledge(&mut old, &old_client).await;
     new.send(&[message(Kind::GetNodeInfo, 1, &[])]).await;
     assert_eq!(response_body(&new.next().await).kind(), Kind::NodeInfo);
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap(),
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap(),
         fresh
     );
     stop(app).await;

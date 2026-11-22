@@ -17,6 +17,7 @@ pub mod keys;
 pub mod maintenance;
 pub mod network;
 pub mod observe;
+mod owned;
 pub mod peer;
 pub mod pool;
 pub mod pool_gc;

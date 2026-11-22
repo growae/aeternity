@@ -2,6 +2,7 @@ use super::*;
 type Key = (PeerPublicKey, net::Generation);
 pub struct Service {
     context: Context,
+    owned_capabilities: Option<capability_worker::Worker>,
     scheduled: network::Events,
     incoming: gossip::Events,
     stopped: watch::Receiver<bool>,
@@ -11,13 +12,6 @@ pub struct Service {
     lanes: Vec<Lane>,
     tasks: Tasks<Key, Result<(), Error>>,
     jobs: blocking::Pool,
-}
-impl Drop for Service {
-    fn drop(&mut self) {
-        if let Ok(mut registry) = self.context.capabilities.lock() {
-            registry.close();
-        }
-    }
 }
 impl Service {
     #[allow(clippy::too_many_arguments)]
@@ -29,10 +23,12 @@ impl Service {
         published: watch::Sender<Status>,
         current: Status,
         jobs: blocking::Pool,
+        owned_capabilities: Option<capability_worker::Worker>,
     ) -> Self {
         let progress = context.progress.subscribe();
         Self {
             context,
+            owned_capabilities,
             scheduled,
             incoming,
             stopped,
@@ -78,6 +74,7 @@ impl Service {
                 return;
             }
             let (send, receive) = mpsc::channel(self.context.config.queued_per_connection);
+            let lease = capability_worker::Lease::new();
             self.tasks.insert(
                 (peer, client.generation().clone()),
                 lane::run(
@@ -85,13 +82,14 @@ impl Service {
                     self.jobs.clone(),
                     client.clone(),
                     receive,
+                    lease.token(),
                 ),
             );
             index = Some(self.lanes.len());
             self.lanes.push(Lane {
                 client: client.clone(),
                 input: send,
-                capabilities: self.context.capabilities.clone(),
+                _lease: lease,
             });
         }
         let index = index.unwrap();
@@ -134,6 +132,17 @@ impl Service {
         }
         self.lanes.clear();
         self.tasks.clear();
+        if let Some(worker) = self.owned_capabilities.take() {
+            worker.request_shutdown();
+            match self.jobs.submit(128, move |_| worker.shutdown()) {
+                Ok(ticket) => match ticket.await {
+                    Ok(Ok(())) => (),
+                    Ok(Err(e)) => self.error(e.into()),
+                    Err(e) => self.error(e.into()),
+                },
+                Err(e) => self.error(e.into()),
+            }
+        }
         self.jobs.stop();
         self.jobs.join().await;
         self.current.running = false;

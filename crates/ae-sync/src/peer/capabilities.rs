@@ -2,6 +2,8 @@ use ae_p2p::message::ChainPoi;
 use ae_types::PeerPublicKey;
 use std::collections::BTreeMap;
 
+pub mod worker;
+
 pub const CHAIN_POI: &str = "chain_poi";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +36,7 @@ fn poi_bytes(p: &ChainPoi) -> Option<usize> {
     .try_fold(0usize, usize::checked_add)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub local_entries: usize,
     pub peers: usize,

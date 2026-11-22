@@ -739,3 +739,128 @@ async fn pool_maintenance_partial_start_unwinds_and_standalone_timer_remains_exp
         assert!(within(task).await.unwrap().joined);
     }
 }
+
+#[tokio::test]
+async fn capabilities_restart_clears_only_its_maps_and_shares_the_restart_budget() {
+    use crate::peer::capabilities::Value;
+    let mut node = Node::new();
+    node.stop_worker();
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        settings(),
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().capabilities.unwrap();
+    let old = binding.current().unwrap();
+    for (i, child) in [
+        Child::Capabilities,
+        Child::PoolMaintenance,
+        Child::Admission,
+    ]
+    .into_iter()
+    .cycle()
+    .take(6)
+    .enumerate()
+    {
+        binding
+            .current()
+            .unwrap()
+            .set("future", &Value::Opaque(vec![7]))
+            .unwrap()
+            .await
+            .unwrap();
+        let generations = |s: Status| {
+            [
+                s.capabilities_generation,
+                s.pool_gc_generation,
+                s.admission_generation,
+            ]
+        };
+        let mut expected = generations(handle.status());
+        let index = i % 3;
+        stopped_child(&handle, child, expected[index]).await;
+        if i == 5 {
+            break;
+        }
+        expected[index] += 1;
+        within(async {
+            while generations(handle.status()) != expected {
+                assert!(handle.status().running);
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert_eq!(
+            binding
+                .current()
+                .unwrap()
+                .local()
+                .unwrap()
+                .await
+                .unwrap()
+                .len(),
+            usize::from(index != 0)
+        );
+        assert!(old.info().joined);
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert!(status.joined && binding.is_closed());
+    assert_eq!(
+        (
+            status.capabilities_generation,
+            status.pool_gc_generation,
+            status.admission_generation
+        ),
+        (3, 3, 2)
+    );
+}
+#[tokio::test]
+async fn capabilities_start_failure_and_later_gc_failure_join_partial_startup() {
+    for fail_capabilities in [true, false] {
+        let mut node = Node::new();
+        node.stop_worker();
+        let mut config = settings();
+        if fail_capabilities {
+            config.capabilities.as_mut().unwrap().queue.requests = 0;
+        } else {
+            config.gc.as_mut().unwrap().limits.rows = 0;
+        }
+        let (handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            config,
+            Default::default(),
+        )
+        .unwrap();
+        let bindings = handle.bindings();
+        let status = service.run().await;
+        assert!(status.joined);
+        assert_eq!(status.restart_attempts, 0);
+        assert_eq!(
+            status.capabilities_generation,
+            u64::from(!fail_capabilities)
+        );
+        assert_eq!(status.pool_gc_generation, 1);
+        assert!(bindings.capabilities.as_ref().unwrap().is_closed());
+        if let Some(old) = bindings.capabilities.unwrap().snapshot().value {
+            assert!(old.info().joined);
+        }
+        let (mut handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            settings(),
+            Default::default(),
+        )
+        .unwrap();
+        let task = tokio::spawn(service.run());
+        ready(&mut handle).await;
+        handle.shutdown();
+        assert!(within(task).await.unwrap().joined);
+    }
+}

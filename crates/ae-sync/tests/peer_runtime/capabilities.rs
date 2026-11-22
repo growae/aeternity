@@ -30,7 +30,11 @@ async fn registered(app: &mut App, expected: message::ChainPoi) -> net::Client {
         panic!()
     };
     assert_eq!(*chain_poi, expected);
-    let records = app.application.peers_with_capability(CHAIN_POI).unwrap();
+    let records = app
+        .application
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].peer, client.peer());
     assert_eq!(&records[0].generation, client.generation());
@@ -47,6 +51,7 @@ async fn empty(app: &mut App) {
     assert!(
         app.application
             .peers_with_capability(CHAIN_POI)
+            .await
             .unwrap()
             .is_empty()
     );
@@ -75,27 +80,34 @@ async fn mutable_capabilities_reach_encrypted_pings_and_remote_queries_and_close
     assert!(
         app.application
             .peers_with_capability(CHAIN_POI)
+            .await
             .unwrap()
             .is_empty()
     );
     app.application
         .set_capability(CHAIN_POI, &Capability::ChainPoi(vec![cap(2)]))
+        .await
         .unwrap();
     assert!(matches!(
         app.application
-            .set_capability(CHAIN_POI, &Capability::Opaque(vec![0; 401])),
+            .set_capability(CHAIN_POI, &Capability::Opaque(vec![0; 401]))
+            .await,
         Err(peer::Error::Capabilities(capabilities::Error::Capacity))
     ));
     assert_eq!(advertised(&response(&client, &request).await), vec![cap(2)]);
     let owner = registered(&mut app, cap(4)).await;
-    app.application.delete_capability(CHAIN_POI).unwrap();
+    app.application.delete_capability(CHAIN_POI).await.unwrap();
     assert!(advertised(&response(&client, &announce(&node, &[])).await).is_empty());
     assert!(matches!(
         observed(&mut app.events).await.kind(),
         peer::EventKind::Status { .. }
     ));
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap()[0].value,
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()[0]
+            .value,
         Capability::ChainPoi(vec![cap(4)])
     );
     // A valid unknown-only payload decodes to empty and retains registration.
@@ -112,18 +124,26 @@ async fn mutable_capabilities_reach_encrypted_pings_and_remote_queries_and_close
         peer::EventKind::Status { .. }
     ));
     assert_eq!(
-        app.application.peers_with_capability(CHAIN_POI).unwrap()[0].value,
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()[0]
+            .value,
         Capability::ChainPoi(vec![cap(4)])
     );
     let extension = Capability::Opaque(b"application-defined".to_vec());
     app.application
         .set_capability("future", &extension)
+        .await
         .unwrap();
     assert_eq!(
-        app.application.capability("future").unwrap(),
+        app.application.capability("future").await.unwrap(),
         Some(extension.clone())
     );
-    assert_eq!(app.application.capabilities().unwrap()["future"], extension);
+    assert_eq!(
+        app.application.capabilities().await.unwrap()["future"],
+        extension
+    );
     // Version one does not consult the provider; production v2 fails explicitly.
     assert_eq!(
         body(&response(&client, &ping(&node, 1, true)).await).version(),
@@ -141,7 +161,7 @@ async fn mutable_capabilities_reach_encrypted_pings_and_remote_queries_and_close
         ))
     );
     assert!(app.application.status().running);
-    app.application.delete_capability("future").unwrap();
+    app.application.delete_capability("future").await.unwrap();
     stop(app).await;
 }
 
@@ -161,6 +181,7 @@ async fn capability_registration_replaced_connection_and_owner_abort_release_val
     assert!(
         app.application
             .peers_with_capability(CHAIN_POI)
+            .await
             .unwrap()
             .is_empty()
     );
@@ -169,7 +190,11 @@ async fn capability_registration_replaced_connection_and_owner_abort_release_val
     assert_ne!(old.generation(), replacement.generation());
     old.shutdown();
     assert_eq!(
-        &app.application.peers_with_capability(CHAIN_POI).unwrap()[0].generation,
+        &app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()[0]
+            .generation,
         replacement.generation()
     );
     app.application_task.abort();
@@ -179,15 +204,14 @@ async fn capability_registration_replaced_connection_and_owner_abort_release_val
             .unwrap_err()
             .is_cancelled()
     );
-    assert!(
-        app.application
-            .peers_with_capability(CHAIN_POI)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(matches!(
+        app.application.peers_with_capability(CHAIN_POI).await,
+        Err(peer::Error::Capabilities(capabilities::Error::Closed))
+    ));
     assert!(matches!(
         app.application
-            .set_capability("future", &Capability::Opaque(vec![])),
+            .set_capability("future", &Capability::Opaque(vec![]))
+            .await,
         Err(peer::Error::Capabilities(capabilities::Error::Closed))
     ));
     within(task).await.unwrap();
@@ -240,5 +264,169 @@ async fn capability_malformed_unknown_after_known_closes_without_partial_registr
             .await
             .is_err()
     );
+    stop(app).await;
+}
+
+#[tokio::test]
+async fn independent_capabilities_restart_clears_maps_without_restarting_encrypted_connections() {
+    use ae_sync::runtime::{connection as owner, workers};
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/erlang_capabilities_worker.json")).unwrap();
+    let native = &fixture["rows"][0];
+    assert_eq!(native["cause"], "normal");
+    let mut node = Node::new();
+    node.stop_worker();
+    let (mut workers, service) = workers::create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        worker_owner::worker_config(),
+        Default::default(),
+    )
+    .unwrap();
+    let workers_task = tokio::spawn(service.run());
+    within(async {
+        while !workers.status().ready {
+            assert!(workers.status().running);
+            workers.changed().await.unwrap();
+        }
+    })
+    .await;
+    let bindings = workers.bindings();
+    let binding = bindings.capabilities.as_ref().unwrap();
+    let (mut owner, service) = owner::create_with_workers(
+        worker_owner::inputs(&node, &bindings),
+        connection_owner::settings(),
+        || Ok(Default::default()),
+        bindings.clone(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    let generation = connection_owner::ready(&mut owner, 1).await;
+    let (remote, _events, driver) = connection_owner::remote(&node, &generation).await;
+    generation
+        .peer
+        .set_capability(CHAIN_POI, &Capability::ChainPoi(vec![cap(1)]))
+        .await
+        .unwrap();
+    let request = announce(&node, &[cap(2), cap(3)]);
+    response(&remote, &request).await;
+    assert_eq!(advertised(&response(&remote, &request).await), vec![cap(1)]);
+    let before = generation
+        .peer
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
+    assert_eq!(
+        before.len() as u64,
+        native["before"]["peer_entries"].as_u64().unwrap()
+    );
+    assert_eq!(before[0].value, Capability::ChainPoi(vec![cap(3)]));
+    let old = binding.current().unwrap();
+    assert_eq!(
+        workers
+            .restart(workers::Child::Capabilities, 1)
+            .unwrap()
+            .wait()
+            .await,
+        Ok(2)
+    );
+    assert!(old.info().joined);
+    assert!(matches!(
+        old.local(),
+        Err(capabilities::worker::Error::Worker(
+            capabilities::worker::Fault::Stopped
+        ))
+    ));
+    assert_eq!(
+        generation.peer.capabilities().await.unwrap().len() as u64,
+        native["after"]["local_entries"].as_u64().unwrap()
+    );
+    assert!(
+        generation
+            .peer
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(owner.status().generation, 1);
+    assert!(!remote.is_closed());
+    // A real accepted announcement registers again. No old advertisement is
+    // restored merely because the independent worker has been replaced.
+    assert!(advertised(&response(&remote, &announce(&node, &[cap(4)])).await).is_empty());
+    let after = generation
+        .peer
+        .peers_with_capability(CHAIN_POI)
+        .await
+        .unwrap();
+    assert_eq!(after[0].generation, before[0].generation);
+    assert_eq!(after[0].value, Capability::ChainPoi(vec![cap(4)]));
+    generation
+        .peer
+        .set_capability(CHAIN_POI, &Capability::ChainPoi(vec![cap(5)]))
+        .await
+        .unwrap();
+    assert_eq!(advertised(&response(&remote, &request).await), vec![cap(5)]);
+    owner.shutdown();
+    assert!(within(task).await.unwrap().joined);
+    connection_owner::closed(&generation);
+    within(driver).await.unwrap();
+    assert!(
+        binding
+            .current()
+            .unwrap()
+            .peers_with(CHAIN_POI)
+            .unwrap()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Connection-owner shutdown does not clear independent local capabilities.
+    assert_eq!(
+        binding
+            .current()
+            .unwrap()
+            .get(CHAIN_POI)
+            .unwrap()
+            .await
+            .unwrap(),
+        Some(Capability::ChainPoi(vec![cap(5)]))
+    );
+    workers.shutdown();
+    assert!(within(workers_task).await.unwrap().joined);
+}
+
+#[tokio::test]
+async fn empty_capability_announcements_remain_valid_below_minimum_stored_value_size() {
+    let node = Node::new();
+    let mut app = start(
+        &node,
+        config(),
+        peer::Config {
+            capability_limits: capabilities::Limits {
+                value_bytes: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let (client, _events, task) = connect(&node, &app).await;
+    let request = announce(&node, &[]);
+    for _ in 0..3 {
+        assert!(advertised(&response(&client, &request).await).is_empty());
+    }
+    assert!(!client.is_closed());
+    assert!(
+        app.application
+            .peers_with_capability(CHAIN_POI)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(app.application.status().counts.failed_connections, 0);
+    client.shutdown();
+    within(task).await.unwrap();
+    empty(&mut app).await;
     stop(app).await;
 }

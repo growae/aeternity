@@ -18,6 +18,7 @@ struct Session {
     ctx: Context,
     jobs: blocking::Pool,
     client: net::Client,
+    token: capability_worker::Token,
     requests: Tasks<u16, Response>,
 }
 pub(super) async fn run(
@@ -25,12 +26,14 @@ pub(super) async fn run(
     jobs: blocking::Pool,
     client: net::Client,
     mut input: mpsc::Receiver<Input>,
+    token: capability_worker::Token,
 ) -> Result<(), Error> {
     let monitor = client.monitor();
     let mut session = Session {
         ctx,
         jobs,
         client,
+        token,
         requests: Tasks::new(),
     };
     tokio::select! {
@@ -60,17 +63,11 @@ impl Session {
             .await?
             .ok_or(Error::Stale)?;
         if connection.admitted && !connection.closing {
-            let mut capabilities = self.ctx.capabilities.lock().map_err(|_| Error::Closed)?;
-            // A provisional lane must never erase the admitted generation's
-            // capabilities. Recheck retirement under the registry lock so an
-            // old asynchronous lookup cannot reattach after its replacement.
             if self.client.is_closed() {
                 return Err(Error::Stale);
             }
             if self.client.is_disconnecting() {
                 connection.closing = true;
-            } else {
-                capabilities.attach(self.client.peer(), self.client.generation().clone())?;
             }
         }
         Ok(connection)
@@ -137,11 +134,7 @@ impl Session {
             }
         };
         let capabilities = if version == 2 {
-            self.ctx
-                .capabilities
-                .lock()
-                .map_err(|_| Error::Closed)?
-                .wire()?
+            capability_worker::call(&self.ctx.capabilities, |c| c.wire()).await?
         } else {
             vec![]
         };
@@ -257,14 +250,18 @@ impl Session {
                     )?;
                 }
                 ping::Effect::Capabilities(caps) => {
-                    let registered = self
-                        .ctx
-                        .capabilities
-                        .lock()
-                        .map_err(|_| Error::Closed)?
-                        .receive(self.client.peer(), self.client.generation(), &caps);
+                    let registered = if connection.admitted && !connection.closing {
+                        capability_worker::call(&self.ctx.capabilities, |c| {
+                            c.receive(self.client.clone(), self.token.clone(), &caps)
+                        })
+                        .await
+                    } else {
+                        Err(capability_worker::Error::Registry(
+                            capabilities::Error::Stale,
+                        ))
+                    };
                     match registered {
-                        Err(capabilities::Error::Stale)
+                        Err(capability_worker::Error::Registry(capabilities::Error::Stale))
                             if connection.closing || self.client.is_disconnecting() => {}
                         other => other?,
                     }

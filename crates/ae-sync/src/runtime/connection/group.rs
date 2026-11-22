@@ -115,6 +115,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             incoming,
             config.peer.clone(),
             dependencies.analytics.clone(),
+            dependencies.capabilities.clone(),
         )
         .map_err(|e| Failure::new(Child::Peer, e))?;
         let handle = peer.clone();

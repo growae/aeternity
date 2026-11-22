@@ -94,6 +94,14 @@ impl PeerAnalytics {
         Self::fixed_value(db, client)
     }
 }
+impl Binding<crate::peer::capabilities::worker::Client> {
+    pub(crate) fn fixed(
+        db: &Arc<Database>,
+        client: crate::peer::capabilities::worker::Client,
+    ) -> Self {
+        Self::fixed_value(db, client)
+    }
+}
 impl MetricsRouting {
     pub(crate) fn fixed(db: &Arc<Database>, client: crate::routing::Client) -> Self {
         Self::fixed_value(db, client)

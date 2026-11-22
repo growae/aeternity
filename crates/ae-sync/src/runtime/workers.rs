@@ -1,3 +1,4 @@
+use crate::peer::capabilities::worker as capabilities;
 use crate::{analytics, bindings, blocking, pool_gc, routing};
 use ae_chain::repository::retention;
 use ae_protocol::NetworkProfile;
@@ -18,6 +19,7 @@ pub struct Config {
     pub routing: Option<routing::Setup>,
     pub analytics: Option<analytics::Config>,
     pub pool_gc: Option<pool_gc::Config>,
+    pub capabilities: Option<capabilities::Config>,
     pub keys: Option<crate::keys::Config>,
     pub pool: pool::Config,
     pub admission: pool::worker::Settings,
@@ -30,6 +32,7 @@ impl Default for Config {
             routing: None,
             analytics: None,
             pool_gc: Some(Default::default()),
+            capabilities: Some(Default::default()),
             keys: None,
             pool: Default::default(),
             admission: Default::default(),
@@ -45,6 +48,7 @@ pub enum Child {
     Admission,
     Analytics,
     PoolMaintenance,
+    Capabilities,
     GarbageCollection,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,12 +82,14 @@ pub struct Status {
     pub routing_generation: u64,
     pub analytics_generation: u64,
     pub pool_gc_generation: u64,
+    pub capabilities_generation: u64,
     pub admission: Option<pool::worker::Info>,
     pub gc: Option<gc::worker::Info>,
     pub keys: Option<crate::keys::Info>,
     pub routing: Option<routing::Info>,
     pub analytics: Option<analytics::Info>,
     pub pool_gc: Option<pool_gc::Info>,
+    pub capabilities: Option<capabilities::Info>,
     pub restart_attempts: u64,
     pub last_failure: Option<Error>,
     pub error: Option<Error>,
@@ -93,6 +99,7 @@ pub struct Bindings {
     pub routing: Option<bindings::MetricsRouting>,
     pub analytics: Option<bindings::PeerAnalytics>,
     pub pool_gc: Option<bindings::Binding<pool_gc::Client>>,
+    pub capabilities: Option<bindings::Binding<capabilities::Client>>,
     pub keys: Option<bindings::Binding<crate::keys::Client>>,
     pub admission: bindings::Admission,
     pub gc: Option<bindings::GarbageCollection>,
@@ -162,6 +169,8 @@ pub struct Service {
     routing_owner: Option<routing::Owner>,
     analytics: Option<analytics::Worker>,
     pool_gc: Option<pool_gc::Worker>,
+    capabilities: Option<capabilities::Worker>,
+    capabilities_binding: Option<bindings::Owner<capabilities::Client>>,
     admission_binding: bindings::Admission,
     pool_gc_binding: Option<bindings::Owner<pool_gc::Client>>,
     analytics_binding: Option<bindings::Owner<analytics::Client>>,
@@ -209,6 +218,12 @@ pub fn create(
     } else {
         (None, None)
     };
+    let (capabilities_binding, capabilities) = if config.capabilities.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
     let admission_binding = admission.clone();
     let (keys_binding, keys) = if config.keys.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
@@ -242,6 +257,7 @@ pub fn create(
                 routing,
                 analytics,
                 pool_gc,
+                capabilities,
             },
         },
         Service {
@@ -256,6 +272,8 @@ pub fn create(
             routing_owner: None,
             analytics: None,
             pool_gc: None,
+            capabilities: None,
+            capabilities_binding,
             admission_binding,
             pool_gc_binding,
             analytics_binding,
@@ -276,6 +294,7 @@ pub fn create(
     ))
 }
 enum Started {
+    Capabilities(capabilities::Worker),
     PoolMaintenance(pool_gc::Worker),
     Analytics(analytics::Worker),
     Routing(routing::Worker, Option<routing::Owner>),
@@ -296,6 +315,7 @@ impl Service {
     }
     fn generation(&self, child: Child) -> u64 {
         match child {
+            Child::Capabilities => self.current.capabilities_generation,
             Child::Routing => self.current.routing_generation,
             Child::Analytics => self.current.analytics_generation,
             Child::PoolMaintenance => self.current.pool_gc_generation,
@@ -305,6 +325,7 @@ impl Service {
         }
     }
     fn publish(&mut self) {
+        self.current.capabilities = self.capabilities.as_ref().map(|w| w.info());
         self.current.routing = self.routing.as_ref().map(|w| w.info());
         self.current.analytics = self.analytics.as_ref().map(|w| w.info());
         self.current.pool_gc = self.pool_gc.as_ref().map(|w| w.info());
@@ -327,6 +348,14 @@ impl Service {
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::Capabilities => {
+                    capabilities::Worker::spawn(config.capabilities.ok_or(Error::Missing)?)
+                        .map(Started::Capabilities)
+                        .map_err(|e| Error::Start {
+                            child,
+                            reason: e.to_string(),
+                        })
+                }
                 Child::PoolMaintenance => pool_gc::Worker::spawn(
                     &db,
                     admission_binding,
@@ -403,6 +432,14 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::Capabilities(worker) => {
+                self.capabilities_binding
+                    .as_ref()
+                    .expect("configured capabilities")
+                    .install(worker.client(), generation);
+                self.capabilities = Some(worker);
+                self.current.capabilities_generation = generation;
+            }
             Started::PoolMaintenance(worker) => {
                 self.pool_gc_binding
                     .as_ref()
@@ -458,6 +495,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::Capabilities => {
+                if let Some(binding) = &self.capabilities_binding {
+                    binding.withdraw();
+                }
+                self.capabilities.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::PoolMaintenance => {
                 if let Some(binding) = &self.pool_gc_binding {
                     binding.withdraw();
@@ -603,6 +651,12 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
+        if self.config.capabilities.is_some() {
+            self.start(Child::Capabilities).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         if self.config.gc.is_some() {
             self.start(Child::GarbageCollection).await?;
         }
@@ -628,6 +682,12 @@ impl Service {
                 Some(Child::Analytics)
             } else if self.pool_gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::PoolMaintenance)
+            } else if self
+                .capabilities
+                .as_ref()
+                .is_some_and(|w| !w.info().running)
+            {
+                Some(Child::Capabilities)
             } else if self.gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::GarbageCollection)
             } else {
@@ -643,7 +703,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -658,6 +718,7 @@ impl Service {
         #[cfg(test)]
         if command.stop_only {
             match command.child {
+                Child::Capabilities => self.capabilities.as_ref().unwrap().request_shutdown(),
                 Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
                 Child::Analytics => self.analytics.as_ref().unwrap().request_shutdown(),
                 Child::PoolMaintenance => self.pool_gc.as_ref().unwrap().request_shutdown(),
@@ -696,8 +757,12 @@ impl Service {
         if let Some(binding) = &self.pool_gc_binding {
             binding.withdraw();
         }
+        if let Some(binding) = &self.capabilities_binding {
+            binding.withdraw();
+        }
         for child in [
             Child::GarbageCollection,
+            Child::Capabilities,
             Child::PoolMaintenance,
             Child::Analytics,
             Child::Admission,
@@ -707,6 +772,9 @@ impl Service {
             if let Err(error) = self.retire(child).await {
                 self.current.error.get_or_insert(error);
             }
+        }
+        if let Some(binding) = &self.capabilities_binding {
+            binding.close();
         }
         self.pool_binding.close();
         if let Some(binding) = &self.pool_gc_binding {
@@ -739,6 +807,9 @@ mod tests;
 impl Drop for Service {
     fn drop(&mut self) {
         if let Some(binding) = &self.keys_binding {
+            binding.close();
+        }
+        if let Some(binding) = &self.capabilities_binding {
             binding.close();
         }
         self.pool_binding.close();

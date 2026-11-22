@@ -5,14 +5,11 @@ use ae_p2p::{
 };
 use ae_storage::Database;
 use ae_types::{PeerPublicKey, Unsigned};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 pub mod capabilities;
+use capabilities::worker as capability_worker;
 pub mod info;
 mod lane;
 mod service;
@@ -94,6 +91,7 @@ pub enum Error {
     Timeout,
     MalformedCapabilities,
     Capabilities(capabilities::Error),
+    CapabilityWorker(capability_worker::Fault),
     Storage(String),
     Network(network::Error),
     Runtime(net::Error),
@@ -109,6 +107,17 @@ impl std::error::Error for Error {}
 impl From<capabilities::Error> for Error {
     fn from(e: capabilities::Error) -> Self {
         Self::Capabilities(e)
+    }
+}
+impl From<capability_worker::Error> for Error {
+    fn from(e: capability_worker::Error) -> Self {
+        match e {
+            capability_worker::Error::Registry(e) => Self::Capabilities(e),
+            capability_worker::Error::Worker(capability_worker::Fault::Stopped) => {
+                Self::Capabilities(capabilities::Error::Closed)
+            }
+            capability_worker::Error::Worker(e) => Self::CapabilityWorker(e),
+        }
     }
 }
 impl From<network::Error> for Error {
@@ -236,53 +245,44 @@ pub struct Handle {
     status: watch::Receiver<Status>,
     capabilities: CapabilityStore,
 }
-type CapabilityStore = Arc<Mutex<capabilities::Registry<net::Generation>>>;
+type CapabilityStore = capability_worker::Binding;
 impl Handle {
     pub fn shutdown(&self) {
-        if let Ok(mut registry) = self.capabilities.lock() {
-            registry.close();
-        }
         self.stop.send_replace(true);
     }
-    pub fn set_capability(&self, key: &str, value: &capabilities::Value) -> Result<(), Error> {
-        self.capabilities
-            .lock()
-            .map_err(|_| Error::Closed)?
-            .set(key, value)?;
-        Ok(())
+    fn capability_open(&self) -> Result<(), Error> {
+        if *self.stop.borrow() {
+            Err(Error::Capabilities(capabilities::Error::Closed))
+        } else {
+            Ok(())
+        }
     }
-    pub fn delete_capability(&self, key: &str) -> Result<(), Error> {
-        self.capabilities
-            .lock()
-            .map_err(|_| Error::Closed)?
-            .delete(key)?;
-        Ok(())
+    pub async fn set_capability(
+        &self,
+        key: &str,
+        value: &capabilities::Value,
+    ) -> Result<(), Error> {
+        self.capability_open()?;
+        Ok(capability_worker::call(&self.capabilities, |c| c.set(key, value)).await?)
     }
-    pub fn capability(&self, key: &str) -> Result<Option<capabilities::Value>, Error> {
-        Ok(self
-            .capabilities
-            .lock()
-            .map_err(|_| Error::Closed)?
-            .get(key)
-            .cloned())
+    pub async fn delete_capability(&self, key: &str) -> Result<(), Error> {
+        self.capability_open()?;
+        Ok(capability_worker::call(&self.capabilities, |c| c.delete(key)).await?)
     }
-    pub fn capabilities(&self) -> Result<BTreeMap<String, capabilities::Value>, Error> {
-        Ok(self
-            .capabilities
-            .lock()
-            .map_err(|_| Error::Closed)?
-            .local()
-            .clone())
+    pub async fn capability(&self, key: &str) -> Result<Option<capabilities::Value>, Error> {
+        self.capability_open()?;
+        Ok(capability_worker::call(&self.capabilities, |c| c.get(key)).await?)
     }
-    pub fn peers_with_capability(
+    pub async fn capabilities(&self) -> Result<BTreeMap<String, capabilities::Value>, Error> {
+        self.capability_open()?;
+        Ok(capability_worker::call(&self.capabilities, |c| c.local()).await?)
+    }
+    pub async fn peers_with_capability(
         &self,
         key: &str,
     ) -> Result<Vec<capabilities::PeerValue<net::Generation>>, Error> {
-        Ok(self
-            .capabilities
-            .lock()
-            .map_err(|_| Error::Closed)?
-            .peers_with(key))
+        self.capability_open()?;
+        Ok(capability_worker::call(&self.capabilities, |c| c.peers_with(key)).await?)
     }
     // A tracked header target supplied by the synchronizer, not a selected
     // height or proof of block validity. Ping announcements do not set it.
@@ -323,14 +323,11 @@ struct Context {
 struct Lane {
     client: net::Client,
     input: mpsc::Sender<Input>,
-    capabilities: CapabilityStore,
+    _lease: capability_worker::Lease,
 }
 impl Drop for Lane {
     fn drop(&mut self) {
         self.client.shutdown();
-        if let Ok(mut registry) = self.capabilities.lock() {
-            registry.remove(self.client.peer(), self.client.generation());
-        }
     }
 }
 
@@ -343,7 +340,7 @@ pub fn create(
     incoming: gossip::Events,
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
-    create_bound(db, network, scheduled, incoming, config, None)
+    create_bound(db, network, scheduled, incoming, config, None, None)
 }
 pub fn create_with_analytics(
     db: Arc<Database>,
@@ -354,8 +351,17 @@ pub fn create_with_analytics(
     analytics: crate::analytics::Client,
 ) -> Result<(Handle, Events, Service), Error> {
     let binding = crate::bindings::PeerAnalytics::fixed(&db, analytics);
-    create_bound(db, network, scheduled, incoming, config, Some(binding))
+    create_bound(
+        db,
+        network,
+        scheduled,
+        incoming,
+        config,
+        Some(binding),
+        None,
+    )
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_bound(
     db: Arc<Database>,
     network: network::Handle,
@@ -363,6 +369,7 @@ pub(crate) fn create_bound(
     incoming: gossip::Events,
     config: Config,
     analytics: Option<crate::bindings::PeerAnalytics>,
+    capabilities: Option<CapabilityStore>,
 ) -> Result<(Handle, Events, Service), Error> {
     if analytics.as_ref().is_some_and(|a| !a.uses_database(&db)) {
         return Err(Error::Configuration);
@@ -371,14 +378,31 @@ pub(crate) fn create_bound(
     if !network.uses_database(&db) || !network.defers_pings() {
         return Err(Error::Configuration);
     }
-    let mut registry = capabilities::Registry::new(config.capability_limits)?;
-    if let Some(last) = config.capabilities.last() {
-        registry.set(
-            capabilities::CHAIN_POI,
-            &capabilities::Value::ChainPoi(vec![last.clone()]),
-        )?;
-    }
-    let capabilities = Arc::new(Mutex::new(registry));
+    let (capabilities, owned_capabilities) = match capabilities {
+        Some(binding) => {
+            // Managed maps belong to the independent worker. Legacy connection
+            // configuration must not silently seed them again after a restart.
+            if !binding.uses_database(&db)
+                || !config.capabilities.is_empty()
+                || binding
+                    .current()
+                    .is_none_or(|c| c.limits() != config.capability_limits)
+            {
+                return Err(Error::Configuration);
+            }
+            (binding, None)
+        }
+        None => {
+            let worker = capability_worker::Worker::seeded(
+                capability_worker::Config {
+                    registry: config.capability_limits,
+                    ..Default::default()
+                },
+                config.capabilities.last().cloned(),
+            )?;
+            (CapabilityStore::fixed(&db, worker.client()), Some(worker))
+        }
+    };
     let jobs = blocking::Pool::new(
         config.blocking_threads,
         config.blocking_jobs,
@@ -420,6 +444,15 @@ pub(crate) fn create_bound(
             capabilities,
         },
         Events(events),
-        Service::new(context, scheduled, incoming, stopped, status, current, jobs),
+        Service::new(
+            context,
+            scheduled,
+            incoming,
+            stopped,
+            status,
+            current,
+            jobs,
+            owned_capabilities,
+        ),
     ))
 }
