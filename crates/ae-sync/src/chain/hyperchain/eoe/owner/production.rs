@@ -1,6 +1,7 @@
 // aec_conductor:hc_next_producer/hc_create_block, aeternity fa2a6d7.
 // Copyright (c) 2017, Aeternity Anstalt. ISC: repository LICENSE.
 use super::{Owner, candidate, effects, producer};
+mod pins;
 mod retirement;
 use crate::chain::{
     self, Importer,
@@ -34,6 +35,7 @@ pub struct Config {
     pub micro: core::Limits,
     pub inputs: inputs::Limits,
     pub pins: Arc<inputs::Pins>,
+    pub parent_pins: Option<crate::parent_pins::Client>,
     pub timeout: core::Timeout,
     pub release_info: u32,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             micro: Default::default(),
             inputs: Default::default(),
             pins: Arc::new(Default::default()),
+            parent_pins: None,
             timeout: core::Timeout::Disabled,
             release_info: 0,
         }
@@ -86,6 +89,7 @@ pub enum Progress {
     Submitted(Kind),
     Accepted(Kind),
     KeyPrepared,
+    KeyPreparing,
     Effects(delivery::Progress),
     Complete,
 }
@@ -123,6 +127,7 @@ enum Phase {
     Micro,
     SignMicro,
     Key,
+    KeyPreparing,
     KeyEffects,
     FinishKey,
     Seal,
@@ -168,6 +173,7 @@ pub struct Attempt<O> {
     micro: Option<candidate::Build<O>>,
     completed_micro: Option<candidate::Completed<O>>,
     key: Option<owned::Prepared<O>>,
+    key_task: Option<pins::Pending<O>>,
     effects: Option<effects::Pending>,
     acknowledged: u64,
     block: Option<Block>,
@@ -176,6 +182,12 @@ pub struct Attempt<O> {
     skipped: Option<Skipped>,
     outcome: Option<Outcome>,
     failure: Option<Error>,
+}
+impl<O> Drop for Attempt<O> {
+    fn drop(&mut self) {
+        // Join before the first field releases the exclusive production lease.
+        drop(self.key_task.take());
+    }
 }
 impl<O> std::fmt::Debug for Attempt<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -238,6 +250,7 @@ impl Owner {
             micro: None,
             completed_micro: None,
             key: None,
+            key_task: None,
             effects: None,
             acknowledged: 0,
             block: None,
@@ -313,6 +326,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
         self.key.as_ref()
     }
     pub fn cancel(&mut self) {
+        if let Some(task) = &self.key_task {
+            task.cancel();
+        }
         if let Some(micro) = &mut self.micro {
             micro.cancel();
         }
@@ -320,6 +336,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
             receipt.cancel();
         }
         self.failure = Some(Error::Cancelled);
+    }
+    pub(crate) fn join_candidate(&mut self) {
+        if let Some(mut task) = self.key_task.take() {
+            task.cancel();
+            match task.join() {
+                Ok(key) => self.key = Some(key),
+                Err(e) => self.failure = Some(Error::Source(e)),
+            }
+        }
     }
     pub fn retry(&mut self) -> Result<(), Error> {
         if let Some(e) = &self.failure
@@ -551,36 +576,66 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
             Phase::Key => {
                 let parent = owner.parent.as_ref().ok_or(Error::Binding)?;
                 let leader = self.leader.expect("leader");
+                let request = owned::Request {
+                    binding: owner.producer_binding.clone(),
+                    parent: parent.snapshot().cache,
+                    pins: self.config.pins.clone(),
+                    limits: self.config.inputs,
+                    input: owned::Input::Key(build::KeyInput {
+                        parent: self.parent,
+                        production: core::KeyInput {
+                            miner: leader,
+                            beneficiary: leader,
+                            hole: self.hole,
+                            end_of_epoch: self.is_eoe,
+                            time: wall_ms,
+                            release_info: self.config.release_info,
+                        },
+                    }),
+                };
+                if let Some(client) = &self.config.parent_pins {
+                    self.key_task = Some(
+                        pins::start(
+                            self.source.clone(),
+                            owner.source.snapshots().clone(),
+                            request,
+                            client.clone(),
+                            parent.clone(),
+                            self.client.clone(),
+                        )
+                        .map_err(Error::Source)?,
+                    );
+                    self.phase = Phase::KeyPreparing;
+                    return Ok(Progress::KeyPreparing);
+                }
                 let mut key = self
                     .source
-                    .candidate(
-                        owner.source.snapshots(),
-                        owned::Request {
-                            binding: owner.producer_binding.clone(),
-                            parent: parent.snapshot().cache,
-                            pins: self.config.pins.clone(),
-                            limits: self.config.inputs,
-                            input: owned::Input::Key(build::KeyInput {
-                                parent: self.parent,
-                                production: core::KeyInput {
-                                    miner: leader,
-                                    beneficiary: leader,
-                                    hole: self.hole,
-                                    end_of_epoch: self.is_eoe,
-                                    time: wall_ms,
-                                    release_info: self.config.release_info,
-                                },
-                            }),
-                        },
-                        || {
-                            if parent.is_closed() || self.client.is_closed() {
-                                Err(chain::Error::Closed)
-                            } else {
-                                Ok(())
-                            }
-                        },
-                    )
+                    .candidate(owner.source.snapshots(), request, || {
+                        if parent.is_closed() || self.client.is_closed() {
+                            Err(chain::Error::Closed)
+                        } else {
+                            Ok(())
+                        }
+                    })
                     .map_err(Error::Source)?;
+                self.effects = Some(effects::Pending::new(
+                    &mut key.effects,
+                    parent.clone(),
+                    self.client.clone(),
+                ));
+                self.key = Some(key);
+                self.phase = Phase::KeyEffects;
+                Ok(Progress::KeyPrepared)
+            }
+            Phase::KeyPreparing => {
+                let Some(result) = self.key_task.as_mut().expect("key task").poll() else {
+                    return Ok(Progress::KeyPreparing);
+                };
+                self.key_task = None;
+                // Retryable acquisition failures restart from a fresh snapshot.
+                self.phase = Phase::Key;
+                let mut key = result.map_err(Error::Source)?;
+                let parent = owner.parent.as_ref().ok_or(Error::Binding)?;
                 self.effects = Some(effects::Pending::new(
                     &mut key.effects,
                     parent.clone(),
@@ -710,17 +765,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
             Phase::Done => Ok(Progress::Complete),
         }
     }
-    pub fn finish(self) -> Result<Completed, Box<Self>> {
+    pub fn finish(mut self) -> Result<Completed, Box<Self>> {
         if !self.ready() {
             return Err(Box::new(self));
         }
         Ok(Completed {
-            outcome: self.outcome.expect("completed outcome"),
+            outcome: self.outcome.take().expect("completed outcome"),
             original_parent: self.original_parent,
             parent: self.parent,
             decisions: self.decisions,
             acknowledged_effects: self.acknowledged,
-            skipped: self.skipped,
+            skipped: self.skipped.take(),
         })
     }
 }

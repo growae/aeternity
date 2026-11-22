@@ -43,6 +43,7 @@ pub enum InputError {
     ResourceLimit,
     EntropyNotCaptured(BigInt),
     InvalidEntropy,
+    PinAlreadyCaptured,
     PinNotCaptured(Vec<u8>),
     Selection(Error),
 }
@@ -135,6 +136,9 @@ pub struct Pins {
     bytes: usize,
 }
 impl Pins {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
     pub fn insert(
         &mut self,
         hash: Vec<u8>,
@@ -281,6 +285,12 @@ impl<S: Read> Captured<S> {
     pub fn revision(&self) -> u64 {
         self.child.status().revision
     }
+    pub fn capture_pin(&mut self, hash: Vec<u8>, pin: Option<Pin>) -> Result<(), InputError> {
+        if self.pins.entries.contains_key(&hash) {
+            return Err(InputError::PinAlreadyCaptured);
+        }
+        Arc::make_mut(&mut self.pins).insert(hash, pin, self.limits)
+    }
     pub fn effects(&self) -> &Effects {
         &self.effects
     }
@@ -336,11 +346,13 @@ impl<S: Read> Host for Captured<S> {
         if hash.len() > self.limits.maximum_pin_bytes {
             return Err(InputError::ResourceLimit);
         }
-        self.pins
-            .entries
-            .get(hash)
-            .cloned()
-            .ok_or_else(|| InputError::PinNotCaptured(hash.to_vec()))
+        match self.pins.entries.get(hash) {
+            Some(pin) => Ok(pin.clone()),
+            None if self.pins.entries.len() >= self.limits.maximum_pin_entries => {
+                Err(InputError::ResourceLimit)
+            }
+            None => Err(InputError::PinNotCaptured(hash.to_vec())),
+        }
     }
     fn key_hash(&mut self, height: &BigInt) -> Result<Option<Vec<u8>>, InputError> {
         self.child

@@ -61,6 +61,21 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         &self,
         snapshots: &snapshots::Owner,
         request: Request,
+        check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Prepared<O>, Error<G>> {
+        self.prepare_candidate_with_inputs(snapshots, request, |_, _, _| Ok(false), check)
+    }
+    // A worker may resolve typed input demands while retaining this exact
+    // child view and base cache. No database writer is held during acquisition.
+    pub fn prepare_candidate_with_inputs<G>(
+        &self,
+        snapshots: &snapshots::Owner,
+        request: Request,
+        mut acquire: impl FnMut(
+            &mut inputs::Captured<snapshots::Reader>,
+            &inputs::InputError,
+            &mut dyn FnMut() -> Result<(), G>,
+        ) -> Result<bool, G>,
         mut check: impl FnMut() -> Result<(), G>,
     ) -> Result<Prepared<O>, Error<G>> {
         if !snapshots.uses_database(&self.database) || !request.binding.matches(&self.config) {
@@ -89,15 +104,30 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
             request.limits,
         )
         .map_err(|e| Error::Execution(failure(true, e)))?;
-        let outcome = match request.input {
-            Input::Micro(input) => {
-                build::micro(view, &self.config, input, &mut state, &mut host).map(Candidate::Micro)
+        let outcome = loop {
+            let outcome = match request.input {
+                Input::Micro(input) => {
+                    build::micro(view, &self.config, input, &mut state, &mut host)
+                        .map(Candidate::Micro)
+                }
+                Input::Key(input) => {
+                    build::key(view, &self.config, input, &mut state, &mut host).map(Candidate::Key)
+                }
+            };
+            check().map_err(Error::Guard)?;
+            if let Err(e) = &outcome
+                && e.is_operational::<inputs::Captured<snapshots::Reader>>()
+                && let Some(error) = e.host_error()
+                && acquire(&mut host, error, &mut check).map_err(Error::Guard)?
+            {
+                check().map_err(Error::Guard)?;
+                state = live.state.clone();
+                continue;
             }
-            Input::Key(input) => {
-                build::key(view, &self.config, input, &mut state, &mut host).map(Candidate::Key)
-            }
-        }
-        .map_err(|e| failure(e.is_operational::<inputs::Captured<snapshots::Reader>>(), e));
+            break outcome.map_err(|e| {
+                failure(e.is_operational::<inputs::Captured<snapshots::Reader>>(), e)
+            });
+        };
         check().map_err(Error::Guard)?;
         if self.database.events().info().failure.is_some() {
             return Err(Error::RecoveryRequired);

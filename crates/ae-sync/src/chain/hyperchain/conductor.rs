@@ -22,11 +22,16 @@ use std::{
 pub mod runtime;
 
 pub struct ParentConfig {
+    pub pins: Option<PinConfig>,
     pub cache: parent_cache::Config,
     pub cache_runtime: cache::Config,
     pub connector: connector::Config,
     pub hosts: usize,
     pub seed: [u8; 16],
+}
+pub struct PinConfig {
+    pub nodes: Vec<crate::parent_pins::Node>,
+    pub service: crate::parent_pins::Config,
 }
 pub struct Config {
     pub eoe: owner::Config,
@@ -117,6 +122,7 @@ pub struct Shutdown<O> {
     pub pool: Result<pool::worker::Info, pool::worker::Error>,
     pub parent: Result<cache::Exit, String>,
     pub connector_joined: bool,
+    pub pins_joined: bool,
     pub resilience: Option<Result<(), resilience::Error>>,
 }
 pub struct TopDelivery {
@@ -135,6 +141,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     pool: Option<pool::worker::Worker>,
     parent: Option<cache::Runtime>,
     connector: Option<connector::Runtime>,
+    pins: Option<crate::parent_pins::Service>,
     resilience: Option<resilience::Owner>,
     resilience_worker: Option<resilience::Worker>,
     resilience_config: Option<resilience::Config>,
@@ -186,7 +193,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         database: Arc<Database>,
         execution: repo::HyperchainConfig<O>,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
-        config: Config,
+        mut config: Config,
         backend: Arc<impl Backend>,
         targets: impl FnOnce(Arc<eoe::Source>, &repo::HyperchainConfig<O>) -> Result<T, Error>,
     ) -> Result<Self, Error> {
@@ -194,6 +201,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             return Err(Error::NotBlockProducer);
         }
         if config.events_per_step == 0
+            || config.production.parent_pins.is_some()
+            || (config.parent.pins.is_some() && !config.production.pins.is_empty())
             || config.events_per_step > 65_536
             || config.pool.consensus != ae_protocol::ConsensusType::Pos
             || !(repo::hyperchain::producer::Binding {
@@ -242,6 +251,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         .map_err(Error::Source)?;
         let targets = targets(selected.clone(), &execution)?;
         // Build both directions together. No replaceable connector link escapes.
+        let pins = config
+            .parent
+            .pins
+            .take()
+            .map(|pins| crate::parent_pins::Service::spawn(pins.nodes, pins.service))
+            .transpose()
+            .map_err(|e| Error::Parent(format!("pin service: {e:?}")))?;
+        config.production.parent_pins = pins.as_ref().map(crate::parent_pins::Service::client);
         let mailbox = cache::Mailbox::new(
             parent_cache::Cache::new(config.parent.cache, child),
             config.parent.cache_runtime,
@@ -273,7 +290,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let order = execution.profile.order.clone();
         let cached = scoped::Cached {
             cache: parent.client(),
-            pins: config.production.pins.clone(),
+            pins: match &config.production.parent_pins {
+                Some(client) => scoped::PinSource::Remote(client.clone()),
+                None => scoped::PinSource::Captured(config.production.pins.clone()),
+            },
             parent_start: config.eoe.eoe.host.parent_start_height.clone(),
             parent_length: config.eoe.eoe.host.parent_epoch_length.clone(),
             limits: config.production.inputs,
@@ -311,6 +331,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             pool: Some(pool),
             parent: Some(parent),
             connector: Some(connector),
+            pins,
             resilience,
             resilience_worker,
             resilience_config: config.resilience,
@@ -372,6 +393,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn connector(&self) -> connector::Client {
         self.connector.as_ref().expect("connector").client()
+    }
+    pub fn parent_pins(&self) -> Option<crate::parent_pins::Client> {
+        self.pins.as_ref().map(crate::parent_pins::Service::client)
     }
     pub fn attempt(&self) -> Option<&production::Attempt<O>> {
         self.attempt.as_ref()
@@ -652,6 +676,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             attempt.cancel();
         }
         self.importer.stop();
+        if let Some(pins) = &self.pins {
+            pins.stop();
+        }
+        if let Some(attempt) = &mut self.attempt {
+            attempt.join_candidate();
+        }
+        if let Some(retiring) = &mut self.retiring {
+            retiring.join_candidate();
+        }
         self.importer.jobs.join_blocking();
         let admission = self
             .attempt
@@ -681,6 +714,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .shutdown()
             .map_err(|_| "parent cache panicked".to_string());
         let connector_joined = self.connector.take().expect("connector").shutdown().is_ok();
+        let pins_joined = self.pins.take().is_none_or(|pins| pins.shutdown().is_ok());
         let resilience = self
             .resilience_worker
             .take()
@@ -700,6 +734,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             pool,
             parent,
             connector_joined,
+            pins_joined,
             resilience,
         }
     }

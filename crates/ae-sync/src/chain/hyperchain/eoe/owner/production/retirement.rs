@@ -15,6 +15,7 @@ pub struct Stopped {
     pub discarded_key_effects: VecDeque<inputs::Effect>,
     pub acknowledged_key_effects: u64,
     pub key_effect_error: Option<delivery::Error>,
+    pub key_preparation: Option<Result<(), chain::Error>>,
 }
 pub struct Retiring<O> {
     attempt: Attempt<O>,
@@ -60,6 +61,7 @@ impl Owner {
             discarded_key_effects: VecDeque::new(),
             acknowledged_key_effects: 0,
             key_effect_error: None,
+            key_preparation: None,
         };
         Ok(Retiring {
             attempt,
@@ -72,6 +74,18 @@ impl Owner {
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
+    fn record_candidate(&mut self, result: Result<owned::Prepared<O>, chain::Error>) {
+        let report = self.report.as_mut().expect("report");
+        report.key_preparation = Some(result.map(|mut key| {
+            report.discarded_key_effects.extend(key.effects.drain());
+        }));
+    }
+    pub(crate) fn join_candidate(&mut self) {
+        if let Some(mut task) = self.attempt.key_task.take() {
+            task.cancel();
+            self.record_candidate(task.join());
+        }
+    }
     pub fn ready(&self) -> bool {
         self.ready && self.failure.is_none()
     }
@@ -105,6 +119,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
             || !self.attempt.source.uses_importer(importer)
         {
             return Err(Error::Binding);
+        }
+        if let Some(task) = &mut self.attempt.key_task {
+            let Some(result) = task.poll() else {
+                return Ok(false);
+            };
+            self.attempt.key_task = None;
+            self.record_candidate(result);
         }
         let report = self.report.as_mut().expect("report");
         if let Some(receipt) = &mut self.attempt.receipt {
@@ -154,7 +175,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
                 Err(e) => return Err(Error::Effects(e)),
             }
             report.acknowledged_key_effects = effects.acknowledged;
-            report.discarded_key_effects = std::mem::take(&mut effects.pending);
+            report
+                .discarded_key_effects
+                .extend(std::mem::take(&mut effects.pending));
             self.attempt.effects = None;
         }
         self.ready = true;

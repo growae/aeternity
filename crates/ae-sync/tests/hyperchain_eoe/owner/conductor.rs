@@ -4,6 +4,8 @@ mod connections;
 mod controls;
 #[path = "conductor/parent_http.rs"]
 mod parent_http;
+#[path = "conductor/pins.rs"]
+mod pins;
 #[path = "conductor/targets.rs"]
 mod targets;
 use super::*;
@@ -57,6 +59,7 @@ fn config(node: &Node, producing: bool) -> conductor::Config {
         resilience: None,
         gossip: Default::default(),
         parent: conductor::ParentConfig {
+            pins: None,
             cache: parent_cache::Config {
                 child_start_height: 0.into(),
                 max_size: 200.into(),
@@ -124,7 +127,7 @@ fn shutdown(c: Conductor<Otp26>) -> conductor::Shutdown<Otp26> {
     let votes = c.votes();
     let s = c.shutdown();
     assert!(s.pool.as_ref().is_ok_and(|i| !i.running && !i.accepting));
-    assert!(s.parent.is_ok() && s.connector_joined);
+    assert!(s.parent.is_ok() && s.connector_joined && s.pins_joined);
     assert!(s.accepted.is_ok());
     assert!(!pool.info().accepting && parent.is_closed() && !votes.info().accepting);
     assert!(matches!(

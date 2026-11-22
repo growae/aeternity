@@ -13,6 +13,12 @@ pub enum Error<E, S> {
     Candidate(candidate::Error<E, Overlay<S>, Overlay<S>>),
 }
 impl<E, S> Error<E, S> {
+    pub fn host_error(&self) -> Option<&E> {
+        match self {
+            Self::Candidate(e) => e.host_error(),
+            _ => None,
+        }
+    }
     pub fn is_operational<H: consensus::Host<Error = E>>(&self) -> bool {
         match self {
             Self::Repository(_) => true,

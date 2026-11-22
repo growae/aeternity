@@ -1,5 +1,5 @@
 use super::*;
-use ae_hyperchain::{block, parent_cache, signing};
+use ae_hyperchain::parent_cache;
 use num_bigint::BigInt;
 use std::time::{Duration, Instant};
 
@@ -9,15 +9,7 @@ pub(super) fn acquire<P: PinInputs>(
     error: &repository::HyperchainError<inputs::InputError, Snapshot<'_>>,
     check: &mut dyn FnMut() -> Result<(), Error>,
 ) -> Result<bool, Error> {
-    use ae_chain::hyperchain::Error as Execution;
-    let repository::HyperchainError::Execution(error) = error else {
-        return Ok(false);
-    };
-    let (Execution::Consensus(block::Error::Host(inputs::InputError::EntropyNotCaptured(height)))
-    | Execution::Micro(signing::MicroError::Leader(block::Error::Host(
-        inputs::InputError::EntropyNotCaptured(height),
-    )))) = error.as_ref()
-    else {
+    let Some(inputs::InputError::EntropyNotCaptured(height)) = error.host_error() else {
         return Ok(false);
     };
     let mut guard = || {

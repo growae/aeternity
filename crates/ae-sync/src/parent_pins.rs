@@ -124,6 +124,44 @@ pub struct Client {
     stopped: Arc<AtomicBool>,
     config: Arc<Config>,
 }
+// One bounded lookup. Dropping the receipt cancels queued or active work.
+// Polling never waits for the parent service or its transport.
+pub struct Request {
+    result: mpsc::Receiver<Result<Option<Pin>, Error>>,
+    cancel: Pending,
+    client: Client,
+    deadline: Instant,
+    done: bool,
+}
+impl Request {
+    pub fn try_result(&mut self) -> Option<Result<Option<Pin>, Error>> {
+        if self.done {
+            return None;
+        }
+        let result = match self.client.check() {
+            Err(e) => Some(Err(e)),
+            Ok(()) if Instant::now() >= self.deadline => Some(Err(Error::Deadline)),
+            Ok(()) => match self.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(Error::Worker)),
+            },
+        };
+        if let Some(result) = result {
+            self.done = true;
+            self.cancel.0.store(true, Ordering::Release);
+            Some(self.client.check().and_then(|()| {
+                if Instant::now() >= self.deadline {
+                    Err(Error::Deadline)
+                } else {
+                    result
+                }
+            }))
+        } else {
+            None
+        }
+    }
+}
 impl Client {
     // Nonblocking lifetime check, safe under a storage writer. Never performs I/O.
     pub fn check(&self) -> Result<(), Error> {
@@ -135,6 +173,15 @@ impl Client {
     }
     // Synchronous capture; run on the import worker, never on an async event loop.
     pub fn fetch(&self, hash: &[u8]) -> Result<Option<Pin>, Error> {
+        let mut request = self.request(hash)?;
+        loop {
+            if let Some(result) = request.try_result() {
+                return result;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    pub fn request(&self, hash: &[u8]) -> Result<Request, Error> {
         self.check()?;
         if hash.len() > self.config.maximum_hash_bytes {
             return Err(Error::ResourceLimit);
@@ -155,30 +202,13 @@ impl Client {
                 TrySendError::Full(_) => Error::Busy,
                 TrySendError::Disconnected(_) => Error::Closed,
             })?;
-        loop {
-            self.check()?;
-            if Instant::now() >= deadline {
-                return Err(Error::Deadline);
-            }
-            match result.recv_timeout(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(10)),
-            ) {
-                Ok(value) => {
-                    self.check()?;
-                    if Instant::now() >= deadline {
-                        return Err(Error::Deadline);
-                    }
-                    return value;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => (),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.check()?;
-                    return Err(Error::Worker);
-                }
-            }
-        }
+        Ok(Request {
+            result,
+            cancel,
+            client: self.clone(),
+            deadline,
+            done: false,
+        })
     }
 }
 pub struct Service {
@@ -250,6 +280,14 @@ impl Service {
     }
     pub fn stop(&self) {
         self.client.stopped.store(true, Ordering::Release);
+    }
+    pub fn shutdown(mut self) -> Result<(), Error> {
+        self.stop();
+        self.worker
+            .take()
+            .expect("pin worker")
+            .join()
+            .map_err(|_| Error::Worker)
     }
 }
 impl Drop for Service {

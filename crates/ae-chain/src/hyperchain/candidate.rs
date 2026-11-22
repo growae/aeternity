@@ -55,6 +55,12 @@ pub enum Error<E, A = MemoryStore, C = MemoryStore> {
     Sequence,
 }
 impl<E, A, C> Error<E, A, C> {
+    pub fn host_error(&self) -> Option<&E> {
+        match self {
+            Self::Chain(e) => e.host_error(),
+            _ => None,
+        }
+    }
     pub fn is_operational<H: hc::Host<Error = E>>(&self) -> bool {
         match self {
             Self::Chain(e) => e.is_operational::<H>(),

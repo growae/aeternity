@@ -115,6 +115,13 @@ impl<E, A, C> From<AdmissionError> for Error<E, A, C> {
     }
 }
 impl<E, A, C> Error<E, A, C> {
+    pub fn host_error(&self) -> Option<&E> {
+        match self {
+            Self::Consensus(hc_block::Error::Host(e))
+            | Self::Micro(signing::MicroError::Leader(hc_block::Error::Host(e))) => Some(e),
+            _ => None,
+        }
+    }
     pub fn is_operational<H: hc_block::Host<Error = E>>(&self) -> bool {
         match self {
             Self::Protocol(e) => e.is_operational(),

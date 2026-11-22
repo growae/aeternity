@@ -143,16 +143,49 @@ impl<O: MapOrder + Clone> Producer<O> {
         &self,
         snapshots: &ae_storage::snapshots::Owner,
         request: storage::candidate::Request,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<storage::candidate::Prepared<O>, Error> {
+        self.candidate_inner(snapshots, request, None, check)
+    }
+    pub fn candidate_with_pins(
+        &self,
+        snapshots: &ae_storage::snapshots::Owner,
+        request: storage::candidate::Request,
+        pins: &crate::parent_pins::Client,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<storage::candidate::Prepared<O>, Error> {
+        self.candidate_inner(snapshots, request, Some(pins), check)
+    }
+    fn candidate_inner(
+        &self,
+        snapshots: &ae_storage::snapshots::Owner,
+        request: storage::candidate::Request,
+        pins: Option<&crate::parent_pins::Client>,
         mut check: impl FnMut() -> Result<(), Error>,
     ) -> Result<storage::candidate::Prepared<O>, Error> {
         let context = self.context.upgrade().ok_or(Error::Closed)?;
         self.owner
             .upgrade()
             .ok_or(Error::Closed)?
-            .prepare_candidate(snapshots, request, || {
-                producer_guard(&context)?;
-                check()
-            })
+            .prepare_candidate_with_inputs(
+                snapshots,
+                request,
+                |host, error, check| {
+                    if let (Some(pins), inputs::InputError::PinNotCaptured(hash)) = (pins, error) {
+                        acquire_pin(pins, host, hash, check)?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                },
+                || {
+                    producer_guard(&context)?;
+                    if let Some(pins) = pins {
+                        pins.check().map_err(input_error)?;
+                    }
+                    check()
+                },
+            )
             .map_err(|e| match e {
                 storage::candidate::Error::Repository(e) => Error::Storage(e),
                 storage::candidate::Error::Snapshot(ae_storage::snapshots::Error::Repository(
@@ -302,6 +335,72 @@ pub trait PinInputs: Send + Sync + 'static {
         child: &repository::View<Snapshot<'_>>,
         block: &Block,
     ) -> Result<Arc<inputs::Pins>, Self::Error>;
+    fn acquire<S: repository::Read>(
+        &self,
+        _host: &mut inputs::Captured<S>,
+        _hash: &[u8],
+        _check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        Ok(false)
+    }
+}
+#[derive(Clone)]
+pub enum PinSource {
+    Captured(Arc<inputs::Pins>),
+    Remote(crate::parent_pins::Client),
+}
+impl PinInputs for PinSource {
+    type Error = crate::parent_pins::Error;
+    fn check(&self) -> Result<(), Self::Error> {
+        match self {
+            Self::Captured(_) => Ok(()),
+            Self::Remote(client) => client.check(),
+        }
+    }
+    fn capture(
+        &self,
+        _: &repository::View<Snapshot<'_>>,
+        _: &Block,
+    ) -> Result<Arc<inputs::Pins>, Self::Error> {
+        self.check()?;
+        Ok(match self {
+            Self::Captured(pins) => pins.clone(),
+            Self::Remote(_) => Arc::new(Default::default()),
+        })
+    }
+    fn acquire<S: repository::Read>(
+        &self,
+        host: &mut inputs::Captured<S>,
+        hash: &[u8],
+        check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        match self {
+            Self::Captured(_) => Ok(false),
+            Self::Remote(client) => acquire_pin(client, host, hash, check).map(|()| true),
+        }
+    }
+}
+pub(crate) fn acquire_pin<S: repository::Read>(
+    client: &crate::parent_pins::Client,
+    host: &mut inputs::Captured<S>,
+    hash: &[u8],
+    check: &mut dyn FnMut() -> Result<(), Error>,
+) -> Result<(), Error> {
+    let service_error = |e| match e {
+        crate::parent_pins::Error::Busy => Error::Busy,
+        other => input_error(other),
+    };
+    check()?;
+    let mut request = client.request(hash).map_err(service_error)?;
+    let pin = loop {
+        check()?;
+        if let Some(result) = request.try_result() {
+            break result.map_err(service_error)?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    check()?;
+    host.capture_pin(hash.to_vec(), pin).map_err(input_error)
 }
 impl PinInputs for Arc<inputs::Pins> {
     type Error = std::convert::Infallible;
@@ -373,6 +472,9 @@ impl<P: PinInputs> ParentInputs for Cached<P> {
         error: &repository::HyperchainError<inputs::InputError, Snapshot<'db>>,
         check: &mut dyn FnMut() -> Result<(), Error>,
     ) -> Result<bool, Error> {
+        if let Some(inputs::InputError::PinNotCaptured(hash)) = error.host_error() {
+            return self.pins.acquire(host, hash, check);
+        }
         entropy::acquire(self, host, error, check)
     }
     fn detach(host: Self::Host<'_>) -> inputs::Effects {

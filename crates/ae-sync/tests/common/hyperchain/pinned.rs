@@ -19,6 +19,7 @@ pub static DATA: LazyLock<J> = LazyLock::new(|| {
 });
 pub type Accepted = scoped::Accepted<Otp26, Effects>;
 pub struct Parent {
+    pub node: parent_pins::Node,
     service: Option<parent_pins::Service>,
     server: Option<thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -37,15 +38,14 @@ impl Parent {
         let tx = String::from_utf8(bytes(&row["transaction_hash"])).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
+        let node = parent_pins::Node::new(
+            parent_pins::Chain::Aeternity,
+            &format!("http://{}", listener.local_addr().unwrap()),
+            None,
+        )
+        .unwrap();
         let service = parent_pins::Service::spawn(
-            vec![
-                parent_pins::Node::new(
-                    parent_pins::Chain::Aeternity,
-                    &format!("http://{}", listener.local_addr().unwrap()),
-                    None,
-                )
-                .unwrap(),
-            ],
+            vec![node.clone()],
             parent_pins::Config {
                 request_timeout: Duration::from_secs(2),
                 lookup_timeout: Duration::from_secs(3),
@@ -102,6 +102,7 @@ impl Parent {
             }
         });
         Self {
+            node,
             service: Some(service),
             server: Some(server),
             stop,

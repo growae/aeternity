@@ -24,6 +24,12 @@ impl<E, S> From<Error> for HyperchainError<E, S> {
     }
 }
 impl<E, S> HyperchainError<E, S> {
+    pub fn host_error(&self) -> Option<&E> {
+        match self {
+            Self::Execution(e) => e.host_error(),
+            _ => None,
+        }
+    }
     pub fn is_operational<H: consensus::Host<Error = E>>(&self) -> bool {
         match self {
             Self::Repository(_) => true,
