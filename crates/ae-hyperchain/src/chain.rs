@@ -20,6 +20,9 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
 };
+pub mod source;
+use source::Read;
+pub use source::{LookupError, Source};
 
 #[derive(Debug, Clone)]
 pub struct View<A = MemoryStore, C = MemoryStore> {
@@ -92,15 +95,26 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     ChainTooShort,
     ViewUnavailable(Vec<u8>),
     ResourceLimit,
+    Lookup(LookupError),
     Native(Native),
     Contract(Box<consensus_contract::Error<A, C>>),
 }
 impl<A, C> Error<A, C> {
     pub fn is_operational(&self) -> bool {
         match self {
+            Self::Lookup(e) => e.is_operational(),
             Self::ViewUnavailable(_) | Self::ResourceLimit => true,
             Self::Contract(e) => !e.is_native(),
             Self::ChainTooShort | Self::Native(_) => false,
+        }
+    }
+}
+impl<A, C> From<LookupError> for Error<A, C> {
+    fn from(error: LookupError) -> Self {
+        match error {
+            LookupError::Unavailable(hash) => Self::ViewUnavailable(hash),
+            LookupError::ResourceLimit => Self::ResourceLimit,
+            e => Self::Lookup(e),
         }
     }
 }
@@ -278,39 +292,60 @@ pub fn decode_finalize(v: &Value) -> Result<FinalizeInfo, Native> {
     })
 }
 #[derive(Clone)]
-pub struct Reader<A, C, O> {
-    pub selected: Selected<A, C>,
+pub struct Reader<A, C, O, S = Selected<A, C>> {
+    pub selected: S,
     pub profile: Arc<Profile<O>>,
+    // Keep the tree types explicit even for a backend whose snapshot resolves
+    // them lazily. This private field is supplied by the constructor.
+    marker: std::marker::PhantomData<fn() -> (A, C)>,
 }
-impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder> Reader<A, C, O> {
-    fn view(&self, env: &RunEnv<A, C>) -> Result<Arc<View<A, C>>, Error<A, C>> {
+pub type PinnedReader<A, C, O, S> = Reader<A, C, O, source::Pinned<S>>;
+pub type PinResult<A, C, O, S> = Result<PinnedReader<A, C, O, S>, Error<A, C>>;
+impl<A, C, O, S> Reader<A, C, O, S> {
+    pub fn new(selected: S, profile: Arc<Profile<O>>) -> Self {
+        Self {
+            selected,
+            profile,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
+    Reader<A, C, O, S>
+{
+    pub fn pin(&self) -> PinResult<A, C, O, S::Snapshot> {
+        Ok(Reader::new(
+            source::Pinned(self.selected.capture()?),
+            self.profile.clone(),
+        ))
+    }
+    pub fn view(&self, env: &RunEnv<A, C>) -> Result<Arc<View<A, C>>, Error<A, C>> {
         if let RunEnv::View(view) = env {
             return Ok(view.clone());
         }
-        let selection = self.selected.snapshot();
+        if matches!(env, RunEnv::Height(h) if h.sign() == Sign::Minus) {
+            return Err(Error::Native(Native::FunctionClause));
+        }
+        let selection = self.selected.capture()?;
         let height;
         let hash = match env {
             RunEnv::Top => {
-                height = selection.top.as_ref().ok_or(Error::ChainTooShort)?;
+                height = selection.top_height()?.ok_or(Error::ChainTooShort)?;
                 if height.sign() == Sign::Minus {
                     return Err(Error::Native(Native::FunctionClause));
                 }
-                selection.heights.get(height).ok_or(Error::ChainTooShort)?
+                std::borrow::Cow::Owned(selection.key_hash(&height)?.ok_or(Error::ChainTooShort)?)
             }
             RunEnv::Height(h) => {
                 if h.sign() == Sign::Minus {
                     return Err(Error::Native(Native::FunctionClause));
                 }
-                selection.heights.get(h).ok_or(Error::ChainTooShort)?
+                std::borrow::Cow::Owned(selection.key_hash(h)?.ok_or(Error::ChainTooShort)?)
             }
-            RunEnv::Hash(h) => h,
+            RunEnv::Hash(h) => std::borrow::Cow::Borrowed(h.as_slice()),
             RunEnv::View(_) => unreachable!(),
         };
-        selection
-            .views
-            .get(hash)
-            .cloned()
-            .ok_or_else(|| Error::ViewUnavailable(hash.clone()))
+        selection.view(&hash).map_err(Into::into)
     }
     pub fn query(
         &self,
@@ -463,14 +498,14 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder> Reader<A, C, O> 
         option(&v, decode_finalize).map_err(Error::Native)
     }
     pub fn epoch_start_height(&self, epoch: &BigInt) -> Result<BigInt, Error<A, C>> {
-        let mut height = self
+        let reader = self.pin()?;
+        let mut height = reader
             .selected
-            .snapshot()
-            .top
-            .clone()
+            .0
+            .top_height()?
             .ok_or(Error::ChainTooShort)?;
         for _ in 0..self.profile.maximum_history_reads {
-            let info = self.epoch_info(&RunEnv::Height(height))?;
+            let info = reader.epoch_info(&RunEnv::Height(height))?;
             // Erlang's guards compare arbitrary terms. Integer contract epochs
             // take the ordinary path; other decoded terms compare above numbers.
             if let Value::Integer(n) = info.epoch {
@@ -487,8 +522,8 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder> Reader<A, C, O> 
     }
 }
 #[derive(Clone)]
-pub struct ParentTargets<A, C, O> {
-    pub reader: Reader<A, C, O>,
+pub struct ParentTargets<A, C, O, S = Selected<A, C>> {
+    pub reader: Reader<A, C, O, S>,
     pub epoch_length: Unsigned,
     pub start_height: Unsigned,
 }
@@ -501,7 +536,8 @@ impl<
     A: NodeWriter + Clone + Send + Sync + 'static,
     C: NodeWriter + Clone + Send + Sync + 'static,
     O: MapOrder + Clone + Send + Sync + 'static,
-> Targets for ParentTargets<A, C, O>
+    S: Source<A, C> + Send + Sync + 'static,
+> Targets for ParentTargets<A, C, O, S>
 {
     fn targets(&mut self, height: &Unsigned) -> Result<Vec<BigInt>, TargetError> {
         match self.reader.epoch(&RunEnv::Height(BigInt::from_bytes_be(
@@ -513,8 +549,8 @@ impl<
                 &self.epoch_length,
                 &self.start_height,
             )),
-            Ok(_) | Err(Error::ChainTooShort | Error::Native(_)) => Err(TargetError::Native),
-            Err(Error::Contract(error)) if error.is_native() => Err(TargetError::Native),
+            Ok(_) => Err(TargetError::Native),
+            Err(error) if !error.is_operational() => Err(TargetError::Native),
             Err(_) => Err(TargetError::Unavailable),
         }
     }

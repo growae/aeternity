@@ -29,10 +29,7 @@ fn reader(row: &J) -> R {
     .unwrap();
     p.order = otp_order::profile(&BLOCK["profile"]);
     p.maximum_steps = 1_000_000;
-    R {
-        selected: chain::Selected::new(Default::default()),
-        profile: Arc::new(p),
-    }
+    R::new(chain::Selected::new(Default::default()), Arc::new(p))
 }
 fn config() -> b::Config {
     b::Config {

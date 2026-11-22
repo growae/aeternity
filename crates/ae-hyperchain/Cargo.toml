@@ -22,6 +22,7 @@ num-traits.workspace = true
 [dev-dependencies]
 ae-chain.workspace = true
 ae-storage.workspace = true
+ae-vm-aevm.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 

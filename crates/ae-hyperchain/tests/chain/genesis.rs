@@ -19,7 +19,7 @@ use ae_vm_fate::{
 };
 use serde_json::Value as J;
 use std::sync::{Arc, LazyLock};
-static DATA: LazyLock<J> =
+pub(super) static DATA: LazyLock<J> =
     LazyLock::new(|| unpack(include_str!("../fixtures/erlang_hc_genesis.json")));
 fn api(j: &J) -> Vec<u8> {
     ae_codec::api::decode(j.as_str().unwrap()).unwrap().1
@@ -94,7 +94,7 @@ fn plan(row: &J) -> g::Plan {
         pin_reward: 7.into(),
     }
 }
-fn reader(row: &J) -> Reader<MemoryStore, MemoryStore, Otp26> {
+pub(super) fn reader(row: &J) -> Reader<MemoryStore, MemoryStore, Otp26> {
     let mut p = super::profile(8);
     p.contracts = plan(row).contracts;
     p.network = NetworkProfile::custom(
@@ -107,10 +107,7 @@ fn reader(row: &J) -> Reader<MemoryStore, MemoryStore, Otp26> {
     .unwrap();
     p.order = super::otp_order::profile(&DATA["profile"]);
     p.maximum_steps = 1_000_000;
-    Reader {
-        selected: chain::Selected::new(Default::default()),
-        profile: Arc::new(p),
-    }
+    Reader::new(chain::Selected::new(Default::default()), Arc::new(p))
 }
 fn context(row: &J, t: Trees, h: u64) -> chain::View {
     let mut v = view(t, row["protocol"].as_u64().unwrap(), h);
@@ -120,12 +117,24 @@ fn context(row: &J, t: Trees, h: u64) -> chain::View {
 fn queries<
     A: ae_trie::NodeWriter + Clone + std::fmt::Debug,
     C: ae_trie::NodeWriter + Clone + std::fmt::Debug,
+    S: chain::Source<A, C>,
 >(
-    r: &Reader<A, C, Otp26>,
+    r: &Reader<A, C, Otp26, S>,
     v: &chain::View<A, C>,
     rows: &J,
 ) {
-    let env = RunEnv::View(Arc::new(v.clone()));
+    queries_env(r, RunEnv::View(Arc::new(v.clone())), rows);
+}
+pub(super) fn queries_env<
+    A: ae_trie::NodeWriter + Clone + std::fmt::Debug,
+    C: ae_trie::NodeWriter + Clone + std::fmt::Debug,
+    S: chain::Source<A, C>,
+>(
+    r: &Reader<A, C, Otp26, S>,
+    env: RunEnv<A, C>,
+    rows: &J,
+) {
+    let v = r.view(&env).unwrap();
     let roots = v.trees.roots();
     for row in rows.as_array().unwrap() {
         let n = row["name"].as_str().unwrap();
@@ -484,6 +493,13 @@ fn production_contract_genesis_commits_reopens_and_queries_persistent_roots() {
         let database =
             Database::open_with_config(&path.0, identity.clone(), config.clone()).unwrap();
         let before = database.view().unwrap().status();
+        let empty_reader = database
+            .hyperchain_reader(&identity, r.profile.clone(), Default::default())
+            .unwrap();
+        assert!(matches!(
+            empty_reader.epoch(&RunEnv::Top),
+            Err(chain::Error::ChainTooShort)
+        ));
         let small = repo::Limits {
             commit_bytes: 1,
             ..Default::default()
@@ -516,6 +532,17 @@ fn production_contract_genesis_commits_reopens_and_queries_persistent_roots() {
         )
         .unwrap();
         database.commit(first).unwrap();
+        // Publication cannot change an already captured reader's roots/indexes.
+        assert!(matches!(
+            empty_reader.epoch(&RunEnv::Top),
+            Err(chain::Error::ChainTooShort)
+        ));
+        let fresh = database
+            .hyperchain_reader(&identity, r.profile.clone(), Default::default())
+            .unwrap();
+        assert_eq!(fresh.epoch(&RunEnv::Top).unwrap(), Value::Integer(1.into()));
+        drop(fresh);
+        drop(empty_reader);
         assert!(database.commit(stale).is_err());
         assert_eq!(database.view().unwrap().status().revision, 1);
         assert_eq!(
@@ -587,18 +614,61 @@ fn production_contract_genesis_commits_reopens_and_queries_persistent_roots() {
             );
             let persisted = pinned.trees(hash, Default::default()).unwrap();
             assert_eq!(persisted.roots(), roots);
-            let stored = chain::View {
-                trees: Arc::new(persisted),
-                context: context.context.clone(),
-                environment: context.environment.clone(),
-                history: context.history.clone(),
-                aevm: context.aevm.clone(),
-            };
-            let reader = Reader {
-                selected: chain::Selected::new(Default::default()),
-                profile: r.profile.clone(),
-            };
-            queries(&reader, &stored, &row["queries"]);
+            let reader = database
+                .hyperchain_reader(&identity, r.profile.clone(), Default::default())
+                .unwrap();
+            let stored = reader.view(&RunEnv::Top).unwrap();
+            assert_eq!(stored.trees.roots(), roots);
+            assert_eq!(stored.environment.timestamp, 1.into());
+            assert_eq!(stored.environment.difficulty, 0.into());
+            assert_eq!(stored.environment.key_hash, hash.0);
+            assert_eq!(stored.context.height, 0);
+            assert_eq!(stored.context.protocol as u32, header.common.version);
+            queries_env(&reader, RunEnv::Top, &row["queries"]);
+            assert_eq!(
+                reader.epoch(&RunEnv::Height(0.into())).unwrap(),
+                Value::Integer(1.into())
+            );
+            assert_eq!(
+                reader.epoch(&RunEnv::Hash(hash.0.to_vec())).unwrap(),
+                Value::Integer(1.into())
+            );
+            for missing in [1.into(), num_bigint::BigInt::from(1) << 128] {
+                assert!(matches!(
+                    reader.epoch(&RunEnv::Height(missing)),
+                    Err(chain::Error::ChainTooShort)
+                ));
+            }
+            assert!(matches!(
+                reader.epoch(&RunEnv::Height((-1).into())),
+                Err(chain::Error::Native(chain::Native::FunctionClause))
+            ));
+            for bad in [vec![], vec![1; 31], vec![1; 32], vec![1; 33]] {
+                assert!(matches!(
+                    reader.epoch(&RunEnv::Hash(bad)),
+                    Err(chain::Error::Lookup(chain::LookupError::InvalidHash))
+                ));
+            }
+            let limited = database
+                .hyperchain_reader(
+                    &identity,
+                    r.profile.clone(),
+                    repo::hyperchain::Config {
+                        maximum_history_headers: 0,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                limited.epoch(&RunEnv::Top),
+                Err(chain::Error::ResourceLimit)
+            ));
+            let mut wrong = identity.clone();
+            wrong.execution_profile.0[0] ^= 1;
+            assert!(matches!(
+                database.hyperchain_reader(&wrong, r.profile.clone(), Default::default()),
+                Err(repo::Error::Identity)
+            ));
             let mut scan = pinned.scan_state(hash, Default::default()).unwrap();
             while !scan.is_complete() {
                 scan.next_page(Default::default()).unwrap();

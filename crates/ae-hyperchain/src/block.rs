@@ -163,9 +163,15 @@ impl State {
         self.epoch_starts.truncate(5);
         Ok(())
     }
-    fn cache_info<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+    fn cache_info<
+        A: NodeWriter + Clone,
+        C: NodeWriter + Clone,
+        O: MapOrder,
+        H: Host,
+        S: chain::Source<A, C>,
+    >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         env: &RunEnv<A, C>,
         host: &mut H,
         info: EpochInfo,
@@ -195,9 +201,15 @@ impl State {
             .insert(epoch, info.first, info.length, schedule, limits)
             .map_err(Error::Leader)
     }
-    fn cache_epoch<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+    fn cache_epoch<
+        A: NodeWriter + Clone,
+        C: NodeWriter + Clone,
+        O: MapOrder,
+        H: Host,
+        S: chain::Source<A, C>,
+    >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         env: &RunEnv<A, C>,
         host: &mut H,
         epoch: BigInt,
@@ -212,9 +224,15 @@ impl State {
             Err(e) => Err(Error::Chain(e)),
         }
     }
-    fn leader_inner<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+    fn leader_inner<
+        A: NodeWriter + Clone,
+        C: NodeWriter + Clone,
+        O: MapOrder,
+        H: Host,
+        S: chain::Source<A, C>,
+    >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         env: &RunEnv<A, C>,
         host: &mut H,
         height: &BigInt,
@@ -238,9 +256,10 @@ impl State {
         C: NodeWriter + Clone,
         O: MapOrder,
         H: Host,
+        S: chain::Source<A, C>,
     >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         env: &RunEnv<A, C>,
         host: &mut H,
         height: &BigInt,
@@ -256,9 +275,15 @@ impl State {
         result
     }
     #[allow(clippy::too_many_arguments)]
-    pub fn pre_transform<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+    pub fn pre_transform<
+        A: NodeWriter + Clone,
+        C: NodeWriter + Clone,
+        O: MapOrder,
+        H: Host,
+        S: chain::Source<A, C>,
+    >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         previous: &View<A, C>,
         trees: &Trees<A, C>,
         host: &mut H,
@@ -280,9 +305,15 @@ impl State {
         result
     }
     #[allow(clippy::too_many_arguments)]
-    fn transform_inner<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+    fn transform_inner<
+        A: NodeWriter + Clone,
+        C: NodeWriter + Clone,
+        O: MapOrder,
+        H: Host,
+        S: chain::Source<A, C>,
+    >(
         &mut self,
-        reader: &Reader<A, C, O>,
+        reader: &Reader<A, C, O, S>,
         previous: &View<A, C>,
         trees: &Trees<A, C>,
         host: &mut H,

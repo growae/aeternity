@@ -144,9 +144,10 @@ pub fn validate_micro<
     C: ae_trie::NodeWriter + Clone,
     O: ae_vm_fate::maps::MapOrder,
     H: crate::block::Host,
+    S: crate::chain::Source<A, C>,
 >(
     state: &mut crate::block::State,
-    reader: &crate::chain::Reader<A, C, O>,
+    reader: &crate::chain::Reader<A, C, O, S>,
     header: &MicroHeader,
     previous_time: u64,
     host: &mut H,

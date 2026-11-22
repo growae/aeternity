@@ -14,6 +14,7 @@ ae-trie.workspace = true
 ae-state.workspace = true
 ae-tx.workspace = true
 ae-consensus.workspace = true
+ae-hyperchain.workspace = true
 ae-execution.workspace = true
 ae-vm-fate.workspace = true
 num-bigint.workspace = true

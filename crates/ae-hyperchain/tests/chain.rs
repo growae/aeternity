@@ -26,6 +26,8 @@ use std::{
 };
 #[path = "chain/block.rs"]
 mod block;
+#[path = "chain/durable.rs"]
+mod durable;
 #[path = "chain/genesis.rs"]
 mod genesis;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
@@ -277,10 +279,10 @@ fn view(t: Trees, p: u64, h: u64) -> chain::View {
     }
 }
 fn reader() -> Reader<MemoryStore, MemoryStore, Otp26> {
-    Reader {
-        selected: chain::Selected::new(Default::default()),
-        profile: Arc::new(profile(8)),
-    }
+    Reader::new(
+        chain::Selected::new(Default::default()),
+        Arc::new(profile(8)),
+    )
 }
 fn with_execution<T>(
     p: &chain::Profile<Otp26>,
@@ -634,6 +636,85 @@ fn query_limits_preserve_selected_roots_and_allow_retry() {
     ));
     assert_eq!(good.epoch(&explicit).unwrap(), Value::Integer(7.into()));
     assert_eq!(before.views[&key(80).to_vec()].trees.roots(), root);
+}
+
+#[test]
+fn epoch_walk_pins_one_capture_even_when_selection_changes_during_acquisition() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone)]
+    struct Replacing {
+        selected: chain::Selected,
+        captures: Arc<AtomicUsize>,
+    }
+    impl chain::Source<MemoryStore, MemoryStore> for Replacing {
+        type Snapshot = Arc<chain::Selection>;
+        fn capture(&self) -> Result<Self::Snapshot, chain::LookupError> {
+            let snapshot = self.selected.snapshot();
+            self.captures.fetch_add(1, Ordering::SeqCst);
+            self.selected.replace(Default::default());
+            Ok(snapshot)
+        }
+    }
+    let selected = Replacing {
+        selected: chain::Selected::new(selection()),
+        captures: Arc::new(AtomicUsize::new(0)),
+    };
+    let r = Reader::new(selected.clone(), Arc::new(profile(8)));
+    assert_eq!(r.epoch_start_height(&5.into()).unwrap(), BigInt::from(51));
+    assert_eq!(selected.captures.load(Ordering::SeqCst), 1);
+    assert!(selected.selected.snapshot().top.is_none());
+    assert!(matches!(
+        r.epoch(&RunEnv::Top),
+        Err(chain::Error::ChainTooShort)
+    ));
+    assert_eq!(selected.captures.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn capture_failures_stay_operational_and_explicit_views_do_not_capture() {
+    use ae_hyperchain::parent_cache::runtime::{TargetError, Targets};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone)]
+    struct Failing(Arc<AtomicUsize>);
+    impl chain::Source<MemoryStore, MemoryStore> for Failing {
+        type Snapshot = Arc<chain::Selection>;
+        fn capture(&self) -> Result<Self::Snapshot, chain::LookupError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(chain::LookupError::Backend(Arc::new(
+                std::io::Error::other("capture failed"),
+            )))
+        }
+    }
+    let selected = Failing(Arc::new(AtomicUsize::new(0)));
+    let r = Reader::new(selected.clone(), Arc::new(profile(8)));
+    let s = selection();
+    let explicit = RunEnv::View(s.views[&key(80).to_vec()].clone());
+    assert_eq!(r.epoch(&explicit).unwrap(), Value::Integer(7.into()));
+    assert!(matches!(
+        r.epoch(&RunEnv::Height((-1).into())),
+        Err(chain::Error::Native(chain::Native::FunctionClause))
+    ));
+    assert_eq!(selected.0.load(Ordering::SeqCst), 0);
+    for env in [
+        RunEnv::Top,
+        RunEnv::Height(80.into()),
+        RunEnv::Hash(key(80).to_vec()),
+    ] {
+        let error = r.epoch(&env).unwrap_err();
+        assert!(error.is_operational());
+        assert!(matches!(
+            error,
+            chain::Error::Lookup(chain::LookupError::Backend(_))
+        ));
+    }
+    let mut target = chain::ParentTargets {
+        reader: r.clone(),
+        epoch_length: 5.into(),
+        start_height: 1.into(),
+    };
+    assert_eq!(target.targets(&80.into()), Err(TargetError::Unavailable));
+    assert!(r.pin().err().unwrap().is_operational());
+    assert_eq!(selected.0.load(Ordering::SeqCst), 5);
 }
 
 #[test]

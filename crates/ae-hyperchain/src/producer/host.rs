@@ -1,4 +1,5 @@
 use super::{Host, Negotiation};
+use crate::chain::source::Read;
 use crate::{
     block::{self, Pin, host::PinSource},
     chain,
@@ -18,22 +19,23 @@ pub enum Error<E> {
     Pin(E),
     MissingHeader(BigInt),
     UnsupportedInput,
+    Selection(chain::LookupError),
 }
 // The chain owner supplies an immutable key-header snapshot corresponding to
 // the selected transaction view. Durable lookup and top-change subscriptions
 // remain owned by the node. No timestamp is inferred from VM environment time.
 #[derive(Clone)]
-pub struct LiveHost<P, A = MemoryStore, C = MemoryStore> {
+pub struct LiveHost<P, A = MemoryStore, C = MemoryStore, S = chain::Selected<A, C>> {
     pub coordinator: Coordinator<A, C>,
-    pub selected: chain::Selected<A, C>,
+    pub selected: S,
     pub headers: Arc<BTreeMap<BigInt, KeyHeader>>,
     pub keys: Keys,
     pub pins: P,
 }
-impl<P, A: NodeReader + Clone, C: NodeReader + Clone> LiveHost<P, A, C> {
+impl<P, A: NodeReader + Clone, C: NodeReader + Clone, S> LiveHost<P, A, C, S> {
     pub fn new(
         coordinator: Coordinator<A, C>,
-        selected: chain::Selected<A, C>,
+        selected: S,
         headers: Arc<BTreeMap<BigInt, KeyHeader>>,
         pins: P,
     ) -> Self {
@@ -66,13 +68,16 @@ fn integer(v: &Value) -> Option<Unsigned> {
         _ => None,
     }
 }
-impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone> block::Host for LiveHost<P, A, C> {
+impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone, S: chain::Source<A, C>> block::Host
+    for LiveHost<P, A, C, S>
+{
     type Error = Error<P::Error>;
     fn is_operational(e: &Self::Error) -> bool {
         match e {
             Error::Coordinator(eoe::coordinator::Error::Host(e)) => e.is_operational(),
             Error::Coordinator(eoe::coordinator::Error::Stopped) => false,
             Error::Pin(e) => P::is_operational(e),
+            Error::Selection(e) => e.is_operational(),
             _ => true,
         }
     }
@@ -86,10 +91,15 @@ impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone> block::Host for
         self.pins.get_pin(hash).map_err(Error::Pin)
     }
     fn key_hash(&mut self, height: &BigInt) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.selected.snapshot().heights.get(height).cloned())
+        self.selected
+            .capture()
+            .and_then(|s| s.key_hash(height))
+            .map_err(Error::Selection)
     }
 }
-impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone> Host for LiveHost<P, A, C> {
+impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone, S: chain::Source<A, C>> Host
+    for LiveHost<P, A, C, S>
+{
     fn key_time(&mut self, height: &BigInt) -> Result<BigInt, Self::Error> {
         self.headers
             .get(height)

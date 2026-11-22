@@ -288,6 +288,14 @@ impl Database {
         let policy = self.writer.lock().map_err(|_| backend_lock())?;
         self.view_locked(&policy)
     }
+    pub fn hyperchain_reader<O>(
+        &self,
+        identity: &Identity,
+        profile: Arc<repo::hyperchain::Profile<O>>,
+        config: repo::hyperchain::Config,
+    ) -> Result<repo::hyperchain::Reader<Snapshot<'_>, O>, Error> {
+        repo::hyperchain::reader(self.view()?, identity, profile, config)
+    }
     pub fn gc_events(&self) -> gc::events::Reader {
         self.gc_events.reader()
     }

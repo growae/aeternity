@@ -14,6 +14,7 @@ mod blocks;
 mod codec;
 mod decoding;
 mod history;
+pub mod hyperchain;
 pub mod retention;
 pub mod rollback;
 pub mod scan;

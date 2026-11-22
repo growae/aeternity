@@ -19,6 +19,7 @@ ae-storage = { path = "crates/ae-storage" }
 rocksdb = { version = "=0.24.0", default-features = false, features = ["bindgen-runtime", "lz4"] }
 ae-consensus = { path = "crates/ae-consensus" }
 ae-chain = { path = "crates/ae-chain" }
+ae-hyperchain = { path = "crates/ae-hyperchain" }
 ae-mempool = { path = "crates/ae-mempool" }
 ae-execution = { path = "crates/ae-execution" }
 ae-types = { path = "crates/ae-types" }

@@ -83,8 +83,14 @@ impl<E, A, C> Error<E, A, C> {
         }
     }
 }
-pub fn slot_info<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
-    reader: &Reader<A, C, O>,
+pub fn slot_info<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    H: Host,
+    S: chain::Source<A, C>,
+>(
+    reader: &Reader<A, C, O, S>,
     view: &View<A, C>,
     top: &BigInt,
     now: &BigInt,
@@ -133,8 +139,14 @@ fn until_next<E, A, C>(s: &Slot, time: &BigInt) -> Result<BigInt, Error<E, A, C>
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn activate<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
-    reader: &Reader<A, C, O>,
+fn activate<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    H: Host,
+    S: chain::Source<A, C>,
+>(
+    reader: &Reader<A, C, O, S>,
     view: &View<A, C>,
     top: &BigInt,
     slot: Slot,
@@ -178,9 +190,15 @@ fn activate<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
     })
 }
 #[allow(clippy::too_many_arguments)]
-fn next_inner<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+fn next_inner<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    H: Host,
+    S: chain::Source<A, C>,
+>(
     state: &mut block::State,
-    reader: &Reader<A, C, O>,
+    reader: &Reader<A, C, O, S>,
     view: &View<A, C>,
     top: &BigInt,
     now: &BigInt,
@@ -231,9 +249,15 @@ fn next_inner<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host
 // plus the observed wall-clock time. A negative delay or hole count is retained
 // as in Erlang; this layer does not clamp clock regressions or sleep.
 #[allow(clippy::too_many_arguments)]
-pub fn next<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, H: Host>(
+pub fn next<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    H: Host,
+    S: chain::Source<A, C>,
+>(
     state: &mut block::State,
-    reader: &Reader<A, C, O>,
+    reader: &Reader<A, C, O, S>,
     view: &View<A, C>,
     top: &BigInt,
     now: &BigInt,
