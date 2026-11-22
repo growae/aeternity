@@ -7,15 +7,23 @@ pub(super) struct Control {
     calls: AtomicUsize,
     maximum_calls: usize,
     maximum_command_bytes: usize,
+    pub vote_replies: Arc<votes::Budget>,
+    network: ae_protocol::NetworkProfile,
 }
 impl Control {
-    pub fn new(stop: Arc<AtomicBool>, config: Config) -> Self {
+    pub fn new(
+        stop: Arc<AtomicBool>,
+        config: Config,
+        network: ae_protocol::NetworkProfile,
+    ) -> Self {
         Self {
             alive: AtomicBool::new(true),
             stop,
             calls: AtomicUsize::new(0),
             maximum_calls: config.command_capacity,
             maximum_command_bytes: config.maximum_command_bytes,
+            vote_replies: Arc::new(votes::Budget::new(config.maximum_vote_reply_bytes)),
+            network,
         }
     }
 }
@@ -41,6 +49,12 @@ impl<A, C> Clone for Client<A, C> {
     }
 }
 impl<A, C> Client<A, C> {
+    pub fn network(&self) -> &ae_protocol::NetworkProfile {
+        &self.control.network
+    }
+    pub fn retained_vote_reply_bytes(&self) -> usize {
+        self.control.vote_replies.used()
+    }
     pub fn is_closed(&self) -> bool {
         !self.control.alive.load(Ordering::Acquire) || self.control.stop.load(Ordering::Acquire)
     }

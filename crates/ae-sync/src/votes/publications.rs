@@ -40,6 +40,9 @@ impl Publications {
     pub fn uses_database(&self, db: &Arc<Database>) -> bool {
         self.0.database.ptr_eq(&Arc::downgrade(db))
     }
+    pub(super) fn maximum_event_bytes(&self) -> usize {
+        self.0.config.event_bytes
+    }
     pub(super) fn replies(&self, config: Config) -> Result<Arc<Semaphore>, Error> {
         let original = self.0.config;
         if original.events != config.events

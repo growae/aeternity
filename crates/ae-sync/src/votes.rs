@@ -7,6 +7,7 @@ use ae_types::Unsigned;
 use std::sync::{Arc, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
+pub mod eoe;
 mod publications;
 pub use publications::{Consumer, Publication, Publications};
 
@@ -58,6 +59,9 @@ pub enum Error {
     Pool(policy::Error),
     Protocol,
     Storage,
+    Authority(ae_hyperchain::eoe::coordinator::Error),
+    AuthorityClosed,
+    UnknownReceipt(eoe::ReceiptError),
 }
 impl From<Fault> for Error {
     fn from(e: Fault) -> Self {
@@ -120,18 +124,26 @@ pub(crate) fn snapshot(
         _bytes: bytes,
     })
 }
+enum Pool {
+    Local(policy::VotePool),
+    Shared(eoe::Authority),
+}
 struct State {
     database: Arc<Database>,
     network: NetworkProfile,
-    cache: GossipCache,
+    cache: Option<GossipCache>,
     config: Config,
-    pool: policy::VotePool,
+    pool: Pool,
     decoding: ae_chain::repository::ReadConfig,
     replies: Arc<Semaphore>,
-    _claim: publications::Claim,
+    _claim: Option<publications::Claim>,
+    _eoe_claim: Option<eoe::Lease>,
 }
 impl owned::Actor for State {
     type Error = Error;
+    fn fatal(&self, error: &Error) -> bool {
+        matches!(error, Error::AuthorityClosed | Error::UnknownReceipt(_))
+    }
 }
 #[derive(Clone)]
 pub struct Client {
@@ -139,6 +151,7 @@ pub struct Client {
     database: Weak<Database>,
     publications: Publications,
     config: Config,
+    shared: bool,
 }
 impl Client {
     pub fn info(&self) -> Info {
@@ -162,7 +175,11 @@ impl Client {
             return Err(policy::Error::ResourceLimit.into());
         }
         let weight = bytes.len().checked_add(128).ok_or(Fault::Busy)?;
-        let reservation = self.publications.reserve(weight)?;
+        let reservation = if self.shared {
+            None
+        } else {
+            Some(self.publications.reserve(weight)?)
+        };
         self.inner.submit(weight, move |s| {
             let config = s.decoding.transaction_record();
             let tx = Arc::new(
@@ -170,7 +187,11 @@ impl Client {
                     .map_err(|_| Error::Protocol)?,
             );
             let hash = policy::admission_hash(&tx, s.config.pool)?;
-            if s.cache.check(hash) {
+            let pool = match &mut s.pool {
+                Pool::Shared(authority) => return authority.admit(tx, event),
+                Pool::Local(pool) => pool,
+            };
+            if s.cache.as_ref().expect("local cache").check(hash) {
                 return Ok(policy::PushOutcome::Cached);
             }
             let view = s.database.view().map_err(|_| Error::Storage)?;
@@ -185,7 +206,7 @@ impl Client {
                 .map_err(|_| Error::Storage)?,
                 None => s.network.protocol_at(0).map_err(|_| Error::Storage)?,
             };
-            let result = s.pool.push(
+            let result = pool.push(
                 &tx,
                 event,
                 &policy::Admission {
@@ -197,7 +218,9 @@ impl Client {
                 |_| false,
             )?;
             if matches!(result, policy::PushOutcome::Accepted { .. }) {
-                reservation.send(tx, event);
+                reservation
+                    .expect("local publication reservation")
+                    .send(tx, event);
             }
             Ok(result)
         })
@@ -205,7 +228,10 @@ impl Client {
     pub fn advance_epoch(&self, epoch: Unsigned) -> Result<Ticket<()>, Error> {
         let weight = epoch.as_bytes().len().checked_add(128).ok_or(Fault::Busy)?;
         self.inner.submit(weight, move |s| {
-            s.pool.update_epoch(epoch);
+            match &mut s.pool {
+                Pool::Local(pool) => pool.update_epoch(epoch),
+                Pool::Shared(authority) => authority.advance_epoch(epoch)?,
+            }
             Ok(())
         })
     }
@@ -223,28 +249,54 @@ impl Client {
             .len()
             .saturating_add(kind.as_ref().map_or(0, |v| v.as_bytes().len()))
             .saturating_add(128);
-        self.inner.submit(weight, move |s| {
-            snapshot(&s.pool, &epoch, kind.as_ref(), maximum, &s.replies)
+        self.inner.submit(weight, move |s| match &s.pool {
+            Pool::Local(pool) => snapshot(pool, &epoch, kind.as_ref(), maximum, &s.replies),
+            Pool::Shared(authority) => {
+                let snapshot = authority.query(epoch, kind, maximum)?;
+                let weight = snapshot
+                    .votes()
+                    .iter()
+                    .try_fold(0usize, |n, vote| {
+                        n.checked_add(vote.wire_size())
+                            .and_then(|n| n.checked_add(128))
+                    })
+                    .ok_or(Fault::Busy)?;
+                let bytes = s
+                    .replies
+                    .clone()
+                    .try_acquire_many_owned(u32::try_from(weight).map_err(|_| Fault::Busy)?)
+                    .map_err(|_| Fault::Busy)?;
+                Ok(Batch {
+                    votes: snapshot.votes().to_vec(),
+                    _bytes: bytes,
+                })
+            }
         })
     }
     pub fn stats(&self) -> Result<Ticket<Stats>, Error> {
         self.inner.submit(128, |s| {
-            let weight = s
-                .pool
-                .epoch()
-                .as_bytes()
-                .len()
-                .checked_add(128)
-                .ok_or(Fault::Busy)?;
+            let snapshot;
+            let (epoch, entries, retained_wire_bytes) = match &s.pool {
+                Pool::Local(pool) => (pool.epoch(), pool.len(), pool.retained_wire_bytes()),
+                Pool::Shared(authority) => {
+                    snapshot = authority.query(0.into(), None, 0)?;
+                    (
+                        snapshot.epoch(),
+                        snapshot.entries(),
+                        snapshot.retained_wire_bytes(),
+                    )
+                }
+            };
+            let weight = epoch.as_bytes().len().checked_add(128).ok_or(Fault::Busy)?;
             let bytes = s
                 .replies
                 .clone()
                 .try_acquire_many_owned(u32::try_from(weight).map_err(|_| Fault::Busy)?)
                 .map_err(|_| Fault::Busy)?;
             Ok(Stats {
-                epoch: s.pool.epoch().clone(),
-                entries: s.pool.len(),
-                retained_wire_bytes: s.pool.retained_wire_bytes(),
+                epoch: epoch.clone(),
+                entries,
+                retained_wire_bytes,
                 _bytes: bytes,
             })
         })
@@ -259,6 +311,8 @@ impl Client {
     }
 }
 pub struct Worker {
+    // Field drop order interrupts a blocked receipt before joining its worker.
+    eoe_stop: Option<eoe::Stop>,
     inner: owned::Worker<State>,
     client: Client,
 }
@@ -287,12 +341,13 @@ impl Worker {
             Ok(State {
                 database,
                 network,
-                cache,
+                cache: Some(cache),
                 config,
-                pool: Default::default(),
+                pool: Pool::Local(Default::default()),
                 decoding,
                 replies,
-                _claim: claim,
+                _claim: Some(claim),
+                _eoe_claim: None,
             })
         })?;
         let client = Client {
@@ -300,8 +355,13 @@ impl Worker {
             database: weak,
             publications,
             config,
+            shared: false,
         };
-        Ok(Self { inner, client })
+        Ok(Self {
+            inner,
+            client,
+            eoe_stop: None,
+        })
     }
     pub fn client(&self) -> Client {
         self.client.clone()
@@ -310,9 +370,13 @@ impl Worker {
         self.inner.info()
     }
     pub fn request_shutdown(&self) {
+        if let Some(stop) = &self.eoe_stop {
+            stop.request();
+        }
         self.inner.request_shutdown();
     }
     pub fn shutdown(self) -> Result<(), Error> {
+        self.request_shutdown();
         self.inner.shutdown()
     }
 }

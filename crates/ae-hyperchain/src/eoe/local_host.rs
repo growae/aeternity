@@ -145,6 +145,9 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     pub fn pool(&self) -> &VotePool {
         &self.pool
     }
+    pub fn network(&self) -> &NetworkProfile {
+        &self.config.network
+    }
     pub fn stakers(&self) -> BTreeSet<AccountPublicKey> {
         self.keys.keys().copied().collect()
     }

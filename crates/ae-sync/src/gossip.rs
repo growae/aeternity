@@ -337,6 +337,33 @@ pub fn create(
     let binding = crate::bindings::Admission::fixed(&db, admission);
     create_bound(db, binding, peers, incoming, network, consensus, config)
 }
+// Explicit local composition with an existing authoritative vote client.
+// Managed node startup still owns its consensus/lifecycle enablement checks.
+pub fn create_with_vote_client(
+    db: Arc<Database>,
+    admission: worker::Client,
+    peers: impl Into<pool::Reader>,
+    incoming: pool::Events,
+    network: NetworkProfile,
+    config: Config,
+    votes: crate::votes::Client,
+) -> Result<(Handle, Events, Service), Error> {
+    if !admission.uses_database(&db) || !votes.uses_database(&db) {
+        return Err(Error::Configuration);
+    }
+    let binding = crate::bindings::Admission::fixed(&db, admission);
+    let votes = crate::votes::Binding::fixed(&db, votes);
+    create_with_votes(
+        db,
+        binding,
+        peers,
+        incoming,
+        network,
+        ConsensusType::Pos,
+        config,
+        Some(votes),
+    )
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_bound(
     db: Arc<Database>,

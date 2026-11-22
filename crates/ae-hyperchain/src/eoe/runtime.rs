@@ -23,6 +23,8 @@ use std::{
 
 mod client;
 pub use client::{Call, CallError, Client};
+mod votes;
+pub use votes::{VoteQuery, VoteSnapshot};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -30,6 +32,7 @@ pub struct Config {
     pub output_capacity: usize,
     pub batch_steps: usize,
     pub maximum_command_bytes: usize,
+    pub maximum_vote_reply_bytes: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -38,6 +41,7 @@ impl Default for Config {
             output_capacity: 64,
             batch_steps: 64,
             maximum_command_bytes: 16 * 1024 * 1024,
+            maximum_vote_reply_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -56,6 +60,7 @@ pub enum Command<A = MemoryStore, C = MemoryStore> {
     Entropy(Unsigned),
     ForgetParent(Unsigned),
     NewEpoch(Unsigned),
+    Votes(VoteQuery),
     SelectTip(SelectedTip<A, C>),
     GossipCache(BTreeSet<Hash256>),
     Finalize {
@@ -72,6 +77,7 @@ pub enum Applied {
     Unit,
     Admission(PushOutcome),
     Entropy(Option<Vec<u8>>),
+    Votes(VoteSnapshot),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
@@ -120,6 +126,8 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
             || config.output_capacity == 0
             || config.batch_steps == 0
             || config.maximum_command_bytes == 0
+            || config.maximum_vote_reply_bytes == 0
+            || config.maximum_vote_reply_bytes > 1 << 30
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -131,7 +139,11 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
         let stop = Arc::new(AtomicBool::new(false));
         coordinator.set_shutdown(stop.clone());
         let worker_stop = stop.clone();
-        let control = Arc::new(client::Control::new(stop.clone(), config));
+        let control = Arc::new(client::Control::new(
+            stop.clone(),
+            config,
+            coordinator.host().network().clone(),
+        ));
         let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name("ae-hc-eoe".into())
@@ -142,8 +154,17 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
                         self.0.alive.store(false, Ordering::Release);
                     }
                 }
+                let replies = worker_control.vote_replies.clone();
                 let _end = End(worker_control);
-                run(coordinator, order, config, commands, outputs, worker_stop)
+                run(
+                    coordinator,
+                    order,
+                    config,
+                    commands,
+                    outputs,
+                    worker_stop,
+                    replies,
+                )
             })?;
         Ok(Self {
             sender: Some(sender),
@@ -240,6 +261,10 @@ fn command_size<A, C>(command: &Command<A, C>, maximum: usize) -> Result<(), Fai
             budget.add(n.as_bytes().len())?
         }
         Command::GossipCache(hashes) => budget.add(hashes.len().saturating_mul(32))?,
+        Command::Votes(query) => {
+            budget.add(query.epoch.as_bytes().len())?;
+            budget.add(query.kind.as_ref().map_or(0, |n| n.as_bytes().len()))?;
+        }
         _ => {}
     };
     Ok(())
@@ -251,6 +276,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
     commands: Receiver<Request<A, C>>,
     outputs: SyncSender<Output>,
     stop: Arc<AtomicBool>,
+    replies: Arc<votes::Budget>,
 ) {
     let started = Instant::now();
     let start_ms = service.now();
@@ -300,7 +326,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                 let retry = matches!(command, Command::Retry | Command::Configure(_));
                 let result = service
                     .advance(now)
-                    .and_then(|()| apply(&mut service, command, now));
+                    .and_then(|()| apply(&mut service, command, now, &replies));
                 if retry && result.is_ok() {
                     blocked = false;
                 }
@@ -353,6 +379,7 @@ fn apply<A: NodeReader + Clone, C: NodeReader + Clone>(
     service: &mut Coordinator<A, C>,
     command: Command<A, C>,
     now: u64,
+    replies: &Arc<votes::Budget>,
 ) -> Result<Applied, coordinator::Error> {
     match command {
         Command::Negotiate(n) => service.negotiate(n)?,
@@ -367,6 +394,11 @@ fn apply<A: NodeReader + Clone, C: NodeReader + Clone>(
             service.remove_parent(&height);
         }
         Command::NewEpoch(epoch) => service.new_epoch(epoch)?,
+        Command::Votes(query) => {
+            return replies
+                .capture(service.host().pool(), query)
+                .map(Applied::Votes);
+        }
         Command::SelectTip(tip) => service.select_tip(tip),
         Command::GossipCache(hashes) => service.set_gossip_cache(hashes)?,
         Command::Finalize { request, view } => service.request_finalize(request, view, now)?,

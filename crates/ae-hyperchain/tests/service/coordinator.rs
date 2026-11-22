@@ -848,3 +848,84 @@ fn shutdown_returns_unknown_receipt_and_fixed_clients_cannot_follow_replacement(
         .unwrap();
     replacement.shutdown().unwrap();
 }
+
+#[test]
+fn shared_vote_queries_keep_byte_credits_through_clones_and_shutdown() {
+    let rt = runtime::Runtime::spawn(
+        Coordinator::new(
+            host(&[], ServiceLimits::default()),
+            1000.into(),
+            api::Config::default(),
+        ),
+        otp_order::profile(&COORDINATOR["profile"]),
+        runtime::Config {
+            maximum_vote_reply_bytes: 4096,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let client = rt.client();
+    for kind in [VoteType::Vote, VoteType::Commit] {
+        addressed(
+            &client,
+            runtime::Command::Admit {
+                signed: Box::new(vote(Mode::Fork, kind, 2, false)),
+                event: hc_votes::Event::Received,
+            },
+        )
+        .wait(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    }
+    let query = || {
+        runtime::Command::Votes(runtime::VoteQuery {
+            epoch: 7.into(),
+            kind: None,
+            maximum: 10,
+        })
+    };
+    let runtime::Applied::Votes(snapshot) = addressed(&client, query())
+        .wait(Duration::from_secs(2))
+        .unwrap()
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(snapshot.entries(), 2);
+    assert_eq!(snapshot.epoch(), &0.into());
+    assert_eq!(
+        snapshot
+            .votes()
+            .iter()
+            .map(|v| v.vote_type().clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Mode::Fork.type_number(VoteType::Commit),
+            Mode::Fork.type_number(VoteType::Vote)
+        ]
+    );
+    let bytes = client.retained_vote_reply_bytes();
+    assert!(bytes > 256 && bytes <= 4096);
+    let held = snapshot.clone();
+    drop(snapshot);
+    assert_eq!(client.retained_vote_reply_bytes(), bytes);
+    let mut more = vec![];
+    loop {
+        match addressed(&client, query())
+            .wait(Duration::from_secs(2))
+            .unwrap()
+        {
+            Ok(runtime::Applied::Votes(s)) => more.push(s),
+            Err(api::Error::ResourceLimit) => break,
+            other => panic!("unexpected reply {other:?}"),
+        }
+        assert!(more.len() < 16);
+    }
+    drop(more);
+    assert_eq!(client.retained_vote_reply_bytes(), bytes);
+    rt.shutdown().unwrap();
+    assert_eq!(held.entries(), 2);
+    assert_eq!(client.retained_vote_reply_bytes(), bytes);
+    drop(held);
+    assert_eq!(client.retained_vote_reply_bytes(), 0);
+}

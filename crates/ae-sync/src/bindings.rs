@@ -112,6 +112,11 @@ impl Admission {
         Self::fixed_value(db, Pool::new(client))
     }
 }
+impl Binding<crate::votes::Client> {
+    pub(crate) fn fixed(db: &Arc<Database>, client: crate::votes::Client) -> Self {
+        Self::fixed_value(db, client)
+    }
+}
 impl GarbageCollection {
     pub(crate) fn fixed(db: &Arc<Database>, client: gc::Client) -> Self {
         Self::fixed_value(db, client)
