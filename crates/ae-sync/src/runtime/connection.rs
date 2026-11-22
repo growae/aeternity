@@ -152,6 +152,7 @@ impl Handle {
 pub struct Service<O, F> {
     inputs: Inputs<O>,
     dependencies: super::workers::Bindings,
+    upnp_listener: Option<crate::upnp::ListenerLease>,
     cache: Option<admission::CacheController>,
     config: Config,
     outputs: F,
@@ -173,6 +174,8 @@ where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
     let dependencies = super::workers::Bindings {
+        upnp: None,
+        upnp_listener: None,
         keys: None,
         routing: None,
         analytics: None,
@@ -234,9 +237,14 @@ where
         return Err(Error::Configuration);
     }
     if dependencies
-        .routing
+        .upnp
         .as_ref()
-        .is_some_and(|r| !r.uses_database(&inputs.database))
+        .is_some_and(|u| !u.uses_database(&inputs.database))
+        || dependencies.upnp.is_some() != dependencies.upnp_listener.is_some()
+        || dependencies
+            .routing
+            .as_ref()
+            .is_some_and(|r| !r.uses_database(&inputs.database))
         || dependencies
             .analytics
             .as_ref()
@@ -272,6 +280,11 @@ where
     {
         return Err(Error::Configuration);
     }
+    let upnp_listener = dependencies
+        .upnp_listener
+        .as_ref()
+        .map(|source| source.acquire().map_err(|_| Error::Configuration))
+        .transpose()?;
     let current = Status {
         running: true,
         ..Default::default()
@@ -288,6 +301,7 @@ where
         Service {
             inputs,
             dependencies,
+            upnp_listener,
             cache,
             config,
             outputs,
@@ -491,6 +505,12 @@ where
                                 break;
                             }
                             if !self.current.ready && generation.network.status().ready {
+                                if let Some(listener) = &self.upnp_listener {
+                                    listener.publish(
+                                        generation.network.status().listening,
+                                        self.config.peer.port,
+                                    );
+                                }
                                 ever_ready = true;
                                 self.current.ready = true;
                                 self.generation.send_replace(Some(generation.clone()));
@@ -508,6 +528,9 @@ where
                 }
             }
             self.current.ready = false;
+            if let Some(listener) = &self.upnp_listener {
+                listener.clear();
+            }
             self.generation.send_replace(None);
             self.publish();
             // OTP timestamps the restart decision before terminating siblings.

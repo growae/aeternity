@@ -43,6 +43,9 @@ bs58 = "=0.5.1"
 base64 = "=0.22.1"
 hex = "=0.4.3"
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+httparse = "=1.10.1"
+roxmltree = "=0.21.1"
+netdev = { version = "=0.47.0", default-features = false, features = ["gateway"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

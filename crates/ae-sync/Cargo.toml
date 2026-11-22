@@ -24,6 +24,9 @@ ae-mempool.workspace = true
 ae-types.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+httparse.workspace = true
+roxmltree.workspace = true
+netdev.workspace = true
 
 [dev-dependencies]
 ae-trie.workspace = true

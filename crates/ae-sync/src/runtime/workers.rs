@@ -1,5 +1,5 @@
 use crate::peer::capabilities::worker as capabilities;
-use crate::{analytics, bindings, blocking, pool_gc, resilience, routing};
+use crate::{analytics, bindings, blocking, pool_gc, resilience, routing, upnp};
 use ae_chain::repository::retention;
 use ae_protocol::NetworkProfile;
 use ae_storage::{Database, gc, pool};
@@ -16,6 +16,7 @@ pub struct GarbageCollection {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub upnp: Option<upnp::Config>,
     pub routing: Option<routing::Setup>,
     pub analytics: Option<analytics::Config>,
     pub pool_gc: Option<pool_gc::Config>,
@@ -30,6 +31,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            upnp: None,
             routing: None,
             analytics: None,
             pool_gc: Some(Default::default()),
@@ -45,6 +47,7 @@ impl Default for Config {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Child {
+    Upnp,
     Routing,
     Keys,
     Admission,
@@ -79,6 +82,9 @@ pub struct Status {
     pub running: bool,
     pub ready: bool,
     pub joined: bool,
+    pub upnp_generation: u64,
+    pub upnp: Option<upnp::Info>,
+    pub upnp_cleanup_error: Option<upnp::Error>,
     pub admission_generation: u64,
     pub gc_generation: u64,
     pub keys_generation: u64,
@@ -101,6 +107,8 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Bindings {
+    pub upnp: Option<bindings::Binding<upnp::Client>>,
+    pub upnp_listener: Option<upnp::ListenerSource>,
     pub routing: Option<bindings::MetricsRouting>,
     pub analytics: Option<bindings::PeerAnalytics>,
     pub pool_gc: Option<bindings::Binding<pool_gc::Client>>,
@@ -168,6 +176,8 @@ pub struct Service {
     network: NetworkProfile,
     config: Config,
     cache: pool::worker::GossipCache,
+    upnp: Option<upnp::Worker>,
+    upnp_binding: Option<bindings::Owner<upnp::Client>>,
     admission: Option<pool::worker::Worker>,
     gc: Option<gc::worker::Worker>,
     keys: Option<crate::keys::Worker>,
@@ -200,14 +210,25 @@ pub struct Service {
 pub fn create(
     database: Arc<Database>,
     network: NetworkProfile,
-    config: Config,
+    mut config: Config,
     cache: pool::worker::GossipCache,
 ) -> Result<(Handle, Service), Error> {
     if config.poll.is_zero() || config.poll > Duration::from_secs(1) {
         return Err(Error::Configuration);
     }
+    let upnp_listener = config.upnp.as_mut().map(|config| {
+        let listener = upnp::ListenerSource::default();
+        config.listener = Some(listener.clone());
+        listener
+    });
     let jobs =
         blocking::Pool::named("ae-worker-supervisor", 1, 2, 256).map_err(|_| Error::Worker)?;
+    let (upnp_binding, upnp) = if config.upnp.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
     let (pool_binding, admission) = bindings::Owner::new(&database);
     let (routing_binding, routing) = if config.routing.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
@@ -266,6 +287,8 @@ pub fn create(
             status,
             commands,
             bindings: Bindings {
+                upnp,
+                upnp_listener,
                 admission,
                 gc,
                 keys,
@@ -282,8 +305,10 @@ pub fn create(
             config,
             cache,
             admission: None,
+            upnp_binding,
             gc: None,
             keys: None,
+            upnp: None,
             routing: None,
             routing_owner: None,
             analytics: None,
@@ -313,6 +338,7 @@ pub fn create(
     ))
 }
 enum Started {
+    Upnp(upnp::Worker),
     Resilience(resilience::Worker, Option<resilience::Owner>),
     Capabilities(capabilities::Worker),
     PoolMaintenance(pool_gc::Worker),
@@ -335,6 +361,7 @@ impl Service {
     }
     fn generation(&self, child: Child) -> u64 {
         match child {
+            Child::Upnp => self.current.upnp_generation,
             Child::Resilience => self.current.resilience_generation,
             Child::Capabilities => self.current.capabilities_generation,
             Child::Routing => self.current.routing_generation,
@@ -346,6 +373,7 @@ impl Service {
         }
     }
     fn publish(&mut self) {
+        self.current.upnp = self.upnp.as_ref().map(|w| w.info());
         self.current.resilience = self.resilience.as_ref().map(|w| w.info());
         self.current.capabilities = self.capabilities.as_ref().map(|w| w.info());
         self.current.routing = self.routing.as_ref().map(|w| w.info());
@@ -371,6 +399,12 @@ impl Service {
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::Upnp => upnp::Worker::spawn(config.upnp.ok_or(Error::Missing)?)
+                    .map(Started::Upnp)
+                    .map_err(|e| Error::Start {
+                        child,
+                        reason: e.to_string(),
+                    }),
                 Child::Resilience => {
                     let config = config.resilience.ok_or(Error::Missing)?;
                     let start = || -> Result<Started, resilience::Error> {
@@ -476,6 +510,14 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::Upnp(worker) => {
+                self.upnp_binding
+                    .as_ref()
+                    .expect("configured UPnP")
+                    .install(worker.client(), generation);
+                self.upnp = Some(worker);
+                self.current.upnp_generation = generation;
+            }
             Started::Resilience(worker, owner) => {
                 if let Some(owner) = owner {
                     self.resilience_owner = Some(owner);
@@ -550,6 +592,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::Upnp => {
+                if let Some(binding) = &self.upnp_binding {
+                    binding.withdraw();
+                }
+                self.upnp.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::Resilience => {
                 if let Some(binding) = &self.resilience_binding {
                     binding.withdraw();
@@ -689,6 +742,12 @@ impl Service {
             return Ok(());
         }
         self.healthy()?;
+        if self.config.upnp.is_some() {
+            self.start(Child::Upnp).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         if self.config.routing.is_some() {
             self.start(Child::Routing).await?;
         }
@@ -744,7 +803,9 @@ impl Service {
                 return Ok(());
             }
             self.healthy()?;
-            let exited = if self.routing.as_ref().is_some_and(|w| !w.info().running) {
+            let exited = if self.upnp.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::Upnp)
+            } else if self.routing.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Routing)
             } else if self.keys.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::Keys)
@@ -777,7 +838,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::Upnp && self.config.upnp.is_none()) || (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -792,6 +853,7 @@ impl Service {
         #[cfg(test)]
         if command.stop_only {
             match command.child {
+                Child::Upnp => self.upnp.as_ref().unwrap().request_shutdown(),
                 Child::Resilience => self.resilience.as_ref().unwrap().request_shutdown(),
                 Child::Capabilities => self.capabilities.as_ref().unwrap().request_shutdown(),
                 Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
@@ -805,6 +867,36 @@ impl Service {
         }
         self.replace(command.child).await
     }
+    async fn prepare_upnp(&mut self) {
+        let Some(client) = self.upnp.as_ref().map(|w| w.client()) else {
+            return;
+        };
+        if !client.info().running {
+            return;
+        }
+        let result = if client.info().accepting {
+            match client.prepare_stop() {
+                Ok(ticket) => tokio::time::timeout(upnp::CLEANUP_TIMEOUT, ticket)
+                    .await
+                    .unwrap_or(Err(upnp::Error::Timeout)),
+                Err(e) => Err(e),
+            }
+        } else {
+            // An explicit application prepare_stop may already be in flight.
+            tokio::time::timeout(upnp::CLEANUP_TIMEOUT, async {
+                loop {
+                    let info = client.info();
+                    if info.prepared || !info.running {
+                        break info.last_error.map_or(Ok(()), Err);
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or(Err(upnp::Error::Timeout))
+        };
+        self.current.upnp_cleanup_error = result.err();
+    }
     pub async fn run(mut self) -> Status {
         if let Err(error) = self.run_inner().await
             && !(error == Error::Closed && self.stopping())
@@ -815,6 +907,10 @@ impl Service {
         self.commands.close();
         while let Ok(command) = self.commands.try_recv() {
             let _ = command.reply.send(Err(Error::Closed));
+        }
+        self.prepare_upnp().await;
+        if let Some(binding) = &self.upnp_binding {
+            binding.withdraw();
         }
         self.pool_binding.withdraw();
         if let Some(binding) = &self.routing_binding {
@@ -847,6 +943,7 @@ impl Service {
             Child::Admission,
             Child::Keys,
             Child::Routing,
+            Child::Upnp,
         ] {
             if let Err(error) = self.retire(child).await {
                 self.current.error.get_or_insert(error);
@@ -874,6 +971,9 @@ impl Service {
         if let Some(binding) = &self.resilience_binding {
             binding.close();
         }
+        if let Some(binding) = &self.upnp_binding {
+            binding.close();
+        }
         self.resilience_owner.take();
         self.routing_owner.take();
         self.jobs.stop();
@@ -889,6 +989,9 @@ impl Service {
 mod tests;
 impl Drop for Service {
     fn drop(&mut self) {
+        if let Some(binding) = &self.upnp_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.resilience_binding {
             binding.close();
         }

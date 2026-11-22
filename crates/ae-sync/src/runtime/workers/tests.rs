@@ -1,6 +1,122 @@
 use super::*;
 use crate::test_support::{Node, within};
 
+async fn upnp_settings() -> (upnp::Config, tokio::net::UdpSocket) {
+    let socket = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let std::net::SocketAddr::V4(address) = socket.local_addr().unwrap() else {
+        panic!("IPv4 test")
+    };
+    (
+        upnp::Config {
+            system_gateways: false,
+            network: upnp::Settings {
+                bind: std::net::Ipv4Addr::LOCALHOST,
+                ssdp: address,
+                discovery_timeout: Duration::from_millis(30),
+                request_timeout: Duration::from_millis(30),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        socket,
+    )
+}
+
+#[tokio::test]
+async fn upnp_is_optional_independent_and_shares_the_native_worker_budget() {
+    assert!(Config::default().upnp.is_none());
+    let mut node = Node::new();
+    node.stop_worker();
+    let (upnp, _socket) = upnp_settings().await;
+    let mut config = settings();
+    config.upnp = Some(upnp);
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().upnp.unwrap();
+    let admission = handle.bindings().admission.current().unwrap().client;
+    for index in 0..6 {
+        let status = handle.status();
+        let old = binding.current().unwrap();
+        let (child, generation) = if index % 2 == 0 {
+            (Child::Upnp, status.upnp_generation)
+        } else {
+            (Child::Capabilities, status.capabilities_generation)
+        };
+        stopped_child(&handle, child, generation).await;
+        within(async {
+            loop {
+                let next = handle.status();
+                if !next.running
+                    || (child == Child::Upnp && next.upnp_generation > generation)
+                    || (child == Child::Capabilities && next.capabilities_generation > generation)
+                {
+                    break;
+                }
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        if index < 5 {
+            assert_eq!(handle.status().admission_generation, 1);
+            assert!(admission.info().running);
+            if child == Child::Upnp {
+                assert!(matches!(old.refresh(), Err(upnp::Error::Closed)));
+                assert!(old.info().joined);
+            }
+        }
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert!(status.joined && binding.is_closed());
+    assert!(!admission.info().running);
+}
+
+#[tokio::test]
+async fn upnp_start_failure_precedes_other_children_and_later_failure_cleans_it_up() {
+    for first in [true, false] {
+        let mut node = Node::new();
+        node.stop_worker();
+        let (mut upnp, _socket) = upnp_settings().await;
+        if first {
+            upnp.requests = 0;
+        }
+        let mut config = settings();
+        config.upnp = Some(upnp);
+        if !first {
+            config.capabilities.as_mut().unwrap().queue.requests = 0;
+        }
+        let (handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            config,
+            Default::default(),
+        )
+        .unwrap();
+        let binding = handle.bindings().upnp.unwrap();
+        let status = within(service.run()).await;
+        assert!(
+            matches!(status.error,Some(Error::Start{child,..}) if child==if first {Child::Upnp} else {Child::Capabilities})
+        );
+        assert_eq!(status.upnp_generation, u64::from(!first));
+        assert_eq!(status.admission_generation, u64::from(!first));
+        assert!(binding.is_closed() && status.joined);
+        if !first {
+            let old = binding.snapshot().value.unwrap();
+            assert!(old.info().joined && old.info().prepared);
+            assert_eq!(status.upnp_cleanup_error, None);
+        }
+    }
+}
+
 pub(super) fn settings() -> Config {
     Config {
         admission: pool::worker::Settings {

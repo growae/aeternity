@@ -1,6 +1,8 @@
 mod common;
 #[path = "peer_runtime/connection_owner.rs"]
 mod connection_owner;
+#[path = "peer_runtime/upnp.rs"]
+mod upnp;
 #[path = "peer_runtime/worker_owner.rs"]
 mod worker_owner;
 use ae_p2p::{

@@ -27,5 +27,6 @@ pub mod routing;
 pub mod runtime;
 mod tasks;
 pub mod transport;
+pub mod upnp;
 
 pub mod resilience;
