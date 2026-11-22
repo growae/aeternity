@@ -153,17 +153,73 @@ pub fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     {
         return Err(Error::InvalidGas);
     }
-    let current = Protocol::try_from(header.common.version).map_err(|e| Error::Header(e.into()))?;
-    let previous = parent.headers.previous.common().version;
-    if header.common.version < previous {
-        return Err(Error::VersionRegression);
-    }
     let gas = rewards::unsigned(
         execution
             .network
             .fixed_block_gas_limit()
             .map_or_else(|| rules.admission.configured_gas_limit.clone(), Into::into),
     );
+    let base = pre_transform(
+        trees,
+        header,
+        parent,
+        execution,
+        TransformRules {
+            gas: &gas,
+            custom_forks: &rules.custom_forks,
+            fork_limits: rules.fork_limits,
+            max_calls: rules.max_calls,
+        },
+    )?;
+    let mut next = base.trees;
+    let fees = base.fees;
+    let policy = rewards::Policy::for_network(execution.network, rules.reward_policy.clone());
+    let reward = rewards::grant(
+        &mut next,
+        header,
+        parent.reported_fraud,
+        &rewards::Schedule {
+            history,
+            delay: rules.reward_delay,
+            policy: &policy,
+            max_history: rules.max_reward_history,
+            genesis_hash: rules.genesis_hash,
+        },
+    )
+    .map_err(Error::Rewards)?;
+    Ok(Prepared {
+        trees: next,
+        fees,
+        reward,
+    })
+}
+pub(crate) struct TransformRules<'a> {
+    pub gas: &'a Unsigned,
+    pub custom_forks: &'a forks::CustomForks,
+    pub fork_limits: forks::Limits,
+    pub max_calls: usize,
+}
+pub(crate) struct Transformed<A, C> {
+    pub trees: Trees<A, C>,
+    pub fees: Unsigned,
+}
+// Shared tree expiry and protocol migration. Consensus-specific leader steps
+// and rewards run after this stage in the corresponding executor.
+pub(crate) fn pre_transform<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    trees: &Trees<A, C>,
+    header: &KeyHeader,
+    parent: &Parent<'_>,
+    execution: &transactions::Config<'_, O>,
+    rules: TransformRules<'_>,
+) -> Result<Transformed<A, C>, Error<A, C>> {
+    if parent.fees.sign() == Sign::Minus {
+        return Err(Error::InvalidFees);
+    }
+    let current = Protocol::try_from(header.common.version).map_err(|e| Error::Header(e.into()))?;
+    let previous = parent.headers.previous.common().version;
+    if header.common.version < previous {
+        return Err(Error::VersionRegression);
+    }
     let fees = gas_fees(&trees.calls, rules.max_calls)
         .map_err(Error::GasFees)?
         .add(&rewards::unsigned(parent.fees.clone()));
@@ -196,14 +252,14 @@ pub fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             header,
             header.time,
             key_hash,
-            &rewards::number(&gas),
+            &rewards::number(rules.gas),
             |config| {
                 forks::apply(
                     &mut next,
                     &migration,
                     &context,
                     config,
-                    &gas,
+                    rules.gas,
                     rules.fork_limits,
                 )
             },
@@ -211,25 +267,7 @@ pub fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .map_err(Error::Difficulty)?
         .map_err(Error::Migration)?;
     }
-    let policy = rewards::Policy::for_network(execution.network, rules.reward_policy.clone());
-    let reward = rewards::grant(
-        &mut next,
-        header,
-        parent.reported_fraud,
-        &rewards::Schedule {
-            history,
-            delay: rules.reward_delay,
-            policy: &policy,
-            max_history: rules.max_reward_history,
-            genesis_hash: rules.genesis_hash,
-        },
-    )
-    .map_err(Error::Rewards)?;
-    Ok(Prepared {
-        trees: next,
-        fees,
-        reward,
-    })
+    Ok(Transformed { trees: next, fees })
 }
 #[derive(Debug)]
 pub struct Executed {

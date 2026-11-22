@@ -194,8 +194,13 @@ pub(crate) fn with_block_environment<O: MapOrder, R>(
     gas_limit: &BigInt,
     f: impl FnOnce(&transactions::Config<'_, O>) -> R,
 ) -> Result<R, TargetError> {
-    let difficulty = Target(key.target).difficulty()?;
-    let difficulty = BigInt::from_bytes_be(Sign::Plus, difficulty.as_bytes());
+    let difficulty = match config.consensus {
+        ConsensusType::Pow => {
+            let value = Target(key.target).difficulty()?;
+            BigInt::from_bytes_be(Sign::Plus, value.as_bytes())
+        }
+        ConsensusType::Pos => key.target.into(),
+    };
     let fate_context = config.fate.map(|f| {
         let mut c = f.context.clone();
         c.in_auth = false;
@@ -211,7 +216,10 @@ pub(crate) fn with_block_environment<O: MapOrder, R>(
         e.difficulty = difficulty.clone();
         e.block_gas_limit = gas_limit.clone();
         e.network_id = config.network.network_id().to_vec();
-        e.consensus = Consensus::Pow;
+        e.consensus = match config.consensus {
+            ConsensusType::Pow => Consensus::Pow,
+            ConsensusType::Pos => Consensus::Pos,
+        };
         e.key_hash = key_hash;
         e
     });
@@ -239,7 +247,7 @@ pub(crate) fn with_block_environment<O: MapOrder, R>(
     });
     let config = transactions::Config {
         network: config.network,
-        consensus: ConsensusType::Pow,
+        consensus: config.consensus,
         fate: fate.as_ref(),
         aevm: aevm.as_ref(),
         signature_limits: config.signature_limits,

@@ -369,7 +369,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
             .map_err(|e| Error::Contract(Box::new(e)))
         })
     }
-    pub(crate) fn with_execution<T>(
+    pub fn with_execution<T>(
         &self,
         view: &View<A, C>,
         f: impl FnOnce(&transactions::Config<'_, O>) -> T,

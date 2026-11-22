@@ -221,7 +221,7 @@ pub struct Record {
     pub reported_fraud: Option<bool>,
 }
 pub type History = BTreeMap<Hash256, Record>;
-fn predecessor<'a>(
+pub(crate) fn predecessor<'a>(
     h: &KeyHeader,
     history: &'a History,
     left: &mut usize,

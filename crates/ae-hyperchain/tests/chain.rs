@@ -30,6 +30,8 @@ mod block;
 mod durable;
 #[path = "chain/genesis.rs"]
 mod genesis;
+#[path = "chain/ledger.rs"]
+mod ledger;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
 #[path = "chain/producer.rs"]

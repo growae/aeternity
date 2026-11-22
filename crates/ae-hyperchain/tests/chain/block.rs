@@ -146,7 +146,7 @@ pub(super) fn cache(s: &b::State) -> J {
         ("schedule",map(s.leaders.schedule().iter().map(|(h,p)|(int(h),object(p))).collect()))]),
         "starts":list(s.epoch_starts.iter().map(|e|tuple(vec![int(&e.epoch),int(&e.height),int(&e.time)])).collect())})
 }
-fn events(es: Vec<b::Event>) -> J {
+pub(super) fn events(es: Vec<b::Event>) -> J {
     list(
         es.into_iter()
             .map(|e| match e {
