@@ -9,6 +9,7 @@ use tokio::{
 };
 
 mod ownership;
+mod transport;
 
 fn settings() -> Settings {
     Settings {
@@ -155,7 +156,8 @@ fn native_protocol_fixture_preserves_v1_and_records_v2_repairs() {
         let version = if row["backend"] == "natupnp_v2" { 2 } else { 1 };
         let result = xml::control(row["xml"].as_str().unwrap().as_bytes(), &url, version, &s);
         match row["name"].as_str().unwrap() {
-            "v1_relative" | "v1_absolute" => assert!(result.is_err()),
+            "v1_relative" => assert_eq!(result.unwrap().0.path, "/folder/control"),
+            "v1_absolute" => assert_eq!(result.unwrap().0.path, "/control"),
             _ => assert_eq!(
                 result.unwrap().0,
                 http::Url::parse(row["result"]["url"].as_str().unwrap()).unwrap()
@@ -225,7 +227,7 @@ fn http_urls_framing_and_chunk_limits() {
     assert_eq!(url.path, "/root?a=b");
     assert_eq!(url.control("/control").unwrap().path, "/control");
     for bad in [
-        "https://127.0.0.1/",
+        "ftp://127.0.0.1/",
         "http://127.0.0.1:0/",
         "http://user@127.0.0.1/",
         "http://127.0.0.1/\r\nX: x",
@@ -234,8 +236,11 @@ fn http_urls_framing_and_chunk_limits() {
     ] {
         assert!(http::Url::parse(bad).is_err(), "{bad}");
     }
-    assert!(url.control("relative").is_err());
-    assert!(url.control("//192.0.2.1/control").is_err());
+    assert_eq!(url.control("relative").unwrap().path, "/relative");
+    assert_eq!(
+        url.control("//192.0.2.1/control").unwrap().host(),
+        "192.0.2.1"
+    );
     for bad in [
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n".as_slice(),
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n",

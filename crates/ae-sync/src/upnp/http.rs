@@ -1,90 +1,46 @@
 use super::{Error, Settings};
-use std::net::{Ipv4Addr, SocketAddrV4};
-use tokio::net::{TcpSocket, TcpStream};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Url {
-    pub address: SocketAddrV4,
-    pub path: String,
-}
-impl Url {
-    pub fn parse(input: &str) -> Result<Self, Error> {
-        if input.len() > 4096 || input.bytes().any(|b| b <= 32 || b >= 127) {
-            return Err(Error::Address);
-        }
-        let tail = input.strip_prefix("http://").ok_or(Error::Address)?;
-        let split = tail.find(['/', '?', '#']).unwrap_or(tail.len());
-        let authority = &tail[..split];
-        let (host, port) = match authority.split_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().map_err(|_| Error::Address)?),
-            None => (authority, 80),
-        };
-        let ip = host.parse::<Ipv4Addr>().map_err(|_| Error::Address)?;
-        if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() || port == 0 {
-            return Err(Error::Address);
-        }
-        let path = tail[split..].split('#').next().unwrap_or("");
-        let path = if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            format!("/{path}")
-        };
-        Ok(Self {
-            address: SocketAddrV4::new(ip, port),
-            path,
-        })
-    }
-    pub fn control(&self, path: &str) -> Result<Self, Error> {
-        // The reference library uses the description's origin, not URLBase.
-        // Require an origin-relative path instead of silently constructing a
-        // malformed URL from an absolute or directory-relative controlURL.
-        if !path.starts_with('/') || path.starts_with("//") {
-            return Err(Error::Address);
-        }
-        Self::parse(&format!("http://{}{}", self.address, path))
-    }
-}
+use std::{future::poll_fn, pin::Pin};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+mod address;
+mod transport;
+pub(super) use address::Url;
+pub(super) use transport::{Endpoint, Transport};
 
 #[derive(Debug)]
 pub(super) struct Response {
     pub status: u16,
     pub body: Vec<u8>,
 }
-
+struct Received {
+    response: Response,
+    location: Option<String>,
+}
+#[cfg(test)]
 pub(super) async fn request(
     url: &Url,
-    local: Ipv4Addr,
+    local: std::net::Ipv4Addr,
     soap: Option<(&str, &str)>,
     settings: &Settings,
 ) -> Result<Response, Error> {
-    tokio::time::timeout(settings.request_timeout, async {
-        let socket = TcpSocket::new_v4()?;
-        socket.bind(SocketAddrV4::new(local,0).into())?;
-        let stream = socket.connect(url.address.into()).await?;
-        let mut request = match soap {
-            None => format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", url.path, url.address),
-            Some((action, body)) => format!(
-                "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-cache\r\nPragma: no-cache\r\n\r\n{}",
-                url.path,url.address,action,body.len(),body),
-        }.into_bytes();
-        // The request is generated solely from validated URLs and fixed XML.
-        if request.len() > settings.header_bytes + settings.body_bytes { return Err(Error::Limit); }
-        write(&stream, &request).await?;
-        request.clear();
-        read(&stream, settings).await
-    }).await.map_err(|_| Error::Timeout)?
-}
-
-async fn write(stream: &TcpStream, mut bytes: &[u8]) -> Result<(), Error> {
-    while !bytes.is_empty() {
-        stream.writable().await?;
-        match stream.try_write(bytes) {
-            Ok(0) => return Err(Error::Io(std::io::ErrorKind::WriteZero)),
-            Ok(n) => bytes = &bytes[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e.into()),
+    let transport = Transport::new(std::sync::Arc::new(settings.clone()))?;
+    match soap {
+        None => transport.fetch(url, local).await.map(|f| f.response),
+        Some((action, body)) => {
+            transport
+                .post(&transport.resolve(url).await?, local, action, body)
+                .await
         }
     }
+}
+async fn write<S: AsyncWrite + Unpin>(stream: &mut S, mut bytes: &[u8]) -> Result<(), Error> {
+    while !bytes.is_empty() {
+        let n = poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, bytes)).await?;
+        if n == 0 {
+            return Err(Error::Io(std::io::ErrorKind::WriteZero));
+        }
+        bytes = &bytes[n..];
+    }
+    poll_fn(|cx| Pin::new(&mut *stream).poll_flush(cx)).await?;
     Ok(())
 }
 
@@ -220,26 +176,52 @@ impl Chunks {
     }
 }
 
-async fn read(stream: &TcpStream, settings: &Settings) -> Result<Response, Error> {
+fn redirect_location(raw: &[u8]) -> Result<Option<String>, Error> {
+    let mut fields = [httparse::EMPTY_HEADER; 64];
+    let mut response = httparse::Response::new(&mut fields);
+    response.parse(raw).map_err(|_| Error::Http)?;
+    let mut location = None;
+    for h in response
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("Location"))
+    {
+        if location.is_some() {
+            return Err(Error::Http);
+        }
+        if h.value.len() > 4096 {
+            return Err(Error::Limit);
+        }
+        location = Some(
+            std::str::from_utf8(h.value)
+                .map_err(|_| Error::Address)?
+                .trim()
+                .to_owned(),
+        );
+    }
+    Ok(location)
+}
+async fn read<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    settings: &Settings,
+) -> Result<Received, Error> {
     let mut raw = Vec::new();
     let mut parsed = None;
     let mut chunks = Chunks::default();
     let wire_limit = settings.body_bytes * 2 + settings.header_bytes * 2;
     loop {
-        stream.readable().await?;
         let mut buffer = [0u8; 4096];
-        let n = match stream.try_read(&mut buffer) {
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e.into()),
-        };
+        let mut target = ReadBuf::new(&mut buffer);
+        poll_fn(|cx| Pin::new(&mut *stream).poll_read(cx, &mut target)).await?;
+        let n = target.filled().len();
         if n > wire_limit.saturating_sub(raw.len()) {
             return Err(Error::Limit);
         }
         raw.extend_from_slice(&buffer[..n]);
         if parsed.is_none() {
             if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-                parsed = Some(headers(&raw, settings)?);
+                let (status, end, framing) = headers(&raw, settings)?;
+                parsed = Some((status, end, framing, redirect_location(&raw[..end])?));
             } else if raw.len() > settings.header_bytes {
                 return Err(Error::Limit);
             } else if n == 0 {
@@ -248,7 +230,7 @@ async fn read(stream: &TcpStream, settings: &Settings) -> Result<Response, Error
                 continue;
             }
         }
-        let (status, end, ref framing) = *parsed.as_ref().expect("parsed response");
+        let (status, end, ref framing, ref location) = *parsed.as_ref().expect("parsed response");
         let body = &raw[end..];
         let complete = match framing {
             Framing::Length(length) if body.len() > *length => return Err(Error::Http),
@@ -263,7 +245,10 @@ async fn read(stream: &TcpStream, settings: &Settings) -> Result<Response, Error
             Framing::Chunked => chunks.advance(body, settings)?,
         };
         if let Some(body) = complete {
-            return Ok(Response { status, body });
+            return Ok(Received {
+                response: Response { status, body },
+                location: location.clone(),
+            });
         }
         if n == 0 {
             return Err(Error::Http);

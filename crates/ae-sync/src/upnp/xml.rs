@@ -64,7 +64,23 @@ pub(super) fn control(
         .children()
         .find(|n| n.has_tag_name("service") && text(*n, "serviceType") == Ok(expected.as_str()))
         .ok_or(Error::Xml)?;
-    Ok((root.control(text(entry, "controlURL")?)?, version))
+    let mut bases = doc
+        .root_element()
+        .children()
+        .filter(|n| n.has_tag_name("URLBase"));
+    let base = if bases.next().is_some() {
+        if bases.next().is_some() {
+            return Err(Error::Xml);
+        }
+        let value = text(doc.root_element(), "URLBase")?;
+        // URLBase, when present, must be absolute. Resolve the control URL
+        // against it; otherwise use the final description URL after redirects.
+        http::Url::parse(value)?;
+        root.control(value)?
+    } else {
+        root.clone()
+    };
+    Ok((base.control(text(entry, "controlURL")?)?, version))
 }
 
 #[derive(Debug, Clone, Copy)]

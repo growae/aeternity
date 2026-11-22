@@ -77,6 +77,9 @@ pub enum Error {
     Soap(u16),
     NatPmp(u16),
     Io(io::ErrorKind),
+    Dns(io::ErrorKind),
+    Tls(String),
+    Redirect,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,6 +90,21 @@ impl std::error::Error for Error {}
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Self::Io(e.kind())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Https {
+    pub public_roots: bool,
+    // Additional DER trust anchors, e.g. a locally administered router CA.
+    pub roots: Vec<Vec<u8>>,
+}
+impl Default for Https {
+    fn default() -> Self {
+        Self {
+            public_roots: true,
+            roots: vec![],
+        }
     }
 }
 
@@ -103,6 +121,8 @@ pub struct Settings {
     pub header_bytes: usize,
     pub body_bytes: usize,
     pub xml_nodes: u32,
+    pub redirects: u8,
+    pub https: Https,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -117,12 +137,22 @@ impl Default for Settings {
             header_bytes: 16 * 1024,
             body_bytes: 1024 * 1024,
             xml_nodes: 16384,
+            redirects: 5,
+            https: Https::default(),
         }
     }
 }
 impl Settings {
     fn validate(&self) -> Result<(), Error> {
         if self.gateways.len() > 32
+            || self.redirects > 16
+            || self.https.roots.len() > 32
+            || self
+                .https
+                .roots
+                .iter()
+                .any(|r| r.is_empty() || r.len() > 65536)
+            || self.https.roots.iter().map(Vec::len).sum::<usize>() > 1024 * 1024
             || self.ssdp.port() == 0
             || self
                 .gateways

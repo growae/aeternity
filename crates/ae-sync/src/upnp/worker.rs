@@ -238,8 +238,7 @@ impl Worker {
                             return Err(Error::Spawn);
                         }
                     };
-                    let _ = ready.send(Ok(()));
-                    runtime.block_on(run(
+                    let driver = run(
                         config,
                         shared.clone(),
                         receiver,
@@ -247,7 +246,9 @@ impl Worker {
                         stopped,
                         initial,
                         renewal,
-                    ));
+                    );
+                    let _ = ready.send(Ok(()));
+                    runtime.block_on(driver);
                     Ok(())
                 }));
                 let mut info = shared.lock();
@@ -383,7 +384,7 @@ async fn prepare(config: &Config) -> Result<(), Error> {
         .await
         .map_err(|_| Error::Timeout)?
 }
-async fn run(
+fn run(
     config: Config,
     shared: Arc<Shared>,
     mut commands: mpsc::Receiver<Command>,
@@ -391,85 +392,154 @@ async fn run(
     mut stopped: watch::Receiver<bool>,
     initial: Duration,
     renewal: Duration,
-) {
-    let mut attempts = JoinSet::new();
-    let mut next = Instant::now() + initial;
-    let mut prepared = false;
+) -> impl Future<Output = ()> {
+    // Capture notifications before acknowledging startup. Publications between
+    // construction and the first poll must not be mistaken for initial state.
     let mut listener = config.listener.as_ref().map(ListenerSource::subscribe);
-    loop {
-        {
-            let mut info = shared.lock();
-            info.retained_mappings = config.ports.retained_mappings();
-            info.uncertain_mappings = config.ports.uncertain_mappings();
-            info.retiring_mappings = config.ports.retiring_mappings();
-        }
-        if *stopped.borrow() || stopped.has_changed().is_err() {
-            break;
-        }
-        tokio::select! {
-            biased;
-            _=stopped.changed()=>break,
-            cleanup=cleanups.recv(),if !prepared=>{
-                let Some(reply)=cleanup else {break;};
-                cancel(&mut attempts,&shared).await;
-                let result=tokio::select! {
-                    biased;
-                    _=stopped.changed()=>Err(Error::Closed),
-                    result=prepare(&config)=>result,
-                };
-                {let mut info=shared.lock();info.preparing=false;info.prepared=true;info.mapping=None;info.last_error=result.as_ref().err().cloned();}
-                prepared=true;
-                let _=reply.send(result);
-            },
-            _=async { match &mut listener { Some(source)=>{let _=source.changed().await;},None=>std::future::pending().await } },if !prepared=>{
-                cancel(&mut attempts,&shared).await;
-                shared.lock().mapping=None;
-                if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
-                    retire(&mut attempts,&shared,&config).await;
-                }
-                next=Instant::now()+renewal;
-            },
-            _=sleep_until(next),if !prepared=>{
-                if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
-                    retire(&mut attempts,&shared,&config).await;
-                }
-                next=Instant::now()+renewal;
-            },
-            result=attempts.join_next(),if !attempts.is_empty()=>{
-                let result=result.expect("active mapping attempt").unwrap_or(Err(Error::Panicked));
-                let mut info=shared.lock();info.active=false;
-                if info.retiring {info.retirement_completions=info.retirement_completions.saturating_add(1);} else {info.completed=info.completed.saturating_add(1);}
-                info.retiring=false;
-                match result {Ok(Outcome::Mapped(mapping))=>{info.mapping=Some(mapping);info.last_error=None;},Ok(Outcome::Retired)=>{info.mapping=None;info.last_error=None;},Err(e)=>info.last_error=Some(e)}
-            },
-            command=commands.recv()=>match command {
-                None=>break,
-                Some(Command::Refresh(reply))=>{
-                    let result=if prepared {Err(Error::Closed)} else {let result=start(&mut attempts,&shared,&config).await;next=Instant::now()+renewal;result};
-                    shared.lock().pending-=1;let _=reply.send(result);
-                },
-                #[cfg(test)]
-                Some(Command::Fail)=>panic!("injected port mapping owner failure"),
-                #[cfg(test)]
-                Some(Command::Pause(entered,release))=>{let _=entered.send(());let _=release.recv();},
-            },
-        }
-    }
-    cancel(&mut attempts, &shared).await;
-    commands.close();
-    cleanups.close();
-    while let Ok(command) = commands.try_recv() {
-        match command {
-            Command::Refresh(reply) => {
-                let _ = reply.send(Err(Error::Closed));
+    async move {
+        let mut attempts = JoinSet::new();
+        let mut next = Instant::now() + initial;
+        let mut prepared = false;
+        loop {
+            {
+                let mut info = shared.lock();
+                info.retained_mappings = config.ports.retained_mappings();
+                info.uncertain_mappings = config.ports.uncertain_mappings();
+                info.retiring_mappings = config.ports.retiring_mappings();
             }
-            #[cfg(test)]
-            Command::Fail => {}
-            #[cfg(test)]
-            Command::Pause(_, _) => {}
+            if *stopped.borrow() || stopped.has_changed().is_err() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _=stopped.changed()=>break,
+                cleanup=cleanups.recv(),if !prepared=>{
+                    let Some(reply)=cleanup else {break;};
+                    cancel(&mut attempts,&shared).await;
+                    let result=tokio::select! {
+                        biased;
+                        _=stopped.changed()=>Err(Error::Closed),
+                        result=prepare(&config)=>result,
+                    };
+                    {let mut info=shared.lock();info.preparing=false;info.prepared=true;info.mapping=None;info.last_error=result.as_ref().err().cloned();}
+                    prepared=true;
+                    let _=reply.send(result);
+                },
+                _=async { match &mut listener { Some(source)=>{let _=source.changed().await;},None=>std::future::pending().await } },if !prepared=>{
+                    cancel(&mut attempts,&shared).await;
+                    shared.lock().mapping=None;
+                    if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
+                        retire(&mut attempts,&shared,&config).await;
+                    }
+                    next=Instant::now()+renewal;
+                },
+                _=sleep_until(next),if !prepared=>{
+                    if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
+                        retire(&mut attempts,&shared,&config).await;
+                    }
+                    next=Instant::now()+renewal;
+                },
+                result=attempts.join_next(),if !attempts.is_empty()=>{
+                    let result=result.expect("active mapping attempt").unwrap_or(Err(Error::Panicked));
+                    let mut info=shared.lock();info.active=false;
+                    if info.retiring {info.retirement_completions=info.retirement_completions.saturating_add(1);} else {info.completed=info.completed.saturating_add(1);}
+                    info.retiring=false;
+                    match result {Ok(Outcome::Mapped(mapping))=>{info.mapping=Some(mapping);info.last_error=None;},Ok(Outcome::Retired)=>{info.mapping=None;info.last_error=None;},Err(e)=>info.last_error=Some(e)}
+                },
+                command=commands.recv()=>match command {
+                    None=>break,
+                    Some(Command::Refresh(reply))=>{
+                        let result=if prepared {Err(Error::Closed)} else {let result=start(&mut attempts,&shared,&config).await;next=Instant::now()+renewal;result};
+                        shared.lock().pending-=1;let _=reply.send(result);
+                    },
+                    #[cfg(test)]
+                    Some(Command::Fail)=>panic!("injected port mapping owner failure"),
+                    #[cfg(test)]
+                    Some(Command::Pause(entered,release))=>{let _=entered.send(());let _=release.recv();},
+                },
+            }
+        }
+        cancel(&mut attempts, &shared).await;
+        commands.close();
+        cleanups.close();
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                Command::Refresh(reply) => {
+                    let _ = reply.send(Err(Error::Closed));
+                }
+                #[cfg(test)]
+                Command::Fail => {}
+                #[cfg(test)]
+                Command::Pause(_, _) => {}
+            }
+        }
+        while let Ok(reply) = cleanups.try_recv() {
+            let _ = reply.send(Err(Error::Closed));
         }
     }
-    while let Ok(reply) = cleanups.try_recv() {
-        let _ = reply.send(Err(Error::Closed));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn listener_publication_before_first_poll_starts_discovery_without_waiting_for_timer() {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = match socket.local_addr().unwrap() {
+            std::net::SocketAddr::V4(address) => address,
+            _ => unreachable!(),
+        };
+        let gate = ListenerSource::default();
+        let lease = gate.acquire().unwrap();
+        let config = Config {
+            listener: Some(gate),
+            system_gateways: false,
+            network: Settings {
+                bind: Ipv4Addr::LOCALHOST,
+                ssdp: address,
+                ..Settings::default()
+            },
+            ..Config::default()
+        };
+        let (stop, stopped) = watch::channel(false);
+        let shared = Arc::new(Shared {
+            info: Mutex::new(Info::default()),
+            stop,
+            limit: 1,
+        });
+        let (_commands, commands) = mpsc::channel(1);
+        let (_cleanups, cleanups) = mpsc::channel(1);
+        let driver = run(
+            config,
+            shared.clone(),
+            commands,
+            cleanups,
+            stopped,
+            Duration::from_secs(60),
+            RENEWAL_INTERVAL,
+        );
+        // This is the constructor-ready/first-poll interval that used to lose
+        // the notification. A long initial timer makes the regression explicit.
+        lease.publish(Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6000)), 7000);
+        let driver = tokio::spawn(driver);
+        let mut bytes = [0; 4096];
+        let observed = timeout(Duration::from_secs(2), socket.recv_from(&mut bytes)).await;
+        shared.stop();
+        timeout(Duration::from_secs(2), driver)
+            .await
+            .unwrap()
+            .unwrap();
+        let (n, _) = observed.unwrap().unwrap();
+        assert!(
+            std::str::from_utf8(&bytes[..n])
+                .unwrap()
+                .starts_with("M-SEARCH ")
+        );
+        assert_eq!(shared.lock().attempts, 1);
+        assert!(!shared.lock().active);
+        assert_eq!(shared.lock().cancelled, 1);
     }
 }

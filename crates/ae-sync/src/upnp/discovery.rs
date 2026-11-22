@@ -17,7 +17,7 @@ enum Backend {
         local: Ipv4Addr,
     },
     Upnp {
-        url: http::Url,
+        endpoint: http::Endpoint,
         local: Ipv4Addr,
         version: u8,
     },
@@ -36,6 +36,7 @@ impl Gateway {
 #[derive(Debug, Clone)]
 pub struct Network {
     settings: Arc<Settings>,
+    transport: Arc<http::Transport>,
 }
 impl Network {
     // Queries local interface/route metadata only. Actual gateway discovery
@@ -45,8 +46,11 @@ impl Network {
     }
     pub fn new(settings: Settings) -> Result<Self, Error> {
         settings.validate()?;
+        let settings = Arc::new(settings);
+        let transport = Arc::new(http::Transport::new(settings.clone())?);
         Ok(Self {
-            settings: Arc::new(settings),
+            settings,
+            transport,
         })
     }
     // All competing attempts are owned futures: dropping this call closes
@@ -56,8 +60,9 @@ impl Network {
             let mut tasks = Tasks::new();
             for version in [1, 2] {
                 let settings = self.settings.clone();
+                let transport = self.transport.clone();
                 tasks.insert(u16::from(version), async move {
-                    upnp(version, &settings).await.map(Gateway)
+                    upnp(version, &settings, &transport).await.map(Gateway)
                 });
             }
             for (index, gateway) in self.settings.gateways.iter().copied().enumerate() {
@@ -108,7 +113,7 @@ impl Network {
                 pmp::map(*address, ports, super::MAPPING_LIFETIME, &settings).await
             }
             Backend::Upnp {
-                url,
+                endpoint,
                 local,
                 version,
             } => {
@@ -124,7 +129,7 @@ impl Network {
                         ports
                     };
                     match self
-                        .upnp_add(url, *local, *version, ports, description)
+                        .upnp_add(endpoint, *local, *version, ports, description)
                         .await
                     {
                         Ok(mapping) => return Ok(mapping),
@@ -137,7 +142,7 @@ impl Network {
     }
     async fn upnp_add(
         &self,
-        url: &http::Url,
+        endpoint: &http::Endpoint,
         local: Ipv4Addr,
         version: u8,
         ports: Ports,
@@ -148,8 +153,7 @@ impl Network {
             let started = Instant::now();
             let action = xml::Action::Add { ports, lifetime };
             let (header, body) = xml::request_named(action, version, local, description);
-            let response =
-                http::request(url, local, Some((&header, &body)), &self.settings).await?;
+            let response = self.transport.post(endpoint, local, &header, &body).await?;
             match xml::response(&response, action, version, &self.settings) {
                 Err(Error::Soap(725)) if lifetime != 0 => lifetime = 0,
                 Err(e) => return Err(e),
@@ -184,7 +188,7 @@ impl Network {
                 pmp::map(*address, ports, 0, &settings).await?;
             }
             Backend::Upnp {
-                url,
+                endpoint,
                 local,
                 version,
             } => {
@@ -192,8 +196,10 @@ impl Network {
                     external: ports.external,
                 };
                 let (header, body) = xml::request(action, *version, *local);
-                let response =
-                    http::request(url, *local, Some((&header, &body)), &self.settings).await?;
+                let response = self
+                    .transport
+                    .post(endpoint, *local, &header, &body)
+                    .await?;
                 xml::response(&response, action, *version, &self.settings)?;
             }
         }
@@ -207,7 +213,7 @@ impl Network {
         known: Option<u16>,
     ) -> Result<Vec<u16>, Error> {
         let Backend::Upnp {
-            url,
+            endpoint,
             local,
             version,
         } = &gateway.0
@@ -224,8 +230,10 @@ impl Network {
         };
         let query = async |action| {
             let (header, body) = xml::request(action, *version, *local);
-            let response =
-                http::request(url, *local, Some((&header, &body)), &self.settings).await?;
+            let response = self
+                .transport
+                .post(endpoint, *local, &header, &body)
+                .await?;
             xml::entry(&response, action, *version, &self.settings)
         };
         if let Some(external) = known {
@@ -292,7 +300,11 @@ pub(super) fn location(raw: &[u8], version: u8) -> Result<Option<http::Url>, Err
     http::Url::parse(std::str::from_utf8(location.ok_or(Error::Http)?).map_err(|_| Error::Address)?)
         .map(Some)
 }
-async fn upnp(version: u8, settings: &Settings) -> Result<Backend, Error> {
+async fn upnp(
+    version: u8,
+    settings: &Settings,
+    transport: &http::Transport,
+) -> Result<Backend, Error> {
     let socket = UdpSocket::bind(SocketAddrV4::new(settings.bind, 0)).await?;
     socket.set_multicast_ttl_v4(2)?;
     let search = msearch(version);
@@ -322,21 +334,24 @@ async fn upnp(version: u8, settings: &Settings) -> Result<Backend, Error> {
                 SocketAddr::V4(a) => *a.ip(),
                 _ => return Err(Error::Address),
             };
-            let response = http::request(&root, local, None, settings).await?;
+            let fetched = transport.fetch(&root, local).await?;
+            let response = fetched.response;
             if response.status != 200 {
                 return Err(Error::HttpStatus(response.status));
             }
-            let (url, service_version) = xml::control(&response.body, &root, version, settings)?;
+            let (url, service_version) =
+                xml::control(&response.body, &fetched.endpoint.url, version, settings)?;
+            let endpoint = transport.endpoint(url, &fetched.endpoint).await?;
             if version == 2 {
                 let action = xml::Action::NatStatus;
                 let (header, body) = xml::request(action, service_version, local);
-                let response = http::request(&url, local, Some((&header, &body)), settings).await?;
+                let response = transport.post(&endpoint, local, &header, &body).await?;
                 if xml::response(&response, action, service_version, settings)? != Some(1) {
                     return Err(Error::NoGateway);
                 }
             }
             return Ok(Backend::Upnp {
-                url,
+                endpoint,
                 local,
                 version: service_version,
             });
