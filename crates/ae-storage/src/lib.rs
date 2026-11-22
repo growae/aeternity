@@ -20,6 +20,7 @@ pub mod peers;
 pub mod policy;
 pub mod pool;
 pub mod replay;
+pub mod snapshots;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Notifications {
@@ -43,6 +44,7 @@ pub struct Database {
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
     hyperchain_owner: Mutex<std::sync::Weak<()>>,
+    snapshot_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
     gc_events: gc::events::Source,
     #[cfg(test)]
@@ -237,6 +239,7 @@ impl Database {
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
             hyperchain_owner: Mutex::new(Default::default()),
+            snapshot_owner: Mutex::new(Default::default()),
             events: events::Source::new(event_status, notifications.chain),
             gc_events: gc::events::Source::new(gc_state, event_status, notifications.gc),
             #[cfg(test)]

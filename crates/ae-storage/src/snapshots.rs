@@ -1,0 +1,239 @@
+// Owned immutable trie access for services whose lifetime cannot borrow a DB.
+// Each bounded worker owns the database Arc and borrows its actual snapshot
+// on its own stack. No lifetime extension or mutable live-read adapter.
+use crate::{Database, Snapshot, events};
+use ae_chain::{repository as repo, resilience};
+use ae_crypto::blake2b_256;
+use ae_trie::{Error as TrieError, NodeReader};
+use ae_types::Hash256;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, SyncSender, TrySendError},
+    },
+    thread::{self, JoinHandle},
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    pub maximum_snapshots: usize,
+    pub command_capacity: usize,
+    pub maximum_node_bytes: usize,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            maximum_snapshots: 8,
+            command_capacity: 16,
+            maximum_node_bytes: 64 << 20,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    Config,
+    AlreadyRunning,
+    ResourceLimit,
+    Repository(repo::Error),
+    Worker(String),
+}
+struct Shared {
+    database: Arc<Database>,
+    config: Config,
+    live: AtomicUsize,
+    _lease: Arc<()>,
+}
+// One configuration/limit owner per open database. Outstanding readers retain
+// the lease even after this factory is dropped; replacement cannot evade limits.
+#[derive(Clone)]
+pub struct Owner(Arc<Shared>);
+impl Owner {
+    pub fn start(database: Arc<Database>, config: Config) -> Result<Self, Error> {
+        if !(1..=128).contains(&config.maximum_snapshots)
+            || !(1..=1024).contains(&config.command_capacity)
+            || !(1..=1 << 30).contains(&config.maximum_node_bytes)
+        {
+            return Err(Error::Config);
+        }
+        let lease = Arc::new(());
+        {
+            let mut owner = database
+                .snapshot_owner
+                .lock()
+                .map_err(|_| Error::Worker("poisoned snapshot ownership".into()))?;
+            if owner.upgrade().is_some() {
+                return Err(Error::AlreadyRunning);
+            }
+            *owner = Arc::downgrade(&lease);
+        }
+        Ok(Self(Arc::new(Shared {
+            database,
+            config,
+            live: AtomicUsize::new(0),
+            _lease: lease,
+        })))
+    }
+    pub fn live_snapshots(&self) -> usize {
+        self.0.live.load(Ordering::Acquire)
+    }
+    // The inspection and all subsequent node reads use the same snapshot.
+    // Inspect metadata/roots here; leave account/contract lookups lazy when
+    // their native ordering depends on later entropy or callback results.
+    pub fn capture<T, F>(&self, inspect: F) -> Result<Captured<T>, Error>
+    where
+        T: Send + 'static,
+        F: FnOnce(&repo::View<Snapshot<'_>>) -> Result<T, repo::Error> + Send + 'static,
+    {
+        self.0
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.0.config.maximum_snapshots).then_some(n + 1)
+            })
+            .map_err(|_| Error::ResourceLimit)?;
+        let slot = Slot(self.0.clone());
+        let (ready, initialized) = mpsc::sync_channel(1);
+        let (sender, commands) = mpsc::sync_channel::<Request>(self.0.config.command_capacity);
+        let worker = thread::Builder::new()
+            .name("ae-state-snapshot".into())
+            .spawn(move || {
+                let slot = slot;
+                let (view, cursor) = match slot.0.database.event_snapshot() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = ready.send(Err(Error::Repository(e)));
+                        return;
+                    }
+                };
+                let value = match inspect(&view) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = ready.send(Err(Error::Repository(e)));
+                        return;
+                    }
+                };
+                let meta = Metadata {
+                    status: view.status(),
+                    source_id: repo::Read::source_id(view.source()),
+                    resilience: view.resilience(),
+                    cursor,
+                };
+                if ready.send(Ok((value, meta))).is_err() {
+                    return;
+                }
+                for request in commands {
+                    let result = node(
+                        view.source(),
+                        request.hash,
+                        slot.0.config.maximum_node_bytes,
+                    );
+                    // A dropped read caller cannot block shutdown or another read.
+                    let _ = request.reply.send(result);
+                }
+            })
+            .map_err(|e| Error::Worker(e.to_string()))?;
+        let inner = Inner {
+            sender: Some(sender),
+            worker: Some(worker),
+        };
+        let (value, metadata) = initialized
+            .recv()
+            .map_err(|_| Error::Worker("snapshot initialization ended".into()))??;
+        Ok(Captured {
+            value,
+            metadata,
+            reader: Reader(Arc::new(inner)),
+        })
+    }
+}
+struct Slot(Arc<Shared>);
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+#[derive(Debug, Clone)]
+pub struct Metadata {
+    pub status: repo::Status,
+    pub source_id: u64,
+    pub resilience: resilience::Snapshot,
+    pub cursor: events::Cursor,
+}
+pub struct Captured<T> {
+    pub value: T,
+    metadata: Metadata,
+    reader: Reader,
+}
+impl<T> Captured<T> {
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    pub fn reader(&self) -> &Reader {
+        &self.reader
+    }
+}
+struct Request {
+    hash: Hash256,
+    reply: SyncSender<Result<Option<Vec<u8>>, TrieError>>,
+}
+struct Inner {
+    sender: Option<SyncSender<Request>>,
+    worker: Option<JoinHandle<()>>,
+}
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // The last reader closes the channel before joining. Workers never own
+        // a Reader, so there is no ownership cycle or self-join.
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+#[derive(Clone)]
+pub struct Reader(Arc<Inner>);
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedNodeReader").finish_non_exhaustive()
+    }
+}
+impl NodeReader for Reader {
+    fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, TrieError> {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.0
+            .sender
+            .as_ref()
+            .expect("live reader has a sender")
+            .try_send(Request { hash: *hash, reply })
+            .map_err(|e| match e {
+                TrySendError::Full(_) => TrieError::ResourceLimit,
+                TrySendError::Disconnected(_) => closed(),
+            })?;
+        receive.recv().map_err(|_| closed())?
+    }
+}
+fn closed() -> TrieError {
+    TrieError::Backend("pinned snapshot worker ended".into())
+}
+fn node(
+    snapshot: &Snapshot<'_>,
+    hash: Hash256,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, TrieError> {
+    // Inspect length before allocating a reply. Hash checking matches Snapshot.
+    let bytes = snapshot
+        .snapshot
+        .get_pinned(repo::key(repo::NODES, hash.0))
+        .map_err(|e| TrieError::Backend(e.to_string()))?;
+    let Some(bytes) = bytes else { return Ok(None) };
+    if bytes.len() > limit {
+        return Err(TrieError::ResourceLimit);
+    }
+    if blake2b_256(&bytes) != hash {
+        return Err(TrieError::HashMismatch(hash));
+    }
+    Ok(Some(bytes.to_vec()))
+}
+
+#[cfg(test)]
+mod tests;
