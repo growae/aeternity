@@ -207,7 +207,7 @@ fn trees(j: &J) -> Trees {
         oracles: Default::default(),
     }
 }
-fn check(t: &Trees, j: &J) {
+fn check<A: ae_trie::NodeReader, C: ae_trie::NodeReader>(t: &Trees<A, C>, j: &J) {
     let roots = t.roots();
     for (k, v) in [
         ("account_root", roots.accounts),

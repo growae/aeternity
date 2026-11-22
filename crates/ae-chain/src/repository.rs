@@ -24,7 +24,10 @@ use codec::*;
 pub use decoding::ReadConfig;
 pub use history::vm_history;
 pub mod ledger;
-pub use ledger::{InsertError, Limits, Update, bootstrap, prepare};
+pub use ledger::{
+    HyperchainConfig, HyperchainError, InsertError, Limits, Update, bootstrap, prepare,
+    prepare_hyperchain,
+};
 
 pub const IDENTITY: &[u8] = b"\0identity";
 pub const STATUS: &[u8] = b"\0status";
@@ -44,6 +47,9 @@ pub const PROOFS: u8 = 12;
 pub const SIGNALS: u8 = 13;
 pub const GC_MARKS: u8 = 14;
 pub const GC_PENDING: u8 = 15;
+// 16..=18 belong to the storage pool and peer repositories.
+pub const HC_EVENTS: u8 = 19;
+pub const HC_STATE: &[u8] = b"\0hc-state";
 pub const GC_STATE: &[u8] = b"\0gc";
 pub fn key(prefix: u8, suffix: impl AsRef<[u8]>) -> Vec<u8> {
     let mut k = vec![prefix];
@@ -142,7 +148,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(10)
+        self.encode_version(11)
     }
     // Archive ownership was introduced with version 7. Bind the identity
     // fields using that stable layout, independently of writer capabilities.
@@ -178,7 +184,7 @@ impl Identity {
         let v = decode(bytes)?;
         let all = items(&v)?;
         let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
-        if !matches!(version, 1..=10) {
+        if !matches!(version, 1..=11) {
             return Err(Error::Corrupt("schema version"));
         }
         let a = fields(&v, if version >= 10 { 6 } else { 5 })?;
@@ -697,8 +703,19 @@ impl<S: Read> View<S> {
                 Block::Key(_) => h,
                 Block::Micro(ref m) => Hash256(m.header.common.previous_key_hash),
             };
-            if self.canonical_key(b.header().common().height)? != Some(generation) {
+            let generation_height = match (&b, self.identity.consensus) {
+                (Block::Micro(_), ConsensusType::Pos) => match self.require_block(generation)? {
+                    Block::Key(k) => k.common.height,
+                    _ => return Err(Error::Corrupt("tip generation type")),
+                },
+                _ => b.header().common().height,
+            };
+            if self.canonical_key(generation_height)? != Some(generation) {
                 return Err(Error::Corrupt("tip generation index"));
+            }
+            if self.identity.consensus == ConsensusType::Pos {
+                self.hyperchain_checkpoint()?;
+                self.hyperchain_event(self.status.revision)?;
             }
         } else if retention.epoch != 0 || !self.source.prefix(&[BLOCKS], 1)?.is_empty() {
             return Err(Error::Corrupt("blocks without initialized chain"));

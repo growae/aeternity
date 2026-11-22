@@ -483,7 +483,7 @@ fn finalized_record_corruption_and_future_schema_never_reinitialize_storage() {
     let List(mut fields) = ae_trie::Value::decode(&id.encode()).unwrap() else {
         panic!()
     };
-    fields[0] = Bytes(vec![11]);
+    fields[0] = Bytes(vec![12]);
     let encoded = List(fields).encode();
     db.db.put(repo::IDENTITY, &encoded).unwrap();
     drop(db);

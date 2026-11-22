@@ -11,6 +11,8 @@ use num_traits::ToPrimitive;
 use std::collections::BTreeMap;
 #[path = "ledger/failures.rs"]
 mod failures;
+#[path = "ledger/storage.rs"]
+mod storage;
 static LEDGER: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../fixtures/erlang_hc_ledger.json")).unwrap()
 });

@@ -11,6 +11,7 @@ pub struct ReadConfig {
     pub state_limits: ae_state::transport::Limits,
     pub existing_name_status_atoms: Option<Arc<BTreeSet<Vec<u8>>>>,
     pub max_transaction_record_bytes: usize,
+    pub hyperchain_metadata: ae_vm_fate::Limits,
 }
 impl Default for ReadConfig {
     fn default() -> Self {
@@ -24,6 +25,7 @@ impl Default for ReadConfig {
             state_limits: c.state.limits,
             existing_name_status_atoms: None,
             max_transaction_record_bytes: ae_tx::storage::Config::default().max_record_bytes,
+            hyperchain_metadata: Default::default(),
         }
     }
 }

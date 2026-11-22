@@ -311,7 +311,7 @@ impl Service {
                             self.current.created = self.current.created.saturating_add(1)
                         }
                         Effect::BlockToPublish { origin, .. } => publication = Some(origin),
-                        Effect::Reverted(_) => (),
+                        Effect::Reverted(_) | Effect::Consensus { .. } => (),
                     }
                 }
                 if let Some(origin) = publication {

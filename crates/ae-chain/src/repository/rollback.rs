@@ -161,7 +161,31 @@ pub fn prepare<S: Read>(view: &View<S>, target: Target, limits: Limits) -> Resul
         cursor = previous(&b);
     }
     let mut kept_generation = BTreeSet::new();
-    if !by_height {
+    if !by_height && view.identity.consensus == ConsensusType::Pos {
+        // HC micros precede their same-height key. Preserve every target
+        // ancestor at the deletion boundary, including those before a key
+        // target; stopping at that key would delete its own micro parent.
+        cursor = hash;
+        loop {
+            let b = view.require_block(cursor)?;
+            if b.header().common().height < height {
+                break;
+            }
+            if kept_generation.len() >= limits.ancestry {
+                return Err(Error::ResourceLimit.into());
+            }
+            if !kept_generation.insert(cursor) {
+                return Err(Error::Corrupt("rollback generation cycle").into());
+            }
+            if b.header().common().height != height {
+                return Err(Error::Corrupt("rollback generation height").into());
+            }
+            if cursor == view.identity.genesis {
+                break;
+            }
+            cursor = previous(&b);
+        }
+    } else if !by_height {
         cursor = hash;
         loop {
             if kept_generation.len() >= limits.ancestry {

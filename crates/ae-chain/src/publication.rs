@@ -58,6 +58,11 @@ pub enum Propagation {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect<'a> {
+    Consensus {
+        block: BlockInfo,
+        origin: Origin,
+        event: &'a ae_hyperchain::block::Event,
+    },
     Transaction {
         block: BlockInfo,
         origin: Origin,
@@ -77,6 +82,7 @@ pub struct Payload {
     change: Change,
     context: Context,
     events: Vec<batch::Event>,
+    consensus: Vec<ae_hyperchain::block::Event>,
     body: Option<Arc<[u8]>>,
     bytes: usize,
 }
@@ -113,6 +119,13 @@ impl Payload {
                 event,
             })
         });
+        let consensus = self.consensus.iter().filter_map(move |event| {
+            block.map(|block| Effect::Consensus {
+                block,
+                origin: context.origin,
+                event,
+            })
+        });
         let created_event = block.filter(|_| created).map(Effect::BlockCreated);
         let created_publish = block
             .filter(|_| created)
@@ -132,7 +145,8 @@ impl Payload {
                 });
         let reverted =
             (context.origin == Origin::Rollback).then_some(Effect::Reverted(&self.change));
-        tx.chain(created_event)
+        tx.chain(consensus)
+            .chain(created_event)
             .chain(created_publish)
             .chain(top)
             .chain(received_publish)
@@ -156,6 +170,23 @@ impl Payload {
         bytes = bytes.checked_add(change.confirm.len().checked_mul(64)?)?;
         let emit = matches!(context.origin, Origin::Received | Origin::Created);
         let events = if emit { update.events() } else { &[] };
+        let consensus = if emit { update.consensus_events() } else { &[] };
+        if !consensus.is_empty() {
+            // The sealed update already contains bounded encoded events.
+            // Account conservatively for their decoded AST before cloning.
+            // As for transaction events, this is a bound, not allocator RSS.
+            let encoded = update
+                .writes()
+                .get(&crate::repository::key(
+                    crate::repository::HC_EVENTS,
+                    change.revision.to_be_bytes(),
+                ))?
+                .as_ref()?;
+            bytes = bytes.checked_add(encoded.len().checked_mul(256)?)?;
+            if bytes > limit {
+                return None;
+            }
+        }
         for event in events {
             bytes = bytes.checked_add(event_bytes(event)?)?;
             if bytes > limit {
@@ -177,6 +208,7 @@ impl Payload {
             change: change.clone(),
             context,
             events: events.to_vec(),
+            consensus: consensus.to_vec(),
             body: body.cloned(),
             bytes,
         })

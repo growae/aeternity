@@ -34,6 +34,24 @@ pub struct Cache {
     schedule: BTreeMap<BigInt, ObjectPayload>,
 }
 impl Cache {
+    // Restore Rust-owned cache metadata without replaying insert/GC effects.
+    pub fn restore(
+        epochs: Vec<BigInt>,
+        ranges: BTreeMap<BigInt, (BigInt, BigInt)>,
+        schedule: BTreeMap<BigInt, ObjectPayload>,
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        if epochs.len() > 5 || ranges.len() > 5 {
+            return Err(Error::ResourceLimit);
+        }
+        let cache = Self {
+            epochs,
+            ranges,
+            schedule,
+        };
+        cache.validate_size(limits)?;
+        Ok(cache)
+    }
     pub fn epochs(&self) -> &[BigInt] {
         &self.epochs
     }
@@ -120,11 +138,16 @@ impl Cache {
                     .retain(|h, _| h < &first || h >= &(&first + &span));
             }
         }
-        if next.schedule.len() > limits.maximum_slots {
+        next.validate_size(limits)?;
+        *self = next;
+        Ok(())
+    }
+    fn validate_size(&self, limits: Limits) -> Result<(), Error> {
+        if self.schedule.len() > limits.maximum_slots {
             return Err(Error::ResourceLimit);
         }
         let mut remaining = limits.maximum_address_bytes;
-        for p in next.schedule.values() {
+        for p in self.schedule.values() {
             let mut pending = vec![p];
             while let Some(p) = pending.pop() {
                 match p {
@@ -140,7 +163,6 @@ impl Cache {
                 }
             }
         }
-        *self = next;
         Ok(())
     }
 }

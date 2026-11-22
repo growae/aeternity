@@ -247,6 +247,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
                     change,
                     writes,
                     events: vec![],
+                    consensus_events: vec![],
                     key_fraud: None,
                     proof: None,
                 },

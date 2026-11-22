@@ -65,6 +65,7 @@ fn publication_order_and_origins_match_original_conductor_callbacks() {
                     .collect()
             },
             body: None,
+            consensus: vec![],
             bytes: 0,
         };
         let effects: Vec<Value> = payload.effects().map(|e|match e {
@@ -75,7 +76,7 @@ fn publication_order_and_origins_match_original_conductor_callbacks() {
             Effect::BlockCreated(b)=>json!({"kind":"created","hash":hex::encode(b.hash.0),"block_type":case["block_type"]}),
             Effect::BlockToPublish {block,origin}=>json!({"kind":"publish","hash":hex::encode(block.hash.0),"origin":if origin==Propagation::Created {"created"}else{"received"}}),
             Effect::TopChanged(b)=>json!({"kind":"top","hash":hex::encode(b.hash.0),"block_type":case["block_type"],"previous":hex::encode(b.previous.0),"height":b.height}),
-            Effect::Reverted(_)=>panic!(),
+            Effect::Reverted(_)|Effect::Consensus{..}=>panic!(),
         }).collect();
         assert_eq!(json!(effects), case["effects"], "{case}");
     }

@@ -8,6 +8,9 @@ use ae_execution::transactions::{self, batch};
 use ae_protocol::ConsensusType;
 use ae_trie::MemoryStore;
 use ae_vm_fate::maps::MapOrder;
+#[path = "ledger/hyperchain.rs"]
+mod hyperchain_insert;
+pub use hyperchain_insert::{HyperchainConfig, HyperchainError, prepare_hyperchain};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Origin {
@@ -103,6 +106,7 @@ pub struct Update {
     change: Change,
     writes: Writes,
     events: Vec<batch::Event>,
+    consensus_events: Vec<ae_hyperchain::block::Event>,
     publication: crate::publication::Context,
     publication_body: Option<std::sync::Arc<[u8]>>,
     key_fraud: Option<(KeyHeader, KeyHeader)>,
@@ -115,7 +119,7 @@ impl Update {
         writes: Writes,
         limit: usize,
     ) -> Result<Self, Error> {
-        publish(
+        publish_consensus(
             Self {
                 identity: view.identity.clone(),
                 source_id: view.source.source_id(),
@@ -125,6 +129,7 @@ impl Update {
                 change,
                 writes,
                 events: vec![],
+                consensus_events: vec![],
                 publication_body: None,
                 publication: crate::publication::Context {
                     origin: crate::publication::Origin::Rollback,
@@ -133,6 +138,8 @@ impl Update {
                 key_fraud: None,
                 proof: None,
             },
+            view,
+            None,
             limit,
         )
     }
@@ -159,6 +166,9 @@ impl Update {
     }
     pub fn events(&self) -> &[batch::Event] {
         &self.events
+    }
+    pub fn consensus_events(&self) -> &[ae_hyperchain::block::Event] {
+        &self.consensus_events
     }
     pub fn publication_body(&self) -> Option<&std::sync::Arc<[u8]>> {
         self.publication_body.as_ref()
@@ -203,6 +213,50 @@ fn publish(mut u: Update, limit: usize) -> Result<Update, Error> {
         }
     }
     Ok(u)
+}
+fn publish_consensus<S: Read>(
+    mut update: Update,
+    view: &View<S>,
+    state: Option<ae_hyperchain::block::State>,
+    limit: usize,
+) -> Result<Update, Error> {
+    if view.identity.consensus == ConsensusType::Pos {
+        let state = match state {
+            Some(s) => s,
+            None if matches!(
+                update.publication.origin,
+                crate::publication::Origin::Bootstrap | crate::publication::Origin::Rollback
+            ) =>
+            {
+                Default::default()
+            }
+            None => return Err(Error::Corrupt("missing HC execution state")),
+        };
+        let old = view.hyperchain_checkpoint()?;
+        let checkpoint = super::hyperchain::journal::Checkpoint {
+            revision: update.change.revision,
+            first_revision: old.first_revision,
+            state,
+        };
+        let record = super::hyperchain::journal::Record {
+            revision: update.change.revision,
+            context: update.publication,
+            events: update.consensus_events.clone(),
+        };
+        put(
+            &mut update.writes,
+            HC_STATE.to_vec(),
+            checkpoint.encode(view.config.hyperchain_metadata)?,
+        );
+        put(
+            &mut update.writes,
+            key(HC_EVENTS, update.change.revision.to_be_bytes()),
+            record.encode(view.config.hyperchain_metadata)?,
+        );
+    } else if state.is_some() || !update.consensus_events.is_empty() {
+        return Err(Error::Identity);
+    }
+    publish(update, limit)
 }
 fn raw_nodes(w: &mut Writes, nodes: &BTreeMap<Hash256, Vec<u8>>) -> Result<(), Error> {
     for (h, b) in nodes {
@@ -327,7 +381,7 @@ pub fn bootstrap<S: Read>(
         requeue: vec![],
         confirm: vec![],
     };
-    Ok(publish(
+    Ok(publish_consensus(
         Update {
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
@@ -337,6 +391,7 @@ pub fn bootstrap<S: Read>(
             change,
             writes,
             events: vec![],
+            consensus_events: vec![],
             publication_body: None,
             publication: crate::publication::Context {
                 origin: crate::publication::Origin::Bootstrap,
@@ -345,6 +400,8 @@ pub fn bootstrap<S: Read>(
             key_fraud: None,
             proof: None,
         },
+        view,
+        None,
         limits.commit_bytes,
     )?)
 }
@@ -421,7 +478,16 @@ fn selection<S: Read>(
         });
     }
     let old_record = v.require_record(old)?;
-    if keep_pow_tip(&old_record.difficulty, &record.difficulty) {
+    let keep = match v.identity.consensus {
+        ConsensusType::Pow => keep_pow_tip(&old_record.difficulty, &record.difficulty),
+        ConsensusType::Pos => crate::hyperchain::keep_tip(
+            &old_record.difficulty,
+            &record.difficulty,
+            v.require_block(old)?.header().common().height,
+            block.header().common().height,
+        ),
+    };
+    if keep {
         return Ok(Change {
             revision,
             inserted: Some(inserted),
@@ -740,6 +806,50 @@ pub fn prepare<S: Read, O: MapOrder>(
             _ => {}
         }
     }
+    finish(
+        view,
+        block,
+        Applied {
+            state,
+            record,
+            writes,
+            events,
+            consensus_events: vec![],
+            consensus_state: None,
+            key_fraud,
+            proof,
+        },
+        limits,
+    )
+}
+struct Applied<S> {
+    state: Trees<Overlay<S>, Overlay<S>>,
+    record: Record,
+    writes: Writes,
+    events: Vec<batch::Event>,
+    consensus_events: Vec<ae_hyperchain::block::Event>,
+    consensus_state: Option<ae_hyperchain::block::State>,
+    key_fraud: Option<(KeyHeader, KeyHeader)>,
+    proof: Option<fraud::Proof>,
+}
+fn finish<S: Read>(
+    view: &View<S>,
+    block: &Block,
+    applied: Applied<S>,
+    limits: Limits,
+) -> Result<Update, InsertError<S>> {
+    let Applied {
+        state,
+        record,
+        mut writes,
+        events,
+        consensus_events,
+        consensus_state,
+        key_fraud,
+        proof,
+    } = applied;
+    let current = block.hash().map_err(|_| InsertError::Encoding)?;
+    let header = block.header();
     let mut change = selection(view, block, &record, limits.ancestry)?;
     raw_nodes(&mut writes, state.accounts.tree().store().pending())?;
     for s in stores(&state) {
@@ -776,7 +886,7 @@ pub fn prepare<S: Read, O: MapOrder>(
         Origin::Created => crate::publication::Origin::Created,
     };
     let publication_body = crate::publication::wire(block, origin, &change);
-    Ok(publish(
+    Ok(publish_consensus(
         Update {
             identity: view.identity.clone(),
             source_id: view.source.source_id(),
@@ -786,6 +896,7 @@ pub fn prepare<S: Read, O: MapOrder>(
             change,
             writes,
             events,
+            consensus_events,
             publication_body,
             publication: crate::publication::Context {
                 origin,
@@ -794,6 +905,8 @@ pub fn prepare<S: Read, O: MapOrder>(
             key_fraud,
             proof,
         },
+        view,
+        consensus_state,
         limits.commit_bytes,
     )?)
 }

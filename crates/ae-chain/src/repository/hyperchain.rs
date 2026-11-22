@@ -11,6 +11,7 @@ use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
 use num_bigint::{BigInt, Sign};
 use std::sync::Arc;
+pub mod journal;
 
 pub use ae_hyperchain::chain::Profile;
 pub type Reader<S, O> = chain::Reader<Overlay<S>, Overlay<S>, O, Snapshot<S>>;

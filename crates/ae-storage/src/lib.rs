@@ -15,6 +15,7 @@ use std::{
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod events;
 pub mod gc;
+pub mod hyperchain;
 pub mod peers;
 pub mod policy;
 pub mod pool;
@@ -41,6 +42,7 @@ pub struct Database {
     pool_owner: Mutex<std::sync::Weak<()>>,
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
+    hyperchain_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
     gc_events: gc::events::Source,
     #[cfg(test)]
@@ -234,6 +236,7 @@ impl Database {
             pool_owner: Mutex::new(Default::default()),
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
+            hyperchain_owner: Mutex::new(Default::default()),
             events: events::Source::new(event_status, notifications.chain),
             gc_events: gc::events::Source::new(gc_state, event_status, notifications.gc),
             #[cfg(test)]
@@ -252,6 +255,20 @@ impl Database {
             // old binaries then refuse to open instead of losing metadata.
             let mut batch = WriteBatch::default();
             batch.put(repo::IDENTITY, result.identity.encode());
+            if result.identity.consensus == ae_protocol::ConsensusType::Pos
+                && result.db.get(repo::HC_STATE).map_err(backend)?.is_none()
+            {
+                let view = result.view()?;
+                if view.status().tip.is_some() {
+                    // Version 10 admitted only genesis. Preserve its explicit
+                    // empty historical event interval when upgrading.
+                    let checkpoint = view.hyperchain_checkpoint()?;
+                    batch.put(
+                        repo::HC_STATE,
+                        checkpoint.encode(result.config.hyperchain_metadata)?,
+                    );
+                }
+            }
             result
                 .db
                 .write_opt(batch, &write_options())
