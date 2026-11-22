@@ -1,6 +1,6 @@
 // One fixed micro build: selected-state vote results, shared-pool packing,
 // then native ordered vote application with one candidate-tree nonce refresh.
-use super::{Completion, Owner, Request, RequestError};
+use super::{Completion, Owner, Request, RequestError, effects};
 use crate::chain::hyperchain::{delivery, packing, scoped};
 use ae_chain::{
     hyperchain::candidate as core,
@@ -14,7 +14,6 @@ use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
 use num_bigint::BigInt;
 use std::sync::Arc;
-mod effects;
 
 pub struct Input {
     pub parent: Hash256,
@@ -130,7 +129,7 @@ impl Owner {
         })
     }
 }
-fn retryable(error: &Error) -> bool {
+pub(super) fn retryable(error: &Error) -> bool {
     match error {
         Error::Owner(
             super::Error::Backpressured

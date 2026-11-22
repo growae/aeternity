@@ -207,6 +207,20 @@ pub struct Ticket {
     timeout: Duration,
 }
 impl Ticket {
+    // Poll this receipt once to completion. An empty poll retains the same
+    // accepted job; it is not a timeout or permission to resubmit the block.
+    pub fn try_result(&mut self) -> Option<Result<Report, Failure>> {
+        self.pending.try_result().map(|r| {
+            r.map_err(|e| Failure {
+                progress: None,
+                error: e.into(),
+            })
+            .and_then(|r| r)
+        })
+    }
+    pub fn cancel(&self) {
+        self.pending.cancel();
+    }
     pub async fn wait(self) -> Result<Report, Failure> {
         tokio::time::timeout(self.timeout, self.pending)
             .await

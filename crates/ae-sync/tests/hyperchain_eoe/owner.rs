@@ -2,6 +2,8 @@
 mod candidate;
 #[path = "owner/producer.rs"]
 mod producer;
+#[path = "owner/production.rs"]
+mod production;
 use super::*;
 use ae_storage::pool::worker::GossipCache;
 use ae_sync::{chain::hyperchain::eoe::owner as managed, votes};

@@ -6,7 +6,9 @@ use ae_hyperchain::{eoe, parent_block::ParentBlock, parent_cache::runtime as par
 use ae_storage::pool::worker::GossipCache;
 
 pub mod candidate;
+mod effects;
 pub mod producer;
+pub mod production;
 mod requests;
 use requests::Requests;
 pub use requests::{Completion, Request, RequestError};
@@ -87,6 +89,7 @@ pub struct Owner {
     signing: ae_hyperchain::signing::Keys,
     producer_binding: repo::hyperchain::producer::Binding,
     production: Option<producer::Pending>,
+    attempt: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Owner {
     pub fn start(
@@ -144,6 +147,7 @@ impl Owner {
             signing,
             producer_binding,
             production: None,
+            attempt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
     fn client(&self) -> Client {
@@ -187,6 +191,16 @@ impl Owner {
         source: &super::super::scoped::Producer<O>,
         input: producer::Input,
     ) -> Result<(), Error> {
+        if self.attempt.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Backpressured);
+        }
+        self.prepare_producer_inner(source, input)
+    }
+    fn prepare_producer_inner<O: MapOrder + Clone>(
+        &mut self,
+        source: &super::super::scoped::Producer<O>,
+        input: producer::Input,
+    ) -> Result<(), Error> {
         self.ready()?;
         if self.production.is_some() {
             return Err(Error::Backpressured);
@@ -222,6 +236,12 @@ impl Owner {
         self.production.as_ref()
     }
     pub fn take_production(&mut self) -> Option<producer::Decision> {
+        if self.attempt.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        self.take_production_inner()
+    }
+    fn take_production_inner(&mut self) -> Option<producer::Decision> {
         if self.failure.is_some()
             || self.client().is_closed()
             || !self

@@ -78,6 +78,18 @@ pub(crate) struct Pending<T> {
     receiver: oneshot::Receiver<Response<T>>,
     cancel: Cancellation,
 }
+impl<T> Pending<T> {
+    pub fn try_result(&mut self) -> Option<Result<T, Error>> {
+        match self.receiver.try_recv() {
+            Ok(response) => Some(response.result),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => Some(Err(Error::Stopped)),
+        }
+    }
+    pub fn cancel(&self) {
+        self.cancel.0.store(true, Ordering::Release);
+    }
+}
 impl<T> Future for Pending<T> {
     type Output = Result<T, Error>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -305,6 +317,48 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn polling_and_explicit_cancellation_keep_unread_job_credits() {
+        let pool = Pool::new(1, 2, 8).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, observed) = oneshot::channel();
+        let mut first = pool
+            .submit(4, move |_| {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                7
+            })
+            .unwrap();
+        observed.await.unwrap();
+        let executed = Arc::new(AtomicBool::new(false));
+        let flag = executed.clone();
+        let mut second = pool
+            .submit(4, move |_| flag.store(true, Ordering::Release))
+            .unwrap();
+        second.cancel();
+        for _ in 0..3 {
+            assert_eq!(first.try_result(), None);
+            assert_eq!(second.try_result(), None);
+            assert_eq!(pool.available(), (0, 0));
+        }
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(result) = first.try_result() {
+                    break result;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Ok(7));
+        assert_eq!(second.await, Err(Error::Cancelled));
+        assert!(!executed.load(Ordering::Acquire));
+        assert_eq!(pool.available(), (2, 8));
+        pool.stop();
+        pool.join().await;
+    }
     #[tokio::test]
     async fn reservations_charge_capacity_before_work_and_transfer_through_unread_results() {
         let pool = Pool::new(1, 2, 8).unwrap();

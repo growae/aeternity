@@ -9,7 +9,7 @@ use ae_types::AccountPublicKey;
 use common::hyperchain::parents::Pair;
 use serde_json::Value as J;
 use std::sync::LazyLock;
-static DATA: LazyLock<J> = LazyLock::new(|| {
+pub(super) static DATA: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!(
         "../../fixtures/erlang_hc_vote_application.json"
     ))
@@ -28,7 +28,7 @@ fn input(node: &Node) -> build::Input {
         window_ms: 1000,
     }
 }
-fn pool(node: &Node) -> worker::Worker {
+pub(super) fn pool(node: &Node) -> worker::Worker {
     worker::Worker::spawn(
         node.db.clone(),
         node.config.profile.network.clone(),
@@ -47,7 +47,7 @@ fn pool(node: &Node) -> worker::Worker {
     )
     .unwrap()
 }
-fn owner(
+pub(super) fn owner(
     node: &Node,
     source: &Arc<live::Source>,
     pair: &Pair,

@@ -93,6 +93,15 @@ pub struct Producer<O> {
     database: Weak<Database>,
     context: Weak<crate::chain::Context<O>>,
 }
+impl<O> Clone for Producer<O> {
+    fn clone(&self) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            database: self.database.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
 impl<O: MapOrder + Clone> Accepted<O, inputs::Effects> {
     pub fn producer(&self) -> Producer<O> {
         Producer {
@@ -103,6 +112,9 @@ impl<O: MapOrder + Clone> Accepted<O, inputs::Effects> {
     }
 }
 impl<O: MapOrder + Clone> Producer<O> {
+    pub fn uses_importer(&self, importer: &Importer<O>) -> bool {
+        self.context.ptr_eq(&Arc::downgrade(&importer.context))
+    }
     pub fn check(&self) -> Result<(), Error> {
         let context = self.context.upgrade().ok_or(Error::Closed)?;
         let _owner = self.owner.upgrade().ok_or(Error::Closed)?;
