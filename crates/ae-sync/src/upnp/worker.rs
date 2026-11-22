@@ -238,7 +238,7 @@ impl Worker {
                             return Err(Error::Spawn);
                         }
                     };
-                    let driver = run(
+                    let driver = match run(
                         config,
                         shared.clone(),
                         receiver,
@@ -246,7 +246,13 @@ impl Worker {
                         stopped,
                         initial,
                         renewal,
-                    );
+                    ) {
+                        Ok(driver) => driver,
+                        Err(error) => {
+                            let _ = ready.send(Err(error.clone()));
+                            return Err(error);
+                        }
+                    };
                     let _ = ready.send(Ok(()));
                     runtime.block_on(driver);
                     Ok(())
@@ -308,7 +314,11 @@ impl Drop for Worker {
 }
 
 enum Outcome {
-    Mapped(Mapping),
+    Mapped {
+        mapping: Mapping,
+        listener: Option<super::listener::BoundListener>,
+        began: std::time::Instant,
+    },
     Retired,
 }
 async fn cancel(attempts: &mut JoinSet<Result<Outcome, Error>>, shared: &Shared) {
@@ -326,7 +336,11 @@ async fn start(
     attempts: &mut JoinSet<Result<Outcome, Error>>,
     shared: &Shared,
     config: &Config,
+    advertisement: Option<&super::listener::AdvertisementLease>,
 ) -> Result<u64, Error> {
+    if let Some(advertisement) = advertisement {
+        advertisement.clear();
+    }
     let listener = config.listener.as_ref().and_then(ListenerSource::current);
     if config.listener.is_some() && listener.is_none() {
         return Err(Error::NotReady);
@@ -334,6 +348,8 @@ async fn start(
     cancel(attempts, shared).await;
     shared.lock().mapping = None;
     let config = config.clone();
+    // Start before discovery/cleanup: a slow response must not extend a lease.
+    let began = std::time::Instant::now();
     attempts.spawn(async move {
         timeout(MAPPING_TIMEOUT, async {
             let network = config.network(listener)?;
@@ -356,7 +372,11 @@ async fn start(
                 .ports
                 .add_ports(network, gateway, configured)
                 .await
-                .map(Outcome::Mapped)
+                .map(|mapping| Outcome::Mapped {
+                    mapping,
+                    listener,
+                    began,
+                })
         })
         .await
         .map_err(|_| Error::Timeout)?
@@ -392,11 +412,16 @@ fn run(
     mut stopped: watch::Receiver<bool>,
     initial: Duration,
     renewal: Duration,
-) -> impl Future<Output = ()> {
+) -> Result<impl Future<Output = ()>, Error> {
+    let advertisement = config
+        .listener
+        .as_ref()
+        .map(ListenerSource::advertise)
+        .transpose()?;
     // Capture notifications before acknowledging startup. Publications between
     // construction and the first poll must not be mistaken for initial state.
     let mut listener = config.listener.as_ref().map(ListenerSource::subscribe);
-    async move {
+    Ok(async move {
         let mut attempts = JoinSet::new();
         let mut next = Instant::now() + initial;
         let mut prepared = false;
@@ -415,6 +440,7 @@ fn run(
                 _=stopped.changed()=>break,
                 cleanup=cleanups.recv(),if !prepared=>{
                     let Some(reply)=cleanup else {break;};
+                    if let Some(advertisement) = &advertisement { advertisement.clear(); }
                     cancel(&mut attempts,&shared).await;
                     let result=tokio::select! {
                         biased;
@@ -428,13 +454,13 @@ fn run(
                 _=async { match &mut listener { Some(source)=>{let _=source.changed().await;},None=>std::future::pending().await } },if !prepared=>{
                     cancel(&mut attempts,&shared).await;
                     shared.lock().mapping=None;
-                    if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
+                    if start(&mut attempts,&shared,&config,advertisement.as_ref()).await == Err(Error::NotReady) {
                         retire(&mut attempts,&shared,&config).await;
                     }
                     next=Instant::now()+renewal;
                 },
                 _=sleep_until(next),if !prepared=>{
-                    if start(&mut attempts,&shared,&config).await == Err(Error::NotReady) {
+                    if start(&mut attempts,&shared,&config,advertisement.as_ref()).await == Err(Error::NotReady) {
                         retire(&mut attempts,&shared,&config).await;
                     }
                     next=Instant::now()+renewal;
@@ -444,12 +470,17 @@ fn run(
                     let mut info=shared.lock();info.active=false;
                     if info.retiring {info.retirement_completions=info.retirement_completions.saturating_add(1);} else {info.completed=info.completed.saturating_add(1);}
                     info.retiring=false;
-                    match result {Ok(Outcome::Mapped(mapping))=>{info.mapping=Some(mapping);info.last_error=None;},Ok(Outcome::Retired)=>{info.mapping=None;info.last_error=None;},Err(e)=>info.last_error=Some(e)}
+                    match result {Ok(Outcome::Mapped { mapping, listener, began })=>{
+                        if let (Some(advertisement), Some(bound)) = (&advertisement, listener)
+                            && !advertisement.confirm(bound, &mapping, began)
+                        { info.mapping=None;info.last_error=Some(Error::NotReady); }
+                        else {info.mapping=Some(mapping);info.last_error=None;}
+                    },Ok(Outcome::Retired)=>{info.mapping=None;info.last_error=None;},Err(e)=>info.last_error=Some(e)}
                 },
                 command=commands.recv()=>match command {
                     None=>break,
                     Some(Command::Refresh(reply))=>{
-                        let result=if prepared {Err(Error::Closed)} else {let result=start(&mut attempts,&shared,&config).await;next=Instant::now()+renewal;result};
+                        let result=if prepared {Err(Error::Closed)} else {let result=start(&mut attempts,&shared,&config,advertisement.as_ref()).await;next=Instant::now()+renewal;result};
                         shared.lock().pending-=1;let _=reply.send(result);
                     },
                     #[cfg(test)]
@@ -458,6 +489,9 @@ fn run(
                     Some(Command::Pause(entered,release))=>{let _=entered.send(());let _=release.recv();},
                 },
             }
+        }
+        if let Some(advertisement) = &advertisement {
+            advertisement.clear();
         }
         cancel(&mut attempts, &shared).await;
         commands.close();
@@ -476,7 +510,7 @@ fn run(
         while let Ok(reply) = cleanups.try_recv() {
             let _ = reply.send(Err(Error::Closed));
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -520,7 +554,8 @@ mod tests {
             stopped,
             Duration::from_secs(60),
             RENEWAL_INTERVAL,
-        );
+        )
+        .unwrap();
         // This is the constructor-ready/first-poll interval that used to lose
         // the notification. A long initial timer makes the regression explicit.
         lease.publish(Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6000)), 7000);

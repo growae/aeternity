@@ -108,12 +108,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Gossip, move || handle.shutdown(), async move {
             Failure::new(Child::Gossip, service.run().await.last_error)
         });
+        let mut peer_config = config.peer.clone();
+        peer_config.port_mapping = dependencies.upnp_listener.clone();
         let (peer, incoming, service) = peer::create_bound(
             db.clone(),
             network.clone(),
             scheduled,
             incoming,
-            config.peer.clone(),
+            peer_config,
             dependencies.analytics.clone(),
             dependencies.capabilities.clone(),
         )

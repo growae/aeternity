@@ -145,7 +145,14 @@ impl Session {
             ping::Encoding {
                 version,
                 minimum_version: self.client.minimum_ping_version(),
-                port: self.ctx.config.port,
+                port: self
+                    .ctx
+                    .config
+                    .port_mapping
+                    .as_ref()
+                    .map_or(self.ctx.config.port, |source| {
+                        source.advertised_port(self.ctx.config.port)
+                    }),
                 share,
                 limits: self.ctx.config.messages,
             },

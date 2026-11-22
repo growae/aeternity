@@ -1016,3 +1016,76 @@ async fn redirected_delete_success_rechecks_each_prior_destination_before_forget
         second.close().await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn permanent_advertisement_withdraws_before_cleanup_and_after_worker_failure() {
+    let router = Router::start().await;
+    router.state.lock().unwrap().permanent = true;
+    let gate = ListenerSource::default();
+    let lease = gate.acquire().unwrap();
+    let mut config = router.config();
+    config.listener = Some(gate.clone());
+    config.network.request_timeout = Duration::from_secs(10);
+    let worker = router.spawn(config.clone());
+    lease.publish(Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6000)), 7000);
+    assert_eq!(mapped(&worker, 1).await.external, 5000);
+    assert_eq!(gate.advertised_port(7000), 5000);
+    worker.client().fail();
+    wait_info(&worker.client(), |i| !i.running).await;
+    assert_eq!(gate.advertised_port(7000), 7000);
+    assert_eq!(worker.shutdown(), Err(Error::Panicked));
+    let replacement = router.spawn(config);
+    replacement.client().refresh().unwrap().await.unwrap();
+    assert_eq!(gate.advertised_port(7000), 7000);
+    assert_eq!(mapped(&replacement, 1).await.external, 5000);
+    assert_eq!(gate.advertised_port(7000), 5000);
+    router.state.lock().unwrap().hold_delete = true;
+    let cleanup = replacement.client().prepare_stop().unwrap();
+    timeout(Duration::from_secs(2), async {
+        while router.state.lock().unwrap().deleted.is_empty() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(gate.advertised_port(7000), 7000);
+    replacement.shutdown().unwrap();
+    assert_eq!(cleanup.await, Err(Error::Closed));
+    assert_eq!(gate.advertised_port(7000), 7000);
+    router.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unconfirmed_mapping_and_failed_refresh_keep_the_configured_advertisement() {
+    let router = Router::start().await;
+    let gate = ListenerSource::default();
+    let lease = gate.acquire().unwrap();
+    let mut config = router.config();
+    config.listener = Some(gate.clone());
+    config.network.request_timeout = Duration::from_secs(10);
+    let worker = router.spawn(config.clone());
+    router.state.lock().unwrap().hold_add = true;
+    lease.publish(Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6000)), 7000);
+    timeout(Duration::from_secs(2), async {
+        while router.state.lock().unwrap().adds.is_empty() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(gate.advertised_port(7000), 7000);
+    worker.shutdown().unwrap();
+    router.state.lock().unwrap().hold_add = false;
+    let replacement = router.spawn(config);
+    replacement.client().refresh().unwrap().await.unwrap();
+    assert_eq!(mapped(&replacement, 1).await.external, 5001);
+    assert_eq!(gate.advertised_port(7000), 5001);
+    router.state.lock().unwrap().reject_adds = 1;
+    replacement.client().refresh().unwrap().await.unwrap();
+    let info = wait_info(&replacement.client(), |i| i.completed == 2).await;
+    assert!(info.last_error.is_some() && info.mapping.is_none());
+    assert_eq!(gate.advertised_port(7000), 7000);
+    replacement.client().prepare_stop().unwrap().await.unwrap();
+    replacement.shutdown().unwrap();
+    router.close().await;
+}
