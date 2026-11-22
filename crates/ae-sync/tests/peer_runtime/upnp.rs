@@ -184,6 +184,17 @@ async fn upnp_advertises_live_assignments_and_fallback_over_existing_encrypted_c
     next.refresh().unwrap().await.unwrap();
     mapped(&next, first_port, 6115).await;
     advertised(&remote, &node, 2, 6115).await;
+    assigned.store(6215, Ordering::SeqCst);
+    lifetime.store(upnp::MAPPING_LIFETIME, Ordering::SeqCst);
+    // A router-granted one-second lease triggers this renewal without an
+    // administrative refresh, on the existing encrypted connection.
+    mapped(&next, first_port, 6215).await;
+    advertised(&remote, &node, 2, 6215).await;
+    assigned.store(6315, Ordering::SeqCst);
+    lifetime.store(1, Ordering::SeqCst);
+    next.refresh().unwrap().await.unwrap();
+    mapped(&next, first_port, 6315).await;
+    enabled.store(false, Ordering::SeqCst);
     within(async {
         while advertisement.advertised_port(4015) != 4015 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -193,6 +204,7 @@ async fn upnp_advertises_live_assignments_and_fallback_over_existing_encrypted_c
     advertised(&remote, &node, 2, 4015).await;
     lifetime.store(upnp::MAPPING_LIFETIME, Ordering::SeqCst);
     assigned.store(7015, Ordering::SeqCst);
+    enabled.store(true, Ordering::SeqCst);
     first.peer.shutdown();
     let second = connection_owner::ready(&mut owner, 2).await;
     within(driver).await.unwrap();

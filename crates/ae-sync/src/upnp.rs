@@ -9,6 +9,7 @@ mod discovery;
 mod http;
 mod listener;
 mod pmp;
+mod renewal;
 mod routes;
 mod source;
 mod worker;

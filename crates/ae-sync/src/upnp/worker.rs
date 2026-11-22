@@ -424,6 +424,7 @@ fn run(
     Ok(async move {
         let mut attempts = JoinSet::new();
         let mut next = Instant::now() + initial;
+        let mut schedule = super::renewal::Schedule::new(renewal);
         let mut prepared = false;
         loop {
             {
@@ -452,6 +453,7 @@ fn run(
                     let _=reply.send(result);
                 },
                 _=async { match &mut listener { Some(source)=>{let _=source.changed().await;},None=>std::future::pending().await } },if !prepared=>{
+                    schedule.reset();
                     cancel(&mut attempts,&shared).await;
                     shared.lock().mapping=None;
                     if start(&mut attempts,&shared,&config,advertisement.as_ref()).await == Err(Error::NotReady) {
@@ -473,9 +475,12 @@ fn run(
                     match result {Ok(Outcome::Mapped { mapping, listener, began })=>{
                         if let (Some(advertisement), Some(bound)) = (&advertisement, listener)
                             && !advertisement.confirm(bound, &mapping, began)
-                        { info.mapping=None;info.last_error=Some(Error::NotReady); }
-                        else {info.mapping=Some(mapping);info.last_error=None;}
-                    },Ok(Outcome::Retired)=>{info.mapping=None;info.last_error=None;},Err(e)=>info.last_error=Some(e)}
+                        { info.mapping=None;info.last_error=Some(Error::NotReady);next=Instant::from_std(schedule.failed(std::time::Instant::now())); }
+                        else {
+                            next=Instant::from_std(schedule.mapped(began,mapping.lifetime,std::time::Instant::now()));
+                            info.mapping=Some(mapping);info.last_error=None;
+                        }
+                    },Ok(Outcome::Retired)=>{schedule.reset();info.mapping=None;info.last_error=None;},Err(e)=>{info.last_error=Some(e);next=Instant::from_std(schedule.failed(std::time::Instant::now()));}}
                 },
                 command=commands.recv()=>match command {
                     None=>break,
