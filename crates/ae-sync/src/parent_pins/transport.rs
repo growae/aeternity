@@ -157,14 +157,20 @@ impl Transport {
             if body.len() > self.config.maximum_body_bytes {
                 return Err(Error::ResourceLimit);
             }
-            let (user, password) = node.credentials.as_ref().ok_or(Error::Configuration)?;
-            let mut plain = user.clone();
-            plain.push(b':');
-            plain.extend_from_slice(password);
-            use zeroize::Zeroize;
-            let auth = base64::engine::general_purpose::STANDARD.encode(&plain);
-            plain.zeroize();
-            headers.push_str(&format!("Authorization: Basic {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+            if node.chain != super::Chain::Aeternity {
+                let (user, password) = node.credentials.as_ref().ok_or(Error::Configuration)?;
+                let mut plain = user.clone();
+                plain.push(b':');
+                plain.extend_from_slice(password);
+                use zeroize::Zeroize;
+                let auth = base64::engine::general_purpose::STANDARD.encode(&plain);
+                plain.zeroize();
+                headers.push_str(&format!("Authorization: Basic {auth}\r\n"));
+            }
+            headers.push_str(&format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                body.len()
+            ));
         }
         headers.push_str("\r\n");
         if headers.len() > self.config.maximum_header_bytes {

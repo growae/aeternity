@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod lookup;
+pub mod posting;
 pub(crate) mod transport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,11 +107,15 @@ pub enum Error {
     Worker,
     Redirect,
 }
-struct Job {
+struct Lookup {
     hash: Vec<u8>,
     reply: SyncSender<Result<Option<Pin>, Error>>,
     cancel: Arc<AtomicBool>,
     deadline: Instant,
+}
+enum Job {
+    Lookup(Lookup),
+    Post(posting::Job),
 }
 struct Pending(Arc<AtomicBool>);
 impl Drop for Pending {
@@ -192,12 +197,12 @@ impl Client {
         let (reply, result) = mpsc::sync_channel(1);
         let cancel = Pending(Arc::new(AtomicBool::new(false)));
         self.requests
-            .try_send(Job {
+            .try_send(Job::Lookup(Lookup {
                 hash: hash.to_vec(),
                 reply,
                 cancel: cancel.0.clone(),
                 deadline,
-            })
+            }))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Busy,
                 TrySendError::Disconnected(_) => Error::Closed,
@@ -217,6 +222,16 @@ pub struct Service {
 }
 impl Service {
     pub fn spawn(nodes: Vec<Node>, config: Config) -> Result<Self, Error> {
+        Self::spawn_with_signing(nodes, config, None)
+    }
+    pub fn spawn_with_signing(
+        nodes: Vec<Node>,
+        config: Config,
+        signing: Option<posting::Signing>,
+    ) -> Result<Self, Error> {
+        if signing.as_ref().is_some_and(|s| s.network.len() > 4096) {
+            return Err(Error::Configuration);
+        }
         if nodes.is_empty()
             || nodes.len() > 32
             || !(1..=1024).contains(&config.maximum_pending)
@@ -256,6 +271,8 @@ impl Service {
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
+                match job {
+                Job::Lookup(job) => {
                 let value = runtime.block_on(async {
                     tokio::select! {
                         biased;
@@ -264,6 +281,9 @@ impl Service {
                     }
                 });
                 let _ = job.reply.try_send(value);
+                }
+                Job::Post(job) => posting::run(&runtime, &transport, &node, signing.as_ref(), &stop, job),
+                }
             }
         }).map_err(|_| Error::Spawn)?;
         Ok(Self {
