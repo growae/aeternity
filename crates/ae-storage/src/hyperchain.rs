@@ -3,6 +3,7 @@ use ae_chain::{block::Block, repository as repo};
 use ae_hyperchain::block::{Host, State};
 use ae_vm_fate::maps::MapOrder;
 use std::sync::{Arc, Mutex};
+pub mod candidate;
 #[cfg(test)]
 mod tests;
 

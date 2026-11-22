@@ -1,4 +1,6 @@
 mod common;
+#[path = "hyperchain_key_candidates/owner.rs"]
+mod owner;
 use ae_chain::repository::Read;
 use ae_chain::{
     block::Block,

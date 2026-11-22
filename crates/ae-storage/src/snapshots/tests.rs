@@ -129,6 +129,14 @@ fn initialization_failures_release_capacity_and_failed_feed_requires_reopen() {
             maximum_node_bytes: 0,
             ..Default::default()
         },
+        Config {
+            maximum_read_bytes: 0,
+            ..Default::default()
+        },
+        Config {
+            maximum_scan_entries: 0,
+            ..Default::default()
+        },
     ] {
         assert!(matches!(
             Owner::start(db.clone(), config),
@@ -221,19 +229,23 @@ fn saturated_node_queue_is_retryable_and_abandoned_receipts_do_not_stop_worker()
     // Hold the worker in its reply send, then fill the one queued slot.
     let (reply, receive) = mpsc::sync_channel(0);
     sender
-        .send(Request {
+        .send(Request::Node {
             hash: Hash256::ZERO,
             reply,
         })
         .unwrap();
     let (reply, abandoned) = mpsc::sync_channel(1);
     sender
-        .send(Request {
+        .send(Request::Node {
             hash: Hash256::ZERO,
             reply,
         })
         .unwrap();
     assert_eq!(reader.node(&Hash256::ZERO), Err(TrieError::ResourceLimit));
+    assert_eq!(
+        repo::Read::get(reader, b"queued"),
+        Err(repo::Error::ResourceLimit)
+    );
     drop(abandoned);
     assert_eq!(
         receive.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -242,7 +254,7 @@ fn saturated_node_queue_is_retryable_and_abandoned_receipts_do_not_stop_worker()
     // Queue ordering makes this blocking test request a drain barrier.
     let (reply, receive) = mpsc::sync_channel(1);
     sender
-        .send(Request {
+        .send(Request::Node {
             hash: Hash256::ZERO,
             reply,
         })
@@ -254,4 +266,106 @@ fn saturated_node_queue_is_retryable_and_abandoned_receipts_do_not_stop_worker()
     assert_eq!(reader.node(&Hash256::ZERO), Ok(None));
     drop(capture);
     assert_eq!(owner.live_snapshots(), 0);
+}
+
+#[test]
+fn owned_repository_reads_and_scans_keep_the_same_revision_and_joined_lease() {
+    use repo::Read;
+    let path = Temp::new();
+    let db = database(&path);
+    for (k, v) in [(b"x1", b"one"), (b"x2", b"two"), (b"y1", b"end")] {
+        db.db.put(k, v).unwrap();
+    }
+    let owner = Owner::start(db.clone(), Default::default()).unwrap();
+    let old = owner.view().unwrap();
+    let reader = old.value.source().clone();
+    assert_eq!(reader.source_id(), old.metadata().source_id);
+    assert_eq!(reader.resilience(), old.metadata().resilience);
+    assert_eq!(old.value.status(), old.metadata().status);
+    db.db.delete(b"x1").unwrap();
+    db.db.put(b"x2", b"changed").unwrap();
+    assert_eq!(reader.get(b"x1").unwrap(), Some(b"one".to_vec()));
+    let expected = vec![
+        (b"x1".to_vec(), b"one".to_vec()),
+        (b"x2".to_vec(), b"two".to_vec()),
+    ];
+    assert_eq!(reader.prefix(b"x", 2).unwrap(), expected);
+    assert_eq!(reader.range(b"x1", b"y", 2).unwrap(), expected);
+    assert!(reader.range(b"y", b"x", 0).unwrap().is_empty());
+    let mut seen = vec![];
+    reader
+        .visit_range(b"x", b"y", 2, &mut |k, v| {
+            // The callback can issue another read; it runs outside the worker.
+            assert_eq!(reader.get(k).unwrap().as_deref(), Some(v));
+            seen.push((k.to_vec(), v.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, expected);
+    assert_eq!(
+        reader.visit_range(b"x", b"y", 2, &mut |_, _| Err(repo::Error::Conflict)),
+        Err(repo::Error::Conflict)
+    );
+    let weak = Arc::downgrade(&db);
+    drop((db, owner, old));
+    assert!(weak.upgrade().is_some());
+    assert_eq!(reader.get(b"x2").unwrap(), Some(b"two".to_vec()));
+    drop(reader);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn repository_payload_and_scan_limits_reject_without_truncated_success() {
+    use repo::Read;
+    let path = Temp::new();
+    let db = database(&path);
+    db.db.put(b"a1", b"123").unwrap();
+    db.db.put(b"a2", b"456").unwrap();
+    db.db.put(b"big", b"123456789").unwrap();
+    let owner = Owner::start(
+        db.clone(),
+        Config {
+            maximum_read_bytes: 8,
+            maximum_scan_entries: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let captured = owner.capture(|_| Ok(())).unwrap();
+    let r = captured.reader();
+    assert_eq!(r.get(b"big"), Err(repo::Error::ResourceLimit));
+    assert_eq!(r.get(b"123456789"), Err(repo::Error::ResourceLimit));
+    assert_eq!(r.get(b"a1"), Ok(Some(b"123".to_vec())));
+    assert_eq!(r.prefix(b"a", 100), Err(repo::Error::ResourceLimit));
+    assert_eq!(r.prefix(b"a1", 0), Err(repo::Error::ResourceLimit));
+    assert_eq!(r.range(b"a1", b"a2", 1).unwrap().len(), 1);
+    assert_eq!(
+        r.range(b"12345", b"67890", 10),
+        Err(repo::Error::ResourceLimit)
+    );
+    assert!(r.prefix(b"absent", 0).unwrap().is_empty());
+    drop((captured, owner));
+    let owner = Owner::start(
+        db,
+        Config {
+            maximum_read_bytes: 8,
+            maximum_scan_entries: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let captured = owner.capture(|_| Ok(())).unwrap();
+    assert_eq!(
+        captured.reader().prefix(b"a", 100),
+        Err(repo::Error::ResourceLimit)
+    );
+    let mut visits = 0;
+    assert_eq!(
+        captured.reader().visit_range(b"a", b"b", 10, &mut |_, _| {
+            visits += 1;
+            Ok(())
+        }),
+        Err(repo::Error::ResourceLimit)
+    );
+    assert_eq!(visits, 0);
 }

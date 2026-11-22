@@ -127,10 +127,8 @@ impl Requests {
         captured: snapshots::Metadata,
         submit: impl FnOnce(
             u64,
-        ) -> Result<
-            runtime::Call,
-            runtime::SubmitError<snapshots::Reader, snapshots::Reader>,
-        >,
+        )
+            -> Result<runtime::Call, runtime::SubmitError<StateReader, StateReader>>,
     ) -> Result<Request, Error> {
         // Never recycle request IDs, even for definitely rejected submissions.
         self.sequence = self.sequence.checked_add(1).ok_or(Error::ResourceLimit)?;

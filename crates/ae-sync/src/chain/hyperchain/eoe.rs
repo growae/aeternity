@@ -14,9 +14,10 @@ use std::{
 
 pub mod owner;
 pub mod service;
-pub type Runtime = runtime::Runtime<snapshots::Reader, snapshots::Reader>;
-pub type Client = runtime::Client<snapshots::Reader, snapshots::Reader>;
-pub type Tip = local_host::SelectedTip<snapshots::Reader, snapshots::Reader>;
+pub type StateReader = ae_storage::hyperchain::candidate::Store;
+pub type Runtime = runtime::Runtime<StateReader, StateReader>;
+pub type Client = runtime::Client<StateReader, StateReader>;
+pub type Tip = local_host::SelectedTip<StateReader, StateReader>;
 
 pub struct Source {
     database: Weak<Database>,
@@ -120,7 +121,14 @@ impl Source {
             .value
             .0
             .as_ref()
-            .map(|roots| roots.load(captured.reader().clone()).map(Arc::new))
+            .map(|roots| {
+                roots
+                    .load(StateReader::new(
+                        captured.reader().clone(),
+                        Default::default(),
+                    ))
+                    .map(Arc::new)
+            })
             .transpose()
             .map_err(|e| state_error(snapshots::Error::Repository(e)))?;
         Ok(State {
@@ -211,7 +219,7 @@ struct Live {
     source: Arc<Source>,
     _lease: Arc<()>,
 }
-impl local_host::SelectedSource<snapshots::Reader, snapshots::Reader> for Live {
+impl local_host::SelectedSource<StateReader, StateReader> for Live {
     fn capture(&self) -> Result<Tip, local_host::SelectedError> {
         self.source.capture().map(|s| s.tip)
     }

@@ -612,3 +612,135 @@ fn operational_eoe_stop_is_forwarded_and_requires_explicit_runtime_recovery() {
     drop((request, result));
     assert!(owner.shutdown().errors.is_empty());
 }
+
+#[test]
+fn candidate_finalization_uses_staged_nonce_and_retains_exact_snapshot() {
+    use ae_storage::hyperchain::candidate as owned;
+    use ae_sync::chain::Importer;
+    use common::hyperchain::parents::Pair;
+    let node = Node::new(1);
+    let source = source(&node);
+    let pair = Pair::new(false);
+    let mut owner = start(&node, &source, cfg(&node), &[12, 13, 14]);
+    let (importer, accepted) = Importer::new_hyperchain_scoped(
+        node.db.clone(),
+        node.config.clone(),
+        pair.inputs(),
+        Default::default(),
+    )
+    .unwrap();
+    let mut candidate = accepted
+        .producer()
+        .candidate(
+            source.snapshots(),
+            owned::Request {
+                binding: repo::hyperchain::producer::Binding {
+                    network: node.config.profile.network.clone(),
+                    election: node.config.profile.contracts.election,
+                    parent_start: 1.into(),
+                    parent_length: 5.into(),
+                    block_time: 4.into(),
+                },
+                input: owned::Input::Micro(repo::hyperchain::candidate::Input {
+                    parent: node.db.view().unwrap().status().tip.unwrap(),
+                    now: 999,
+                    limits: Default::default(),
+                }),
+                parent: pair.client.snapshot().cache,
+                pins: Arc::new(Default::default()),
+                limits: Default::default(),
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let (trees, old_nonce) = {
+        let owned::Candidate::Micro(p) = candidate.outcome.as_mut().unwrap() else {
+            panic!()
+        };
+        let nonce = p
+            .candidate
+            .trees()
+            .accounts
+            .lookup(signer(12).public_key())
+            .unwrap()
+            .unwrap()
+            .nonce()
+            .clone();
+        let mut spend = ae_tx::Spend::new(
+            signer(12).public_key(),
+            ae_types::Id::new(ae_types::IdTag::Account, signer(13).public_key().0),
+        )
+        .unwrap();
+        spend.set_nonce(nonce.add(&1.into()));
+        spend.set_fee(1_000_000_000_000.into());
+        spend.set_amount(1.into());
+        let signed = finalization::sign(
+            Transaction::new(TransactionLeaf::Spend(spend)),
+            &signer(12),
+            &node.config.profile.network,
+        );
+        let applied = p
+            .candidate
+            .update::<(), _, _>(&[signed], &p.reader)
+            .unwrap();
+        assert_eq!(applied.accepted, vec![0]);
+        (p.candidate.trees().clone(), nonce)
+    };
+    prepare(&owner);
+    let mut request = owner.finalize_candidate(&candidate).unwrap();
+    assert_eq!(request.captured().source_id, candidate.metadata.source_id);
+    assert_eq!(request.captured().status, candidate.metadata.status);
+    let result = complete(&mut owner, &mut request);
+    for (i, reply) in result.replies().iter().enumerate() {
+        let eoe::Reply::Finalized(local_host::Finalized::Signed(signed)) = reply else {
+            panic!("{reply:?}")
+        };
+        let TransactionLeaf::Contract(tx) = signed.transaction().leaf() else {
+            panic!()
+        };
+        let ContractOperation::Call { call_data, .. } = tx.operation() else {
+            panic!()
+        };
+        let expected = finalization::transaction(
+            &trees,
+            signer(12).public_key(),
+            node.config.profile.contracts.election,
+            call_data.clone(),
+            &(i as u64 + 1).into(),
+        )
+        .unwrap();
+        assert_eq!(
+            **signed,
+            finalization::sign(expected, &signer(12), &node.config.profile.network)
+        );
+        assert_eq!(tx.nonce(), &old_nonce.add(&(i as u64 + 2).into()));
+    }
+    let selected = source.capture().unwrap();
+    assert_eq!(
+        selected
+            .tip
+            .trees
+            .as_ref()
+            .unwrap()
+            .accounts
+            .lookup(signer(12).public_key())
+            .unwrap()
+            .unwrap()
+            .nonce(),
+        &old_nonce
+    );
+    drop(selected);
+    assert_eq!(source.snapshots().live_snapshots(), 1);
+    let mut foreign_metadata = candidate.metadata.clone();
+    foreign_metadata.source_id = foreign_metadata.source_id.wrapping_add(1);
+    let actual = std::mem::replace(&mut candidate.metadata, foreign_metadata);
+    assert!(matches!(
+        owner.finalize_candidate(&candidate),
+        Err(managed::Error::Configuration)
+    ));
+    candidate.metadata = actual;
+    importer.stop();
+    assert!(owner.shutdown().errors.is_empty());
+    drop((candidate, trees));
+    assert_eq!(source.snapshots().live_snapshots(), 0);
+}

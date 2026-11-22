@@ -67,7 +67,7 @@ fn connect(source: &Arc<live::Source>, node: &Node) -> live::Connected {
 }
 fn call(
     client: &live::Client,
-    command: runtime::Command<snapshots::Reader, snapshots::Reader>,
+    command: runtime::Command<live::StateReader, live::StateReader>,
 ) -> runtime::Call {
     match client.call(command) {
         Ok(c) => c,
@@ -76,7 +76,7 @@ fn call(
 }
 fn apply(
     client: &live::Client,
-    command: runtime::Command<snapshots::Reader, snapshots::Reader>,
+    command: runtime::Command<live::StateReader, live::StateReader>,
 ) -> runtime::Applied {
     call(client, command)
         .wait(Duration::from_secs(5))

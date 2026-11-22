@@ -103,6 +103,34 @@ impl<O: MapOrder + Clone> Accepted<O, inputs::Effects> {
     }
 }
 impl<O: MapOrder + Clone> Producer<O> {
+    pub fn candidate(
+        &self,
+        snapshots: &ae_storage::snapshots::Owner,
+        request: storage::candidate::Request,
+        mut check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<storage::candidate::Prepared<O>, Error> {
+        let context = self.context.upgrade().ok_or(Error::Closed)?;
+        self.owner
+            .upgrade()
+            .ok_or(Error::Closed)?
+            .prepare_candidate(snapshots, request, || {
+                producer_guard(&context)?;
+                check()
+            })
+            .map_err(|e| match e {
+                storage::candidate::Error::Repository(e) => Error::Storage(e),
+                storage::candidate::Error::Snapshot(ae_storage::snapshots::Error::Repository(
+                    e,
+                )) => Error::Storage(e),
+                storage::candidate::Error::Snapshot(e) => input_error(e),
+                storage::candidate::Error::RecoveryRequired => Error::RecoveryRequired,
+                storage::candidate::Error::Guard(e) => e,
+                storage::candidate::Error::Execution(e) => Error::Validation {
+                    operational: e.operational,
+                    reason: e.reason,
+                },
+            })
+    }
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {
         self.database.ptr_eq(&Arc::downgrade(database))
     }
@@ -116,21 +144,7 @@ impl<O: MapOrder + Clone> Producer<O> {
             .upgrade()
             .ok_or(Error::Closed)?
             .prepare_producer(request, || {
-                if context.stopped.load(Ordering::Acquire)
-                    || context.policy_scope.is_closed()
-                    || !context.db.policy_ready()
-                {
-                    return Err(Error::Closed);
-                }
-                if context.db.policy_recovery_required()
-                    || context
-                        .recovery
-                        .lock()
-                        .map_err(|_| Error::RecoveryRequired)?
-                        .is_some()
-                {
-                    return Err(Error::RecoveryRequired);
-                }
+                producer_guard(&context)?;
                 check()
             })
             .map_err(|e| match e {
@@ -143,6 +157,24 @@ impl<O: MapOrder + Clone> Producer<O> {
                 },
             })
     }
+}
+fn producer_guard<O>(context: &crate::chain::Context<O>) -> Result<(), Error> {
+    if context.stopped.load(Ordering::Acquire)
+        || context.policy_scope.is_closed()
+        || !context.db.policy_ready()
+    {
+        return Err(Error::Closed);
+    }
+    if context.db.policy_recovery_required()
+        || context
+            .recovery
+            .lock()
+            .map_err(|_| Error::RecoveryRequired)?
+            .is_some()
+    {
+        return Err(Error::RecoveryRequired);
+    }
+    Ok(())
 }
 impl<O: MapOrder + Clone, H: Clone + Default> Accepted<O, H> {
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {

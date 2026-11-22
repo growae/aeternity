@@ -20,6 +20,8 @@ pub struct Config {
     pub maximum_snapshots: usize,
     pub command_capacity: usize,
     pub maximum_node_bytes: usize,
+    pub maximum_read_bytes: usize,
+    pub maximum_scan_entries: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -27,6 +29,8 @@ impl Default for Config {
             maximum_snapshots: 8,
             command_capacity: 16,
             maximum_node_bytes: 64 << 20,
+            maximum_read_bytes: 64 << 20,
+            maximum_scan_entries: 100_000,
         }
     }
 }
@@ -53,6 +57,8 @@ impl Owner {
         if !(1..=128).contains(&config.maximum_snapshots)
             || !(1..=1024).contains(&config.command_capacity)
             || !(1..=1 << 30).contains(&config.maximum_node_bytes)
+            || !(1..=1 << 30).contains(&config.maximum_read_bytes)
+            || !(1..=1_000_000).contains(&config.maximum_scan_entries)
         {
             return Err(Error::Config);
         }
@@ -76,6 +82,21 @@ impl Owner {
     }
     pub fn live_snapshots(&self) -> usize {
         self.0.live.load(Ordering::Acquire)
+    }
+    pub fn uses_database(&self, database: &Arc<Database>) -> bool {
+        Arc::ptr_eq(&self.0.database, database)
+    }
+    // All repository reads, including metadata and prefix scans, go to the
+    // same pinned snapshot as trie reads. No live database fallback exists.
+    pub fn view(&self) -> Result<Captured<repo::View<Reader>>, Error> {
+        let captured = self.capture(|view| Ok(view.config().clone()))?;
+        let value = repo::View::load_with_config(captured.reader.clone(), captured.value)
+            .map_err(Error::Repository)?;
+        Ok(Captured {
+            value,
+            metadata: captured.metadata,
+            reader: captured.reader,
+        })
     }
     // The inspection and all subsequent node reads use the same snapshot.
     // Inspect metadata/roots here; leave account/contract lookups lazy when
@@ -122,23 +143,20 @@ impl Owner {
                     return;
                 }
                 for request in commands {
-                    let result = node(
-                        view.source(),
-                        request.hash,
-                        slot.0.config.maximum_node_bytes,
-                    );
-                    // A dropped read caller cannot block shutdown or another read.
-                    let _ = request.reply.send(result);
+                    request.run(view.source(), slot.0.config);
                 }
             })
             .map_err(|e| Error::Worker(e.to_string()))?;
-        let inner = Inner {
+        let mut inner = Inner {
             sender: Some(sender),
             worker: Some(worker),
+            metadata: None,
+            config: self.0.config,
         };
         let (value, metadata) = initialized
             .recv()
             .map_err(|_| Error::Worker("snapshot initialization ended".into()))??;
+        inner.metadata = Some(metadata.clone());
         Ok(Captured {
             value,
             metadata,
@@ -172,13 +190,13 @@ impl<T> Captured<T> {
         &self.reader
     }
 }
-struct Request {
-    hash: Hash256,
-    reply: SyncSender<Result<Option<Vec<u8>>, TrieError>>,
-}
+mod reads;
+use reads::Request;
 struct Inner {
     sender: Option<SyncSender<Request>>,
     worker: Option<JoinHandle<()>>,
+    metadata: Option<Metadata>,
+    config: Config,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -204,7 +222,7 @@ impl NodeReader for Reader {
             .sender
             .as_ref()
             .expect("live reader has a sender")
-            .try_send(Request { hash: *hash, reply })
+            .try_send(Request::Node { hash: *hash, reply })
             .map_err(|e| match e {
                 TrySendError::Full(_) => TrieError::ResourceLimit,
                 TrySendError::Disconnected(_) => closed(),

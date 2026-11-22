@@ -77,7 +77,7 @@ pub struct Shutdown {
 pub struct Owner {
     source: Arc<Source>,
     parent: Option<parent::Client>,
-    output: Option<votes::eoe::Owner<snapshots::Reader, snapshots::Reader>>,
+    output: Option<votes::eoe::Owner<StateReader, StateReader>>,
     votes: Option<votes::Worker>,
     epochs: Epochs,
     requests: Requests,
@@ -249,11 +249,42 @@ impl Owner {
             client.call(runtime::Command::Finalize { request, view })
         })
     }
+    // hc_apply_vote's retry must see the candidate's actual overlay, including
+    // earlier successful transactions. Pending callbacks still independently
+    // consult LocalHost's selected source, exactly as ordinary finalize does.
+    pub fn finalize_candidate<O>(
+        &mut self,
+        candidate: &ae_storage::hyperchain::candidate::Prepared<O>,
+    ) -> Result<Request, Error> {
+        use ae_storage::hyperchain::candidate::Candidate;
+        self.ready()?;
+        let database = self.source.database.upgrade().ok_or(Error::Closed)?;
+        let view = database
+            .view()
+            .map_err(|e| Error::State(state_error(snapshots::Error::Repository(e))))?;
+        if repo::Read::source_id(view.source()) != candidate.metadata.source_id {
+            return Err(Error::Configuration);
+        }
+        let view = match candidate
+            .outcome
+            .as_ref()
+            .map_err(|_| Error::Configuration)?
+        {
+            Candidate::Micro(prepared) => prepared.candidate.trees().clone(),
+            Candidate::Key(prepared) => prepared.candidate.trees().clone(),
+        };
+        let lease = self.requests.reserve()?;
+        let client = self.client();
+        self.requests
+            .submit(lease, candidate.metadata.clone(), |request| {
+                client.call(runtime::Command::Finalize { request, view })
+            })
+    }
     // Private command receipts belong to the caller. Dropping one does not
     // cancel accepted work or authorize replay into another service instance.
     fn call(
         &self,
-        command: runtime::Command<snapshots::Reader, snapshots::Reader>,
+        command: runtime::Command<StateReader, StateReader>,
     ) -> Result<runtime::Call, Error> {
         self.ready()?;
         self.client().call(command).map_err(submit_error)
@@ -290,8 +321,7 @@ impl Owner {
             O,
             ae_chain::repository::hyperchain::inputs::Effects,
         >,
-    ) -> Result<super::super::delivery::Delivery<O, snapshots::Reader, snapshots::Reader>, Error>
-    {
+    ) -> Result<super::super::delivery::Delivery<O, StateReader, StateReader>, Error> {
         self.ready()?;
         let database = self.source.database.upgrade().ok_or(Error::Closed)?;
         if !source.uses_database(&database) {
@@ -438,7 +468,7 @@ impl Drop for Owner {
         }
     }
 }
-fn submit_error(error: runtime::SubmitError<snapshots::Reader, snapshots::Reader>) -> Error {
+fn submit_error(error: runtime::SubmitError<StateReader, StateReader>) -> Error {
     match error {
         runtime::SubmitError::Full(_) => Error::Backpressured,
         runtime::SubmitError::ResourceLimit(_) => Error::ResourceLimit,
