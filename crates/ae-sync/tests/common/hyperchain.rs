@@ -1,3 +1,5 @@
+pub mod parents;
+pub mod pinned;
 use super::ledger_fixtures::otp_order;
 use ae_chain::{block::Block, repository as repo};
 use ae_codec::headers::{Header, HeaderMode};
@@ -86,7 +88,12 @@ fn read_config() -> repo::ReadConfig {
 pub fn block(j: &J) -> Block {
     Block::decode(&bytes(&j["block"]), read_config().block()).unwrap()
 }
-fn setup(path: &super::Temporary, corpus: &J, index: usize) -> (Arc<Database>, Config<Otp26>) {
+fn setup(
+    path: &super::Temporary,
+    corpus: &J,
+    index: usize,
+    profile_name: &str,
+) -> (Arc<Database>, Config<Otp26>) {
     let row = &corpus["rows"][index];
     let network = NetworkProfile::custom(
         b"ae_hc_reference".to_vec(),
@@ -127,7 +134,7 @@ fn setup(path: &super::Temporary, corpus: &J, index: usize) -> (Arc<Database>, C
             unicode_profile: ae_vm_fate::unicode::Profile::Otp26Unicode15,
             bls_profile: ae_crypto::bls::Profile::Mcl11976beLlvm64VintArm64,
         },
-        order: otp_order::profile(&corpus["profile"]),
+        order: otp_order::profile(&corpus[profile_name]),
         overrides: Default::default(),
         diagnostic: ae_vm_fate::diagnostic::Profile::Release,
         limits: Default::default(),
@@ -202,25 +209,55 @@ pub struct Node {
     pub db: Arc<Database>,
     pub config: Config<Otp26>,
     pub index: usize,
+    pub corpus: &'static J,
+    profile_name: &'static str,
     temporary: super::Temporary,
 }
 impl Node {
     pub fn new(index: usize) -> Self {
+        Self::from_corpus(&DATA, index)
+    }
+    pub fn from_corpus(corpus: &'static J, index: usize) -> Self {
+        Self::from_profile(corpus, index, "profile")
+    }
+    pub fn from_profile(corpus: &'static J, index: usize, profile_name: &'static str) -> Self {
         let temporary = super::Temporary(std::env::temp_dir().join(format!(
             "ae-hc-import-{}-{}",
             std::process::id(),
             super::NEXT.fetch_add(1, Ordering::Relaxed)
         )));
-        let (db, config) = setup(&temporary, &DATA, index);
+        let (db, config) = setup(&temporary, corpus, index, profile_name);
         Self {
             db,
             config,
             index,
+            corpus,
+            profile_name,
+            temporary,
+        }
+    }
+    pub fn reopen(self) -> Self {
+        let Self {
+            db,
+            config: _,
+            index,
+            corpus,
+            profile_name,
+            temporary,
+        } = self;
+        drop(db);
+        let (db, config) = setup(&temporary, corpus, index, profile_name);
+        Self {
+            db,
+            config,
+            index,
+            corpus,
+            profile_name,
             temporary,
         }
     }
     pub fn blocks(&self) -> Vec<Block> {
-        DATA["rows"][self.index]["rows"]
+        self.corpus["rows"][self.index]["rows"]
             .as_array()
             .unwrap()
             .iter()
@@ -228,7 +265,7 @@ impl Node {
             .collect()
     }
     pub fn check(&self, index: usize) {
-        let row = &DATA["rows"][self.index]["rows"][index];
+        let row = &self.corpus["rows"][self.index]["rows"][index];
         let b = block(row);
         let hash = b.hash().unwrap();
         let view = self.db.view().unwrap();

@@ -315,12 +315,31 @@ async fn wait_blocks(handle: &mut sync::Handle, accepted: u64, ignored: u64) {
 }
 #[tokio::test]
 async fn encrypted_full_and_light_hc_blocks_reconstruct_and_commit_both_epoch_ends() {
-    for (index, light) in [(0, false), (0, true), (6, true)] {
-        let node = fixture::Node::new(index);
+    for (index, light, pins) in [
+        (0, false, false),
+        (0, true, false),
+        (6, true, false),
+        (0, false, true),
+        (0, true, true),
+        (1, true, true),
+        (6, true, true),
+    ] {
+        let node = if pins {
+            fixture::Node::from_corpus(&fixture::pinned::DATA, index)
+        } else {
+            fixture::Node::new(index)
+        };
+        let parent = pins.then(|| fixture::pinned::Parent::new(index));
+        let (importer, mut accepted) = if let Some(p) = &parent {
+            let (i, a) = p.importer(&node);
+            (i, Some(a))
+        } else {
+            (importer(&node), None)
+        };
         let app = start(&node).await;
         let (remote, mut events, driver) = connect(&node, &app).await;
         let (handle, _forwarded, service) = sync::create(
-            importer(&node),
+            importer,
             app.network.clone(),
             app.peer.clone(),
             app.events,
@@ -402,6 +421,10 @@ async fn encrypted_full_and_light_hc_blocks_reconstruct_and_commit_both_epoch_en
             }
             wait_blocks(&mut handle, i as u64 + 1, ignored).await;
             node.check(i);
+            if let Some(a) = &mut accepted {
+                fixture::pinned::check_pin(&node, i);
+                a.take().unwrap().drain();
+            }
             if let Block::Key(k) = &block {
                 leader_version = k.common.version;
             }
@@ -422,6 +445,9 @@ async fn encrypted_full_and_light_hc_blocks_reconstruct_and_commit_both_epoch_en
                 wait_blocks(&mut handle, 1, ignored).await;
                 assert_eq!(node.db.view().unwrap().status().revision, 2);
             }
+        }
+        if let Some(p) = &parent {
+            assert_eq!(p.requests.load(std::sync::atomic::Ordering::Acquire), 1);
         }
         handle.shutdown();
         let status = within(finish).await.unwrap();
@@ -511,5 +537,204 @@ async fn encrypted_hc_disconnect_during_parent_capture_cannot_publish_the_downlo
     importer.stop();
     importer.join().await;
     within(driver).await.unwrap();
+    stop_parts(app).await;
+}
+
+#[tokio::test]
+async fn encrypted_pin_generations_preserve_native_rewards_and_incorrect_proofs() {
+    use fixture::pinned;
+    use std::sync::atomic::Ordering;
+    for index in [0, 1, 6] {
+        let node = fixture::Node::from_corpus(&pinned::DATA, index);
+        let parent = pinned::Parent::new(index);
+        let (importer, mut accepted) = parent.importer(&node);
+        let app = start(&node).await;
+        let (remote, mut events, driver) = connect(&node, &app).await;
+        let client = app
+            .network
+            .peers()
+            .peers()
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut micros = vec![];
+        for (i, block) in node.blocks().into_iter().enumerate() {
+            if matches!(block, Block::Micro(_)) {
+                micros.push(block);
+                continue;
+            }
+            let hash = block.hash().unwrap();
+            let fetch =
+                importer.fetch(&app.network, client.clone(), hash, Direction::Backward, NOW);
+            let serve = async {
+                let request = incoming(&mut events, Kind::GetGeneration).await;
+                assert_eq!(
+                    request.message().fields()["hash"],
+                    Value::Binary(hash.0.to_vec())
+                );
+                remote
+                    .send(
+                        &Message::response_ok(
+                            &common::import::message(&block, &micros, Direction::Backward),
+                            Default::default(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = within(async { tokio::join!(fetch, serve) }).await;
+            assert_eq!(result.unwrap().accepted.len(), micros.len() + 1);
+            node.check(i);
+            pinned::check_pin(&node, i);
+            accepted.take().unwrap().drain();
+            micros.clear();
+        }
+        assert_eq!(parent.requests.load(Ordering::Acquire), 1);
+        remote.shutdown();
+        within(driver).await.unwrap();
+        importer.stop();
+        importer.join().await;
+        stop_parts(app).await;
+    }
+}
+
+#[tokio::test]
+async fn encrypted_disconnect_during_pin_rpc_discards_reward_and_retries_on_fresh_peer() {
+    use fixture::pinned;
+    use std::sync::atomic::Ordering;
+    let node = fixture::Node::from_corpus(&pinned::DATA, 6);
+    let parent = pinned::Parent::new(6);
+    let (importer, mut accepted) = parent.importer(&node);
+    let blocks = node.blocks();
+    for b in &blocks[..10] {
+        within(
+            importer
+                .import_block(b.encode().unwrap(), NOW)
+                .unwrap()
+                .wait(),
+        )
+        .await
+        .unwrap();
+        accepted.take().unwrap().drain();
+    }
+    let before = node.db.view().unwrap();
+    let status = before.status();
+    let checkpoint = before.hyperchain_checkpoint().unwrap();
+    let app = start(&node).await;
+    let (remote, mut events, driver) = connect(&node, &app).await;
+    let client = app
+        .network
+        .peers()
+        .peers()
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    parent.mode.store(3, Ordering::Release);
+    let hash = blocks[10].hash().unwrap();
+    let fetch = importer.fetch(&app.network, client.clone(), hash, Direction::Backward, NOW);
+    let serve = async {
+        incoming(&mut events, Kind::GetGeneration).await;
+        remote
+            .send(
+                &Message::response_ok(
+                    &common::import::message(&blocks[10], &blocks[9..10], Direction::Backward),
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        within(async {
+            while parent.requests.load(Ordering::Acquire) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        remote.shutdown();
+        within(client.monitor().wait()).await;
+        parent.mode.store(0, Ordering::Release);
+    };
+    let (result, ()) = within(async { tokio::join!(fetch, serve) }).await;
+    let failure = result.unwrap_err();
+    assert_eq!(failure.error, chain::Error::Stale);
+    let prefix = failure.progress.unwrap();
+    assert_eq!(prefix.accepted.len(), 1);
+    assert_eq!(prefix.accepted[0].outcome, chain::Outcome::Present);
+    assert_eq!(node.db.view().unwrap().status(), status);
+    assert_eq!(
+        node.db.view().unwrap().hyperchain_checkpoint().unwrap(),
+        checkpoint
+    );
+    assert!(accepted.take().unwrap().entries().is_empty());
+    assert!(!importer.recovery_required());
+    within(driver).await.unwrap();
+    within(async {
+        while !app
+            .network
+            .peers()
+            .peers()
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let (remote, mut events, driver) = connect(&node, &app).await;
+    let client = app
+        .network
+        .peers()
+        .peers()
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let fetch = importer.fetch(&app.network, client, hash, Direction::Backward, NOW);
+    let serve = async {
+        incoming(&mut events, Kind::GetGeneration).await;
+        remote
+            .send(
+                &Message::response_ok(
+                    &common::import::message(&blocks[10], &blocks[9..10], Direction::Backward),
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .await
+            .unwrap();
+    };
+    let (result, ()) = within(async { tokio::join!(fetch, serve) }).await;
+    let report = result.unwrap();
+    assert_eq!(report.accepted.len(), 2);
+    assert_eq!(
+        report.accepted[1].outcome,
+        chain::Outcome::Committed {
+            revision: status.revision + 1
+        }
+    );
+    node.check(10);
+    pinned::check_pin(&node, 10);
+    accepted.take().unwrap().drain();
+    assert_eq!(before.status(), status);
+    assert_eq!(parent.requests.load(Ordering::Acquire), 2);
+    remote.shutdown();
+    within(driver).await.unwrap();
+    importer.stop();
+    importer.join().await;
     stop_parts(app).await;
 }
