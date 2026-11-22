@@ -11,6 +11,7 @@ use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
 use num_bigint::{BigInt, Sign};
 use std::sync::Arc;
+pub mod inputs;
 pub mod journal;
 
 pub use ae_hyperchain::chain::Profile;
@@ -74,6 +75,23 @@ fn backend(error: Error) -> LookupError {
         }
         Error::Pruned { .. } => LookupError::StateGarbageCollected,
         error => LookupError::Backend(Arc::new(error)),
+    }
+}
+impl<S: Read> View<S> {
+    pub fn hyperchain_key_hash(&self, height: &BigInt) -> Result<Option<Hash256>, Error> {
+        let Ok(height) = u64::try_from(height) else {
+            return Ok(None);
+        };
+        let Some(hash) = self.canonical_key(height)? else {
+            return Ok(None);
+        };
+        let block = self.require_block(hash)?;
+        if !matches!(block.header(), Header::Key(k) if k.common.height == height)
+            || !self.is_canonical(hash)?
+        {
+            return Err(Error::Corrupt("HC canonical key"));
+        }
+        Ok(Some(hash))
     }
 }
 impl<S: Read> Snapshot<S> {
@@ -164,20 +182,10 @@ impl<S: Read> source::Read<Overlay<S>, Overlay<S>> for Snapshot<S> {
             .transpose()
     }
     fn key_hash(&self, height: &BigInt) -> Result<Option<Vec<u8>>, LookupError> {
-        let Ok(height) = u64::try_from(height) else {
-            return Ok(None);
-        };
-        let view = &self.repository;
-        let Some(hash) = view.canonical_key(height).map_err(backend)? else {
-            return Ok(None);
-        };
-        let block = view.require_block(hash).map_err(backend)?;
-        if !matches!(block.header(), Header::Key(k) if k.common.height == height)
-            || !view.is_canonical(hash).map_err(backend)?
-        {
-            return Err(backend(Error::Corrupt("HC canonical key")));
-        }
-        Ok(Some(hash.0.to_vec()))
+        self.repository
+            .hyperchain_key_hash(height)
+            .map(|h| h.map(|h| h.0.to_vec()))
+            .map_err(backend)
     }
     fn view(&self, hash: &[u8]) -> Result<Arc<ContractView<S>>, LookupError> {
         let hash = Hash256(hash.try_into().map_err(|_| LookupError::InvalidHash)?);

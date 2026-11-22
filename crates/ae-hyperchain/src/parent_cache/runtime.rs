@@ -184,6 +184,11 @@ fn call_error(e: RecvTimeoutError) -> Error {
     }
 }
 impl Client {
+    // A fixed client names one cache lifetime, even if another runtime is
+    // started later. Suitable for nonblocking guards at the child writer.
+    pub fn is_closed(&self) -> bool {
+        !self.control.alive.load(Ordering::Acquire) || self.control.stop.load(Ordering::Acquire)
+    }
     fn submit(&self, task: Task) -> Result<(), Error> {
         if !self.control.alive.load(Ordering::Acquire) || self.control.stop.load(Ordering::Acquire)
         {

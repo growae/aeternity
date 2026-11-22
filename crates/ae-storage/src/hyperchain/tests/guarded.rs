@@ -186,6 +186,7 @@ fn guarded_hc_uncertain_writes_poison_without_publishing_staged_host_or_cache() 
             db.view().unwrap().status().revision,
             if failure == 1 { 1 } else { 2 }
         );
+        assert!(owner.take_host().is_err());
         assert!(matches!(
             owner.insert_guarded(
                 &b,
@@ -197,5 +198,90 @@ fn guarded_hc_uncertain_writes_poison_without_publishing_staged_host_or_cache() 
             ),
             Err(Error::RecoveryRequired)
         ));
+    }
+}
+
+#[derive(Clone)]
+struct Borrowed<'db> {
+    child: repo::View<Snapshot<'db>>,
+    parent: Parent,
+}
+impl Host for Borrowed<'_> {
+    type Error = ();
+    fn is_operational(_: &()) -> bool {
+        true
+    }
+    fn entropy(&mut self, epoch: &BigInt) -> Result<Option<Vec<u8>>, ()> {
+        assert_eq!(
+            self.child.hyperchain_key_hash(&0.into()).unwrap(),
+            Some(self.child.identity().genesis)
+        );
+        self.parent.entropy(epoch)
+    }
+    fn pin(&mut self, hash: &[u8]) -> Result<Option<hc::Pin>, ()> {
+        self.parent.pin(hash)
+    }
+    fn key_hash(&mut self, height: &BigInt) -> Result<Option<Vec<u8>>, ()> {
+        Ok(self
+            .child
+            .hyperchain_key_hash(height)
+            .unwrap()
+            .map(|h| h.0.to_vec()))
+    }
+}
+struct Scoped;
+impl Inputs<Parent, ()> for Scoped {
+    type Error = ();
+    type Host<'db> = Borrowed<'db>;
+    fn capture<'db>(
+        &mut self,
+        child: &repo::View<Snapshot<'db>>,
+        _: &Block,
+        _: &Parent,
+    ) -> Result<Borrowed<'db>, ()> {
+        Ok(Borrowed {
+            child: child.clone(),
+            parent: Parent {
+                reads: vec![99.into()],
+                unavailable: false,
+            },
+        })
+    }
+    fn detach(host: Borrowed<'_>) -> Parent {
+        host.parent
+    }
+}
+#[test]
+fn scoped_hc_hosts_detach_borrowed_views_and_quarantine_uncertain_effects() {
+    for failure in [0, 1, 2] {
+        let path = Temp::new();
+        let (db, config) = setup(&path);
+        let owner = Owner::start(db.clone(), config, Parent::default()).unwrap();
+        let scope = db.policy_scope().unwrap();
+        let b = block(&DATA["rows"][0]["rows"][0]);
+        db.event_write_failure.store(failure, Ordering::Relaxed);
+        let result = owner.insert_scoped(&b, 1_000_000, Origin::Gossip, &scope, Scoped, || Ok(()));
+        if failure == 0 {
+            result.unwrap();
+            let effects = owner.take_host().unwrap();
+            assert_eq!(effects.reads[0], BigInt::from(99));
+            assert!(effects.reads.len() > 1);
+            assert!(owner.take_host().unwrap().reads.is_empty());
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::Repository(repo::Error::Backend(_)))
+            ));
+            assert!(owner.take_host().is_err());
+            assert!(owner.live.lock().unwrap().host.reads.is_empty());
+            assert!(matches!(
+                owner.insert_scoped(&b, 1_000_000, Origin::Gossip, &scope, Scoped, || Ok(())),
+                Err(Error::RecoveryRequired)
+            ));
+        }
+        assert_eq!(
+            db.view().unwrap().status().revision,
+            if failure == 1 { 1 } else { 2 }
+        );
     }
 }
