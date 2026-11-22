@@ -8,6 +8,7 @@ use ae_state::Trees;
 use ae_trie::MemoryStore;
 use ae_types::{Hash256, Unsigned};
 use std::sync::Arc;
+pub mod candidate;
 mod transition;
 mod validation;
 pub use transition::execute;

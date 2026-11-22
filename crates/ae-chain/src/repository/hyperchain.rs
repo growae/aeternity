@@ -11,6 +11,7 @@ use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
 use num_bigint::{BigInt, Sign};
 use std::sync::Arc;
+pub mod candidate;
 pub mod inputs;
 pub mod journal;
 pub mod producer;

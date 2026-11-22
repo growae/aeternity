@@ -13,7 +13,7 @@ use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::{machine::program::remote::context::Consensus, maps::MapOrder};
 use std::sync::Arc;
 
-fn frame<E, A: Clone, C: Clone>(
+pub(super) fn frame<E, A: Clone, C: Clone>(
     parent: &Parent<'_, A, C>,
     key: &KeyHeader,
     height: u64,
