@@ -220,50 +220,26 @@ fn execute_inner<
     if parent.view.trees.roots().hash().0 != parent.header.common().state_hash {
         return Err(Error::ParentState);
     }
-    let incoming = if matches!(parent.header, Header::Key(_)) {
-        0.into()
-    } else {
-        parent.fees.clone()
-    };
-    let mut out = Outcome {
-        trees: parent.view.trees.as_ref().clone(),
-        fees: incoming.clone(),
-        score: validation::score(block),
-        transactions: vec![],
-        consensus: vec![],
-        wait_ms: None,
-    };
-    if let Block::Key(k) = block {
-        let prepared = input_trees(&reader, parent, k, rules).map_err(Error::Transform)?;
-        out.trees = prepared.trees;
-        out.fees = prepared.fees;
-    }
-    let kind = match block {
-        Block::Key(_) => hc::Kind::Key,
-        Block::Micro(_) => hc::Kind::Micro,
-    };
-    let transformed = state
-        .pre_transform(
-            &reader,
-            parent.view,
-            &out.trees,
-            host,
-            kind,
-            h.common().height,
-            &rules.consensus,
-        )
-        .map_err(Error::Consensus)?;
-    out.trees = transformed.trees;
-    out.consensus = transformed.events;
-    out.wait_ms = transformed.wait_ms;
-    current.trees = Arc::new(out.trees);
-    match block {
-        Block::Key(k) => {
-            validation::leader(k, state)?;
-            grant(&reader, &mut current, k, history, rules)?;
-            out.trees = current.trees.as_ref().clone();
-        }
+    let out = match block {
+        Block::Key(k) => key_state(k, parent, history, &reader, state, host, rules, current)?,
         Block::Micro(m) => {
+            let incoming = if matches!(parent.header, Header::Key(_)) {
+                0.into()
+            } else {
+                parent.fees.clone()
+            };
+            let transformed = state
+                .pre_transform(
+                    &reader,
+                    parent.view,
+                    &parent.view.trees,
+                    host,
+                    hc::Kind::Micro,
+                    h.common().height,
+                    &rules.consensus,
+                )
+                .map_err(Error::Consensus)?;
+            current.trees = Arc::new(transformed.trees);
             let mut trees = current.trees.as_ref().clone();
             let applied = reader
                 .with_execution(&current, |cfg| {
@@ -277,13 +253,63 @@ fn execute_inner<
                     )
                 })
                 .map_err(Error::Transactions)?;
-            out.trees = trees;
-            out.fees = rewards::unsigned(applied.fees);
-            out.transactions = applied.transactions.events;
+            Outcome {
+                trees,
+                fees: rewards::unsigned(applied.fees),
+                score: validation::score(block),
+                transactions: applied.transactions.events,
+                consensus: transformed.events,
+                wait_ms: transformed.wait_ms,
+            }
         }
-    }
+    };
     validation::root(&out.trees, &h)?;
     Ok(out)
+}
+
+// Shared key-state calculation. Header admission, target/seal checks and root
+// verification remain the responsibility of the normal incoming-block path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn key_state<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    S: chain::Source<A, C>,
+    H: hc::Host,
+>(
+    header: &KeyHeader,
+    parent: &Parent<'_, A, C>,
+    history: &rewards::History,
+    reader: &Reader<A, C, O, S>,
+    state: &mut hc::State,
+    host: &mut H,
+    rules: &Rules,
+    mut current: chain::View<A, C>,
+) -> Result<Outcome<A, C>, Error<H::Error, A, C>> {
+    let input = input_trees_in_environment(reader, parent, header, rules, &current)
+        .map_err(Error::Transform)?;
+    let transformed = state
+        .pre_transform(
+            reader,
+            parent.view,
+            &input.trees,
+            host,
+            hc::Kind::Key,
+            header.common.height,
+            &rules.consensus,
+        )
+        .map_err(Error::Consensus)?;
+    current.trees = Arc::new(transformed.trees);
+    validation::leader(header, state)?;
+    grant(reader, &mut current, header, history, rules)?;
+    Ok(Outcome {
+        trees: current.trees.as_ref().clone(),
+        fees: input.fees,
+        score: u64::from(header.target).into(),
+        transactions: vec![],
+        consensus: transformed.events,
+        wait_ms: transformed.wait_ms,
+    })
 }
 
 pub(crate) fn input_trees<
@@ -296,6 +322,34 @@ pub(crate) fn input_trees<
     parent: &Parent<'_, A, C>,
     k: &KeyHeader,
     rules: &Rules,
+) -> Result<key::Transformed<A, C>, key::Error<A, C>> {
+    let gas = reader
+        .profile
+        .network
+        .block_gas_limit(&rules.configured_gas_limit);
+    // pre_transform installs its incoming block environment for migrations;
+    // expiry and gas fees use the exact predecessor trees in both paths.
+    let hash = Header::Key(k.clone())
+        .hash()
+        .map_err(key::Error::Encoding)?;
+    let current =
+        frame::<(), _, _>(parent, k, k.common.height, k.time, hash, &gas).map_err(|e| match e {
+            Error::Protocol(p) => key::Error::Header(p.into()),
+            _ => unreachable!("frame protocol"),
+        })?;
+    input_trees_in_environment(reader, parent, k, rules, &current)
+}
+fn input_trees_in_environment<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    S: chain::Source<A, C>,
+>(
+    reader: &Reader<A, C, O, S>,
+    parent: &Parent<'_, A, C>,
+    k: &KeyHeader,
+    rules: &Rules,
+    current: &chain::View<A, C>,
 ) -> Result<key::Transformed<A, C>, key::Error<A, C>> {
     let incoming = if matches!(parent.header, Header::Key(_)) {
         0.into()
@@ -316,18 +370,8 @@ pub(crate) fn input_trees<
         .profile
         .network
         .block_gas_limit(&rules.configured_gas_limit);
-    // pre_transform installs its incoming block environment for migrations;
-    // expiry and gas fees use the exact predecessor trees in both paths.
-    let hash = Header::Key(k.clone())
-        .hash()
-        .map_err(key::Error::Encoding)?;
-    let current =
-        frame::<(), _, _>(parent, k, k.common.height, k.time, hash, &gas).map_err(|e| match e {
-            Error::Protocol(p) => key::Error::Header(p.into()),
-            _ => unreachable!("frame protocol"),
-        })?;
-    reader.with_execution(&current, |cfg| {
-        key::pre_transform(
+    reader.with_execution(current, |cfg| {
+        key::pre_transform_in_environment(
             &parent.view.trees,
             k,
             &p,

@@ -13,7 +13,10 @@ use ae_types::{AccountPublicKey, Hash256};
 use ae_vm_fate::maps::MapOrder;
 use num_bigint::BigInt;
 use std::sync::Arc;
+mod key;
 mod packing;
+pub(crate) use key::template as key_template;
+pub use key::{Key, KeyInput};
 pub use packing::{Deadlines, PackRequest, Packing, Timeout};
 pub type Signed = SignedTransaction<Transaction>;
 

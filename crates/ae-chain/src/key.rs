@@ -212,6 +212,80 @@ pub(crate) fn pre_transform<A: NodeWriter + Clone, C: NodeWriter + Clone, O: Map
     execution: &transactions::Config<'_, O>,
     rules: TransformRules<'_>,
 ) -> Result<Transformed<A, C>, Error<A, C>> {
+    pre_transform_with(
+        trees,
+        header,
+        parent,
+        execution,
+        &rules,
+        |next, migration, context| {
+            let key_hash = Header::Key(header.clone())
+                .hash()
+                .map_err(Error::Encoding)?
+                .0;
+            with_block_environment(
+                execution,
+                header,
+                header.time,
+                key_hash,
+                &rewards::number(rules.gas),
+                |config| {
+                    forks::apply(
+                        next,
+                        migration,
+                        context,
+                        config,
+                        rules.gas,
+                        rules.fork_limits,
+                    )
+                },
+            )
+            .map_err(Error::Difficulty)?
+            .map_err(Error::Migration)
+        },
+    )
+}
+// The caller has already constructed the exact environment. In particular,
+// HC's fake candidate header has native difficulty -1, despite its encoded
+// target word being u32::MAX. Do not reconstruct that environment from bytes.
+pub(crate) fn pre_transform_in_environment<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+>(
+    trees: &Trees<A, C>,
+    header: &KeyHeader,
+    parent: &Parent<'_>,
+    execution: &transactions::Config<'_, O>,
+    rules: TransformRules<'_>,
+) -> Result<Transformed<A, C>, Error<A, C>> {
+    pre_transform_with(
+        trees,
+        header,
+        parent,
+        execution,
+        &rules,
+        |next, migration, context| {
+            forks::apply(
+                next,
+                migration,
+                context,
+                execution,
+                rules.gas,
+                rules.fork_limits,
+            )
+            .map_err(Error::Migration)
+        },
+    )
+}
+fn pre_transform_with<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    trees: &Trees<A, C>,
+    header: &KeyHeader,
+    parent: &Parent<'_>,
+    execution: &transactions::Config<'_, O>,
+    rules: &TransformRules<'_>,
+    migrate: impl FnOnce(&mut Trees<A, C>, &forks::Migration, &Context) -> Result<(), Error<A, C>>,
+) -> Result<Transformed<A, C>, Error<A, C>> {
     if parent.fees.sign() == Sign::Minus {
         return Err(Error::InvalidFees);
     }
@@ -243,29 +317,7 @@ pub(crate) fn pre_transform<A: NodeWriter + Clone, C: NodeWriter + Clone, O: Map
                 contracts: vec![],
             }
         };
-        let key_hash = Header::Key(header.clone())
-            .hash()
-            .map_err(Error::Encoding)?
-            .0;
-        with_block_environment(
-            execution,
-            header,
-            header.time,
-            key_hash,
-            &rewards::number(rules.gas),
-            |config| {
-                forks::apply(
-                    &mut next,
-                    &migration,
-                    &context,
-                    config,
-                    rules.gas,
-                    rules.fork_limits,
-                )
-            },
-        )
-        .map_err(Error::Difficulty)?
-        .map_err(Error::Migration)?;
+        migrate(&mut next, &migration, &context)?;
     }
     Ok(Transformed { trees: next, fees })
 }

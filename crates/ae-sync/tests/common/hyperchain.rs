@@ -103,6 +103,16 @@ fn setup_events(
     profile_name: &str,
     events: ae_storage::events::Config,
 ) -> (Arc<Database>, Config<Otp26>) {
+    setup_fork(path, corpus, index, profile_name, events, None)
+}
+fn setup_fork(
+    path: &super::Temporary,
+    corpus: &J,
+    index: usize,
+    profile_name: &str,
+    events: ae_storage::events::Config,
+    fork: Option<ae_protocol::signaling::Fork>,
+) -> (Arc<Database>, Config<Otp26>) {
     let row = &corpus["rows"][index];
     let network = NetworkProfile::custom(
         b"ae_hc_reference".to_vec(),
@@ -116,6 +126,8 @@ fn setup_events(
             })
             .collect(),
     )
+    .unwrap()
+    .with_community_fork(fork)
     .unwrap();
     let Header::Key(header) =
         Header::decode(&bytes(&row["genesis"]["header"]), HeaderMode::Hyperchain).unwrap()
@@ -252,6 +264,29 @@ impl Node {
     pub fn from_corpus(corpus: &'static J, index: usize) -> Self {
         Self::from_profile(corpus, index, "profile")
     }
+    pub fn with_fork(index: usize, fork: ae_protocol::signaling::Fork) -> Self {
+        let temporary = super::Temporary(std::env::temp_dir().join(format!(
+            "ae-hc-fork-{}-{}",
+            std::process::id(),
+            super::NEXT.fetch_add(1, Ordering::Relaxed)
+        )));
+        let (db, config) = setup_fork(
+            &temporary,
+            &DATA,
+            index,
+            "profile",
+            Default::default(),
+            Some(fork),
+        );
+        Self {
+            db,
+            config,
+            index,
+            corpus: &DATA,
+            profile_name: "profile",
+            temporary,
+        }
+    }
     pub fn from_profile(corpus: &'static J, index: usize, profile_name: &'static str) -> Self {
         let temporary = super::Temporary(std::env::temp_dir().join(format!(
             "ae-hc-import-{}-{}",
@@ -271,14 +306,21 @@ impl Node {
     pub fn reopen(self) -> Self {
         let Self {
             db,
-            config: _,
+            config,
             index,
             corpus,
             profile_name,
             temporary,
         } = self;
         drop(db);
-        let (db, config) = setup(&temporary, corpus, index, profile_name);
+        let (db, config) = setup_fork(
+            &temporary,
+            corpus,
+            index,
+            profile_name,
+            Default::default(),
+            config.profile.network.community_fork(),
+        );
         Self {
             db,
             config,

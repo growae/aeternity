@@ -116,36 +116,17 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
         Block::Micro(_) => &previous_key,
     };
     let execution_history = Arc::new(super::super::vm_history(view, branch, limits.history)?);
-    let mut history = rewards::History::new();
-    if matches!(block,Block::Key(k) if k.common.height > config.rules.reward_delay) {
-        let count = config
-            .rules
-            .reward_delay
-            .checked_add(1)
-            .ok_or(Error::ResourceLimit)?;
-        if count > limits.history as u64 {
-            return Err(Error::ResourceLimit.into());
-        }
-        let mut next = key_hash;
-        for _ in 0..count {
-            let header = require_key(view, next)?;
-            let r = view.require_record(next)?;
-            let previous = Hash256(header.common.previous_key_hash);
-            let genesis = next == view.identity.genesis;
-            history.insert(
-                next,
-                rewards::Record {
-                    header,
-                    fees: Some(r.fees),
-                    reported_fraud: Some(r.fraud),
-                },
-            );
-            if genesis {
-                break;
-            }
-            next = previous;
-        }
-    }
+    let history = if let Block::Key(k) = block {
+        super::super::hyperchain::candidate::reward_history(
+            view,
+            key_hash,
+            k.common.height,
+            &config.rules,
+            limits.history,
+        )?
+    } else {
+        rewards::History::new()
+    };
     let parent = hc::Parent {
         header: &previous,
         key: &previous_key,
