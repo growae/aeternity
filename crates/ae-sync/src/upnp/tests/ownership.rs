@@ -21,8 +21,14 @@ struct RouterState {
     lose_add_reply: bool,
     reject_adds: u8,
     add_requests: usize,
+    requests: Vec<String>,
+    redirects: BTreeMap<String, (u16, String)>,
+    redirect_after_add: bool,
+    redirect_after_delete: bool,
+    generic_redirect_minimum: u16,
 }
 struct Router {
+    control: String,
     state: Arc<Mutex<RouterState>>,
     settings: Settings,
     stop: watch::Sender<bool>,
@@ -53,13 +59,23 @@ fn entry_body(port: u16, reservation: &Reservation, generic: bool) -> String {
         reservation.internal, reservation.description
     )
 }
+async fn redirect_reply(stream: &TcpStream, status: u16, location: &str) {
+    send(stream, format!("HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await;
+}
 impl Router {
+    fn redirect(&self, operation: &str, other: &Router, status: u16) {
+        self.state.lock().unwrap().redirects.insert(
+            operation.to_owned(),
+            (status, other.control.replace("127.0.0.1", "localhost")),
+        );
+    }
     async fn start() -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut settings = settings();
         settings.ssdp = address(udp.local_addr().unwrap());
         let location = format!("http://{}/root.xml", listener.local_addr().unwrap());
+        let control = format!("http://{}/control", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(RouterState {
             mappings: BTreeMap::from([(
                 4000,
@@ -80,6 +96,11 @@ impl Router {
             lose_add_reply: false,
             reject_adds: 0,
             add_requests: 0,
+            requests: vec![],
+            redirects: BTreeMap::new(),
+            redirect_after_add: false,
+            redirect_after_delete: false,
+            generic_redirect_minimum: 0,
         }));
         let (stop, mut stopped) = watch::channel(false);
         let udp_task = tokio::spawn(async move {
@@ -116,6 +137,27 @@ impl Router {
                     })
                     .unwrap();
                 let name = operation.tag_name().name();
+                let (redirect, after) = {
+                    let mut s = records.lock().unwrap();
+                    s.requests.push(raw.clone());
+                    let eligible = name != "GetGenericPortMappingEntry"
+                        || field(operation, "NewPortMappingIndex")
+                            .parse::<u16>()
+                            .unwrap()
+                            >= s.generic_redirect_minimum;
+                    let redirect = eligible.then(|| s.redirects.get(name).cloned()).flatten();
+                    (
+                        redirect,
+                        (name == "AddAnyPortMapping" && s.redirect_after_add)
+                            || (name == "DeletePortMapping" && s.redirect_after_delete),
+                    )
+                };
+                if let Some((status, location)) = &redirect
+                    && !after
+                {
+                    redirect_reply(&stream, *status, location).await;
+                    continue;
+                }
                 let (status, body, hold, omit) = {
                     let mut s = records.lock().unwrap();
                     match name {
@@ -212,7 +254,9 @@ impl Router {
                         _ => panic!("unexpected action {name}"),
                     }
                 };
-                if hold {
+                if let Some((status, location)) = redirect {
+                    redirect_reply(&stream, status, &location).await;
+                } else if hold {
                     loop {
                         tokio::select! {_=stopped.changed()=>return,r=stream.readable()=>r.unwrap()};
                         match stream.try_read(&mut [0; 32]) {
@@ -227,6 +271,7 @@ impl Router {
             }
         });
         Self {
+            control,
             state,
             settings,
             stop,
@@ -655,4 +700,319 @@ async fn withdrawn_listener_cleanup_survives_rejected_refresh_and_worker_cancell
         "another-owner"
     );
     router.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn soap_redirects_preserve_post_body_and_retire_every_possible_mapping_before_renewal() {
+    for status in [300, 301, 302, 307, 308] {
+        let first = Router::start().await;
+        let second = Router::start().await;
+        first.redirect("AddAnyPortMapping", &second, status);
+        first.state.lock().unwrap().redirect_after_add = true;
+        let config = first.config();
+        let source = config.ports.clone();
+        let network = Network::new(config.network.clone()).unwrap();
+        let gateway = network.discover().await.unwrap();
+        let mapping = source
+            .add_ports(network.clone(), gateway.clone(), ports())
+            .await
+            .unwrap();
+        assert_eq!(mapping.external, 5000);
+        assert_eq!(source.retained_mappings(), 2);
+        assert_eq!(source.uncertain_mappings(), 1);
+        {
+            let a = first.state.lock().unwrap();
+            let b = second.state.lock().unwrap();
+            assert_eq!(a.mappings[&5000].description, b.mappings[&5000].description);
+            let a = a
+                .requests
+                .iter()
+                .find(|r| r.contains("#AddAnyPortMapping"))
+                .unwrap();
+            let b = b
+                .requests
+                .iter()
+                .find(|r| r.contains("#AddAnyPortMapping"))
+                .unwrap();
+            assert!(b.starts_with("POST /control HTTP/1.1"));
+            assert!(b.contains("Host: localhost:"));
+            assert_eq!(
+                a.split_once("\r\n\r\n").unwrap().1,
+                b.split_once("\r\n\r\n").unwrap().1
+            );
+        }
+        let next = source.add_ports(network, gateway, ports()).await.unwrap();
+        assert_eq!(next.external, 5001);
+        assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+        assert_eq!(second.state.lock().unwrap().deleted, [5000]);
+        source.cleanup().await.unwrap();
+        assert_eq!(source.retained_mappings(), 0);
+        assert_eq!(first.state.lock().unwrap().deleted, [5000, 5001]);
+        assert_eq!(second.state.lock().unwrap().deleted, [5000, 5001]);
+        assert_eq!(
+            first.state.lock().unwrap().mappings[&4000].description,
+            "foreign"
+        );
+        assert_eq!(
+            second.state.lock().unwrap().mappings[&4000].description,
+            "foreign"
+        );
+        first.close().await;
+        second.close().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirected_add_cancellation_keeps_each_destination_through_worker_replacement() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    first.redirect("AddAnyPortMapping", &second, 307);
+    first.state.lock().unwrap().redirect_after_add = true;
+    second.state.lock().unwrap().hold_add = true;
+    let mut config = first.config();
+    config.network.request_timeout = Duration::from_secs(10);
+    let source = config.ports.clone();
+    let worker = first.spawn(config.clone());
+    worker.client().refresh().unwrap().await.unwrap();
+    timeout(Duration::from_secs(3), async {
+        while second.state.lock().unwrap().adds.is_empty() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(source.retained_mappings(), 2);
+    assert_eq!(source.uncertain_mappings(), 2);
+    worker.shutdown().unwrap();
+    let replacement = first.spawn(config);
+    replacement.client().prepare_stop().unwrap().await.unwrap();
+    replacement.shutdown().unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+    assert_eq!(second.state.lock().unwrap().deleted, [5000]);
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirect_destination_quota_is_reserved_before_forwarding_a_write() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    let config = first.config();
+    let source = config.ports;
+    let network = Network::new(config.network).unwrap();
+    let gateway = network.discover().await.unwrap();
+    for external in 10000..10031 {
+        source
+            .add_ports(
+                network.clone(),
+                gateway.clone(),
+                Ports {
+                    external,
+                    ..ports()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    first.redirect("AddAnyPortMapping", &second, 308);
+    assert_eq!(
+        source.add_ports(network, gateway, ports()).await,
+        Err(Error::Limit)
+    );
+    assert_eq!(source.retained_mappings(), 32);
+    assert!(second.state.lock().unwrap().requests.is_empty());
+    source.cleanup().await.unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    assert_eq!(first.state.lock().unwrap().deleted.len(), 31);
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirect_cycles_and_indirect_303_results_leave_recoverable_intents() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    first.redirect("AddAnyPortMapping", &second, 307);
+    second.redirect("AddAnyPortMapping", &first, 308);
+    let config = first.config();
+    let source = config.ports;
+    let network = Network::new(config.network).unwrap();
+    let gateway = network.discover().await.unwrap();
+    assert_eq!(
+        source
+            .add_ports(network.clone(), gateway.clone(), ports())
+            .await,
+        Err(Error::Redirect)
+    );
+    // Numeric and hostname authorities can select different virtual services.
+    assert_eq!(source.retained_mappings(), 3);
+    source.cleanup().await.unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    first.redirect("AddAnyPortMapping", &second, 303);
+    first.state.lock().unwrap().redirect_after_add = true;
+    let before = second.state.lock().unwrap().requests.len();
+    assert_eq!(
+        source.add_ports(network, gateway, ports()).await,
+        Err(Error::HttpStatus(303))
+    );
+    assert_eq!(second.state.lock().unwrap().requests.len(), before);
+    assert_eq!(source.retained_mappings(), 1);
+    source.cleanup().await.unwrap();
+    assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirected_deletion_never_uses_ownership_from_a_different_destination() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    let config = first.config();
+    let source = config.ports;
+    let network = Network::new(config.network).unwrap();
+    let gateway = network.discover().await.unwrap();
+    source.add_ports(network, gateway, ports()).await.unwrap();
+    second.state.lock().unwrap().mappings.insert(
+        5000,
+        Reservation {
+            internal: ports().internal,
+            description: "another-owner".into(),
+        },
+    );
+    first.redirect("DeletePortMapping", &second, 307);
+    assert_eq!(source.cleanup().await, Err(Error::Response));
+    assert_eq!(source.retiring_mappings(), 1);
+    assert_eq!(source.retained_mappings(), 1);
+    assert!(first.state.lock().unwrap().deleted.is_empty());
+    assert!(second.state.lock().unwrap().deleted.is_empty());
+    first.state.lock().unwrap().redirects.clear();
+    source.cleanup().await.unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    assert_eq!(
+        second.state.lock().unwrap().mappings[&5000].description,
+        "another-owner"
+    );
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirected_delete_loss_keeps_the_verified_destination_across_replacement() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    let mut config = first.config();
+    config.network.request_timeout = Duration::from_secs(10);
+    let source = config.ports.clone();
+    let worker = first.spawn(config.clone());
+    worker.client().refresh().unwrap().await.unwrap();
+    assert_eq!(mapped(&worker, 1).await.external, 5000);
+    let copy = first.state.lock().unwrap().mappings[&5000].clone();
+    second.state.lock().unwrap().mappings.insert(5000, copy);
+    second.state.lock().unwrap().hold_delete = true;
+    first.redirect("DeletePortMapping", &second, 308);
+    let ticket = worker.client().prepare_stop().unwrap();
+    timeout(Duration::from_secs(3), async {
+        while second.state.lock().unwrap().deleted.is_empty() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(source.retained_mappings(), 2);
+    assert_eq!(source.retiring_mappings(), 2);
+    worker.shutdown().unwrap();
+    assert_eq!(ticket.await, Err(Error::Closed));
+    first.state.lock().unwrap().redirects.clear();
+    let replacement = first.spawn(config);
+    replacement.client().prepare_stop().unwrap().await.unwrap();
+    replacement.shutdown().unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+    assert_eq!(second.state.lock().unwrap().deleted, [5000]);
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn enumeration_redirect_cannot_switch_tables_after_the_first_index() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    let third = Router::start().await;
+    first.redirect("AddAnyPortMapping", &second, 307);
+    first.state.lock().unwrap().redirect_after_add = true;
+    let config = first.config();
+    let source = config.ports;
+    let network = Network::new(config.network).unwrap();
+    let gateway = network.discover().await.unwrap();
+    source.add_ports(network, gateway, ports()).await.unwrap();
+    first.redirect("GetGenericPortMappingEntry", &second, 307);
+    second.redirect("GetGenericPortMappingEntry", &third, 308);
+    second.state.lock().unwrap().generic_redirect_minimum = 1;
+    assert_eq!(source.cleanup().await, Err(Error::Response));
+    assert_eq!(source.retained_mappings(), 1);
+    assert!(first.state.lock().unwrap().mappings.contains_key(&5000));
+    first.state.lock().unwrap().redirects.clear();
+    source.cleanup().await.unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    first.close().await;
+    second.close().await;
+    third.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirected_permanent_lease_fallback_keeps_the_target_and_cleans_both_gateways() {
+    let first = Router::start().await;
+    let second = Router::start().await;
+    first.redirect("AddAnyPortMapping", &second, 307);
+    first.state.lock().unwrap().redirect_after_add = true;
+    second.state.lock().unwrap().permanent = true;
+    let config = first.config();
+    let source = config.ports;
+    let network = Network::new(config.network).unwrap();
+    let gateway = network.discover().await.unwrap();
+    let mapping = source.add_ports(network, gateway, ports()).await.unwrap();
+    assert_eq!(mapping.lifetime, None);
+    assert_eq!(first.state.lock().unwrap().add_requests, 1);
+    assert_eq!(second.state.lock().unwrap().add_requests, 2);
+    assert_eq!(source.retained_mappings(), 2);
+    source.cleanup().await.unwrap();
+    assert_eq!(source.retained_mappings(), 0);
+    assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+    assert_eq!(second.state.lock().unwrap().deleted, [5000]);
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redirected_delete_success_rechecks_each_prior_destination_before_forgetting_it() {
+    for applied_before_redirect in [false, true] {
+        let first = Router::start().await;
+        let second = Router::start().await;
+        let config = first.config();
+        let source = config.ports;
+        let network = Network::new(config.network).unwrap();
+        let gateway = network.discover().await.unwrap();
+        source.add_ports(network, gateway, ports()).await.unwrap();
+        let copy = first.state.lock().unwrap().mappings[&5000].clone();
+        second.state.lock().unwrap().mappings.insert(5000, copy);
+        first.redirect("DeletePortMapping", &second, 307);
+        first.state.lock().unwrap().redirect_after_delete = applied_before_redirect;
+        let result = source.cleanup().await;
+        if applied_before_redirect {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err(Error::Response));
+            assert_eq!(source.retained_mappings(), 2);
+            assert!(first.state.lock().unwrap().mappings.contains_key(&5000));
+            assert!(!second.state.lock().unwrap().mappings.contains_key(&5000));
+            first.state.lock().unwrap().redirects.clear();
+            source.cleanup().await.unwrap();
+        }
+        assert_eq!(source.retained_mappings(), 0);
+        assert_eq!(first.state.lock().unwrap().deleted, [5000]);
+        assert_eq!(second.state.lock().unwrap().deleted, [5000]);
+        first.close().await;
+        second.close().await;
+    }
 }

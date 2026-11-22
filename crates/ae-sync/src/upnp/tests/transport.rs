@@ -243,7 +243,7 @@ async fn hostname_get_follows_all_native_redirect_statuses_and_preserves_host() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn redirect_limit_duplicate_location_and_soap_redirect_are_not_successful_writes() {
+async fn redirect_limit_duplicate_location_and_303_do_not_acknowledge_soap_writes() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -263,7 +263,8 @@ async fn redirect_limit_duplicate_location_and_soap_redirect_are_not_successful_
             b"HTTP/1.1 302 Found\r\nLocation: /a\r\nlocation: /b\r\nContent-Length: 0\r\n\r\n",
         )
         .await;
-        for status in [300, 301, 302, 303, 307, 308] {
+        {
+            let status = 303;
             let (mut stream, _) = listener.accept().await.unwrap();
             assert!(request(&mut stream).await.starts_with("POST /control "));
             send_bytes(
@@ -303,7 +304,8 @@ async fn redirect_limit_duplicate_location_and_soap_redirect_are_not_successful_
         lifetime: 7200,
     };
     let (header, body) = xml::request(action, 1, Ipv4Addr::LOCALHOST);
-    for status in [300, 301, 302, 303, 307, 308] {
+    {
+        let status = 303;
         let result = transport
             .post(&endpoint, Ipv4Addr::LOCALHOST, &header, &body)
             .await
@@ -612,4 +614,132 @@ async fn hostname_redirect_https_v2_gateway_uses_urlbase_and_actual_assigned_por
     timeout(Duration::from_secs(10), secure_gateway(2))
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn soap_redirect_upgrades_to_verified_tls_and_journals_each_exact_destination() {
+    let plain = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let secure = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let plain_port = plain.local_addr().unwrap().port();
+    let secure_port = secure.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = plain.accept().await.unwrap();
+        let original = request(&mut stream).await;
+        send_bytes(&mut stream, format!("HTTP/1.1 308 Redirect\r\nLocation: https://localhost:{secure_port}/control\r\nContent-Length: 0\r\n\r\n").as_bytes()).await;
+        let (stream, _) = secure.accept().await.unwrap();
+        let mut stream = acceptor().accept(stream).await.unwrap();
+        let redirected = request(&mut stream).await;
+        assert!(redirected.starts_with("POST /control HTTP/1.1"));
+        assert!(redirected.contains(&format!("Host: localhost:{secure_port}")));
+        assert_eq!(
+            original.split_once("\r\n\r\n").unwrap().1,
+            redirected.split_once("\r\n\r\n").unwrap().1
+        );
+        reply(&mut stream, "SOAP result").await;
+    });
+    let transport = transport(trusted_settings());
+    let endpoint = transport
+        .resolve(&http::Url::parse(&format!("http://127.0.0.1:{plain_port}/control")).unwrap())
+        .await
+        .unwrap();
+    let mut intents = Vec::new();
+    let result = transport
+        .post_tracked(
+            &endpoint,
+            Ipv4Addr::LOCALHOST,
+            "test#Write",
+            "<operation/>",
+            &mut |e| {
+                intents.push(e.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.response.body, b"SOAP result");
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[0], endpoint);
+    assert_eq!(intents[1], result.endpoint);
+    assert!(result.endpoint.url.secure());
+    timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn soap_hop_limit_and_deadline_stop_forwarding_and_close_the_last_socket() {
+    for delayed in [false, true] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert!(request(&mut stream).await.starts_with("POST /0 "));
+            if delayed {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            send_bytes(
+                &mut stream,
+                b"HTTP/1.1 307 Redirect\r\nLocation: /1\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert!(request(&mut stream).await.starts_with("POST /1 "));
+            if delayed {
+                // The first hop spent part of the one shared deadline. The
+                // second connection must be dropped while awaiting its reply.
+                assert_eq!(read_some(&mut stream, &mut [0; 1]).await, 0);
+            } else {
+                send_bytes(
+                    &mut stream,
+                    b"HTTP/1.1 308 Redirect\r\nLocation: /2\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await;
+                assert!(
+                    timeout(Duration::from_millis(40), listener.accept())
+                        .await
+                        .is_err()
+                );
+            }
+        });
+        let transport = transport(Settings {
+            redirects: 1,
+            request_timeout: Duration::from_millis(800),
+            ..trusted_settings()
+        });
+        let endpoint = transport
+            .resolve(&http::Url::parse(&format!("http://127.0.0.1:{port}/0")).unwrap())
+            .await
+            .unwrap();
+        let mut intents = Vec::new();
+        let started = tokio::time::Instant::now();
+        let result = transport
+            .post_tracked(
+                &endpoint,
+                Ipv4Addr::LOCALHOST,
+                "test#Write",
+                "x",
+                &mut |e| {
+                    intents.push(e.clone());
+                    Ok(())
+                },
+            )
+            .await;
+        assert_eq!(
+            result.err(),
+            Some(if delayed {
+                Error::Timeout
+            } else {
+                Error::Redirect
+            })
+        );
+        if delayed {
+            assert!(started.elapsed() < Duration::from_millis(1100));
+        }
+        assert_eq!(intents.len(), 2);
+        timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

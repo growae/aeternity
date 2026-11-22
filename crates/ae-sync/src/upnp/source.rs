@@ -4,6 +4,13 @@ use std::sync::{Arc, Mutex};
 
 const RECORD_LIMIT: usize = 32;
 #[derive(Debug, Clone)]
+struct Destination {
+    gateway: Gateway,
+    wire: Ports,
+    mapping: Option<Mapping>,
+    uncertain: bool,
+}
+#[derive(Debug, Clone)]
 struct Record {
     id: u64,
     network: Network,
@@ -12,8 +19,13 @@ struct Record {
     wire: Ports,
     description: String,
     mapping: Option<Mapping>,
-    uncertain: bool,
+    destinations: Vec<Destination>,
     retiring: bool,
+}
+impl Record {
+    fn uncertain(&self) -> bool {
+        self.destinations.iter().any(|d| d.uncertain)
+    }
 }
 #[derive(Debug)]
 struct State {
@@ -22,10 +34,14 @@ struct State {
     next: u64,
     active: bool,
 }
+impl State {
+    fn retained(&self) -> usize {
+        self.records.iter().map(|r| r.destinations.len()).sum()
+    }
+}
 
-// This source belongs to the host configuration. Its bounded lease ledger
-// outlives child replacement; only the single claimed worker may mutate it.
-// It is runtime state, not durable recovery after losing the entire process.
+// Host-owned runtime ownership survives child replacement, not process loss.
+// Every distinct write destination is charged against the shared 32-slot limit.
 #[derive(Debug, Clone)]
 pub struct PortsSource(Arc<Mutex<State>>);
 impl PortsSource {
@@ -50,17 +66,27 @@ impl PortsSource {
         Ok(())
     }
     pub fn retained_mappings(&self) -> usize {
-        self.lock().records.len()
+        self.lock().retained()
     }
     pub fn uncertain_mappings(&self) -> usize {
         self.lock()
             .records
             .iter()
-            .filter(|r| r.uncertain || r.retiring)
-            .count()
+            .map(|r| {
+                r.destinations
+                    .iter()
+                    .filter(|d| d.uncertain || r.retiring)
+                    .count()
+            })
+            .sum()
     }
     pub fn retiring_mappings(&self) -> usize {
-        self.lock().records.iter().filter(|r| r.retiring).count()
+        self.lock()
+            .records
+            .iter()
+            .filter(|r| r.retiring)
+            .map(|r| r.destinations.len())
+            .sum()
     }
     pub(super) fn claim(&self) -> Result<Claim, Error> {
         let mut state = self.lock();
@@ -89,18 +115,17 @@ impl PortsSource {
             .iter()
             .position(|r| r.gateway == gateway && r.configured == configured)
         {
-            if state.records[index].uncertain || state.records[index].retiring {
+            if state.records[index].uncertain() || state.records[index].retiring {
                 return Err(Error::Busy);
             }
             let mut record = state.records.remove(index);
             if let Some(mapping) = &record.mapping {
                 record.wire.external = mapping.external;
             }
-            record.uncertain = true;
             state.records.push(record.clone());
             return Ok(record);
         }
-        if state.records.len() >= RECORD_LIMIT {
+        if state.retained() >= RECORD_LIMIT {
             return Err(Error::Limit);
         }
         let id = state.next;
@@ -122,36 +147,85 @@ impl PortsSource {
         let record = Record {
             id,
             network,
-            gateway,
+            gateway: gateway.clone(),
             configured,
             wire,
             description,
             mapping: None,
-            uncertain: true,
             retiring: false,
+            destinations: vec![Destination {
+                gateway,
+                wire,
+                mapping: None,
+                uncertain: true,
+            }],
         };
-        // This intent is retained before any add request can reach the router.
         state.records.push(record.clone());
         Ok(record)
     }
-    fn confirm(&self, id: u64, mapping: Mapping) {
+    fn track(&self, id: u64, gateway: &Gateway, wire: Ports, adding: bool) -> Result<(), Error> {
+        let mut state = self.lock();
+        let full = state.retained() >= RECORD_LIMIT;
+        let record = state
+            .records
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or(Error::Closed)?;
+        if adding && record.retiring {
+            return Err(Error::Closed);
+        }
+        if let Some(destination) = record
+            .destinations
+            .iter_mut()
+            .find(|d| d.gateway == *gateway)
+        {
+            // v1 cannot recover multiple unknown external ports by enumeration.
+            if gateway.protocol() == Protocol::Upnp1 && destination.wire != wire {
+                return Err(Error::Response);
+            }
+            destination.wire = wire;
+            destination.uncertain = true;
+        } else {
+            if full {
+                return Err(Error::Limit);
+            }
+            record.destinations.push(Destination {
+                gateway: gateway.clone(),
+                wire,
+                mapping: None,
+                uncertain: true,
+            });
+        }
+        Ok(())
+    }
+    fn confirm(&self, id: u64, gateway: &Gateway, mapping: Mapping) {
         let mut state = self.lock();
         let record = state
             .records
             .iter_mut()
             .find(|r| r.id == id)
             .expect("owned mapping intent");
-        // AddAnyPortMapping may have created a second mapping rather than
-        // replacing the previous reservation. Enumeration must recover both.
-        record.uncertain = record.gateway.protocol() == Protocol::Upnp2
-            && record
+        let destination = record
+            .destinations
+            .iter_mut()
+            .find(|d| d.gateway == *gateway)
+            .expect("recorded write destination");
+        destination.uncertain = gateway.protocol() == Protocol::Upnp2
+            && destination
                 .mapping
                 .as_ref()
                 .is_some_and(|old| old.external != mapping.external);
+        destination.mapping = Some(mapping.clone());
         record.mapping = Some(mapping);
+        // Earlier redirect destinations remain uncertain: a server can have
+        // applied the request before responding with a redirect.
     }
-    fn forget(&self, id: u64) {
-        self.lock().records.retain(|r| r.id != id);
+    fn remove_destination(&self, id: u64, gateway: &Gateway) {
+        let mut state = self.lock();
+        if let Some(record) = state.records.iter_mut().find(|r| r.id == id) {
+            record.destinations.retain(|d| d.gateway != *gateway);
+        }
+        state.records.retain(|r| !r.destinations.is_empty());
     }
     pub(super) async fn add_ports(
         &self,
@@ -162,9 +236,9 @@ impl PortsSource {
         configured.validate()?;
         if let Some(record) = self
             .find(&gateway, configured)
-            .filter(|r| r.uncertain || r.retiring)
+            .filter(|r| r.uncertain() || r.retiring)
         {
-            self.clean_record(record).await?;
+            self.clean_record(record.id).await?;
         }
         let attempts = if configured.external == 0 && gateway.protocol() != Protocol::NatPmp {
             3
@@ -175,68 +249,75 @@ impl PortsSource {
             let record = self.begin(network.clone(), gateway.clone(), configured)?;
             match record
                 .network
-                .add_named(&record.gateway, record.wire, Some(&record.description))
+                .add_tracked(
+                    &record.gateway,
+                    record.wire,
+                    Some(&record.description),
+                    &mut |at, ports| self.track(record.id, at, ports, true),
+                )
                 .await
             {
-                Ok(mapping) => {
-                    self.confirm(record.id, mapping.clone());
+                Ok((mapping, actual)) => {
+                    self.confirm(record.id, &actual, mapping.clone());
                     return Ok(mapping);
                 }
                 Err(error) if attempt + 1 == attempts => return Err(error),
-                Err(_) => {
-                    // Keep the native three random-port attempts, but recover
-                    // each uncertain reservation before sending another add.
-                    self.clean_record(record).await?;
-                }
+                Err(_) => self.clean_record(record.id).await?,
             }
         }
         unreachable!("at least one mapping attempt")
     }
-    async fn clean_record(&self, record: Record) -> Result<(), Error> {
-        // Once retirement starts, this record must never be renewed without
-        // reconciliation, even if a delete was applied but its reply was lost.
-        self.lock()
-            .records
-            .iter_mut()
-            .find(|r| r.id == record.id)
-            .expect("owned retirement intent")
-            .retiring = true;
-        let known = match record.gateway.protocol() {
-            Protocol::Upnp1 => Some(record.wire.external),
-            Protocol::Upnp2 if !record.uncertain => record.mapping.as_ref().map(|m| m.external),
-            _ => None,
-        };
-        let ports = record
-            .network
-            .owned_ports(
-                &record.gateway,
-                record.wire.internal,
-                &record.description,
-                known,
-            )
-            .await?;
-        for external in ports {
-            match record
-                .network
-                .delete(
-                    &record.gateway,
-                    Ports {
-                        external,
-                        ..record.wire
-                    },
-                )
-                .await
-            {
-                // A concurrent expiry is already a successful removal.
-                Err(Error::Soap(714)) => {}
-                result => result?,
-            }
+    async fn clean_record(&self, id: u64) -> Result<(), Error> {
+        if let Some(record) = self.lock().records.iter_mut().find(|r| r.id == id) {
+            record.retiring = true;
         }
-        self.forget(record.id);
-        Ok(())
+        // Redirected deletes can add destinations. Read the live ledger after
+        // every successful retirement, and bound changing redirect graphs.
+        for _ in 0..64 {
+            let record = self.lock().records.iter().find(|r| r.id == id).cloned();
+            let Some(record) = record else {
+                return Ok(());
+            };
+            let destination = record
+                .destinations
+                .last()
+                .expect("nonempty ownership record");
+            let known = match destination.gateway.protocol() {
+                Protocol::Upnp1 => Some(destination.wire.external),
+                Protocol::Upnp2 if !destination.uncertain => {
+                    destination.mapping.as_ref().map(|m| m.external)
+                }
+                _ => None,
+            };
+            let ports = record
+                .network
+                .owned_ports(
+                    &destination.gateway,
+                    destination.wire.internal,
+                    &record.description,
+                    known,
+                )
+                .await?;
+            for (at, external) in ports {
+                record
+                    .network
+                    .delete_owned(
+                        &at,
+                        Ports {
+                            external,
+                            ..destination.wire
+                        },
+                        &record.description,
+                        &mut |at, ports| self.track(id, at, ports, false),
+                    )
+                    .await?;
+            }
+            self.remove_destination(id, &destination.gateway);
+        }
+        Err(Error::Limit)
     }
     pub(super) async fn cleanup(&self) -> Result<(), Error> {
-        let records = self.lock().records.clone();
+        let records = self.lock().records.iter().map(|r| r.id).collect();
         self.clean_records(records).await
     }
     pub(super) async fn retire_except(
@@ -249,17 +330,14 @@ impl PortsSource {
             .records
             .iter()
             .filter(|r| r.gateway != *gateway || r.configured != configured || r.retiring)
-            .cloned()
+            .map(|r| r.id)
             .collect();
         self.clean_records(records).await
     }
-    async fn clean_records(&self, records: Vec<Record>) -> Result<(), Error> {
+    async fn clean_records(&self, records: Vec<u64>) -> Result<(), Error> {
         let mut error = None;
-        // Serialize our deletions with enumeration: removing one mapping must
-        // not shift another in-flight scan's table indices. Most recently
-        // attempted mappings get the first opportunity within the deadline.
-        for record in records.into_iter().rev() {
-            if let Err(e) = self.clean_record(record).await {
+        for id in records.into_iter().rev() {
+            if let Err(e) = self.clean_record(id).await {
                 error.get_or_insert(e);
             }
         }

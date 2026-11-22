@@ -25,6 +25,16 @@ enum Backend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gateway(Backend);
 impl Gateway {
+    fn endpoint(&self, endpoint: http::Endpoint) -> Self {
+        match &self.0 {
+            Backend::Upnp { local, version, .. } => Self(Backend::Upnp {
+                endpoint,
+                local: *local,
+                version: *version,
+            }),
+            Backend::Pmp { .. } => unreachable!("UPnP endpoint"),
+        }
+    }
     pub fn protocol(&self) -> Protocol {
         match self.0 {
             Backend::Pmp { .. } => Protocol::NatPmp,
@@ -86,14 +96,17 @@ impl Network {
         .map_err(|_| Error::NoGateway)?
     }
     pub async fn add(&self, gateway: &Gateway, ports: Ports) -> Result<Mapping, Error> {
-        self.add_named(gateway, ports, None).await
+        self.add_tracked(gateway, ports, None, &mut |_, _| Ok(()))
+            .await
+            .map(|r| r.0)
     }
-    pub(super) async fn add_named(
+    pub(super) async fn add_tracked(
         &self,
         gateway: &Gateway,
         ports: Ports,
         description: Option<&str>,
-    ) -> Result<Mapping, Error> {
+        before_write: &mut impl FnMut(&Gateway, Ports) -> Result<(), Error>,
+    ) -> Result<(Mapping, Gateway), Error> {
         ports.validate()?;
         if description.is_some_and(|d| {
             d.is_empty()
@@ -110,13 +123,12 @@ impl Network {
                     bind: *local,
                     ..(*self.settings).clone()
                 };
-                pmp::map(*address, ports, super::MAPPING_LIFETIME, &settings).await
+                before_write(gateway, ports)?;
+                pmp::map(*address, ports, super::MAPPING_LIFETIME, &settings)
+                    .await
+                    .map(|m| (m, gateway.clone()))
             }
-            Backend::Upnp {
-                endpoint,
-                local,
-                version,
-            } => {
+            Backend::Upnp { .. } => {
                 let attempts = if ports.external == 0 { 3 } else { 1 };
                 let mut last = Error::Response;
                 for _ in 0..attempts {
@@ -129,7 +141,7 @@ impl Network {
                         ports
                     };
                     match self
-                        .upnp_add(endpoint, *local, *version, ports, description)
+                        .upnp_add(gateway, ports, description, before_write)
                         .await
                     {
                         Ok(mapping) => return Ok(mapping),
@@ -142,37 +154,50 @@ impl Network {
     }
     async fn upnp_add(
         &self,
-        endpoint: &http::Endpoint,
-        local: Ipv4Addr,
-        version: u8,
+        gateway: &Gateway,
         ports: Ports,
         description: Option<&str>,
-    ) -> Result<Mapping, Error> {
+        before_write: &mut impl FnMut(&Gateway, Ports) -> Result<(), Error>,
+    ) -> Result<(Mapping, Gateway), Error> {
+        let Backend::Upnp {
+            endpoint,
+            local,
+            version,
+        } = &gateway.0
+        else {
+            unreachable!("UPnP add")
+        };
         let mut lifetime = super::MAPPING_LIFETIME;
+        let mut current = endpoint.clone();
         loop {
             let started = Instant::now();
             let action = xml::Action::Add { ports, lifetime };
-            let (header, body) = xml::request_named(action, version, local, description);
-            let response = self.transport.post(endpoint, local, &header, &body).await?;
-            match xml::response(&response, action, version, &self.settings) {
+            let (header, body) = xml::request_named(action, *version, *local, description);
+            let received = self
+                .transport
+                .post_tracked(&current, *local, &header, &body, &mut |e| {
+                    before_write(&gateway.endpoint(e.clone()), ports)
+                })
+                .await?;
+            current = received.endpoint;
+            match xml::response(&received.response, action, *version, &self.settings) {
                 Err(Error::Soap(725)) if lifetime != 0 => lifetime = 0,
                 Err(e) => return Err(e),
                 Ok(port) => {
-                    return Ok(Mapping {
-                        protocol: if version == 1 {
-                            Protocol::Upnp1
-                        } else {
-                            Protocol::Upnp2
+                    return Ok((
+                        Mapping {
+                            protocol: gateway.protocol(),
+                            internal: ports.internal,
+                            external: port.unwrap_or(ports.external),
+                            lifetime: (lifetime != 0).then(|| {
+                                lifetime.saturating_sub(
+                                    started.elapsed().as_secs().min(u64::from(u32::MAX)) as u32,
+                                )
+                            }),
+                            gateway_epoch: None,
                         },
-                        internal: ports.internal,
-                        external: port.unwrap_or(ports.external),
-                        lifetime: (lifetime != 0).then(|| {
-                            lifetime.saturating_sub(
-                                started.elapsed().as_secs().min(u64::from(u32::MAX)) as u32,
-                            )
-                        }),
-                        gateway_epoch: None,
-                    });
+                        gateway.endpoint(current),
+                    ));
                 }
             }
         }
@@ -205,61 +230,176 @@ impl Network {
         }
         Ok(())
     }
-    pub(super) async fn owned_ports(
+    async fn entry(
         &self,
         gateway: &Gateway,
-        internal: u16,
-        description: &str,
-        known: Option<u16>,
-    ) -> Result<Vec<u16>, Error> {
+        action: xml::Action,
+    ) -> Result<(Gateway, Result<xml::Entry, Error>), Error> {
         let Backend::Upnp {
             endpoint,
             local,
             version,
         } = &gateway.0
         else {
-            return Ok(vec![0]);
+            unreachable!("UPnP query")
         };
-        let own_client = local.to_string();
-        let matches = |e: &xml::Entry| {
-            e.tcp
-                && e.wildcard
-                && e.client == own_client
-                && e.internal == internal
-                && e.description == description
+        let (header, body) = xml::request(action, *version, *local);
+        let reply = self
+            .transport
+            .post_tracked(endpoint, *local, &header, &body, &mut |_| Ok(()))
+            .await?;
+        Ok((
+            gateway.endpoint(reply.endpoint),
+            xml::entry(&reply.response, action, *version, &self.settings),
+        ))
+    }
+    fn owns(gateway: &Gateway, entry: &xml::Entry, internal: u16, description: &str) -> bool {
+        let Backend::Upnp { local, .. } = &gateway.0 else {
+            return false;
         };
-        let query = async |action| {
-            let (header, body) = xml::request(action, *version, *local);
-            let response = self
-                .transport
-                .post(endpoint, *local, &header, &body)
-                .await?;
-            xml::entry(&response, action, *version, &self.settings)
-        };
+        entry.tcp
+            && entry.wildcard
+            && entry.client == local.to_string()
+            && entry.internal == internal
+            && entry.description == description
+    }
+    pub(super) async fn owned_ports(
+        &self,
+        gateway: &Gateway,
+        internal: u16,
+        description: &str,
+        known: Option<u16>,
+    ) -> Result<Vec<(Gateway, u16)>, Error> {
+        if gateway.protocol() == Protocol::NatPmp {
+            return Ok(vec![(gateway.clone(), 0)]);
+        }
         if let Some(external) = known {
-            return match query(xml::Action::Specific { external }).await {
-                Ok(e) => Ok(if matches(&e) { vec![external] } else { vec![] }),
+            let (actual, entry) = self
+                .entry(gateway, xml::Action::Specific { external })
+                .await?;
+            return match entry {
+                Ok(e) => Ok(if Self::owns(&actual, &e, internal, description) {
+                    vec![(actual, external)]
+                } else {
+                    vec![]
+                }),
                 Err(Error::Soap(714)) => Ok(vec![]),
                 Err(e) => Err(e),
             };
         }
+        let mut current = gateway.clone();
         let mut ports = std::collections::BTreeSet::new();
-        // End-of-table (713) is required before an uncertain write is resolved.
-        // A resource limit or transport failure leaves its ownership record.
+        // Pin the table selected by the first response. Switching tables during
+        // enumeration cannot establish that all of the old table was inspected.
         for index in 0..512 {
-            match query(xml::Action::Generic { index }).await {
-                Ok(e) if matches(&e) => {
+            let (actual, entry) = self.entry(&current, xml::Action::Generic { index }).await?;
+            if index != 0 && current != actual {
+                return Err(Error::Response);
+            }
+            current = actual;
+            match entry {
+                Ok(e) if Self::owns(&current, &e, internal, description) => {
                     if e.external == 0 {
                         return Err(Error::Response);
                     }
                     ports.insert(e.external);
                 }
                 Ok(_) => {}
-                Err(Error::Soap(713)) => return Ok(ports.into_iter().collect()),
+                Err(Error::Soap(713)) => {
+                    return Ok(ports.into_iter().map(|p| (current.clone(), p)).collect());
+                }
                 Err(e) => return Err(e),
             }
         }
         Err(Error::Limit)
+    }
+    pub(super) async fn delete_owned(
+        &self,
+        gateway: &Gateway,
+        ports: Ports,
+        description: &str,
+        before_write: &mut impl FnMut(&Gateway, Ports) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if gateway.protocol() == Protocol::NatPmp {
+            return self.delete(gateway, ports).await;
+        }
+        timeout(self.settings.request_timeout, async {
+            let mut current = gateway.clone();
+            let mut visited = Vec::new();
+            for hop in 0..=self.settings.redirects {
+                // A redirect is never authorization to delete a different
+                // router's reservation. Recheck the marker at the actual target.
+                let (actual, entry) = self
+                    .entry(
+                        &current,
+                        xml::Action::Specific {
+                            external: ports.external,
+                        },
+                    )
+                    .await?;
+                match entry {
+                    Ok(e) if Self::owns(&actual, &e, ports.internal, description) => (),
+                    Ok(_) | Err(Error::Soap(714)) if hop == 0 => return Ok(()),
+                    Ok(_) | Err(Error::Soap(714)) => return Err(Error::Response),
+                    Err(e) => return Err(e),
+                }
+                if visited.contains(&actual) {
+                    return Err(Error::Redirect);
+                }
+                visited.push(actual.clone());
+                before_write(&actual, ports)?;
+                let Backend::Upnp {
+                    endpoint,
+                    local,
+                    version,
+                } = &actual.0
+                else {
+                    unreachable!("UPnP delete")
+                };
+                let action = xml::Action::Delete {
+                    external: ports.external,
+                };
+                let (header, body) = xml::request(action, *version, *local);
+                let reply = self
+                    .transport
+                    .post_once(endpoint, *local, &header, &body)
+                    .await?;
+                if let Some(next) = self.transport.redirect(endpoint, &reply).await? {
+                    if hop == self.settings.redirects {
+                        return Err(Error::Redirect);
+                    }
+                    current = actual.endpoint(next);
+                    continue;
+                }
+                match xml::response(&reply.response, action, *version, &self.settings) {
+                    Ok(_) | Err(Error::Soap(714)) => (),
+                    Err(e) => return Err(e),
+                }
+                // A successful deletion at a redirected destination does not
+                // prove that earlier independent destinations are now empty.
+                for prior in &visited[..visited.len() - 1] {
+                    let (at, entry) = self
+                        .entry(
+                            prior,
+                            xml::Action::Specific {
+                                external: ports.external,
+                            },
+                        )
+                        .await?;
+                    match entry {
+                        Ok(e) if Self::owns(&at, &e, ports.internal, description) => {
+                            return Err(Error::Response);
+                        }
+                        Ok(_) | Err(Error::Soap(714)) => (),
+                        Err(e) => return Err(e),
+                    }
+                }
+                return Ok(());
+            }
+            unreachable!("bounded delete redirect loop")
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
     }
 }
 

@@ -11,9 +11,9 @@ pub(super) struct Response {
     pub status: u16,
     pub body: Vec<u8>,
 }
-struct Received {
-    response: Response,
-    location: Option<String>,
+pub(super) struct Received {
+    pub response: Response,
+    pub location: Option<String>,
 }
 #[cfg(test)]
 pub(super) async fn request(

@@ -211,6 +211,75 @@ impl Transport {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    pub async fn post_once(
+        &self,
+        endpoint: &Endpoint,
+        local: Ipv4Addr,
+        action: &str,
+        body: &str,
+    ) -> Result<super::Received, Error> {
+        timeout(
+            self.settings.request_timeout,
+            self.exchange(endpoint, local, Some((action, body))),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
+    pub async fn redirect(
+        &self,
+        endpoint: &Endpoint,
+        received: &super::Received,
+    ) -> Result<Option<Endpoint>, Error> {
+        // Keep SOAP as POST for 301/302 (RFC9110 permits preserving the method).
+        // A 303 is an indirect representation, not evidence of a SOAP mutation.
+        if !matches!(received.response.status, 300 | 301 | 302 | 307 | 308) {
+            return Ok(None);
+        }
+        match &received.location {
+            Some(location) => self
+                .endpoint(endpoint.url.control(location)?, endpoint)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+    pub async fn post_tracked(
+        &self,
+        endpoint: &Endpoint,
+        local: Ipv4Addr,
+        action: &str,
+        body: &str,
+        before_write: &mut impl FnMut(&Endpoint) -> Result<(), Error>,
+    ) -> Result<Fetched, Error> {
+        timeout(self.settings.request_timeout, async {
+            let mut current = endpoint.clone();
+            let mut visited = Vec::new();
+            for hop in 0..=self.settings.redirects {
+                if visited.contains(&current) {
+                    return Err(Error::Redirect);
+                }
+                visited.push(current.clone());
+                // The caller can reserve ownership/capacity before any bytes
+                // reach this destination. Cancellation never discards its intent.
+                before_write(&current)?;
+                let received = self.post_once(&current, local, action, body).await?;
+                if let Some(next) = self.redirect(&current, &received).await? {
+                    if hop == self.settings.redirects {
+                        return Err(Error::Redirect);
+                    }
+                    current = next;
+                } else {
+                    return Ok(Fetched {
+                        endpoint: current,
+                        response: received.response,
+                    });
+                }
+            }
+            unreachable!("bounded redirect loop")
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
     pub async fn post(
         &self,
         endpoint: &Endpoint,
@@ -218,16 +287,9 @@ impl Transport {
         action: &str,
         body: &str,
     ) -> Result<Response, Error> {
-        // A mutating redirect needs ownership of every destination before any
-        // add can reach it. Until that journal is integrated, return the HTTP
-        // status; never acknowledge a GET response as a successful SOAP write.
-        timeout(
-            self.settings.request_timeout,
-            self.exchange(endpoint, local, Some((action, body))),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map(|received| received.response)
+        self.post_tracked(endpoint, local, action, body, &mut |_| Ok(()))
+            .await
+            .map(|r| r.response)
     }
 }
 // DNS uses a bounded owned worker, as the peer resolver does. Cancellation
