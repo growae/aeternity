@@ -11,6 +11,8 @@ use num_traits::ToPrimitive;
 use std::collections::BTreeMap;
 #[path = "ledger/failures.rs"]
 mod failures;
+#[path = "ledger/finalized.rs"]
+mod finalized;
 #[path = "ledger/storage.rs"]
 mod storage;
 static LEDGER: LazyLock<J> = LazyLock::new(|| {
@@ -116,7 +118,11 @@ fn number(n: &Unsigned) -> BigInt {
     BigInt::from_bytes_be(num_bigint::Sign::Plus, n.as_bytes())
 }
 fn tx_event(e: &transactions::batch::Event) -> J {
-    assert_eq!(e.transaction_type, ae_tx::TransactionKind::Spend);
+    let transaction_type = match e.transaction_type {
+        ae_tx::TransactionKind::Spend => "spend_tx",
+        ae_tx::TransactionKind::ContractCall => "contract_call_tx",
+        other => panic!("unexpected fixture transaction {other:?}"),
+    };
     let (kind, fields, info) = match &e.value {
         transactions::Event::Primitive(ae_execution::Event::Spend { from, to, amount }) => (
             "spend",
@@ -128,13 +134,30 @@ fn tx_event(e: &transactions::batch::Event) -> J {
             vec![bin(account.0), int(-number(amount))],
             b"Chain.fee".as_slice(),
         ),
+        transactions::Event::Contract(ae_execution::contracts::Event::Delta {
+            account,
+            amount,
+            debit,
+            info,
+        }) => (
+            "delta",
+            vec![
+                bin(account.0),
+                int(if *debit {
+                    -number(amount)
+                } else {
+                    number(amount)
+                }),
+            ],
+            info.as_bytes(),
+        ),
         other => panic!("unexpected fixture event {other:?}"),
     };
     tuple(vec![
         tuple(vec![atom(kind), tuple(fields)]),
         named(vec![
             ("info", bin(info)),
-            ("type", atom("spend_tx")),
+            ("type", atom(transaction_type)),
             ("tx_hash", bin(e.transaction_hash.0)),
         ]),
     ])
@@ -150,7 +173,10 @@ struct Step<'a> {
     rules: &'a hc::Rules,
     expected: &'a J,
 }
-fn walk(profile: &str, row: &J, mut before: impl FnMut(Step<'_>)) {
+fn walk(profile: &str, row: &J, before: impl FnMut(Step<'_>)) {
+    walk_corpus(&LEDGER, profile, row, before);
+}
+fn walk_corpus(corpus: &J, profile: &str, row: &J, mut before: impl FnMut(Step<'_>)) {
     let old = genesis::DATA["rows"]
         .as_array()
         .unwrap()
@@ -158,7 +184,7 @@ fn walk(profile: &str, row: &J, mut before: impl FnMut(Step<'_>)) {
         .find(|r| r["protocol"] == row["protocol"])
         .unwrap();
     let mut reader = genesis::reader(old);
-    Arc::make_mut(&mut reader.profile).order = otp_order::profile(&LEDGER[profile]);
+    Arc::make_mut(&mut reader.profile).order = otp_order::profile(&corpus[profile]);
     Arc::make_mut(&mut reader.profile).network = NetworkProfile::custom(
         b"ae_hc_reference".to_vec(),
         row["activations"]
@@ -256,6 +282,7 @@ fn walk(profile: &str, row: &J, mut before: impl FnMut(Step<'_>)) {
             });
         assert_eq!(before, t.roots());
         check(&out.trees, &expected["trees"]);
+        finalized::check_calls(&out.trees, expected);
         assert_eq!(number(&out.fees).to_string(), expected["fees"]);
         assert_eq!(number(&out.score).to_string(), expected["score"]);
         let events = if matches!(b, Block::Key(_)) {

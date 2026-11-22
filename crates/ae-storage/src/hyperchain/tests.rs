@@ -26,6 +26,12 @@ static DATA: LazyLock<J> = LazyLock::new(|| {
     ))
     .unwrap()
 });
+static FINALIZED: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!(
+        "../../../ae-hyperchain/tests/fixtures/erlang_hc_finalized.json"
+    ))
+    .unwrap()
+});
 mod recovery;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Parent {
@@ -81,13 +87,21 @@ fn block(j: &J) -> Block {
     Block::decode(&bytes(&j["block"]), read_config().block()).unwrap()
 }
 fn setup(path: &Temp) -> (Arc<Database>, Config<Otp26>) {
-    let row = &DATA["rows"][0];
+    setup_corpus(path, &DATA, 0)
+}
+fn setup_corpus(path: &Temp, corpus: &J, index: usize) -> (Arc<Database>, Config<Otp26>) {
+    let row = &corpus["rows"][index];
     let network = NetworkProfile::custom(
         b"ae_hc_reference".to_vec(),
-        vec![Activation {
-            height: 0,
-            protocol: Protocol::Ceres,
-        }],
+        row["activations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| Activation {
+                height: a["height"].as_u64().unwrap(),
+                protocol: Protocol::try_from(a["protocol"].as_u64().unwrap() as u32).unwrap(),
+            })
+            .collect(),
     )
     .unwrap();
     let Header::Key(header) =
@@ -116,7 +130,7 @@ fn setup(path: &Temp) -> (Arc<Database>, Config<Otp26>) {
             unicode_profile: ae_vm_fate::unicode::Profile::Otp26Unicode15,
             bls_profile: ae_crypto::bls::Profile::Mcl11976beLlvm64VintArm64,
         },
-        order: otp_order::profile(&DATA["profile"]),
+        order: otp_order::profile(&corpus["profile"]),
         overrides: Default::default(),
         diagnostic: ae_vm_fate::diagnostic::Profile::Release,
         limits: Default::default(),
@@ -137,6 +151,16 @@ fn setup(path: &Temp) -> (Arc<Database>, Config<Otp26>) {
     );
     rules.reward_delay = 2;
     rules.fee_distribution = [10.into(), 70.into(), 20.into()];
+    rules.fixed_coinbase = Unsigned::from_field_bytes(
+        &row["fixed_coinbase"]
+            .as_str()
+            .unwrap()
+            .parse::<BigInt>()
+            .unwrap()
+            .to_bytes_be()
+            .1,
+    )
+    .unwrap();
     let config = Config {
         identity: repo::Identity::for_consensus(&network, hash, Hash256::ZERO, ConsensusType::Pos),
         profile: Arc::new(profile),

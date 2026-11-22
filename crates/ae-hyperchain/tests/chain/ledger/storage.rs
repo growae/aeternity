@@ -70,6 +70,7 @@ fn check_stored(db: &Database, b: &Block, expected: &J) {
         &view.trees(hash, Default::default()).unwrap(),
         &expected["trees"],
     );
+    finalized::check_calls(&view.trees(hash, Default::default()).unwrap(), expected);
     assert_eq!(
         normalize(&block::cache(&view.hyperchain_checkpoint().unwrap().state)),
         normalize(&expected["cache"])
@@ -89,11 +90,14 @@ fn check_stored(db: &Database, b: &Block, expected: &J) {
 }
 #[test]
 fn native_hc_blocks_commit_and_reopen_with_atomic_roots_caches_and_events() {
+    assert_eq!(commit_and_reopen(&LEDGER, "reopen"), 77);
+}
+pub(super) fn commit_and_reopen(corpus: &J, label: &str) -> usize {
     let mut blocks = 0;
-    for (index, row) in LEDGER["rows"].as_array().unwrap().iter().enumerate() {
-        let path = Directory::new("reopen", index);
+    for (index, row) in corpus["rows"].as_array().unwrap().iter().enumerate() {
+        let path = Directory::new(label, index);
         let mut first = true;
-        walk("profile", row, |s| {
+        walk_corpus(corpus, "profile", row, |s| {
             let c = config(&s);
             let db = open(&path, &c);
             if first {
@@ -158,19 +162,22 @@ fn native_hc_blocks_commit_and_reopen_with_atomic_roots_caches_and_events() {
             blocks += 1;
         });
     }
-    assert_eq!(blocks, 77);
+    blocks
 }
 
 #[test]
 fn hc_rollback_preserves_same_height_ancestors_and_replays_native_roots() {
-    let row = LEDGER["rows"].as_array().unwrap().last().unwrap();
+    rollback_and_replay(&LEDGER, "rollback");
+}
+pub(super) fn rollback_and_replay(corpus: &J, label: &str) {
+    let row = corpus["rows"].as_array().unwrap().last().unwrap();
     for choice in 0..3 {
-        let path = Directory::new("rollback", choice);
+        let path = Directory::new(label, choice);
         let mut db = None;
         let mut owner = None;
         let mut cfg = None;
         let mut blocks = Vec::new();
-        walk("profile", row, |s| {
+        walk_corpus(corpus, "profile", row, |s| {
             if db.is_none() {
                 let c = config(&s);
                 let database = open(&path, &c);
@@ -232,6 +239,24 @@ fn hc_rollback_preserves_same_height_ancestors_and_replays_native_roots() {
                 number(&view.require_record(receipt.change().new_tip).unwrap().fees).to_string(),
                 expected["fees"]
             );
+            finalized::check_calls(
+                &view
+                    .trees(receipt.change().new_tip, Default::default())
+                    .unwrap(),
+                expected,
+            );
+            let events = view
+                .hyperchain_event(view.status().revision)
+                .unwrap()
+                .unwrap();
+            if matches!(b, Block::Key(_)) {
+                assert_eq!(
+                    normalize(&block::events(events.events)),
+                    normalize(&expected["events"])
+                );
+            } else {
+                assert!(events.events.is_empty());
+            }
         }
         drop(after);
         drop(pinned);

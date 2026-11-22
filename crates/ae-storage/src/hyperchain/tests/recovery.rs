@@ -17,8 +17,14 @@ fn hc_commit_crash_worker() {
         .unwrap()
         .parse()
         .unwrap();
-    let (db, c) = setup(&path);
-    let b = block(&DATA["rows"][0]["rows"][index]);
+    let finalized = std::env::var("AE_HC_COMMIT_FINALIZED").unwrap() == "true";
+    let (corpus, row) = if finalized {
+        (&*FINALIZED, 6)
+    } else {
+        (&*DATA, 0)
+    };
+    let (db, c) = setup_corpus(&path, corpus, row);
+    let b = block(&corpus["rows"][row]["rows"][index]);
     let owner = Owner::start(db.clone(), c.clone(), Parent::default()).unwrap();
     let mut live = owner.live.lock().unwrap();
     let (mut state, mut host) = (live.state.clone(), live.host.clone());
@@ -52,12 +58,24 @@ impl Drop for Worker {
 }
 #[test]
 fn killed_hc_commits_recover_atomic_micro_and_epoch_state() {
-    for index in [0, 5] {
+    crash_cases(false, &[0, 5]);
+}
+#[test]
+fn killed_finalizations_recover_calls_and_epoch_events_across_protocol_activations() {
+    crash_cases(true, &[4, 5, 9, 10]);
+}
+fn crash_cases(finalized: bool, indices: &[usize]) {
+    let (corpus, row) = if finalized {
+        (&*FINALIZED, 6)
+    } else {
+        (&*DATA, 0)
+    };
+    for &index in indices {
         for phase in ["before", "after", "race0", "race1", "race5", "race10"] {
             let path = Temp::new();
-            let (db, c) = setup(&path);
+            let (db, c) = setup_corpus(&path, corpus, row);
             let owner = Owner::start(db.clone(), c.clone(), Parent::default()).unwrap();
-            for row in DATA["rows"][0]["rows"]
+            for row in corpus["rows"][row]["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -70,7 +88,7 @@ fn killed_hc_commits_recover_atomic_micro_and_epoch_state() {
             let view = db.view().unwrap();
             let before = view.source().prefix(&[], 100_000).unwrap();
             let revision = view.status().revision;
-            let b = block(&DATA["rows"][0]["rows"][index]);
+            let b = block(&corpus["rows"][row]["rows"][index]);
             let (_, mut state, mut host) = owner.snapshot().unwrap();
             let expected =
                 repo::prepare_hyperchain(&view, &b, &c, 1_000_000, &mut state, &mut host).unwrap();
@@ -86,6 +104,7 @@ fn killed_hc_commits_recover_atomic_micro_and_epoch_state() {
                     ])
                     .env("AE_HC_COMMIT_CRASH_PATH", &path.0)
                     .env("AE_HC_COMMIT_CRASH_INDEX", index.to_string())
+                    .env("AE_HC_COMMIT_FINALIZED", finalized.to_string())
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::inherit())
@@ -148,6 +167,20 @@ fn killed_hc_commits_recover_atomic_micro_and_epoch_state() {
                 view.verify_tip().unwrap();
                 assert_eq!(view.status().tip, Some(b.hash().unwrap()));
                 assert_eq!(view.hyperchain_checkpoint().unwrap().state, state);
+                let trees = view.trees(b.hash().unwrap(), Default::default()).unwrap();
+                assert_eq!(trees.roots().hash().0, b.header().common().state_hash);
+                if finalized {
+                    for receipt in corpus["rows"][row]["rows"][index]["calls"]
+                        .as_array()
+                        .unwrap()
+                    {
+                        let id = bytes(&receipt["id"]).try_into().unwrap();
+                        let call =
+                            ae_state::calls::Call::deserialize(id, &bytes(&receipt["encoded"]))
+                                .unwrap();
+                        assert_eq!(trees.calls.lookup(&call.contract, id).unwrap(), Some(call));
+                    }
+                }
                 assert_eq!(
                     view.hyperchain_event(actual).unwrap().unwrap().events,
                     expected.consensus_events()
@@ -161,7 +194,8 @@ fn killed_hc_commits_recover_atomic_micro_and_epoch_state() {
                 let owner = Owner::start(db.clone(), c.clone(), Parent::default()).unwrap();
                 assert_eq!(owner.snapshot().unwrap().1, state);
             }
-            eprintln!("HC ledger crash recovery {index}/{phase}: revision {actual}");
+            let kind = if finalized { "finalized" } else { "ledger" };
+            eprintln!("HC {kind} crash recovery {index}/{phase}: revision {actual}");
         }
     }
 }

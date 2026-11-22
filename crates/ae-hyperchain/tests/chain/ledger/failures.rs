@@ -2,7 +2,7 @@ use super::*;
 use ae_chain::admission::BodyError;
 use ae_hyperchain::signing;
 
-fn rejection(e: hc::Error<Unavailable>, b: &Block) -> J {
+pub(super) fn rejection(e: hc::Error<Unavailable>, b: &Block) -> J {
     let header = |e| tuple(vec![atom("header"), e]);
     let reason = match e {
         hc::Error::Protocol(ae_protocol::ProfileError::WrongProtocol { .. }) => {
