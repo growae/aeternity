@@ -864,3 +864,179 @@ async fn capabilities_start_failure_and_later_gc_failure_join_partial_startup() 
         assert!(within(task).await.unwrap().joined);
     }
 }
+
+#[tokio::test]
+async fn resilience_replacement_retains_parent_cache_and_does_not_replay_gap_completions() {
+    use crate::resilience::Delivery;
+    use ae_chain::resilience::Config as Policy;
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.resilience.as_mut().unwrap().initial = Policy {
+        depth: 3,
+        from_start: true,
+    };
+    let (mut handle, mut service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let (entered, ready_gap) = oneshot::channel();
+    let (resume, release) = oneshot::channel();
+    service.restart_gate = Some((entered, release));
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let binding = handle.bindings().resilience.unwrap();
+    let old = binding.current().unwrap();
+    let source = old.source();
+    assert_eq!(source.notify_sync_done(), Delivery::Accepted);
+    assert!(
+        old.snapshot()
+            .unwrap()
+            .await
+            .unwrap()
+            .policy
+            .state
+            .synchronized()
+    );
+    source
+        .configure(Policy {
+            depth: 0,
+            from_start: true,
+        })
+        .unwrap();
+    let before = old.snapshot().unwrap().await.unwrap();
+    assert_eq!(before.policy.state.recorded_active(), Some(0));
+    let replace = handle.restart(Child::Resilience, 1).unwrap();
+    within(ready_gap).await.unwrap();
+    assert!(binding.current().is_none() && !binding.is_closed());
+    assert!(old.info().joined);
+    assert_eq!(source.notify_sync_done(), Delivery::Unavailable);
+    assert_eq!(
+        source
+            .configure(Policy {
+                depth: 9,
+                from_start: true
+            })
+            .unwrap()
+            .delivery,
+        Delivery::Unavailable
+    );
+    assert_eq!(source.snapshot().unwrap(), before.policy);
+    assert!(node.db.policy_ready());
+    resume.send(()).unwrap();
+    assert_eq!(within(replace.wait()).await, Ok(2));
+    let next = binding.current().unwrap();
+    let state = next.snapshot().unwrap().await.unwrap();
+    assert_eq!(state.policy.state.recorded_active(), Some(0));
+    assert_eq!(state.policy.state.configured_depth(), Some(9));
+    assert!(state.sync_subscribed);
+    assert_eq!(state.sync_callbacks, 0);
+    assert_eq!(source.notify_sync_done(), Delivery::Accepted);
+    assert_eq!(
+        next.snapshot()
+            .unwrap()
+            .await
+            .unwrap()
+            .policy
+            .state
+            .active_depth(),
+        Some(9)
+    );
+    assert_eq!(handle.status().admission_generation, 1);
+    assert_eq!(handle.status().capabilities_generation, 1);
+    handle.shutdown();
+    assert!(within(task).await.unwrap().joined);
+    assert!(binding.is_closed() && source.is_closed() && next.info().joined);
+    assert_eq!(
+        node.db.view().unwrap().resilience().state,
+        Default::default()
+    );
+    // Retained sources and exact old clients do not prevent a new root lifetime.
+    let (mut fresh, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        settings(),
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut fresh).await;
+    let clean = fresh
+        .bindings()
+        .resilience
+        .unwrap()
+        .current()
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(!clean.policy.state.synchronized());
+    assert_eq!(clean.policy.state.recorded_active(), None);
+    fresh.shutdown();
+    assert!(within(task).await.unwrap().joined);
+}
+
+#[tokio::test]
+async fn resilience_start_failure_unwinds_prior_children_and_shares_restart_budget() {
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.resilience.as_mut().unwrap().queue.requests = 0;
+    let (handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let bindings = handle.bindings();
+    let status = within(service.run()).await;
+    assert!(matches!(
+        status.error,
+        Some(Error::Start {
+            child: Child::Resilience,
+            ..
+        })
+    ));
+    assert!(status.joined);
+    assert_eq!(status.admission_generation, 1);
+    assert_eq!(status.resilience_generation, 0);
+    assert_eq!(status.capabilities_generation, 0);
+    assert!(bindings.admission.is_closed() && bindings.resilience.unwrap().is_closed());
+    assert!(!node.db.policy_ready());
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        settings(),
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let old = handle.bindings().resilience.unwrap().current().unwrap();
+    for attempt in 0..6 {
+        let status = handle.status();
+        let (child, generation) = if attempt % 2 == 0 {
+            (Child::Resilience, status.resilience_generation)
+        } else {
+            (Child::Capabilities, status.capabilities_generation)
+        };
+        let result = within(handle.restart(child, generation).unwrap().wait()).await;
+        assert_eq!(
+            result,
+            if attempt == 5 {
+                Err(Error::RestartLimit)
+            } else {
+                Ok(generation + 1)
+            }
+        );
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert!(status.joined && old.info().joined && old.source().is_closed());
+}

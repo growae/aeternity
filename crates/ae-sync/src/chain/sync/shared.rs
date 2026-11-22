@@ -81,6 +81,7 @@ impl<O> Group<O> {
     }
 }
 pub(super) struct Book<O> {
+    pub(super) policy_source: Option<crate::resilience::Source>,
     groups: Vec<Group<O>>,
     sequence: u64,
     top_target: u64,
@@ -172,6 +173,11 @@ impl<O> Book<O> {
             self.notices.error.get_or_insert(error);
             return;
         }
+        if let Some(source) = &self.policy_source
+            && let crate::resilience::Delivery::Rejected(error) = source.notify_sync_done()
+        {
+            self.notices.policy_error.get_or_insert(error);
+        }
         self.notices.count = self.notices.count.saturating_add(1);
         self.notices.last = Some(completion.clone());
         if !syncing {
@@ -203,6 +209,7 @@ impl<O> Book<O> {
         }
         let (events, feed) = crate::events::channel(config).map_err(|_| Error::Configuration)?;
         Ok(Self {
+            policy_source: None,
             groups: vec![],
             sequence: 0,
             top_target: 0,

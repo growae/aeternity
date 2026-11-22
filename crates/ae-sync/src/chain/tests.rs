@@ -388,3 +388,43 @@ async fn shutdown_preserves_committed_micro_prefix_and_stops_the_next_block() {
 }
 
 mod gossip;
+
+#[tokio::test]
+async fn importer_scope_survives_child_replacement_but_never_adopts_a_new_parent() {
+    let (_temporary, standalone) = setup(Default::default());
+    let db = standalone.context.db.clone();
+    assert_eq!(standalone.check_open(), Ok(()));
+    let owner = crate::resilience::Owner::new(db.clone(), Default::default()).unwrap();
+    let child = owner.start().unwrap();
+    assert_eq!(standalone.check_open(), Err(Error::Closed));
+    let make = || {
+        Importer::new(
+            db.clone(),
+            fixtures::execution(&NetworkProfile::mainnet()),
+            fixtures::rules(db.view().unwrap().identity().genesis),
+            Default::default(),
+        )
+        .unwrap()
+    };
+    let managed = make();
+    assert_eq!(managed.check_open(), Ok(()));
+    child.shutdown().unwrap();
+    assert_eq!(managed.check_open(), Ok(()));
+    let child = owner.start().unwrap();
+    assert_eq!(managed.check_open(), Ok(()));
+    child.shutdown().unwrap();
+    drop(owner);
+    assert_eq!(managed.check_open(), Err(Error::Closed));
+    let fresh = crate::resilience::Owner::new(db.clone(), Default::default()).unwrap();
+    let child = fresh.start().unwrap();
+    assert!(db.policy_ready());
+    assert_eq!(standalone.check_open(), Err(Error::Closed));
+    assert_eq!(managed.check_open(), Err(Error::Closed));
+    let current = make();
+    assert_eq!(current.check_open(), Ok(()));
+    for importer in [standalone, managed, current] {
+        importer.stop();
+        importer.join().await;
+    }
+    child.shutdown().unwrap();
+}

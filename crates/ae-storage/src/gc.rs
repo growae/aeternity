@@ -130,6 +130,7 @@ impl Database {
         check: impl FnOnce() -> Result<(), Error>,
     ) -> Result<bool, Error> {
         let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
+        self.ensure_policy_recovered()?;
         let view = self.view_locked(&policy)?;
         let prior = view.retention()?;
         if let Some((config, _)) = configured {
@@ -196,6 +197,7 @@ impl Database {
     }
     pub fn cancel_gc(&self) -> Result<State, Error> {
         let guard = self.writer.lock().map_err(|_| backend_lock())?;
+        self.ensure_policy_recovered()?;
         let view = self.view_locked(&guard)?;
         let prior = view.retention()?;
         let mut state = prior.clone();
@@ -225,6 +227,7 @@ impl Database {
             return Err(Error::ResourceLimit);
         }
         let guard = self.writer.lock().map_err(|_| backend_lock())?;
+        self.ensure_policy_recovered()?;
         let view = self.view_locked(&guard)?;
         let prior = view.retention()?;
         let mut state = prior.clone();
@@ -474,4 +477,4 @@ impl Database {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

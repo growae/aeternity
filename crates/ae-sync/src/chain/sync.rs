@@ -175,6 +175,7 @@ pub enum Error {
     Storage(repository::Error),
     Import(super::Failure),
     Policy(super::Error),
+    Resilience(crate::resilience::Error),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -320,6 +321,7 @@ pub struct Handle {
     event_owner: Arc<()>,
     stop: watch::Sender<bool>,
     resilience: watch::Sender<ae_chain::resilience::Config>,
+    policy_source: Option<crate::resilience::Source>,
     status: watch::Receiver<Status>,
     events: crate::events::Feed<lifecycle::Event>,
 }
@@ -341,7 +343,18 @@ impl Handle {
     }
     // Updates are coalesced to the latest configuration, like a config snapshot.
     pub fn set_resilience(&self, config: ae_chain::resilience::Config) -> Result<(), Error> {
-        self.resilience.send(config).map_err(|_| Error::Closed)
+        if let Some(source) = &self.policy_source {
+            if *self.stop.borrow() || self.resilience.is_closed() {
+                return Err(Error::Closed);
+            }
+            let change = source.configure(config).map_err(Error::Resilience)?;
+            if let crate::resilience::Delivery::Rejected(error) = change.delivery {
+                return Err(Error::Resilience(error));
+            }
+            Ok(())
+        } else {
+            self.resilience.send(config).map_err(|_| Error::Closed)
+        }
     }
 
     pub fn shutdown(&self) {
@@ -377,6 +390,7 @@ struct Context<O> {
     network: network::Handle,
     config: Config,
     reads: blocking::Pool,
+    policy_source: Option<crate::resilience::Source>,
     stopped: AtomicBool,
     wake: watch::Sender<()>,
     shared: Mutex<shared::Book<O>>,
@@ -404,7 +418,42 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     incoming: peer::Events,
     config: Config,
 ) -> Result<(Handle, Events, Service<O>), Error> {
+    create_bound(importer, network, application, incoming, config, None)
+}
+pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
+    importer: Importer<O>,
+    network: network::Handle,
+    application: peer::Handle,
+    incoming: peer::Events,
+    config: Config,
+    binding: Option<crate::bindings::Binding<crate::resilience::Client>>,
+) -> Result<(Handle, Events, Service<O>), Error> {
     config.validate()?;
+    let policy_source = match binding {
+        Some(binding) => {
+            if !binding.uses_database(&importer.context.db) {
+                return Err(Error::Configuration);
+            }
+            // Withdrawal retains the previous client descriptor. Its source
+            // belongs to the same parent, so a child replacement between the
+            // dependency wait and this constructor need not restart sync.
+            let held = binding.snapshot();
+            if held.closed {
+                return Err(Error::Closed);
+            }
+            let source = held.value.ok_or(Error::Closed)?.source();
+            // A group restart must not overwrite the parent's live external config.
+            if source.is_closed() {
+                return Err(Error::Closed);
+            }
+            if !source.uses_database(&importer.context.db) || source.initial() != config.resilience
+            {
+                return Err(Error::Configuration);
+            }
+            Some(source)
+        }
+        None => None,
+    };
     if !network.uses_database(&importer.context.db)
         || !application.uses_database(&importer.context.db)
         || importer
@@ -414,7 +463,8 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
     {
         return Err(Error::Configuration);
     }
-    let book = shared::Book::with_events(config.events)?;
+    let mut book = shared::Book::with_events(config.events)?;
+    book.policy_source = policy_source.clone();
     let business_events = book.feed();
     let reads = blocking::Pool::named(
         "ae-chain-sync",
@@ -446,6 +496,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
         network,
         config,
         reads,
+        policy_source: policy_source.clone(),
         stopped: AtomicBool::new(false),
         wake,
         shared: Mutex::new(book),
@@ -459,6 +510,7 @@ pub fn create<O: MapOrder + Send + Sync + 'static>(
             event_owner: event_owner.clone(),
             stop,
             resilience,
+            policy_source,
             status: observed,
             events: business_events,
         },

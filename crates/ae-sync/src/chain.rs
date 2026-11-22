@@ -101,7 +101,11 @@ pub enum Error {
 }
 impl From<repository::Error> for Error {
     fn from(e: repository::Error) -> Self {
-        Self::Storage(e)
+        match e {
+            repository::Error::RecoveryRequired => Self::RecoveryRequired,
+            repository::Error::PolicyClosed => Self::Closed,
+            other => Self::Storage(other),
+        }
     }
 }
 impl From<message::Error> for Error {
@@ -165,6 +169,7 @@ pub struct Failure {
 
 struct Context<O> {
     db: Arc<Database>,
+    policy_scope: ae_storage::policy::Scope,
     execution: Owned<O>,
     rules: Rules,
     config: Config,
@@ -261,10 +266,12 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         {
             return Err(Error::Configuration);
         }
+        let policy_scope = db.policy_scope()?;
         let jobs = blocking::Pool::named("ae-chain-import", 1, config.jobs, config.bytes)?;
         Ok(Self {
             context: Arc::new(Context {
                 db,
+                policy_scope,
                 execution,
                 rules,
                 config,
@@ -280,11 +287,13 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         })
     }
     pub fn recovery_required(&self) -> bool {
-        self.context
-            .recovery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        self.context.db.policy_recovery_required()
+            || self
+                .context
+                .recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
     }
     pub fn recovery_reason(&self) -> Option<Error> {
         // The first cause survives task cancellation and shutdown. It does
@@ -294,6 +303,12 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+            .or_else(|| {
+                self.context
+                    .db
+                    .policy_recovery_required()
+                    .then_some(Error::RecoveryRequired)
+            })
     }
     pub fn available(&self) -> (usize, usize) {
         self.jobs.available()
@@ -364,6 +379,9 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         }
         if self.recovery_required() {
             return Err(Error::RecoveryRequired);
+        }
+        if self.context.policy_scope.is_closed() || !self.context.db.policy_ready() {
+            return Err(Error::Closed);
         }
         Ok(())
     }

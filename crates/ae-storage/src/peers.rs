@@ -413,6 +413,7 @@ impl Writer {
             writes.insert(key, value);
         }
         let _guard = self.db.writer.lock().map_err(|_| backend_lock())?;
+        self.db.ensure_policy_recovered()?;
         let mut metadata = Metadata::decode(self.db.db.get(METADATA).map_err(backend)?)?;
         if metadata.revision != version.revision {
             return Err(Error::Conflict.into());

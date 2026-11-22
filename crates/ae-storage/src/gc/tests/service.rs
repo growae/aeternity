@@ -20,7 +20,7 @@ fn config() -> Config {
 }
 // An already-admitted selected generation, optionally with a micro top, is
 // installed atomically. Consensus validity is covered by real replay elsewhere.
-pub(super) fn advance(db: &Database, height: u64, micro: bool) -> Status {
+pub(crate) fn advance(db: &Database, height: u64, micro: bool) -> Status {
     let guard = db.writer.lock().unwrap();
     let view = db.view_locked(&guard).unwrap();
     let previous = view.status().tip.unwrap();

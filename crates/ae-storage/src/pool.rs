@@ -230,6 +230,7 @@ impl Database {
         mut check: impl FnMut() -> Result<(), Error>,
     ) -> Result<u64, Error> {
         let _guard = self.writer.lock().map_err(|_| backend_lock())?;
+        self.ensure_policy_recovered()?;
         if stored.chain.source().source_id() != self.source_id
             || stored.chain.identity() != &self.identity
         {

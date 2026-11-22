@@ -94,13 +94,17 @@ impl<O: MapOrder> Context<O> {
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
     ) -> Result<(), Error> {
-        if self
-            .recovery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        if self.db.policy_recovery_required()
+            || self
+                .recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
         {
             return Err(Error::RecoveryRequired);
+        }
+        if self.policy_scope.is_closed() || !self.db.policy_ready() {
+            return Err(Error::Closed);
         }
         if self.stopped.load(Ordering::Acquire) || cancel.cancelled() {
             return Err(Error::Cancelled);
@@ -331,6 +335,6 @@ impl<O: MapOrder> Context<O> {
         if let Some(hook) = &self.commit_hook {
             return hook(&self.db, update);
         }
-        self.db.commit(update)
+        self.db.commit_in_policy_scope(update, &self.policy_scope)
     }
 }

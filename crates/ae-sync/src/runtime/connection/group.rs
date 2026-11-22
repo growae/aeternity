@@ -122,12 +122,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Peer, move || handle.shutdown(), async move {
             Failure::new(Child::Peer, service.run().await.last_error)
         });
-        let (sync, incoming, service) = sync::create(
+        let (sync, incoming, service) = sync::create_bound(
             self.importer.as_ref().expect("prepared importer").shared(),
             network.clone(),
             peer.clone(),
             incoming,
             config.sync.clone(),
+            dependencies.resilience.clone(),
         )
         .map_err(|e| Failure::new(Child::Sync, e))?;
         let handle = sync.clone();

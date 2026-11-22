@@ -9,6 +9,7 @@ enum Key {
 enum Update {
     Policy(resilience::Config, resilience::Snapshot),
     View(Point, Option<u64>),
+    Managed(resilience::Config, resilience::Snapshot, Point, Option<u64>),
 }
 pub(in crate::chain::sync) struct Owner<O: MapOrder + Send + Sync + 'static> {
     context: Arc<Context<O>>,
@@ -54,7 +55,9 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
         self.status.peer_completions = notices.count;
         self.status.last_peer_done = notices.last;
         self.status.gc_ready = notices.gc_ready;
-        self.wants_synced |= notices.count > 0;
+        if self.context.policy_source.is_none() {
+            self.wants_synced |= notices.count > 0;
+        }
     }
     fn progress(&mut self) {
         self.status.progress = progress(
@@ -86,6 +89,35 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
             .done(peer, generation, reason);
     }
     pub fn start(&mut self, config: resilience::Config) {
+        if let Some(source) = self.context.policy_source.clone() {
+            if self.refresh && !self.policy_busy {
+                self.refresh = false;
+                self.policy_busy = true;
+                let context = self.context.clone();
+                self.work.insert(Key::Policy, async move {
+                    context
+                        .read_when_available(move |db| {
+                            let view = db.view()?;
+                            // Cache, selected top and finalization share one DB snapshot.
+                            // External config is separately sampled and may be newer.
+                            let config = source.configuration().map_err(SyncError::Resilience)?;
+                            let hash = view.status().tip.ok_or(SyncError::NoProgress)?;
+                            let point = Point {
+                                hash,
+                                height: view.require_block(hash)?.header().common().height,
+                            };
+                            Ok(Update::Managed(
+                                config.value,
+                                view.resilience(),
+                                point,
+                                view.finalized_height()?,
+                            ))
+                        })
+                        .await
+                });
+            }
+            return;
+        }
         self.wants_synced |= self
             .context
             .shared
@@ -145,6 +177,14 @@ impl<O: MapOrder + Send + Sync + 'static> Owner<O> {
             Key::View => self.view_busy = false,
         }
         match result? {
+            Update::Managed(config, snapshot, point, finalized) => {
+                self.initialized = true;
+                self.status.policy = Some(snapshot);
+                self.status.policy_config = Some(config);
+                self.status.selected = Some(point);
+                self.status.finalized_height = finalized;
+                self.progress();
+            }
             Update::Policy(config, snapshot) => {
                 self.initialized = true;
                 self.status.policy = Some(snapshot);
@@ -218,6 +258,7 @@ mod tests {
             network: network.clone(),
             config,
             reads,
+            policy_source: None,
             stopped: AtomicBool::new(false),
             wake,
             shared: Mutex::new(shared::Book::new()),

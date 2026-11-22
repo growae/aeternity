@@ -1,5 +1,5 @@
 use crate::peer::capabilities::worker as capabilities;
-use crate::{analytics, bindings, blocking, pool_gc, routing};
+use crate::{analytics, bindings, blocking, pool_gc, resilience, routing};
 use ae_chain::repository::retention;
 use ae_protocol::NetworkProfile;
 use ae_storage::{Database, gc, pool};
@@ -19,6 +19,7 @@ pub struct Config {
     pub routing: Option<routing::Setup>,
     pub analytics: Option<analytics::Config>,
     pub pool_gc: Option<pool_gc::Config>,
+    pub resilience: Option<resilience::Config>,
     pub capabilities: Option<capabilities::Config>,
     pub keys: Option<crate::keys::Config>,
     pub pool: pool::Config,
@@ -32,6 +33,7 @@ impl Default for Config {
             routing: None,
             analytics: None,
             pool_gc: Some(Default::default()),
+            resilience: Some(Default::default()),
             capabilities: Some(Default::default()),
             keys: None,
             pool: Default::default(),
@@ -48,6 +50,7 @@ pub enum Child {
     Admission,
     Analytics,
     PoolMaintenance,
+    Resilience,
     Capabilities,
     GarbageCollection,
 }
@@ -82,6 +85,7 @@ pub struct Status {
     pub routing_generation: u64,
     pub analytics_generation: u64,
     pub pool_gc_generation: u64,
+    pub resilience_generation: u64,
     pub capabilities_generation: u64,
     pub admission: Option<pool::worker::Info>,
     pub gc: Option<gc::worker::Info>,
@@ -89,6 +93,7 @@ pub struct Status {
     pub routing: Option<routing::Info>,
     pub analytics: Option<analytics::Info>,
     pub pool_gc: Option<pool_gc::Info>,
+    pub resilience: Option<resilience::Info>,
     pub capabilities: Option<capabilities::Info>,
     pub restart_attempts: u64,
     pub last_failure: Option<Error>,
@@ -99,6 +104,7 @@ pub struct Bindings {
     pub routing: Option<bindings::MetricsRouting>,
     pub analytics: Option<bindings::PeerAnalytics>,
     pub pool_gc: Option<bindings::Binding<pool_gc::Client>>,
+    pub resilience: Option<bindings::Binding<resilience::Client>>,
     pub capabilities: Option<bindings::Binding<capabilities::Client>>,
     pub keys: Option<bindings::Binding<crate::keys::Client>>,
     pub admission: bindings::Admission,
@@ -169,6 +175,9 @@ pub struct Service {
     routing_owner: Option<routing::Owner>,
     analytics: Option<analytics::Worker>,
     pool_gc: Option<pool_gc::Worker>,
+    resilience: Option<resilience::Worker>,
+    resilience_owner: Option<resilience::Owner>,
+    resilience_binding: Option<bindings::Owner<resilience::Client>>,
     capabilities: Option<capabilities::Worker>,
     capabilities_binding: Option<bindings::Owner<capabilities::Client>>,
     admission_binding: bindings::Admission,
@@ -218,6 +227,12 @@ pub fn create(
     } else {
         (None, None)
     };
+    let (resilience_binding, resilience) = if config.resilience.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
     let (capabilities_binding, capabilities) = if config.capabilities.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
         (Some(owner), Some(reader))
@@ -257,6 +272,7 @@ pub fn create(
                 routing,
                 analytics,
                 pool_gc,
+                resilience,
                 capabilities,
             },
         },
@@ -272,6 +288,9 @@ pub fn create(
             routing_owner: None,
             analytics: None,
             pool_gc: None,
+            resilience: None,
+            resilience_owner: None,
+            resilience_binding,
             capabilities: None,
             capabilities_binding,
             admission_binding,
@@ -294,6 +313,7 @@ pub fn create(
     ))
 }
 enum Started {
+    Resilience(resilience::Worker, Option<resilience::Owner>),
     Capabilities(capabilities::Worker),
     PoolMaintenance(pool_gc::Worker),
     Analytics(analytics::Worker),
@@ -315,6 +335,7 @@ impl Service {
     }
     fn generation(&self, child: Child) -> u64 {
         match child {
+            Child::Resilience => self.current.resilience_generation,
             Child::Capabilities => self.current.capabilities_generation,
             Child::Routing => self.current.routing_generation,
             Child::Analytics => self.current.analytics_generation,
@@ -325,6 +346,7 @@ impl Service {
         }
     }
     fn publish(&mut self) {
+        self.current.resilience = self.resilience.as_ref().map(|w| w.info());
         self.current.capabilities = self.capabilities.as_ref().map(|w| w.info());
         self.current.routing = self.routing.as_ref().map(|w| w.info());
         self.current.analytics = self.analytics.as_ref().map(|w| w.info());
@@ -345,9 +367,31 @@ impl Service {
         let cache = self.cache.clone();
         let admission_binding = self.admission_binding.clone();
         let routing_store = self.routing_owner.as_ref().map(|o| o.store());
+        let resilience_source = self.resilience_owner.as_ref().map(|o| o.source());
         let created = self
             .jobs
             .submit(128, move |_| match child {
+                Child::Resilience => {
+                    let config = config.resilience.ok_or(Error::Missing)?;
+                    let start = || -> Result<Started, resilience::Error> {
+                        let owner = if resilience_source.is_none() {
+                            Some(resilience::Owner::new(db, config)?)
+                        } else {
+                            None
+                        };
+                        let source = resilience_source
+                            .or_else(|| owner.as_ref().map(|o| o.source()))
+                            .expect("configured resilience");
+                        Ok(Started::Resilience(
+                            resilience::Worker::spawn(source, config.queue)?,
+                            owner,
+                        ))
+                    };
+                    start().map_err(|e| Error::Start {
+                        child,
+                        reason: e.to_string(),
+                    })
+                }
                 Child::Capabilities => {
                     capabilities::Worker::spawn(config.capabilities.ok_or(Error::Missing)?)
                         .map(Started::Capabilities)
@@ -432,6 +476,17 @@ impl Service {
             .await
             .map_err(|_| Error::Worker)??;
         match created {
+            Started::Resilience(worker, owner) => {
+                if let Some(owner) = owner {
+                    self.resilience_owner = Some(owner);
+                }
+                self.resilience_binding
+                    .as_ref()
+                    .expect("configured resilience")
+                    .install(worker.client(), generation);
+                self.resilience = Some(worker);
+                self.current.resilience_generation = generation;
+            }
             Started::Capabilities(worker) => {
                 self.capabilities_binding
                     .as_ref()
@@ -495,6 +550,17 @@ impl Service {
     }
     async fn retire(&mut self, child: Child) -> Result<(), Error> {
         let pending = match child {
+            Child::Resilience => {
+                if let Some(binding) = &self.resilience_binding {
+                    binding.withdraw();
+                }
+                self.resilience.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
             Child::Capabilities => {
                 if let Some(binding) = &self.capabilities_binding {
                     binding.withdraw();
@@ -651,6 +717,12 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
+        if self.config.resilience.is_some() {
+            self.start(Child::Resilience).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         if self.config.capabilities.is_some() {
             self.start(Child::Capabilities).await?;
         }
@@ -682,6 +754,8 @@ impl Service {
                 Some(Child::Analytics)
             } else if self.pool_gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::PoolMaintenance)
+            } else if self.resilience.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::Resilience)
             } else if self
                 .capabilities
                 .as_ref()
@@ -703,7 +777,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -718,6 +792,7 @@ impl Service {
         #[cfg(test)]
         if command.stop_only {
             match command.child {
+                Child::Resilience => self.resilience.as_ref().unwrap().request_shutdown(),
                 Child::Capabilities => self.capabilities.as_ref().unwrap().request_shutdown(),
                 Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
                 Child::Analytics => self.analytics.as_ref().unwrap().request_shutdown(),
@@ -760,9 +835,13 @@ impl Service {
         if let Some(binding) = &self.capabilities_binding {
             binding.withdraw();
         }
+        if let Some(binding) = &self.resilience_binding {
+            binding.withdraw();
+        }
         for child in [
             Child::GarbageCollection,
             Child::Capabilities,
+            Child::Resilience,
             Child::PoolMaintenance,
             Child::Analytics,
             Child::Admission,
@@ -792,6 +871,10 @@ impl Service {
         if let Some(binding) = &self.gc_binding {
             binding.close();
         }
+        if let Some(binding) = &self.resilience_binding {
+            binding.close();
+        }
+        self.resilience_owner.take();
         self.routing_owner.take();
         self.jobs.stop();
         self.jobs.join().await;
@@ -806,6 +889,9 @@ impl Service {
 mod tests;
 impl Drop for Service {
     fn drop(&mut self) {
+        if let Some(binding) = &self.resilience_binding {
+            binding.close();
+        }
         if let Some(binding) = &self.keys_binding {
             binding.close();
         }

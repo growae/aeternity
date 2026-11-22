@@ -16,6 +16,7 @@ static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod events;
 pub mod gc;
 pub mod peers;
+pub mod policy;
 pub mod pool;
 pub mod replay;
 
@@ -29,6 +30,11 @@ pub struct Database {
     db: DB,
     identity: Identity,
     writer: Mutex<resilience::Snapshot>,
+    policy_owner: Mutex<std::sync::Weak<policy::Inner>>,
+    policy_recovery: std::sync::atomic::AtomicBool,
+    policy_managed: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    policy_write_failure: std::sync::atomic::AtomicU8,
     source_id: u64,
     config: ReadConfig,
     gc_worker: Mutex<std::sync::Weak<gc::worker::Shared>>,
@@ -215,6 +221,11 @@ impl Database {
             db,
             identity,
             writer: Mutex::new(Default::default()),
+            policy_owner: Mutex::new(Default::default()),
+            policy_recovery: std::sync::atomic::AtomicBool::new(false),
+            policy_managed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            policy_write_failure: std::sync::atomic::AtomicU8::new(0),
             source_id,
             config,
             gc_worker: Mutex::new(Default::default()),
@@ -337,54 +348,78 @@ impl Database {
         config: resilience::Config,
         check: impl FnOnce() -> Result<(), Error>,
     ) -> Result<resilience::Snapshot, Error> {
+        self.update_resilience_owned(event, config, None, check)
+    }
+    fn update_resilience_owned(
+        &self,
+        event: resilience::Event,
+        config: resilience::Config,
+        owner: Option<&Arc<policy::Inner>>,
+        check: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<resilience::Snapshot, Error> {
         let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
-        let view = self.view_locked(&policy)?;
-        let (state, ensure) = policy.state.transition(event, config);
-        let old = view.finalized_height()?;
-        let new = if let (Some(depth), Some(tip)) = (ensure, view.status().tip) {
-            resilience::finalized_at(view.require_block(tip)?.header().common().height, depth)
-                .or(old)
-        } else {
-            old
-        };
-        if policy.state != state || old != new {
-            let generation = policy
-                .generation
-                .checked_add(1)
-                .ok_or(Error::ResourceLimit)?;
-            check()?;
-            if new != old {
-                let mut batch = WriteBatch::default();
-                batch.put(
-                    repo::FINALIZED,
-                    repo::encode_finalized(new.expect("positive finalized height"))?,
-                );
-                // An engine error can have an uncertain durable outcome. Old
-                // plans must be invalidated even when the write returns Err.
-                policy.generation = generation;
-                self.db
-                    .write_opt(batch, &write_options())
-                    .map_err(backend)?;
-            }
-            *policy = resilience::Snapshot { generation, state };
+        self.authorize_policy(owner)?;
+        self.ensure_policy_recovered()?;
+        if event != resilience::Event::Start
+            && owner.is_some_and(|o| !o.ready.load(Ordering::Acquire))
+        {
+            return Err(Error::PolicyClosed);
         }
-        Ok(*policy)
+        self.policy_operation(|| {
+            let view = self.view_locked(&policy)?;
+            let (state, ensure) = policy.state.transition(event, config);
+            let old = view.finalized_height()?;
+            let new = if let (Some(depth), Some(tip)) = (ensure, view.status().tip) {
+                resilience::finalized_at(view.require_block(tip)?.header().common().height, depth)
+                    .or(old)
+            } else {
+                old
+            };
+            if policy.state != state || old != new {
+                let generation = policy
+                    .generation
+                    .checked_add(1)
+                    .ok_or(Error::ResourceLimit)?;
+                check()?;
+                if new != old {
+                    let mut batch = WriteBatch::default();
+                    batch.put(
+                        repo::FINALIZED,
+                        repo::encode_finalized(new.expect("positive finalized height"))?,
+                    );
+                    // An engine error can have an uncertain durable outcome. Old
+                    // plans must be invalidated even when the write returns Err.
+                    policy.generation = generation;
+                    self.write_policy(batch)?;
+                }
+                *policy = resilience::Snapshot { generation, state };
+            }
+            if let Some(owner) = owner {
+                owner.ready.store(true, Ordering::Release);
+            }
+            Ok(*policy)
+        })
     }
     pub fn clear_finalized_height(&self) -> Result<(), Error> {
+        self.clear_finalized_owned(None)
+    }
+    fn clear_finalized_owned(&self, owner: Option<&Arc<policy::Inner>>) -> Result<(), Error> {
         let mut policy = self.writer.lock().map_err(|_| backend_lock())?;
-        if self.view_locked(&policy)?.finalized_height()?.is_some() {
-            let generation = policy
-                .generation
-                .checked_add(1)
-                .ok_or(Error::ResourceLimit)?;
-            let mut batch = WriteBatch::default();
-            batch.delete(repo::FINALIZED);
-            policy.generation = generation;
-            self.db
-                .write_opt(batch, &write_options())
-                .map_err(backend)?;
-        }
-        Ok(())
+        self.authorize_policy(owner)?;
+        self.ensure_policy_recovered()?;
+        self.policy_operation(|| {
+            if self.view_locked(&policy)?.finalized_height()?.is_some() {
+                let generation = policy
+                    .generation
+                    .checked_add(1)
+                    .ok_or(Error::ResourceLimit)?;
+                let mut batch = WriteBatch::default();
+                batch.delete(repo::FINALIZED);
+                policy.generation = generation;
+                self.write_policy(batch)?;
+            }
+            Ok(())
+        })
     }
     pub fn commit(&self, update: Update) -> Result<Committed, Error> {
         self.commit_checked(update, || Ok(()))
@@ -406,6 +441,10 @@ impl Database {
             .writer
             .lock()
             .map_err(|_| Error::Backend("poisoned chain writer".into()))?;
+        self.ensure_policy_recovered()?;
+        if !self.policy_ready() {
+            return Err(Error::PolicyClosed);
+        }
         if update.source_id() != self.source_id || update.identity() != &self.identity {
             return Err(Error::Identity);
         }

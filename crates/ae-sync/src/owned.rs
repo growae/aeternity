@@ -37,6 +37,7 @@ pub struct Info<E> {
     pub accepting: bool,
     pub joined: bool,
     pub pending: usize,
+    pub control_pending: usize,
     pub bytes: usize,
     pub submitted: u64,
     pub completed: u64,
@@ -50,6 +51,7 @@ impl<E> Default for Info<E> {
             accepting: false,
             joined: false,
             pending: 0,
+            control_pending: 0,
             bytes: 0,
             submitted: 0,
             completed: 0,
@@ -60,9 +62,13 @@ impl<E> Default for Info<E> {
 }
 pub(crate) trait Actor: Send + 'static {
     type Error: From<Fault> + Clone + Send + 'static;
+    const CONTROL_REQUESTS: usize = 0;
     // Bounded local cleanup also runs while idle. It never starts detached work.
     fn before(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+    fn fatal(&self, _error: &Self::Error) -> bool {
+        false
     }
 }
 pub struct Ticket<T, E>(oneshot::Receiver<Result<T, E>>);
@@ -110,6 +116,7 @@ where
     }
 }
 struct Queued<A: Actor> {
+    control: bool,
     bytes: usize,
     work: Box<dyn Work<A>>,
 }
@@ -153,21 +160,40 @@ impl<A: Actor> Client<A> {
         bytes: usize,
         action: impl FnOnce(&mut A) -> Result<T, A::Error> + Send + 'static,
     ) -> Result<Ticket<T, A::Error>, A::Error> {
+        self.enqueue(bytes, false, action)
+    }
+    pub fn submit_control<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(&mut A) -> Result<T, A::Error> + Send + 'static,
+    ) -> Result<Ticket<T, A::Error>, A::Error> {
+        self.enqueue(0, true, action)
+    }
+    fn enqueue<T: Send + 'static>(
+        &self,
+        bytes: usize,
+        control: bool,
+        action: impl FnOnce(&mut A) -> Result<T, A::Error> + Send + 'static,
+    ) -> Result<Ticket<T, A::Error>, A::Error> {
         let mut s = self.shared.lock();
         if !s.info.accepting {
             return Err(Fault::Stopped.into());
         }
-        if s.info.pending >= self.shared.limits.requests
-            || bytes > self.shared.limits.bytes.saturating_sub(s.info.bytes)
-        {
+        let full = if control {
+            s.info.control_pending >= A::CONTROL_REQUESTS
+        } else {
+            s.info.pending - s.info.control_pending >= self.shared.limits.requests
+        };
+        if full || bytes > self.shared.limits.bytes.saturating_sub(s.info.bytes) {
             return Err(Fault::Busy.into());
         }
         let (reply, receive) = oneshot::channel();
         s.queue.push_back(Queued {
+            control,
             bytes,
             work: Box::new(Job { action, reply }),
         });
         s.info.pending += 1;
+        s.info.control_pending += usize::from(control);
         s.info.bytes += bytes;
         s.info.submitted = s.info.submitted.saturating_add(1);
         self.shared.changed.notify_all();
@@ -184,7 +210,15 @@ impl<A: Actor> Worker<A> {
         limits: Limits,
         init: impl FnOnce() -> Result<A, A::Error> + Send + 'static,
     ) -> Result<Self, A::Error> {
+        Self::spawn_with_client(name, limits, move |_| init())
+    }
+    pub fn spawn_with_client(
+        name: &str,
+        limits: Limits,
+        init: impl FnOnce(Client<A>) -> Result<A, A::Error> + Send + 'static,
+    ) -> Result<Self, A::Error> {
         if limits.requests == 0
+            || A::CONTROL_REQUESTS > 65_536
             || limits.requests > 65_536
             || limits.bytes == 0
             || limits.bytes > 1 << 30
@@ -203,12 +237,13 @@ impl<A: Actor> Worker<A> {
         let client = Client {
             shared: shared.clone(),
         };
+        let init_client = client.clone();
         let (ready, started) = std::sync::mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name(name.into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut state = match init() {
+                    let mut state = match init(init_client) {
                         Ok(s) => s,
                         Err(e) => {
                             let _ = ready.send(Err(e.clone()));
@@ -221,8 +256,7 @@ impl<A: Actor> Worker<A> {
                         s.info.accepting = true;
                     }
                     let _ = ready.send(Ok(()));
-                    run(&shared, &mut state);
-                    Ok(())
+                    run(&shared, &mut state)
                 }));
                 let mut s = shared.lock();
                 s.info.running = false;
@@ -233,6 +267,7 @@ impl<A: Actor> Worker<A> {
                 };
                 s.queue.clear();
                 s.info.pending = 0;
+                s.info.control_pending = 0;
                 s.info.bytes = 0;
                 shared.changed.notify_all();
             })
@@ -278,7 +313,7 @@ impl<A: Actor> Drop for Worker<A> {
         let _ = self.join();
     }
 }
-fn run<A: Actor>(shared: &Shared<A>, state: &mut A) {
+fn run<A: Actor>(shared: &Shared<A>, state: &mut A) -> Result<(), A::Error> {
     loop {
         let next = {
             let mut s = shared.lock();
@@ -290,22 +325,30 @@ fn run<A: Actor>(shared: &Shared<A>, state: &mut A) {
                     .0;
             }
             if s.stop && s.queue.is_empty() {
-                return;
+                return Ok(());
             }
             s.queue.pop_front()
         };
         if let Some(q) = next {
             let complete = q.work.run(state);
+            let fatal = complete.error.as_ref().filter(|e| state.fatal(e)).cloned();
             {
                 let mut s = shared.lock();
                 s.info.pending -= 1;
+                s.info.control_pending -= usize::from(q.control);
                 s.info.bytes -= q.bytes;
                 s.info.completed = s.info.completed.saturating_add(1);
                 s.info.last_error = complete.error;
             }
             (complete.reply)();
+            if let Some(error) = fatal {
+                return Err(error);
+            }
         } else if let Err(error) = state.before() {
-            shared.lock().info.last_error = Some(error);
+            shared.lock().info.last_error = Some(error.clone());
+            if state.fatal(&error) {
+                return Err(error);
+            }
         }
     }
 }

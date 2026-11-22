@@ -1593,3 +1593,6 @@ mod routing_owner;
 mod analytics;
 #[path = "peer_runtime/pool_gc.rs"]
 mod pool_gc;
+
+#[path = "peer_runtime/resilience.rs"]
+mod resilience;

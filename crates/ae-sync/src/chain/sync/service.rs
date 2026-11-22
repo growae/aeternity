@@ -26,6 +26,7 @@ pub struct Service<O: MapOrder + Send + Sync + 'static = Otp26> {
     blocks: blocks::Owner<O>,
     lifecycle: lifecycle::Owner<O>,
     policy_config: watch::Receiver<ae_chain::resilience::Config>,
+    policy_changed: Option<watch::Receiver<()>>,
 }
 impl<O: MapOrder + Send + Sync + 'static> Service<O> {
     #[allow(clippy::too_many_arguments)]
@@ -44,6 +45,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             blocks: blocks::Owner::new(context.clone()),
             lifecycle: lifecycle::Owner::new(context.clone()),
             policy_config,
+            policy_changed: context.policy_source.as_ref().map(|s| s.subscribe()),
             context,
             application,
             incoming,
@@ -193,6 +195,9 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         if let Some(error) = notices.error {
             self.current.last_error = Some(Error::Events(error));
         }
+        if let Some(error) = notices.policy_error.clone() {
+            self.current.last_error = Some(Error::Resilience(error));
+        }
         self.current.statistics = book.statistics();
         drop(book);
         self.lifecycle.observe(tasks, target, transitions, notices);
@@ -217,8 +222,8 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .filter(|lane| lane.pending.is_some() || lane.replacement.is_some())
             .count();
         let target = self.observe_shared();
-        if let Some(Error::Events(error)) = self.current.last_error {
-            return Err(Error::Events(error));
+        if let Some(error @ (Error::Events(_) | Error::Resilience(_))) = &self.current.last_error {
+            return Err(error.clone());
         }
         if target != self.target {
             self.application
@@ -299,6 +304,10 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 _ = self.changed.changed() => (),
                 _ = refresh.tick() => self.lifecycle.refresh(),
                 _ = self.policy_config.changed() => (),
+                _ = async { match &mut self.policy_changed {
+                    Some(changed) => { let _ = changed.changed().await; }
+                    None => std::future::pending().await,
+                } } => self.lifecycle.refresh(),
                 result = self.lifecycle.next() => if let Err(error) = result { self.current.last_error = Some(error); break; },
                 event = self.incoming.recv(), if self.lifecycle.ready() => match event {
                     None => break,

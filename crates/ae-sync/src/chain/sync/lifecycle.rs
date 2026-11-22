@@ -83,6 +83,7 @@ pub(super) struct Notices {
     pub last: Option<PeerDone>,
     pub gc_ready: Option<PeerDone>,
     pub error: Option<crate::events::Error>,
+    pub policy_error: Option<crate::resilience::Error>,
 }
 #[derive(Debug, Clone)]
 pub struct Status {
