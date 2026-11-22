@@ -1,3 +1,5 @@
+#[path = "conductor/controls.rs"]
+mod controls;
 use super::*;
 use ae_hyperchain::{
     parent_cache::{self, runtime as cache},

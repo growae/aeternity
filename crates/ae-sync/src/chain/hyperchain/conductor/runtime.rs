@@ -38,9 +38,22 @@ impl Default for Settings {
 }
 struct Control {
     stop: bool,
-    start: bool,
+    commands: VecDeque<Command>,
+    submitted: u64,
+    applied: u64,
     status: Status,
     joined: bool,
+}
+#[derive(Clone, Copy)]
+enum Command {
+    Start,
+    Stop,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Controls {
+    pub submitted: u64,
+    pub applied: u64,
+    pub pending: usize,
 }
 struct Shared {
     control: Mutex<Control>,
@@ -61,17 +74,39 @@ impl Handle {
         self.0.control.lock().expect("conductor control").joined
     }
     pub fn start_production(&self) -> Result<(), Error> {
+        self.submit(Command::Start)
+    }
+    pub fn stop_production(&self) -> Result<(), Error> {
+        self.submit(Command::Stop)
+    }
+    // Commands are accepted in order, with a bounded queue. applied advances
+    // after cancellation/start is applied, not after accepted work settles.
+    pub fn controls(&self) -> Controls {
+        let c = self.0.control.lock().expect("conductor control");
+        Controls {
+            submitted: c.submitted,
+            applied: c.applied,
+            pending: c.commands.len(),
+        }
+    }
+    fn submit(&self, command: Command) -> Result<(), Error> {
         let mut c = self.0.control.lock().expect("conductor control");
         if c.stop || c.joined {
             return Err(Error::Closed);
         }
-        if let Some(e) = &c.status.failure {
-            return Err(e.clone());
+        if matches!(command, Command::Start) {
+            if let Some(e) = &c.status.failure {
+                return Err(e.clone());
+            }
+            if !c.status.block_producer {
+                return Err(Error::NotBlockProducer);
+            }
         }
-        if !c.status.block_producer {
-            return Err(Error::NotBlockProducer);
+        if c.commands.len() >= 64 {
+            return Err(Error::Backpressured);
         }
-        c.start = true;
+        c.submitted = c.submitted.checked_add(1).ok_or(Error::Backpressured)?;
+        c.commands.push_back(command);
         self.0.wake.notify_all();
         Ok(())
     }
@@ -108,7 +143,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<O> {
         let handle = Handle(Arc::new(Shared {
             control: Mutex::new(Control {
                 stop: false,
-                start: false,
+                commands: VecDeque::new(),
+                submitted: 0,
+                applied: 0,
                 status: conductor.status(),
                 joined: false,
             }),
@@ -127,15 +164,22 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<O> {
                     .take()
                     .expect("conductor");
                 loop {
-                    let start = {
+                    {
                         let mut c = shared.control.lock().expect("conductor control");
                         if c.stop {
                             break;
                         }
-                        std::mem::take(&mut c.start)
-                    };
-                    if start && let Err(e) = conductor.start_production() {
-                        conductor.status.failure = Some(e);
+                        while let Some(command) = c.commands.pop_front() {
+                            let result = match command {
+                                Command::Start => conductor.start_production(),
+                                Command::Stop => conductor.stop_production(),
+                            };
+                            if let Err(e) = result {
+                                conductor.status.failure = Some(e);
+                            }
+                            c.applied += 1;
+                        }
+                        c.status = conductor.status();
                     }
                     if conductor.status.failure.is_none() {
                         match clock.now() {
@@ -159,6 +203,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<O> {
                     c.status = conductor.status();
                     if c.stop {
                         break;
+                    }
+                    if !c.commands.is_empty() {
+                        continue;
                     }
                     c = shared
                         .wake

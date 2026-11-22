@@ -183,6 +183,19 @@ impl<O: MapOrder + Clone> Build<O> {
         }
         self.failure = Some(Error::Cancelled);
     }
+    pub(super) fn retire(mut self) -> Retiring {
+        self.cancel();
+        // An already delivered completion is pure candidate input. Dropping it
+        // releases reply credits; no ledger or pool action can follow it.
+        self.answer = None;
+        Retiring {
+            request: self.request.take(),
+            packing: self.packing.take().map(packing::Packing::cancel),
+            effects: self.effects.take(),
+            report: Cancelled::default(),
+            failure: None,
+        }
+    }
     pub fn retry(&mut self) -> Result<(), Error> {
         if let Some(e) = &self.failure
             && !retryable(e)
@@ -436,5 +449,73 @@ impl<O: MapOrder + Clone> Build<O> {
             refreshes: self.refreshes,
             acknowledged_effects: self.effects.expect("completed effects").acknowledged,
         })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Cancelled {
+    pub finalization: Option<Result<(), RequestError>>,
+    pub packing: Option<packing::CancelReport>,
+    pub discarded_effects: std::collections::VecDeque<inputs::Effect>,
+    pub acknowledged_effects: u64,
+    pub effect_error: Option<delivery::Error>,
+}
+pub(super) struct Retiring {
+    request: Option<Request>,
+    packing: Option<packing::Cancelled>,
+    effects: Option<effects::Pending>,
+    report: Cancelled,
+    failure: Option<Error>,
+}
+impl Retiring {
+    pub fn step(&mut self) -> Result<bool, Error> {
+        if let Some(e) = &self.failure {
+            return Err(e.clone());
+        }
+        let result = self.advance();
+        if let Err(e) = &result {
+            self.failure = Some(e.clone());
+        }
+        result
+    }
+    fn advance(&mut self) -> Result<bool, Error> {
+        if let Some(request) = &mut self.request {
+            match request.try_reply() {
+                Ok(None) => return Ok(false),
+                Ok(Some(_completion)) => self.report.finalization = Some(Ok(())),
+                Err(RequestError::Unknown) => return Err(Error::Request(RequestError::Unknown)),
+                Err(e) => self.report.finalization = Some(Err(e)),
+            }
+            self.request = None;
+        }
+        if let Some(packing) = &mut self.packing {
+            if !packing.step().map_err(Error::Packing)? {
+                return Ok(false);
+            }
+            self.report.packing = Some(self.packing.take().expect("settled packing").finish());
+        }
+        if let Some(effects) = &mut self.effects {
+            match effects.settle() {
+                Ok(false) => return Ok(false),
+                Ok(true) => (),
+                Err(e) if super::producer::retryable(&e) && !effects.in_flight() => {
+                    self.report.effect_error = Some(e)
+                }
+                Err(e) => return Err(Error::Effects(e)),
+            }
+            self.report.acknowledged_effects = effects.acknowledged;
+            self.report.discarded_effects = std::mem::take(&mut effects.pending);
+            self.effects = None;
+        }
+        Ok(true)
+    }
+    pub fn finish(self) -> Cancelled {
+        assert!(
+            self.request.is_none()
+                && self.packing.is_none()
+                && self.effects.is_none()
+                && self.failure.is_none()
+        );
+        self.report
     }
 }

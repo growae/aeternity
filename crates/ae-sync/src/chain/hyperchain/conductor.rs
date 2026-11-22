@@ -47,6 +47,7 @@ pub enum Error {
     NotBlockProducer,
     Time,
     Closed,
+    Backpressured,
     Source(eoe::Error),
     Events(events::Error),
     Rollback(u64),
@@ -62,6 +63,7 @@ pub enum Error {
 #[derive(Debug)]
 pub enum Output {
     Attempt(production::Completed),
+    Stopped(Box<production::Stopped>),
     Rejected {
         error: production::Error,
         parent: ae_types::Hash256,
@@ -83,6 +85,8 @@ pub enum Progress {
 #[derive(Debug, Clone)]
 pub struct Status {
     pub producing: bool,
+    pub stopping: bool,
+    pub stops: u64,
     pub block_producer: bool,
     pub attempts: u64,
     pub completed: u64,
@@ -101,6 +105,7 @@ pub struct Shutdown<O> {
     pub status: Status,
     pub output: Option<Output>,
     pub attempt: Option<production::Attempt<O>>,
+    pub retiring: Option<production::Retiring<O>>,
     pub admission: Option<Result<chain::Report, chain::Failure>>,
     pub owner: owner::Shutdown,
     pub delivery: delivery::Delivery<O, eoe::StateReader, eoe::StateReader>,
@@ -131,6 +136,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     production: production::Config,
     event_limit: usize,
     attempt: Option<production::Attempt<O>>,
+    retiring: Option<production::Retiring<O>>,
     restart: bool,
     pending: Option<Output>,
     status: Status,
@@ -256,11 +262,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             production: config.production,
             event_limit: config.events_per_step,
             attempt: None,
+            retiring: None,
             restart: config.producing,
             pending: None,
             tick: None,
             status: Status {
                 producing: config.producing,
+                stopping: false,
+                stops: 0,
                 block_producer: config.block_producer,
                 attempts: 0,
                 completed: 0,
@@ -312,6 +321,34 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if !self.status.producing {
             self.status.producing = true;
             self.restart = true;
+        }
+        Ok(())
+    }
+    // Cancellation prevents new producer work immediately. Previously accepted
+    // calls are retired by step before another attempt can acquire the lease.
+    // Independent admission, pool, votes and parent services remain available.
+    pub fn stop_production(&mut self) -> Result<(), Error> {
+        self.status.producing = false;
+        self.restart = false;
+        self.status.deadline = None;
+        if let Some(attempt) = self.attempt.take() {
+            match self
+                .owner
+                .as_mut()
+                .expect("owner")
+                .retire_production(attempt)
+            {
+                Ok(retiring) => {
+                    self.retiring = Some(retiring);
+                    self.status.stopping = true;
+                }
+                Err(attempt) => {
+                    self.attempt = Some(*attempt);
+                    let error = Error::Production(production::Error::Binding);
+                    self.status.failure = Some(error.clone());
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -384,6 +421,24 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             | delivery::Progress::Backpressured
             | delivery::Progress::SourceBusy => (),
             _ => advanced = true,
+        }
+        if let Some(retiring) = &mut self.retiring {
+            if retiring
+                .step(owner, &self.importer)
+                .map_err(Error::Production)?
+            {
+                let stopped = self
+                    .retiring
+                    .take()
+                    .expect("retiring")
+                    .finish()
+                    .expect("settled");
+                self.status.stopping = false;
+                self.status.stops = self.status.stops.saturating_add(1);
+                self.pending = Some(Output::Stopped(Box::new(stopped)));
+                return Ok(Progress::Output);
+            }
+            return Ok(Progress::Advanced);
         }
         if let Some(attempt) = &mut self.attempt {
             let p = match attempt.step(owner, &self.importer, wall_ms, now) {
@@ -531,6 +586,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .attempt
             .as_mut()
             .and_then(production::Attempt::take_abandoned_admission)
+            .or_else(|| {
+                self.retiring
+                    .as_mut()
+                    .and_then(production::Retiring::take_abandoned_admission)
+            })
             .map(|mut ticket| {
                 ticket.try_result().unwrap_or(Err(chain::Failure {
                     progress: None,
@@ -554,6 +614,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             status: self.status.clone(),
             output: self.pending.take(),
             attempt: self.attempt.take(),
+            retiring: self.retiring.take(),
             admission,
             owner,
             delivery,

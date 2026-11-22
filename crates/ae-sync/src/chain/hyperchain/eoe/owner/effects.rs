@@ -34,6 +34,12 @@ impl Pending {
     pub fn ready(&self) -> bool {
         self.pending.is_empty() && self.receipt.is_none()
     }
+    pub fn settle(&mut self) -> Result<bool, Error> {
+        if self.in_flight() {
+            self.step()?;
+        }
+        Ok(!self.in_flight())
+    }
     pub fn step(&mut self) -> Result<Progress, Error> {
         if let Some(receipt) = &mut self.receipt {
             let result = match receipt {

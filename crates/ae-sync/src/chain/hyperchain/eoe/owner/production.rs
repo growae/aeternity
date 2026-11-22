@@ -1,6 +1,7 @@
 // aec_conductor:hc_next_producer/hc_create_block, aeternity fa2a6d7.
 // Copyright (c) 2017, Aeternity Anstalt. ISC: repository LICENSE.
 use super::{Owner, candidate, effects, producer};
+mod retirement;
 use crate::chain::{
     self, Importer,
     hyperchain::{delivery, packing, scoped},
@@ -18,6 +19,7 @@ use ae_storage::{hyperchain::candidate as owned, pool::worker};
 use ae_types::{AccountPublicKey, Hash256};
 use ae_vm_fate::{maps::MapOrder, value::ObjectPayload};
 use num_bigint::BigInt;
+pub use retirement::{Retiring, Stopped};
 use std::{
     sync::{
         Arc,

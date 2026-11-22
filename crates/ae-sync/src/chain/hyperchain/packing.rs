@@ -342,6 +342,24 @@ impl<O: MapOrder + Clone> Packing<O> {
             State::Done => Ok(Progress::Finished),
         }
     }
+    pub(crate) fn cancel(mut self) -> Cancelled {
+        let (pending, discarded_failures) = match self.state {
+            State::Selecting(call) => (Some(CancelReceipt::Selection(call)), 0),
+            State::Recording { reports, call } => {
+                (Some(CancelReceipt::Failures { reports, call }), 0)
+            }
+            State::Reporting(reports) => (None, reports.len()),
+            _ => (None, 0),
+        };
+        Cancelled {
+            pending,
+            report: CancelReport {
+                discarded_failures,
+                discarded_effects: self.effects.drain(),
+                ..Default::default()
+            },
+        }
+    }
     pub fn finish(self) -> Result<owned::Prepared<O>, Box<FinishError<O>>> {
         if !self.ready() {
             return Err(Box::new(FinishError {
@@ -388,4 +406,77 @@ impl<O: MapOrder + Clone> Packing<O> {
             }
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct CancelReport {
+    pub selection: Option<Result<usize, worker::Error>>,
+    pub failure_reports: Option<Result<Vec<bool>, worker::Error>>,
+    pub discarded_failures: usize,
+    pub discarded_effects: Vec<repo::hyperchain::inputs::Effect>,
+}
+enum CancelReceipt {
+    Selection(worker::Ticket<policy::Candidate>),
+    Failures {
+        reports: Vec<pool::FailedTransaction>,
+        call: worker::Ticket<Vec<bool>>,
+    },
+}
+pub(crate) struct Cancelled {
+    pending: Option<CancelReceipt>,
+    report: CancelReport,
+}
+impl Cancelled {
+    pub fn step(&mut self) -> Result<bool, Error> {
+        let Some(pending) = &self.pending else {
+            return Ok(true);
+        };
+        let (stage, result) = match pending {
+            CancelReceipt::Selection(call) => (
+                Stage::Selection,
+                call.wait_timeout(Duration::ZERO)
+                    .map(|selected| CancelResult::Selection(selected.transactions.len())),
+            ),
+            CancelReceipt::Failures { reports, call } => (
+                Stage::Failures,
+                call.wait_timeout(Duration::ZERO).map(|removed| {
+                    if removed.len() == reports.len() {
+                        CancelResult::Failures(removed)
+                    } else {
+                        CancelResult::Unexpected
+                    }
+                }),
+            ),
+        };
+        match result {
+            Err(worker::Error::Timeout) => return Ok(false),
+            Err(e) if !known_pool_rejection(&e) => return Err(pool_error(stage, e)),
+            Err(e) => match stage {
+                Stage::Selection => self.report.selection = Some(Err(e)),
+                Stage::Failures => self.report.failure_reports = Some(Err(e)),
+            },
+            Ok(CancelResult::Selection(n)) => self.report.selection = Some(Ok(n)),
+            Ok(CancelResult::Failures(removed)) => self.report.failure_reports = Some(Ok(removed)),
+            Ok(CancelResult::Unexpected) => return Err(Error::Sequence),
+        }
+        self.pending = None;
+        Ok(true)
+    }
+    pub fn finish(self) -> CancelReport {
+        assert!(self.pending.is_none());
+        self.report
+    }
+}
+enum CancelResult {
+    Selection(usize),
+    Failures(Vec<bool>),
+    Unexpected,
+}
+fn known_pool_rejection(error: &worker::Error) -> bool {
+    matches!(
+        error,
+        worker::Error::Service(pool::Failure::Repository(
+            repo::Error::Conflict | repo::Error::ResourceLimit
+        ))
+    ) || matches!(error, worker::Error::Service(pool::Failure::Policy(e)) if !e.is_operational())
 }

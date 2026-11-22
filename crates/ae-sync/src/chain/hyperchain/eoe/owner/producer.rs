@@ -178,6 +178,25 @@ impl Pending {
             Err(runtime::SubmitError::ResourceLimit(_)) => Err(Error::ResourceLimit),
         }
     }
+    pub(super) fn settle(&mut self) -> Result<bool, Error> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if self.in_flight() {
+            self.step()?;
+        }
+        Ok(!self.in_flight())
+    }
+    pub(super) fn discard(self) -> Cancelled {
+        assert!(!self.in_flight());
+        Cancelled {
+            decision: self.prepared.decision,
+            parents: self.parents,
+            negotiation: self.prepared.negotiation,
+            acknowledged: self.acknowledged,
+            failure: self.failure,
+        }
+    }
     pub(super) fn finish(self) -> (ae_hyperchain::signing::Keys, Decision) {
         assert!(self.ready());
         let p = self.prepared;
@@ -202,4 +221,13 @@ pub(super) fn retryable(error: &Error) -> bool {
         error,
         Error::Eoe(coordinator::Error::Stopped) | Error::Cache(parent::Error::Closed)
     )
+}
+
+#[derive(Debug)]
+pub struct Cancelled {
+    pub decision: Result<ae_hyperchain::producer::Decision, producer::Failure>,
+    pub parents: VecDeque<Effect>,
+    pub negotiation: Option<eoe::Negotiation>,
+    pub acknowledged: u64,
+    pub failure: Option<Error>,
 }
