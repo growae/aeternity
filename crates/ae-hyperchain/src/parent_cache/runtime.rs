@@ -857,7 +857,7 @@ fn query_bytes(q: &Query) -> Result<usize, Error> {
 fn block_bytes(b: &ParentBlock) -> Result<usize, Error> {
     [
         b.hash.len(),
-        b.previous_hash.len(),
+        b.previous_hash.as_ref().map_or(0, Vec::len),
         b.height.as_bytes().len(),
         b.time.as_bytes().len(),
     ]

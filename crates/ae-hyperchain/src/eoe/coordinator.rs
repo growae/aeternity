@@ -632,7 +632,7 @@ fn output_size(output: &ServiceOutput) -> usize {
         ServiceOutput::Publication(Output::ParentBlock { epoch, block }) => [
             epoch.as_bytes().len(),
             block.hash.len(),
-            block.previous_hash.len(),
+            block.previous_hash.as_ref().map_or(0, Vec::len),
             block.height.as_bytes().len(),
             block.time.as_bytes().len(),
         ]

@@ -19,6 +19,7 @@ pub mod maintenance;
 pub mod network;
 pub mod observe;
 mod owned;
+pub mod parent_blocks;
 pub mod parent_pins;
 pub mod peer;
 pub mod pool;

@@ -128,7 +128,7 @@ fn block_json(b: &ParentBlock) -> J {
         atom("block"),
         bin(&b.hash),
         num(&b.height),
-        bin(&b.previous_hash),
+        bin(b.previous_hash.as_deref().unwrap()),
         num(&b.time),
     ])
 }
@@ -310,7 +310,7 @@ impl Host for TestHost {
             ParentBlock {
                 hash: key(99).to_vec(),
                 height,
-                previous_hash: key(98).to_vec(),
+                previous_hash: Some(key(98).to_vec()),
                 time: 12345.into(),
             },
         ));
@@ -361,7 +361,7 @@ fn event(input: &J) -> Event<u64> {
                 block: ParentBlock {
                     hash: bytes(&b[1]),
                     height: uint(&b[2]),
-                    previous_hash: bytes(&b[3]),
+                    previous_hash: Some(bytes(&b[3])),
                     time: uint(&b[4]),
                 },
             }
@@ -558,7 +558,7 @@ fn original_epoch_length_rounding_and_overflow_match() {
                     ParentBlock {
                         hash: vec![],
                         height: 1.into(),
-                        previous_hash: vec![],
+                        previous_hash: Some(vec![]),
                         time: number(name),
                     },
                 );

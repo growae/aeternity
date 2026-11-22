@@ -331,7 +331,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
 fn parent_size(block: &ParentBlock) -> Result<usize, Error> {
     [
         block.hash.len(),
-        block.previous_hash.len(),
+        block.previous_hash.as_ref().map_or(0, Vec::len),
         block.height.as_bytes().len(),
         block.time.as_bytes().len(),
     ]

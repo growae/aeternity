@@ -53,12 +53,12 @@ fn block(v: &J) -> ParentBlock {
     ParentBlock {
         hash: bytes(&v["hash"]),
         height: u(&v["height"]),
-        previous_hash: bytes(&v["previous_hash"]),
+        previous_hash: Some(bytes(&v["previous_hash"])),
         time: u(&v["time"]),
     }
 }
 fn block_json(b: &ParentBlock) -> J {
-    json!({"hash":hex::encode(&b.hash),"height":integer(&b.height).to_string(),"previous_hash":hex::encode(&b.previous_hash),"time":integer(&b.time).to_string()})
+    json!({"hash":hex::encode(&b.hash),"height":integer(&b.height).to_string(),"previous_hash":hex::encode(b.previous_hash.as_deref().unwrap()),"time":integer(&b.time).to_string()})
 }
 fn snapshot(c: &Cache) -> J {
     json!({"height":integer(&c.child_top().height).to_string(),"hash":hex::encode(c.child_top().hash.as_bytes()),"top":integer(c.top_height()).to_string(),

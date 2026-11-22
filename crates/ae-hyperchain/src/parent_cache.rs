@@ -411,7 +411,7 @@ impl Budget {
     fn block(&mut self, b: &ParentBlock) -> Result<(), Error> {
         for n in [
             b.hash.len(),
-            b.previous_hash.len(),
+            b.previous_hash.as_ref().map_or(0, Vec::len),
             b.height.as_bytes().len(),
             b.time.as_bytes().len(),
         ] {

@@ -51,7 +51,7 @@ fn parent(h: u64, n: u64) -> ParentBlock {
     ParentBlock {
         hash: key(n).to_vec(),
         height: h.into(),
-        previous_hash: key(n - 1).to_vec(),
+        previous_hash: Some(key(n - 1).to_vec()),
         time: (h * 100).into(),
     }
 }

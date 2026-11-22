@@ -778,7 +778,7 @@ impl ae_hyperchain::parent_connector::fetch::Backend for ParentProbe {
         Ok(Remote::Block(ParentBlock {
             hash: key(n).to_vec(),
             height: n.into(),
-            previous_hash: key(n - 1).to_vec(),
+            previous_hash: Some(key(n - 1).to_vec()),
             time: (n * 100).into(),
         }))
     }
@@ -852,7 +852,7 @@ fn original_cache_connector_uses_contract_targets_and_observes_selected_state_re
         json!({"child":s.cache.child_top().height.to_u64().unwrap().to_string(),"top":s.cache.top_height().to_u64().unwrap().to_string(),
             "blocks":s.cache.blocks().iter().map(|(h,e)|json!([h.to_string(),match e {
                 Entry::Requested(_)=>json!("requested"),
-                Entry::Block(b)=>json!({"hash":hex::encode(&b.hash),"height":b.height.to_u64().unwrap().to_string(),"previous":hex::encode(&b.previous_hash),"time":b.time.to_u64().unwrap().to_string()})
+                Entry::Block(b)=>json!({"hash":hex::encode(&b.hash),"height":b.height.to_u64().unwrap().to_string(),"previous":hex::encode(b.previous_hash.as_deref().unwrap()),"time":b.time.to_u64().unwrap().to_string()})
             }])).collect::<Vec<_>>()})
     };
     let idle = || {

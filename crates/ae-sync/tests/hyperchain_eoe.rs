@@ -485,7 +485,7 @@ fn pending_eoe_completion_reads_the_latest_committed_tip_despite_epoch_feed_back
         runtime::Command::CacheParent(ParentBlock {
             hash: key(99).to_vec(),
             height: 31.into(),
-            previous_hash: key(98).to_vec(),
+            previous_hash: Some(key(98).to_vec()),
             time: 12345.into(),
         }),
     );

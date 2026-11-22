@@ -16,7 +16,7 @@ use tokio::{
 };
 trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
-pub(super) struct Transport {
+pub(crate) struct Transport {
     pub config: Arc<Config>,
     tls: Arc<rustls::ClientConfig>,
     resolver: OnceLock<Result<blocking::Pool, Error>>,
@@ -193,12 +193,12 @@ impl Transport {
             Err(_) => Ok(None),
         }
     }
-    pub async fn request(
+    pub(crate) async fn response(
         &self,
         node: &Node,
         path: &str,
         body: Option<&[u8]>,
-    ) -> Result<Option<serde_json::Value>, Error> {
+    ) -> Result<Option<http::Response>, Error> {
         if path
             .bytes()
             .any(|b| b <= 32 || b >= 127 || matches!(b, b'#' | b'\\'))
@@ -218,7 +218,19 @@ impl Transport {
         {
             return Err(Error::Redirect);
         }
-        let Some(reply) = reply.filter(|r| r.status == 200) else {
+        Ok(reply)
+    }
+    pub async fn request(
+        &self,
+        node: &Node,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        let Some(reply) = self
+            .response(node, path, body)
+            .await?
+            .filter(|r| r.status == 200)
+        else {
             return Ok(None);
         };
         match serde_json::from_slice(&reply.body) {

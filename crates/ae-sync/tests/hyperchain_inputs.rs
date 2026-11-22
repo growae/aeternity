@@ -373,7 +373,10 @@ fn captured_entropy_results_and_notifications_match_original_native_queries() {
                             ["atom", "block"],
                             ["binary", hex::encode(&block.hash)],
                             ["integer", parent_cache::integer(&block.height).to_string()],
-                            ["binary", hex::encode(&block.previous_hash)],
+                            [
+                                "binary",
+                                hex::encode(block.previous_hash.as_deref().unwrap())
+                            ],
                             ["integer", parent_cache::integer(&block.time).to_string()]
                         ]
                     ])

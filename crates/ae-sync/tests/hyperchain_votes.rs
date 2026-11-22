@@ -107,7 +107,7 @@ fn runtime(owned: u64, config: runtime::Config) -> runtime::Runtime {
     host.insert_parent(ParentBlock {
         hash: key(99).to_vec(),
         height: 41.into(),
-        previous_hash: key(98).to_vec(),
+        previous_hash: Some(key(98).to_vec()),
         time: 12345.into(),
     })
     .unwrap();

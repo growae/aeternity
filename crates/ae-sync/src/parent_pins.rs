@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod lookup;
-mod transport;
+pub(crate) mod transport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chain {
@@ -21,9 +21,9 @@ pub enum Chain {
 }
 #[derive(Clone)]
 pub struct Node {
-    chain: Chain,
+    pub(crate) chain: Chain,
     origin: url::Url,
-    credentials: Option<(Vec<u8>, Vec<u8>)>,
+    pub(crate) credentials: Option<(Vec<u8>, Vec<u8>)>,
 }
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

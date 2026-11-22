@@ -595,7 +595,7 @@ fn live(r: &R, row: &J, t: &Trees, owned: &[u64]) -> p::host::LiveHost<NoPins> {
     host.insert_parent(ae_hyperchain::parent_block::ParentBlock {
         hash: key(1001).to_vec(),
         height: 1.into(),
-        previous_hash: key(1000).to_vec(),
+        previous_hash: Some(key(1000).to_vec()),
         time: 100.into(),
     })
     .unwrap();

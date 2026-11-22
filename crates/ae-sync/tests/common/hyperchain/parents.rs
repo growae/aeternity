@@ -27,7 +27,7 @@ pub fn parent(height: u64, n: u64) -> ParentBlock {
     ParentBlock {
         hash: key(n),
         height: height.into(),
-        previous_hash: key(n - 1),
+        previous_hash: Some(key(n - 1)),
         time: (height * 100).into(),
     }
 }

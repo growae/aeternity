@@ -154,7 +154,7 @@ fn parent(h: u64, n: u64) -> ParentBlock {
     ParentBlock {
         hash,
         height: h.into(),
-        previous_hash: previous,
+        previous_hash: Some(previous),
         time: (h * 100).into(),
     }
 }

@@ -6,7 +6,9 @@ use ae_types::Unsigned;
 pub struct ParentBlock {
     pub hash: Vec<u8>,
     pub height: Unsigned,
-    pub previous_hash: Vec<u8>,
+    // Bitcoin/Dogecoin genesis uses the native atom null. It is distinct
+    // from an empty binary when the connector compares whole-block replies.
+    pub previous_hash: Option<Vec<u8>>,
     pub time: Unsigned,
 }
 

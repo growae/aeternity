@@ -103,7 +103,7 @@ fn effects<'a>(
                     atom("block"),
                     bin(&block.hash),
                     uint(&block.height),
-                    bin(&block.previous_hash),
+                    bin(block.previous_hash.as_deref().unwrap()),
                     uint(&block.time),
                 ]),
             ]),

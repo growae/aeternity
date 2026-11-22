@@ -57,7 +57,7 @@ pub fn consensus<N: Clone>(
             Response::Block { block, node } => {
                 for n in [
                     block.hash.len(),
-                    block.previous_hash.len(),
+                    block.previous_hash.as_ref().map_or(0, Vec::len),
                     block.height.as_bytes().len(),
                     block.time.as_bytes().len(),
                 ] {

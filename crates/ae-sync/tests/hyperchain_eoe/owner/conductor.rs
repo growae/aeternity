@@ -2,6 +2,8 @@
 mod connections;
 #[path = "conductor/controls.rs"]
 mod controls;
+#[path = "conductor/parent_http.rs"]
+mod parent_http;
 #[path = "conductor/targets.rs"]
 mod targets;
 use super::*;

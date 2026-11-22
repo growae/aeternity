@@ -150,13 +150,13 @@ impl Budget {
         Ok(())
     }
     fn parent(&mut self, block: &ParentBlock) -> Result<(), Failure> {
-        for bytes in [
-            &block.hash[..],
-            &block.previous_hash,
-            block.height.as_bytes(),
-            block.time.as_bytes(),
+        for size in [
+            block.hash.len(),
+            block.previous_hash.as_ref().map_or(0, Vec::len),
+            block.height.as_bytes().len(),
+            block.time.as_bytes().len(),
         ] {
-            self.add(bytes.len())?;
+            self.add(size)?;
         }
         Ok(())
     }
