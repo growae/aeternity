@@ -504,3 +504,52 @@ async fn replacing_poster_after_generation_commit_before_book_ack_uses_actual_st
         source.db.view().unwrap().status().revision
     );
 }
+
+#[tokio::test]
+async fn borrowed_sync_shutdown_waits_for_inflight_commit_and_preserves_owner_recovery() {
+    for uncertain in [false, true] {
+        let node = Node::new();
+        let source = source().await;
+        let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+        let mut owned = importer(&node);
+        let gate = if uncertain {
+            fault(&mut owned, true, false)
+        } else {
+            pause_after(&mut owned, 1)
+        };
+        let running = Running::new(&node, &source, owned.borrowed()).await;
+        within(gate.entered).await.unwrap();
+        running.handle.shutdown();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let waited = !running.task.is_finished();
+        gate.release.send(()).unwrap();
+        assert!(waited, "borrowed shutdown skipped an accepted write");
+        running.stop().await;
+        assert!(!owned.jobs.stopped());
+        assert!(
+            node.db
+                .view()
+                .unwrap()
+                .block(blocks[0].hash().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        if uncertain {
+            assert!(matches!(
+                owned.recovery_reason(),
+                Some(chain::Error::CommitUncertain { .. })
+            ));
+            assert_eq!(owned.check_open(), Err(chain::Error::RecoveryRequired));
+        } else {
+            owned.check_open().unwrap();
+            owned
+                .import_block(blocks[1].encode().unwrap(), u64::MAX - 600_000)
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+        }
+        owned.stop();
+        owned.join().await;
+    }
+}

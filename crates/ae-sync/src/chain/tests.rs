@@ -429,3 +429,31 @@ async fn importer_scope_survives_child_replacement_but_never_adopts_a_new_parent
     }
     child.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn borrowed_importer_drop_preserves_owner_but_owner_drop_retires_borrowers() {
+    let (_temp, importer) = setup(Default::default());
+    let borrowed = importer.borrowed();
+    let child = borrowed.shared();
+    drop(borrowed);
+    importer.check_open().unwrap();
+    child.check_open().unwrap();
+    child.stop_owned();
+    child.settle().await;
+    importer.check_open().unwrap();
+    let all = fixtures::blocks(&NetworkProfile::mainnet());
+    importer
+        .import(
+            packet(&all[0], &[], Direction::Backward),
+            all[0].hash().unwrap(),
+            Direction::Backward,
+            NOW,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    drop(importer);
+    assert_eq!(child.check_open(), Err(Error::Closed));
+    child.jobs.join().await;
+}

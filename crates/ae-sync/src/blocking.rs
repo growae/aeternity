@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
@@ -43,6 +43,31 @@ struct Inner {
     slots: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     byte_limit: usize,
+    work: Arc<Work>,
+}
+struct Work {
+    state: Mutex<WorkState>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+#[derive(Default)]
+struct WorkState {
+    issued: u64,
+    pending: BTreeSet<u64>,
+}
+struct WorkGuard {
+    work: Arc<Work>,
+    id: u64,
+}
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        self.work
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(&self.id);
+        self.work.changed.send_replace(());
+    }
 }
 impl Inner {
     fn stop(&self) {
@@ -151,6 +176,10 @@ impl Pool {
             slots: Arc::new(Semaphore::new(jobs)),
             bytes: Arc::new(Semaphore::new(bytes)),
             byte_limit: bytes,
+            work: Arc::new(Work {
+                state: Mutex::new(WorkState::default()),
+                changed: tokio::sync::watch::channel(()).0,
+            }),
         }));
         for index in 0..threads {
             let shared = pool.0.shared.clone();
@@ -265,10 +294,30 @@ impl Pool {
         bytes: OwnedSemaphorePermit,
         operation: impl FnOnce(Cancellation) -> T + Send + 'static,
     ) -> Result<Pending<T>, Error> {
+        let mut queue = self
+            .0
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if queue.stopped {
+            return Err(Error::Stopped);
+        }
+        let work = {
+            let mut state = self.0.work.state.lock().unwrap_or_else(|e| e.into_inner());
+            let id = state.issued.checked_add(1).ok_or(Error::Busy)?;
+            state.issued = id;
+            state.pending.insert(id);
+            WorkGuard {
+                work: self.0.work.clone(),
+                id,
+            }
+        };
         let (sender, receiver) = oneshot::channel();
         let cancel = Cancellation(Arc::new(AtomicBool::new(false)));
         let token = cancel.clone();
         let job = Box::new(move || {
+            let _work = work;
             let result = if token.cancelled() {
                 Err(Error::Cancelled)
             } else {
@@ -280,21 +329,40 @@ impl Pool {
                 _bytes: bytes,
             });
         });
-        let mut queue = self
-            .0
-            .shared
-            .queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if queue.stopped {
-            return Err(Error::Stopped);
-        }
         queue.jobs.push_back(job);
         self.0.shared.wake.notify_one();
         Ok(Pending { receiver, cancel })
     }
     pub fn stop(&self) {
         self.0.stop();
+    }
+    // Wait for the accepted prefix, including cancelled queued work. Later
+    // submissions and unread response credits do not extend this boundary.
+    // Unlike join, this leaves the independent worker accepting new jobs.
+    pub async fn drain(&self) {
+        let mut changed = self.0.work.changed.subscribe();
+        let target = self
+            .0
+            .work
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .issued;
+        loop {
+            if self
+                .0
+                .work
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .first()
+                .is_none_or(|id| *id > target)
+            {
+                return;
+            }
+            let _ = changed.changed().await;
+        }
     }
     pub(crate) fn join_blocking(&self) {
         self.0.join();
@@ -503,6 +571,84 @@ mod tests {
             pool.submit_wait(1, |_| 0).await,
             Err(Error::Stopped)
         ));
+        pool.join().await;
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_accepted_prefix_without_waiting_for_later_work_or_reply_credits() {
+        let pool = Pool::new(1, 4, 8).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, observed) = oneshot::channel();
+        let first = pool
+            .submit(2, move |_| {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                1
+            })
+            .unwrap();
+        observed.await.unwrap();
+        let second = pool
+            .submit(2, |_| -> () { panic!("cancelled queued work ran") })
+            .unwrap();
+        second.cancel();
+        let mut draining = Box::pin(pool.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        let (later_release, later_wait) = std::sync::mpsc::channel();
+        let (later_started, later_observed) = oneshot::channel();
+        let later = pool
+            .submit(2, move |_| {
+                later_started.send(()).unwrap();
+                later_wait.recv().unwrap();
+                3
+            })
+            .unwrap();
+        release.send(()).unwrap();
+        later_observed.await.unwrap();
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(5), &mut draining).await;
+        later_release.send(()).unwrap();
+        assert!(drained.is_ok());
+        assert!(!pool.stopped());
+        assert_eq!(first.await, Ok(1));
+        assert_eq!(second.await, Err(Error::Cancelled));
+        assert_eq!(later.await, Ok(3));
+        pool.stop();
+        pool.join().await;
+    }
+    #[tokio::test]
+    async fn drain_observes_older_running_work_after_out_of_order_completion_and_stop() {
+        let pool = Pool::new(2, 3, 6).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, observed) = oneshot::channel();
+        let first = pool
+            .submit(2, move |_| {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                1
+            })
+            .unwrap();
+        observed.await.unwrap();
+        assert_eq!(pool.submit(2, |_| 2).unwrap().await, Ok(2));
+        let mut draining = Box::pin(pool.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        pool.stop();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), draining)
+            .await
+            .unwrap();
+        assert_eq!(first.await, Ok(1));
         pool.join().await;
     }
 }

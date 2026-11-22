@@ -201,6 +201,7 @@ type PolicyHook = Arc<
 pub struct Importer<O = Otp26> {
     context: Arc<Context<O>>,
     jobs: blocking::Pool,
+    owns_shutdown: bool,
 }
 pub struct Ticket {
     pending: blocking::Pending<Result<Report, Failure>>,
@@ -241,6 +242,43 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         Self {
             context: self.context.clone(),
             jobs: self.jobs.clone(),
+            owns_shutdown: self.owns_shutdown,
+        }
+    }
+    pub(crate) fn borrowed(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            jobs: self.jobs.clone(),
+            owns_shutdown: false,
+        }
+    }
+    pub(crate) fn database(&self) -> &Arc<Database> {
+        &self.context.db
+    }
+    pub(crate) fn network(&self) -> &ae_protocol::NetworkProfile {
+        self.context.strategy.network()
+    }
+    pub(crate) fn consensus(&self) -> ConsensusType {
+        match self.context.strategy.mode() {
+            ae_codec::headers::HeaderMode::ProofOfWork => ConsensusType::Pow,
+            ae_codec::headers::HeaderMode::Hyperchain => ConsensusType::Pos,
+        }
+    }
+    pub(crate) fn stop_owned(&self) {
+        if self.owns_shutdown {
+            self.stop();
+        }
+    }
+    pub(crate) async fn join_owned(&self) {
+        if self.owns_shutdown {
+            self.join().await;
+        }
+    }
+    pub(crate) async fn settle(&self) {
+        if self.owns_shutdown {
+            self.join().await;
+        } else {
+            self.jobs.drain().await;
         }
     }
     pub fn new(
@@ -313,6 +351,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 policy_hook: None,
             }),
             jobs,
+            owns_shutdown: true,
         })
     }
     pub fn recovery_required(&self) -> bool {
@@ -402,7 +441,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             })
             .map_err(Into::into)
     }
-    fn check_open(&self) -> Result<(), Error> {
+    pub(crate) fn check_open(&self) -> Result<(), Error> {
         if self.context.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
@@ -446,9 +485,11 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
 }
 impl<O> Drop for Importer<O> {
     fn drop(&mut self) {
-        self.context.stopped.store(true, Ordering::Release);
-        self.context.shutdown.send_replace(true);
-        self.jobs.stop();
+        if self.owns_shutdown {
+            self.context.stopped.store(true, Ordering::Release);
+            self.context.shutdown.send_replace(true);
+            self.jobs.stop();
+        }
     }
 }
 enum Input {

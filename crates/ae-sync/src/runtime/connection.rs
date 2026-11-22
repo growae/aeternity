@@ -8,7 +8,9 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 
 mod group;
+mod source;
 use super::restart;
+use source::Sources;
 
 // This owns the currently implemented connection services. Durable admission
 // and GC workers belong to the independent worker hierarchy. Their explicit
@@ -150,7 +152,7 @@ impl Handle {
 }
 
 pub struct Service<O, F> {
-    inputs: Inputs<O>,
+    inputs: Sources<O>,
     dependencies: super::workers::Bindings,
     upnp_listener: Option<crate::upnp::ListenerLease>,
     cache: Option<admission::CacheController>,
@@ -202,7 +204,7 @@ where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
-    create_inner(inputs, config, outputs, dependencies, None)
+    create_inner(inputs.into(), config, outputs, dependencies, None)
 }
 // A managed received-transaction cache belongs to this connection group. Its
 // stable lookup remains with independent admission workers while each group
@@ -218,10 +220,45 @@ where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
+    create_inner(inputs.into(), config, outputs, dependencies, Some(cache))
+}
+// The producer keeps ownership of admission, pool and votes. This connection
+// group owns the received-transaction cache generation and all peer services;
+// restarting it never stops or replaces the producer's importer. The importer
+// configuration in Config applies only to the existing PoW constructors.
+pub fn create_hyperchain<O, F>(
+    producer: &chain::hyperchain::conductor::Conductor<O>,
+    identity: Arc<noise::Identity>,
+    cache: admission::CacheController,
+    config: Config,
+    outputs: F,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let inputs = Sources::hyperchain(producer, identity);
+    inputs.health()?;
+    let dependencies = super::workers::Bindings {
+        upnp: None,
+        upnp_listener: None,
+        votes: Some(crate::votes::Binding::fixed(
+            &inputs.database,
+            producer.votes(),
+        )),
+        keys: None,
+        routing: None,
+        analytics: None,
+        pool_gc: None,
+        capabilities: None,
+        resilience: None,
+        admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
+        gc: None,
+    };
     create_inner(inputs, config, outputs, dependencies, Some(cache))
 }
 fn create_inner<O, F>(
-    inputs: Inputs<O>,
+    inputs: Sources<O>,
     config: Config,
     outputs: F,
     dependencies: super::workers::Bindings,
@@ -243,7 +280,7 @@ where
         .is_some_and(|v| !v.uses_database(&inputs.database))
         || (dependencies.admission.managed()
             && dependencies.votes.is_some()
-                != (inputs.execution.consensus() == ae_protocol::ConsensusType::Pos))
+                != (inputs.consensus() == ae_protocol::ConsensusType::Pos))
     {
         return Err(Error::Configuration);
     }
@@ -333,6 +370,7 @@ where
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn health(&self) -> Result<(), Error> {
+        self.inputs.health()?;
         if self
             .dependencies
             .analytics

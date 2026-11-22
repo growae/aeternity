@@ -345,9 +345,9 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         self.tasks.clear();
         self.lanes.clear();
         self.ready.clear();
-        self.context.importer.stop();
+        self.context.importer.stop_owned();
         self.context.reads.stop();
-        self.context.importer.join().await;
+        self.context.importer.settle().await;
         self.context.reads.join().await;
         for monitor in monitors {
             monitor.wait().await;
@@ -391,7 +391,7 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
             .unwrap_or_else(|e| e.into_inner())
             .close_events();
         self.current.lifecycle.pending = false;
-        self.context.importer.stop();
+        self.context.importer.stop_owned();
         self.context.reads.stop();
         let _ = self.application.set_sync_target(0);
         if !self.current.joined {

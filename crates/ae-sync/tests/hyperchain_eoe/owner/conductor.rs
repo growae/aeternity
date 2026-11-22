@@ -1,3 +1,5 @@
+#[path = "conductor/connections.rs"]
+mod connections;
 #[path = "conductor/controls.rs"]
 mod controls;
 use super::*;

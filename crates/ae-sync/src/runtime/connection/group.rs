@@ -36,7 +36,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare<F>(
         &mut self,
-        inputs: &Inputs<O>,
+        inputs: &Sources<O>,
         dependencies: &super::super::workers::Bindings,
         config: &Config,
         outputs: &mut F,
@@ -62,16 +62,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             );
         }
         let db = &inputs.database;
-        let network_profile = inputs.execution.network().clone();
-        let consensus = inputs.execution.consensus();
+        let network_profile = inputs.network().clone();
+        let consensus = inputs.consensus();
         self.importer = Some(
-            chain::Importer::new(
-                db.clone(),
-                inputs.execution.clone(),
-                inputs.rules.clone(),
-                config.importer.clone(),
-            )
-            .map_err(|e| Failure::new(Child::Importer, e))?,
+            inputs
+                .importer(&config.importer)
+                .map_err(|e| Failure::new(Child::Importer, e))?,
         );
         let mut network_config = config.network.clone();
         if let Some(analytics) = dependencies.analytics.as_ref().and_then(|a| a.current()) {
@@ -256,7 +252,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             stop();
         }
         if let Some(importer) = &self.importer {
-            importer.stop();
+            importer.stop_owned();
         }
         // Also join the services constructed before an initial-start failure.
         self.launch();
@@ -264,7 +260,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             self.next().await;
         }
         if let Some(importer) = &self.importer {
-            importer.join().await;
+            importer.join_owned().await;
         }
         self.cache.take();
     }
@@ -278,7 +274,7 @@ impl<O: MapOrder + Send + Sync + 'static> Drop for Group<O> {
             stop();
         }
         if let Some(importer) = &self.importer {
-            importer.stop();
+            importer.stop_owned();
         }
         // JoinSet aborts remaining tasks on abrupt owner cancellation. That
         // path deliberately leaves the public joined flag false.
