@@ -83,8 +83,12 @@ where
 // keep a retired importer alive or redirect to its replacement.
 pub struct Accepted<O, H> {
     owner: Weak<storage::Owner<O, H>>,
+    database: Weak<Database>,
 }
 impl<O: MapOrder + Clone, H: Clone + Default> Accepted<O, H> {
+    pub fn uses_database(&self, database: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(database))
+    }
     pub fn try_take_if(&mut self, accept: impl FnOnce(&H) -> bool) -> Result<Option<H>, Error> {
         self.owner
             .upgrade()
@@ -140,6 +144,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
         )?);
         let accepted = Accepted {
             owner: Arc::downgrade(&owner),
+            database: Arc::downgrade(&db),
         };
         let importer = Self::with_strategy(
             db,

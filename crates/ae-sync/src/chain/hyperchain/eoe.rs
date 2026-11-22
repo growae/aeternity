@@ -12,12 +12,14 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+pub mod owner;
 pub mod service;
 pub type Runtime = runtime::Runtime<snapshots::Reader, snapshots::Reader>;
 pub type Client = runtime::Client<snapshots::Reader, snapshots::Reader>;
 pub type Tip = local_host::SelectedTip<snapshots::Reader, snapshots::Reader>;
 
 pub struct Source {
+    database: Weak<Database>,
     snapshots: snapshots::Owner,
     events: events::Reader,
     identity: repo::Identity,
@@ -73,10 +75,12 @@ impl Source {
             return Err(Error::Identity);
         }
         let events = database.events();
+        let weak_database = Arc::downgrade(&database);
         let snapshots =
             snapshots::Owner::start(database, limits).map_err(|e| Error::State(state_error(e)))?;
         let genesis_protocol = network.protocol_at(0).map_err(|_| Error::Identity)?;
         Ok(Arc::new(Self {
+            database: weak_database,
             snapshots,
             events,
             identity,
@@ -137,6 +141,16 @@ impl Source {
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Send + 'static,
     ) -> Result<Connected, Error> {
+        self.connect_with(config, keys, order, None, None)
+    }
+    fn connect_with(
+        self: &Arc<Self>,
+        config: Config,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        order: impl MapOrder + Send + 'static,
+        gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
+        parent: Option<ae_hyperchain::parent_cache::runtime::Client>,
+    ) -> Result<Connected, Error> {
         config.epochs.validate()?;
         if config.host.network != self.network {
             return Err(Error::Identity);
@@ -159,7 +173,7 @@ impl Source {
         // and pending finalization read the then-current chain, independently
         // of notification backlog. A newly started pool has epoch zero.
         drop(initial);
-        let host = local_host::LocalHost::new(
+        let mut host = local_host::LocalHost::new(
             config.host,
             Tip {
                 trees: None,
@@ -172,12 +186,12 @@ impl Source {
             source: self.clone(),
             _lease: lease,
         }));
-        let runtime = Runtime::spawn(
-            coordinator::Coordinator::new(host, config.block_time, config.coordinator),
-            order,
-            config.runtime,
-        )
-        .map_err(|e| Error::Worker(e.to_string()))?;
+        host.set_parent_cache(parent);
+        let mut coordinator =
+            coordinator::Coordinator::new(host, config.block_time, config.coordinator);
+        coordinator.set_live_gossip_cache(gossip);
+        let runtime = Runtime::spawn(coordinator, order, config.runtime)
+            .map_err(|e| Error::Worker(e.to_string()))?;
         let epochs = Epochs {
             source: self.clone(),
             cursor,
