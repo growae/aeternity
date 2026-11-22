@@ -1,3 +1,5 @@
+#[path = "owner/candidate.rs"]
+mod candidate;
 #[path = "owner/producer.rs"]
 mod producer;
 use super::*;

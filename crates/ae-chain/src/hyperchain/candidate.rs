@@ -15,9 +15,11 @@ use num_bigint::BigInt;
 use std::sync::Arc;
 mod key;
 mod packing;
+mod votes;
 pub(crate) use key::template as key_template;
 pub use key::{Key, KeyInput};
 pub use packing::{Deadlines, FinishFailure, PackRequest, Packing, Timeout};
+pub use votes::{VoteError, VoteProgress, VoteResults, Votes};
 pub type Signed = SignedTransaction<Transaction>;
 
 #[derive(Debug, Clone, Copy)]

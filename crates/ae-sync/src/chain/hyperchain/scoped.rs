@@ -103,6 +103,11 @@ impl<O: MapOrder + Clone> Accepted<O, inputs::Effects> {
     }
 }
 impl<O: MapOrder + Clone> Producer<O> {
+    pub fn check(&self) -> Result<(), Error> {
+        let context = self.context.upgrade().ok_or(Error::Closed)?;
+        let _owner = self.owner.upgrade().ok_or(Error::Closed)?;
+        producer_guard(&context)
+    }
     pub fn candidate(
         &self,
         snapshots: &ae_storage::snapshots::Owner,

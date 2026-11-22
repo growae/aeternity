@@ -49,6 +49,9 @@ impl<A, C> Clone for Client<A, C> {
     }
 }
 impl<A, C> Client<A, C> {
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.control, &other.control)
+    }
     pub fn network(&self) -> &ae_protocol::NetworkProfile {
         &self.control.network
     }

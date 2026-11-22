@@ -85,7 +85,7 @@ pub struct Packing<O> {
     state: State,
     failure: Option<Error>,
 }
-fn execution(e: core::Error<(), owned::Store, owned::Store>) -> Error {
+pub(crate) fn execution(e: core::Error<(), owned::Store, owned::Store>) -> Error {
     let retryable = match &e {
         core::Error::Transactions(e) => e.failure.is_operational(),
         core::Error::Accounting(e) => e.is_operational(),
@@ -105,7 +105,7 @@ fn execution(e: core::Error<(), owned::Store, owned::Store>) -> Error {
 fn pool_error(stage: Stage, error: worker::Error) -> Error {
     Error::Pool { stage, error }
 }
-fn retryable(e: &Error) -> bool {
+pub(crate) fn retryable(e: &Error) -> bool {
     match e {
         Error::Execution { retryable, .. } => *retryable,
         Error::Pool { error, .. } => match error {

@@ -5,6 +5,7 @@ use crate::votes;
 use ae_hyperchain::{eoe, parent_block::ParentBlock, parent_cache::runtime as parent};
 use ae_storage::pool::worker::GossipCache;
 
+pub mod candidate;
 pub mod producer;
 mod requests;
 use requests::Requests;
