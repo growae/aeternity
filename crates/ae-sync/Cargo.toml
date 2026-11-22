@@ -13,6 +13,7 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 zeroize.workspace = true
 ae-chain.workspace = true
+ae-hyperchain.workspace = true
 ae-execution.workspace = true
 ae-vm-fate.workspace = true
 ae-codec.workspace = true

@@ -32,6 +32,7 @@ static FINALIZED: LazyLock<J> = LazyLock::new(|| {
     ))
     .unwrap()
 });
+mod guarded;
 mod recovery;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Parent {

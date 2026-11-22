@@ -9,12 +9,13 @@ mod tests;
 pub use repo::{HyperchainConfig as Config, HyperchainError as PrepareError};
 
 #[derive(Debug)]
-pub enum Error<E, S> {
+pub enum Error<E, S, G = std::convert::Infallible> {
     Repository(repo::Error),
     Prepare(Box<PrepareError<E, S>>),
     RecoveryRequired,
+    Guard(G),
 }
-impl<E, S> From<repo::Error> for Error<E, S> {
+impl<E, S, G> From<repo::Error> for Error<E, S, G> {
     fn from(e: repo::Error) -> Self {
         Self::Repository(e)
     }
@@ -82,10 +83,42 @@ impl<O: MapOrder + Clone, H: Host> Owner<O, H> {
         now_ms: u64,
         origin: repo::ledger::Origin,
     ) -> Result<Committed, Error<H::Error, Snapshot<'_>>> {
+        self.insert_inner(
+            block,
+            now_ms,
+            origin,
+            None,
+            |_, host| Ok(host.clone()),
+            || Ok(()),
+        )
+    }
+    // Capture parent inputs once for this attempt, against the same immutable
+    // child view used by preparation. Returned hosts must be isolated snapshots.
+    pub fn insert_guarded<G>(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        origin: repo::ledger::Origin,
+        scope: &crate::policy::Scope,
+        inputs: impl FnOnce(&repo::View<Snapshot<'_>>, &H) -> Result<H, G>,
+        check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Committed, Error<H::Error, Snapshot<'_>, G>> {
+        self.insert_inner(block, now_ms, origin, Some(scope), inputs, check)
+    }
+    fn insert_inner<G>(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        origin: repo::ledger::Origin,
+        scope: Option<&crate::policy::Scope>,
+        inputs: impl FnOnce(&repo::View<Snapshot<'_>>, &H) -> Result<H, G>,
+        mut check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Committed, Error<H::Error, Snapshot<'_>, G>> {
         let mut live = self.live.lock().map_err(|_| Error::RecoveryRequired)?;
         if live.failed || self.database.events().info().failure.is_some() {
             return Err(Error::RecoveryRequired);
         }
+        check().map_err(Error::Guard)?;
         let view = self.database.view()?;
         // An acknowledged administrative rollback or another sealed writer
         // may have advanced storage while this owner was idle.
@@ -94,24 +127,48 @@ impl<O: MapOrder + Clone, H: Host> Owner<O, H> {
             live.revision = checkpoint.revision;
             live.state = checkpoint.state;
         }
-        let (mut state, mut host) = (live.state.clone(), live.host.clone());
+        let mut host = inputs(&view, &live.host).map_err(Error::Guard)?;
+        check().map_err(Error::Guard)?;
+        let mut state = live.state.clone();
         let mut config = self.config.clone();
         config.limits.policy.origin = origin;
-        let update =
-            match repo::prepare_hyperchain(&view, block, &config, now_ms, &mut state, &mut host) {
-                Ok(update) => update,
-                Err(error) => {
-                    // Native modeled rejections can populate leader caches. They
-                    // have no durable block/event and disappear on restart.
-                    if !error.is_operational::<H>() {
-                        live.state = state;
-                        live.host = host;
-                    }
-                    return Err(Error::Prepare(Box::new(error)));
+        let prepared =
+            repo::prepare_hyperchain(&view, block, &config, now_ms, &mut state, &mut host);
+        check().map_err(Error::Guard)?;
+        let update = match prepared {
+            Ok(update) => update,
+            Err(error) => {
+                // Native modeled rejections can populate leader caches. They
+                // have no durable block/event and disappear on restart.
+                if !error.is_operational::<H>() {
+                    live.state = state;
+                    live.host = host;
                 }
-            };
-        self.commit_staged(&mut live, update, state, host)
+                return Err(Error::Prepare(Box::new(error)));
+            }
+        };
+        let result = match scope {
+            Some(scope) => self.database.commit_guarded(update, scope, check),
+            None => self
+                .database
+                .commit(update)
+                .map_err(crate::policy::CommitError::Repository),
+        };
+        match result {
+            Ok(receipt) => {
+                live.revision = receipt.change().revision;
+                live.state = state;
+                live.host = host;
+                Ok(receipt)
+            }
+            Err(crate::policy::CommitError::Guard(error)) => Err(Error::Guard(error)),
+            Err(crate::policy::CommitError::Repository(error)) => {
+                live.failed = self.database.events().info().failure.is_some();
+                Err(Error::Repository(error))
+            }
+        }
     }
+    #[cfg(test)]
     fn commit_staged(
         &self,
         live: &mut Live<H>,

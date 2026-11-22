@@ -20,24 +20,21 @@ pub fn score(block: &Block) -> Unsigned {
 pub fn keep_tip(old: &Unsigned, new: &Unsigned, old_height: u64, new_height: u64) -> bool {
     old > new || (old == new && old_height > new_height)
 }
-pub(super) fn standalone<E, A, C>(
+pub fn standalone(
     block: &Block,
-    parent: &Header,
+    parent: Option<&Header>,
     network: &ae_protocol::NetworkProfile,
     rules: &Rules,
-) -> Result<(), Error<E, A, C>> {
+) -> Result<(), super::AdmissionError> {
     let h = block.header();
-    h.encode().map_err(Error::Encoding)?;
-    if h.common().height == 0 {
-        return Err(Error::Genesis);
-    }
+    h.encode().map_err(super::AdmissionError::Encoding)?;
     network
         .validate_version(h.common().height, h.common().version)
-        .map_err(Error::Protocol)?;
+        .map_err(super::AdmissionError::Protocol)?;
     if let Block::Key(k) = block {
-        signing::verify_key(k).map_err(Error::Seal)?;
+        signing::verify_key(k).map_err(super::AdmissionError::Seal)?;
     }
-    if let Block::Micro(m) = block {
+    if let (Block::Micro(m), Some(parent)) = (block, parent) {
         let interval = if matches!(parent, Header::Micro(_)) {
             rules.micro_cycle_ms
         } else {
@@ -46,16 +43,16 @@ pub(super) fn standalone<E, A, C>(
         if u128::from(m.header.time)
             < u128::from(ae_consensus::headers::timestamp(parent)) + u128::from(interval)
         {
-            return Err(Error::MicroInterval);
+            return Err(super::AdmissionError::MicroInterval);
         }
     }
     if u128::from(ae_consensus::headers::timestamp(&h)) >= u128::from(rules.now_ms) + 540_000 {
-        return Err(Error::FutureTimestamp);
+        return Err(super::AdmissionError::FutureTimestamp);
     }
     if let Block::Micro(m) = block {
         let gas = network.block_gas_limit(&rules.configured_gas_limit);
         admission::validate_body(m, &crate::rewards::number(&gas), rules.body_limits)
-            .map_err(Error::Body)?;
+            .map_err(super::AdmissionError::Body)?;
     }
     Ok(())
 }

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod hyperchain;
 pub mod import;
 pub mod ledger_fixtures;
 use ae_chain::repository::{Identity, ledger};

@@ -24,7 +24,7 @@ impl<O: MapOrder + Send + Sync + 'static> Session<O> {
         self.phase(Phase::Agreement);
         let local = self.context.selected().await?;
         self.progress.selected = Some(local);
-        let genesis = self.context.importer.context.rules.genesis_hash;
+        let genesis = self.context.importer.context.strategy.genesis();
         let mut search = Search::new(local.height, target, genesis);
         for _ in 0..self.context.config.probes {
             let hash = match search.next() {

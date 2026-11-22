@@ -14,11 +14,12 @@ pub(super) fn target(header: &Header) -> Result<Point, Error> {
 pub(super) fn header(
     message: &Message,
     checkpoints: &BTreeMap<u64, Hash256>,
+    mode: HeaderMode,
 ) -> Result<Header, Error> {
     let Some(Value::Binary(bytes)) = message.fields().get("hdr") else {
         return Err(Error::MalformedResponse);
     };
-    let header = Header::decode(bytes, HeaderMode::ProofOfWork).map_err(|_| Error::Header)?;
+    let header = Header::decode(bytes, mode).map_err(|_| Error::Header)?;
     // aec_validation:validate_header delegates to the pre-conductor hook.
     // For PoW this checks the whitelist, not standalone PoW/block admission.
     if let Header::Key(k) = &header
@@ -275,9 +276,10 @@ impl<O: MapOrder + Send + Sync + 'static> Context<O> {
         // Both wire operations occupy the same native Header response slot.
         tokio::time::timeout(self.config.timeout, async {
             let _guard = lane.lock().await;
-            let checkpoints = self.importer.context.rules.checkpoints.clone();
+            let checkpoints = self.importer.context.strategy.checkpoints().clone();
+            let mode = self.importer.context.strategy.mode();
             self.request(client, kind, fields, Kind::Header, move |m, _| {
-                header(m, &checkpoints)
+                header(m, &checkpoints, mode)
             })
             .await
         })
@@ -319,7 +321,7 @@ impl<O: MapOrder + Send + Sync + 'static> Context<O> {
         from: Hash256,
         target: Hash256,
     ) -> Result<Vec<Point>, Error> {
-        let checkpoints = self.importer.context.rules.checkpoints.clone();
+        let checkpoints = self.importer.context.strategy.checkpoints().clone();
         let maximum = self.config.maximum_successors;
         self.request(
             client,

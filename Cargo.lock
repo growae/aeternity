@@ -191,6 +191,7 @@ dependencies = [
  "ae-codec",
  "ae-crypto",
  "ae-execution",
+ "ae-hyperchain",
  "ae-mempool",
  "ae-p2p",
  "ae-protocol",

@@ -388,6 +388,7 @@ async fn shutdown_preserves_committed_micro_prefix_and_stops_the_next_block() {
 }
 
 mod gossip;
+mod hyperchain;
 
 #[tokio::test]
 async fn importer_scope_survives_child_replacement_but_never_adopts_a_new_parent() {

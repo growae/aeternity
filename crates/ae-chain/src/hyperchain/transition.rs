@@ -177,7 +177,10 @@ fn execute_inner<
     {
         return Err(Error::Configuration);
     }
-    validation::standalone(block, parent.header, &reader.profile.network, rules)?;
+    if block.header().common().height == 0 {
+        return Err(Error::Genesis);
+    }
+    validation::standalone(block, Some(parent.header), &reader.profile.network, rules)?;
     validation::context(block, parent)?;
     let reader = reader.pin().map_err(Error::Chain)?;
     let h = block.header();

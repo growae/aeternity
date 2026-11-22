@@ -11,8 +11,26 @@ use std::sync::Arc;
 mod transition;
 mod validation;
 pub use transition::execute;
-pub use validation::{keep_tip, score};
+pub use validation::{keep_tip, score, standalone};
 
+#[derive(Debug)]
+pub enum AdmissionError {
+    Encoding(ae_codec::headers::HeaderError),
+    Protocol(ae_protocol::ProfileError),
+    Body(admission::BodyError),
+    Seal(signing::Error),
+    FutureTimestamp,
+    MicroInterval,
+}
+impl AdmissionError {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::Protocol(e) => e.is_operational(),
+            Self::Body(e) => e.is_operational(),
+            _ => false,
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Rules {
     pub genesis_hash: Hash256,
@@ -81,6 +99,18 @@ pub enum Error<E, A = MemoryStore, C = MemoryStore> {
     InvalidLeader,
     MissingLeader,
     StateHash { actual: Hash256, expected: Hash256 },
+}
+impl<E, A, C> From<AdmissionError> for Error<E, A, C> {
+    fn from(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Encoding(e) => Self::Encoding(e),
+            AdmissionError::Protocol(e) => Self::Protocol(e),
+            AdmissionError::Body(e) => Self::Body(e),
+            AdmissionError::Seal(e) => Self::Seal(e),
+            AdmissionError::FutureTimestamp => Self::FutureTimestamp,
+            AdmissionError::MicroInterval => Self::MicroInterval,
+        }
+    }
 }
 impl<E, A, C> Error<E, A, C> {
     pub fn is_operational<H: hc_block::Host<Error = E>>(&self) -> bool {

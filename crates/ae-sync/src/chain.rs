@@ -27,8 +27,10 @@ use std::{
 mod download;
 pub use download::Download;
 pub mod generation;
+pub mod hyperchain;
 mod import;
 mod policy;
+mod strategy;
 pub mod sync;
 #[cfg(test)]
 mod tests;
@@ -170,8 +172,7 @@ pub struct Failure {
 struct Context<O> {
     db: Arc<Database>,
     policy_scope: ae_storage::policy::Scope,
-    execution: Owned<O>,
-    rules: Rules,
+    strategy: strategy::Strategy<O>,
     config: Config,
     stopped: AtomicBool,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -250,6 +251,13 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 return Err(Error::Configuration);
             }
         }
+        Self::with_strategy(
+            db,
+            strategy::Strategy::Pow(Box::new(strategy::Pow { execution, rules })),
+            config,
+        )
+    }
+    fn validate_config(config: &Config) -> Result<(), Error> {
         if config.blocks == 0
             || config.blocks > 65_536
             || config.conflicts > 1024
@@ -266,14 +274,21 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         {
             return Err(Error::Configuration);
         }
+        Ok(())
+    }
+    fn with_strategy(
+        db: Arc<Database>,
+        strategy: strategy::Strategy<O>,
+        config: Config,
+    ) -> Result<Self, Error> {
+        Self::validate_config(&config)?;
         let policy_scope = db.policy_scope()?;
         let jobs = blocking::Pool::named("ae-chain-import", 1, config.jobs, config.bytes)?;
         Ok(Self {
             context: Arc::new(Context {
                 db,
                 policy_scope,
-                execution,
-                rules,
+                strategy,
                 config,
                 stopped: AtomicBool::new(false),
                 shutdown: tokio::sync::watch::channel(false).0,
@@ -287,7 +302,8 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         })
     }
     pub fn recovery_required(&self) -> bool {
-        self.context.db.policy_recovery_required()
+        self.context.db.events().info().failure.is_some()
+            || self.context.db.policy_recovery_required()
             || self
                 .context
                 .recovery
@@ -304,10 +320,9 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .or_else(|| {
-                self.context
-                    .db
-                    .policy_recovery_required()
-                    .then_some(Error::RecoveryRequired)
+                (self.context.db.policy_recovery_required()
+                    || self.context.db.events().info().failure.is_some())
+                .then_some(Error::RecoveryRequired)
             })
     }
     pub fn available(&self) -> (usize, usize) {

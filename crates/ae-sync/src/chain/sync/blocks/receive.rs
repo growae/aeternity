@@ -226,7 +226,7 @@ async fn receive<O: MapOrder + Send + Sync + 'static>(
                 }
                 let settings = Settings {
                     now_ms,
-                    micro_cycle_ms: worker.importer.context.rules.admission.micro_cycle_ms,
+                    micro_cycle_ms: worker.importer.context.strategy.micro_cycle_ms(),
                     gossip_depth: worker.importer.context.config.ledger.policy.gossip_depth,
                 };
                 let material = prepare(

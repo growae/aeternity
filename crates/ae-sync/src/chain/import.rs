@@ -52,9 +52,7 @@ impl<O: MapOrder> Context<O> {
             self.check(&cancel, None)?;
             let view = self.db.view()?;
             let block = Block::decode(&bytes, view.config().block()).map_err(Error::Block)?;
-            let mut rules = self.rules.clone();
-            rules.admission.now_ms = now_ms;
-            self.insert(&block, &rules, &cancel, None, origin)
+            self.insert(&block, now_ms, &cancel, None, origin)
         })();
         Self::block_report(result)
     }
@@ -75,9 +73,7 @@ impl<O: MapOrder> Context<O> {
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
     ) -> Result<Accepted, Error> {
-        let mut rules = self.rules.clone();
-        rules.admission.now_ms = now_ms;
-        self.insert(block, &rules, cancel, client, ledger::Origin::Gossip)
+        self.insert(block, now_ms, cancel, client, ledger::Origin::Gossip)
     }
     fn block_report(result: Result<Accepted, Error>) -> Result<Report, Failure> {
         result
@@ -94,7 +90,8 @@ impl<O: MapOrder> Context<O> {
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
     ) -> Result<(), Error> {
-        if self.db.policy_recovery_required()
+        if self.db.events().info().failure.is_some()
+            || self.db.policy_recovery_required()
             || self
                 .recovery
                 .lock()
@@ -173,20 +170,11 @@ impl<O: MapOrder> Context<O> {
         .map_err(Error::Generation)?;
         let height = generation.key().header().common().height;
         if height > 0 {
-            let network = view.protocol_profile(
-                self.execution.network(),
-                height,
-                self.config.ledger.history,
-            )?;
-            let mut rules = self.rules.admission.clone();
-            rules.now_ms = now_ms;
+            let network =
+                view.protocol_profile(self.strategy.network(), height, self.config.ledger.history)?;
             self.whitelist(generation.key())?;
-            ae_chain::admission::validate_pow(generation.key(), &network, None, &rules).map_err(
-                |e| Error::Validation {
-                    operational: e.is_operational(),
-                    reason: format!("{e:?}"),
-                },
-            )?;
+            self.strategy
+                .validate(generation.key(), None, &network, now_ms)?;
         }
         generation
             .check(requested, view.config().mode)
@@ -213,10 +201,8 @@ impl<O: MapOrder> Context<O> {
             Input::Live(live) => Some(&live.client),
             _ => None,
         };
-        let mut rules = self.rules.clone();
-        rules.admission.now_ms = now_ms;
         for block in generation.blocks() {
-            match self.insert(block, &rules, &cancel, client, ledger::Origin::Sync) {
+            match self.insert(block, now_ms, &cancel, client, ledger::Origin::Sync) {
                 Ok(accepted) => progress.accepted.push(accepted),
                 Err(error) => {
                     return Err(Failure {
@@ -234,7 +220,7 @@ impl<O: MapOrder> Context<O> {
     fn insert(
         &self,
         block: &Block,
-        rules: &Rules,
+        now_ms: u64,
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
         origin: ledger::Origin,
@@ -244,11 +230,8 @@ impl<O: MapOrder> Context<O> {
             self.check(cancel, client)?;
             let view = self.db.view()?;
             let height = block.header().common().height;
-            let network = view.protocol_profile(
-                self.execution.network(),
-                height,
-                self.config.ledger.history,
-            )?;
+            let network =
+                view.protocol_profile(self.strategy.network(), height, self.config.ledger.history)?;
             let previous = view
                 .block(Hash256(block.header().common().previous_hash))?
                 .map(|b| b.header());
@@ -256,11 +239,8 @@ impl<O: MapOrder> Context<O> {
             // check. In particular, a known header is not permission to
             // accept a malformed replacement micro body.
             self.whitelist(block)?;
-            ae_chain::admission::validate_pow(block, &network, previous.as_ref(), &rules.admission)
-                .map_err(|e| Error::Validation {
-                    operational: e.is_operational(),
-                    reason: format!("{e:?}"),
-                })?;
+            self.strategy
+                .validate(block, previous.as_ref(), &network, now_ms)?;
             if view.block(hash)?.is_some() {
                 view.require_record(hash)?;
                 return Ok(Accepted {
@@ -272,24 +252,39 @@ impl<O: MapOrder> Context<O> {
                     },
                 });
             }
-            let update = self
-                .execution
-                .with_config(|config| {
-                    let mut limits = self.config.ledger;
-                    limits.policy.origin = origin;
-                    ledger::prepare(&view, block, config, rules, limits)
-                })
-                .map_err(|e| match e {
-                    ledger::InsertError::Repository(error) => Error::Storage(error),
-                    ledger::InsertError::Policy { height, top } => Error::Policy { height, top },
-                    ledger::InsertError::WrongConsensus => Error::WrongConsensus,
-                    other => Error::Validation {
-                        operational: other.is_operational(),
-                        reason: format!("{other:?}"),
-                    },
-                })?;
-            self.check(cancel, client)?;
-            match self.commit(update) {
+            let committed = match &self.strategy {
+                strategy::Strategy::Pow(pow) => {
+                    let mut rules = pow.rules.clone();
+                    rules.admission.now_ms = now_ms;
+                    let update = pow
+                        .execution
+                        .with_config(|execution| {
+                            let mut limits = self.config.ledger;
+                            limits.policy.origin = origin;
+                            ledger::prepare(&view, block, execution, &rules, limits)
+                        })
+                        .map_err(|e| match e {
+                            ledger::InsertError::Repository(error) => Error::Storage(error),
+                            ledger::InsertError::Policy { height, top } => {
+                                Error::Policy { height, top }
+                            }
+                            ledger::InsertError::WrongConsensus => Error::WrongConsensus,
+                            other => Error::Validation {
+                                operational: other.is_operational(),
+                                reason: format!("{other:?}"),
+                            },
+                        })?;
+                    self.check(cancel, client)?;
+                    self.commit(update, &mut || self.check(cancel, client))
+                }
+                strategy::Strategy::Hyperchain(hc) => {
+                    hc.engine
+                        .insert(block, now_ms, origin, &self.policy_scope, &mut || {
+                            self.check(cancel, client)
+                        })
+                }
+            };
+            match committed {
                 Ok(committed) => {
                     return Ok(Accepted {
                         hash,
@@ -302,8 +297,12 @@ impl<O: MapOrder> Context<O> {
                         },
                     });
                 }
-                Err(repository::Error::Conflict) if attempt < self.config.conflicts => continue,
-                Err(error @ repository::Error::Backend(_)) => {
+                Err(Error::Storage(repository::Error::Conflict))
+                    if attempt < self.config.conflicts =>
+                {
+                    continue;
+                }
+                Err(Error::Storage(error @ repository::Error::Backend(_))) => {
                     // Never retry an uncertain publication, or let later jobs
                     // use this owner. Reopen/reconcile the database first.
                     let error = Error::CommitUncertain { hash, error };
@@ -313,14 +312,14 @@ impl<O: MapOrder> Context<O> {
                         .get_or_insert_with(|| error.clone());
                     return Err(error);
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             }
         }
         unreachable!("last conflict is returned")
     }
     fn whitelist(&self, block: &Block) -> Result<(), Error> {
         if let Block::Key(key) = block
-            && let Some(expected) = self.rules.checkpoints.get(&key.common.height)
+            && let Some(expected) = self.strategy.checkpoints().get(&key.common.height)
             && block.hash().map_err(|_| Error::Hash)? != *expected
         {
             return Err(Error::BlockedByWhitelist);
@@ -330,11 +329,17 @@ impl<O: MapOrder> Context<O> {
     fn commit(
         &self,
         update: repository::Update,
-    ) -> Result<ae_storage::Committed, repository::Error> {
+        check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<ae_storage::Committed, Error> {
         #[cfg(test)]
         if let Some(hook) = &self.commit_hook {
-            return hook(&self.db, update);
+            return hook(&self.db, update).map_err(Error::Storage);
         }
-        self.db.commit_in_policy_scope(update, &self.policy_scope)
+        self.db
+            .commit_guarded(update, &self.policy_scope, check)
+            .map_err(|e| match e {
+                ae_storage::policy::CommitError::Repository(e) => e.into(),
+                ae_storage::policy::CommitError::Guard(e) => e,
+            })
     }
 }

@@ -19,7 +19,7 @@ use ae_vm_fate::{
 };
 use std::sync::Arc;
 #[path = "../../../ae-vm-fate/tests/support/otp_order.rs"]
-mod otp_order;
+pub(super) mod otp_order;
 
 // Explicit isolated-reference profiles, not a deployed-mainnet attestation.
 pub fn execution(network: &NetworkProfile) -> Owned {

@@ -27,6 +27,11 @@ pub struct Scope {
     db: Weak<Database>,
     inner: Option<Weak<Inner>>,
 }
+#[derive(Debug)]
+pub enum CommitError<E> {
+    Repository(Error),
+    Guard(E),
+}
 impl Scope {
     pub fn is_closed(&self) -> bool {
         match &self.inner {
@@ -175,6 +180,30 @@ impl Database {
         scope: &Scope,
     ) -> Result<Committed, Error> {
         self.commit_checked(update, || scope.check(self))
+    }
+    // Check the worker's cancellation/client lifetime as well as the parent
+    // lease while holding the actual writer, including immediately before WAL.
+    // The guard must not reenter storage or wait for another writer.
+    pub fn commit_guarded<E>(
+        &self,
+        update: Update,
+        scope: &Scope,
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<Committed, CommitError<E>> {
+        let mut rejected = None;
+        let result = self.commit_checked(update, || {
+            scope.check(self)?;
+            check().map_err(|error| {
+                rejected = Some(error);
+                // Internal bridge to the existing writer. This sentinel never
+                // escapes as a conflict and cannot trigger a retry.
+                Error::Conflict
+            })
+        });
+        match rejected {
+            Some(error) => Err(CommitError::Guard(error)),
+            None => result.map_err(CommitError::Repository),
+        }
     }
     // Callers hold writer before checking ownership; reset, updates, and block
     // commit all share that same serialization point.

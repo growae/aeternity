@@ -1,4 +1,37 @@
 use super::*;
+
+#[test]
+fn hyperchain_header_responses_preserve_hole_and_epoch_flags() {
+    let row = &crate::test_support::hyperchain::DATA["rows"][0]["rows"];
+    for index in [3, 5, 10] {
+        let block = crate::test_support::hyperchain::block(&row[index]);
+        let header = block.header();
+        let message = Message::new(
+            Kind::Header,
+            1,
+            BTreeMap::from([("hdr".into(), Value::Binary(header.encode().unwrap()))]),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            wire::header(
+                &message,
+                &BTreeMap::new(),
+                ae_codec::headers::HeaderMode::Hyperchain
+            )
+            .unwrap(),
+            header
+        );
+        assert!(
+            wire::header(
+                &message,
+                &BTreeMap::new(),
+                ae_codec::headers::HeaderMode::ProofOfWork
+            )
+            .is_err()
+        );
+    }
+}
 use agreement::{Probe, Search, Step};
 use serde_json::Value as Json;
 fn fixture() -> Json {
@@ -78,7 +111,11 @@ fn original_ancestor_agreement_matches_queries_hash_checks_and_errors() {
                         Default::default(),
                     )
                     .unwrap();
-                    match wire::header(&message, &checkpoints(row)) {
+                    match wire::header(
+                        &message,
+                        &checkpoints(row),
+                        ae_codec::headers::HeaderMode::ProofOfWork,
+                    ) {
                         Ok(header) => header.hash().unwrap(),
                         Err(Error::BlockedByWhitelist) => break Err("blocked_by_whitelist"),
                         other => panic!("unexpected header result: {other:?}"),
@@ -121,12 +158,24 @@ fn original_initial_headers_and_successor_gates_preserve_native_semantics() {
             Default::default(),
         )
         .unwrap();
-        let header = wire::header(&message, &BTreeMap::new()).unwrap();
+        let header = wire::header(
+            &message,
+            &BTreeMap::new(),
+            ae_codec::headers::HeaderMode::ProofOfWork,
+        )
+        .unwrap();
         assert_eq!(wire::target(&header).unwrap(), point(&row["target"]));
         // These synthetic native headers have no valid PoW: announcement
         // parsing is not full block admission. Genesis also skips whitelist.
         if header.common().height == 0 {
-            assert!(wire::header(&message, &BTreeMap::from([(0, Hash256([255; 32]))])).is_ok());
+            assert!(
+                wire::header(
+                    &message,
+                    &BTreeMap::from([(0, Hash256([255; 32]))]),
+                    ae_codec::headers::HeaderMode::ProofOfWork
+                )
+                .is_ok()
+            );
         }
     }
     let rows = f["successors"].as_array().unwrap();
