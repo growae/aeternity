@@ -257,6 +257,23 @@ where
     };
     create_inner(inputs, config, outputs, dependencies, Some(cache))
 }
+pub fn create_hyperchain_with_workers<O, F>(
+    producer: &chain::hyperchain::conductor::Conductor<O>,
+    workers: &super::workers::hyperchain::Handle<O>,
+    identity: Arc<noise::Identity>,
+    cache: admission::CacheController,
+    config: Config,
+    outputs: F,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let inputs = Sources::hyperchain(producer, identity);
+    inputs.health()?;
+    let dependencies = workers.for_producer(producer).ok_or(Error::Configuration)?;
+    create_inner(inputs, config, outputs, dependencies, Some(cache))
+}
 fn create_inner<O, F>(
     inputs: Sources<O>,
     config: Config,
@@ -314,7 +331,7 @@ where
             .gc
             .as_ref()
             .is_some_and(|g| !g.uses_database(&inputs.database))
-        || dependencies.gc.is_some() != inputs.gc.is_some()
+        || !inputs.accepts_gc(dependencies.gc.is_some())
     {
         return Err(Error::Configuration);
     }

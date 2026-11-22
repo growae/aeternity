@@ -7,6 +7,9 @@ use common::within;
 use std::net::Ipv4Addr;
 use tokio::task::JoinHandle;
 
+#[path = "connections/workers.rs"]
+mod workers;
+
 fn settings() -> connections::Config {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
@@ -24,9 +27,16 @@ fn settings() -> connections::Config {
     c
 }
 fn prepared(node: &Node) -> (Conductor<Otp26>, pool::worker::CacheController) {
+    prepared_with_policy(node, None)
+}
+fn prepared_with_policy(
+    node: &Node,
+    resilience: Option<ae_sync::resilience::Config>,
+) -> (Conductor<Otp26>, pool::worker::CacheController) {
     let (cache, controller) = pool::worker::GossipCache::managed(200, 10000).unwrap();
     let mut cfg = config(node, false);
     cfg.gossip = cache;
+    cfg.resilience = resilience;
     let c = new(node, cfg).unwrap();
     c.parent().post_block(parent(8, 1008)).unwrap();
     c.parent().barrier(Duration::from_secs(5)).unwrap();

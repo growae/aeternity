@@ -26,6 +26,11 @@ impl<O> From<Inputs<O>> for Sources<O> {
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Sources<O> {
+    pub fn accepts_gc(&self, configured: bool) -> bool {
+        // The borrowed path is sealed to the conductor's optional-worker
+        // handle. Its managed GC may still be awaiting initial publication.
+        matches!(self.ledger, Ledger::Borrowed(_)) || self.gc.is_some() == configured
+    }
     pub fn hyperchain(
         producer: &chain::hyperchain::conductor::Conductor<O>,
         identity: Arc<noise::Identity>,

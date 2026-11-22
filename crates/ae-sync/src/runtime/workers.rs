@@ -10,6 +10,8 @@ use tokio::{
     time::Instant,
 };
 
+pub mod hyperchain;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GarbageCollection {
     pub policy: retention::Config,
@@ -74,6 +76,8 @@ pub enum Error {
     Worker,
     RecoveryRequired,
     RestartLimit,
+    Producer(crate::chain::Error),
+    Dependency(Child),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,6 +90,8 @@ pub struct Status {
     pub running: bool,
     pub ready: bool,
     pub joined: bool,
+    // Admission and votes are published here but owned by the conductor.
+    pub borrowed_producer: bool,
     pub upnp_generation: u64,
     pub votes_generation: u64,
     pub votes: Option<votes::Info>,
@@ -183,6 +189,7 @@ pub struct Service {
     network: NetworkProfile,
     config: Config,
     cache: pool::worker::GossipCache,
+    external: Option<hyperchain::External>,
     upnp: Option<upnp::Worker>,
     upnp_binding: Option<bindings::Owner<upnp::Client>>,
     votes: Option<votes::Worker>,
@@ -220,8 +227,17 @@ pub struct Service {
 pub fn create(
     database: Arc<Database>,
     network: NetworkProfile,
+    config: Config,
+    cache: pool::worker::GossipCache,
+) -> Result<(Handle, Service), Error> {
+    create_inner(database, network, config, cache, None)
+}
+fn create_inner(
+    database: Arc<Database>,
+    network: NetworkProfile,
     mut config: Config,
     cache: pool::worker::GossipCache,
+    external: Option<hyperchain::External>,
 ) -> Result<(Handle, Service), Error> {
     if config.poll.is_zero() || config.poll > Duration::from_secs(1) {
         return Err(Error::Configuration);
@@ -246,6 +262,14 @@ pub fn create(
         (None, None)
     };
     let (pool_binding, admission) = bindings::Owner::new(&database);
+    if let Some(external) = &external {
+        external.healthy()?;
+        pool_binding.install(bindings::Pool::new(external.pool.clone()), 1);
+        votes_binding
+            .as_ref()
+            .expect("borrowed PoS votes")
+            .install(external.votes.clone(), 1);
+    }
     let (routing_binding, routing) = if config.routing.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
         (Some(owner), Some(reader))
@@ -292,6 +316,9 @@ pub fn create(
     };
     let current = Status {
         running: true,
+        borrowed_producer: external.is_some(),
+        admission_generation: u64::from(external.is_some()),
+        votes_generation: u64::from(external.is_some()),
         ..Default::default()
     };
     let (published, status) = watch::channel(current.clone());
@@ -321,6 +348,7 @@ pub fn create(
             network,
             config,
             cache,
+            external,
             admission: None,
             upnp_binding,
             votes: None,
@@ -374,6 +402,9 @@ impl Service {
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn healthy(&self) -> Result<(), Error> {
+        if let Some(external) = &self.external {
+            external.healthy()?;
+        }
         if self.database.events().info().closed || self.database.gc_events().info().closed {
             Err(Error::RecoveryRequired)
         } else {
@@ -404,10 +435,18 @@ impl Service {
         self.current.pool_gc = self.pool_gc.as_ref().map(|w| w.info());
         self.current.keys = self.keys.as_ref().map(|w| w.info());
         self.current.admission = self.admission.as_ref().map(|w| w.info());
+        if let Some(external) = &self.external {
+            self.current.admission = Some(external.pool.info());
+            self.current.votes = Some(external.votes.info());
+        }
         self.current.gc = self.gc.as_ref().map(|w| w.info());
         self.published.send_replace(self.current.clone());
     }
     async fn start(&mut self, child: Child) -> Result<(), Error> {
+        self.healthy()?;
+        if self.external.is_some() && matches!(child, Child::Admission | Child::Votes) {
+            return Err(Error::Missing);
+        }
         let generation = self
             .generation(child)
             .checked_add(1)
@@ -419,7 +458,18 @@ impl Service {
         let vote_publications = self.vote_publications.clone();
         let admission_binding = self.admission_binding.clone();
         let routing_store = self.routing_owner.as_ref().map(|o| o.store());
-        let resilience_source = self.resilience_owner.as_ref().map(|o| o.source());
+        let resilience_source = self
+            .resilience_owner
+            .as_ref()
+            .map(|o| o.source())
+            .or_else(|| self.external.as_ref().and_then(|e| e.resilience.clone()));
+        let initial_resilience = if child == Child::Resilience {
+            self.external
+                .as_mut()
+                .and_then(|e| e.resilience_worker.take())
+        } else {
+            None
+        };
         let created = self
             .jobs
             .submit(128, move |_| match child {
@@ -450,6 +500,9 @@ impl Service {
                     })
                 }
                 Child::Resilience => {
+                    if let Some(worker) = initial_resilience {
+                        return Ok(Started::Resilience(worker, None));
+                    }
                     let config = config.resilience.ok_or(Error::Missing)?;
                     let start = || -> Result<Started, resilience::Error> {
                         let owner = if resilience_source.is_none() {
@@ -671,12 +724,19 @@ impl Service {
                 if let Some(binding) = &self.resilience_binding {
                     binding.withdraw();
                 }
-                self.resilience.take().map(|worker| {
-                    worker.request_shutdown();
-                    self.jobs.submit(128, move |_| {
-                        let _ = worker.shutdown();
+                self.resilience
+                    .take()
+                    .or_else(|| {
+                        self.external
+                            .as_mut()
+                            .and_then(|e| e.resilience_worker.take())
                     })
-                })
+                    .map(|worker| {
+                        worker.request_shutdown();
+                        self.jobs.submit(128, move |_| {
+                            let _ = worker.shutdown();
+                        })
+                    })
             }
             Child::Capabilities => {
                 if let Some(binding) = &self.capabilities_binding {
@@ -824,7 +884,9 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
-        self.start(Child::Admission).await?;
+        if self.external.is_none() {
+            self.start(Child::Admission).await?;
+        }
         if self.stopping() {
             return Ok(());
         }
@@ -858,12 +920,13 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
-        if self.config.pool.consensus == ConsensusType::Pos {
+        if self.external.is_none() && self.config.pool.consensus == ConsensusType::Pos {
             self.start(Child::Votes).await?;
         }
         if self.stopping() {
             return Ok(());
         }
+        self.healthy()?;
         self.current.ready = true;
         self.publish();
         let mut interval = tokio::time::interval(self.config.poll);
@@ -910,7 +973,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::Votes && self.config.pool.consensus != ConsensusType::Pos) || (command.child == Child::Upnp && self.config.upnp.is_none()) || (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (self.external.is_some() && matches!(command.child, Child::Admission | Child::Votes)) || (command.child == Child::Votes && self.config.pool.consensus != ConsensusType::Pos) || (command.child == Child::Upnp && self.config.upnp.is_none()) || (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();

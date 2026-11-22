@@ -1,7 +1,7 @@
 // Continuous PoS production and owned child shutdown. Scheduling follows
 // aec_conductor (aeternity fa2a6d7); ISC copyright: repository LICENSE.
 use super::{delivery, eoe, scoped};
-use crate::{chain, votes};
+use crate::{chain, resilience, votes};
 use ae_chain::{publication, repository as repo};
 use ae_crypto::Ed25519SecretKey;
 use ae_hyperchain::{
@@ -35,6 +35,7 @@ pub struct Config {
     pub pool_worker: pool::worker::Settings,
     pub admission: chain::Config,
     pub snapshots: snapshots::Config,
+    pub resilience: Option<resilience::Config>,
     pub gossip: pool::worker::GossipCache,
     pub parent: ParentConfig,
     pub events_per_step: usize,
@@ -54,6 +55,7 @@ pub enum Error {
     Importer(chain::Error),
     Pool(pool::worker::Error),
     Votes(votes::Error),
+    Resilience(resilience::Error),
     Parent(String),
     Owner(owner::Error),
     Delivery(delivery::Error),
@@ -115,6 +117,7 @@ pub struct Shutdown<O> {
     pub pool: Result<pool::worker::Info, pool::worker::Error>,
     pub parent: Result<cache::Exit, String>,
     pub connector_joined: bool,
+    pub resilience: Option<Result<(), resilience::Error>>,
 }
 pub struct TopDelivery {
     pub records: VecDeque<Arc<publication::Payload>>,
@@ -132,6 +135,9 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     pool: Option<pool::worker::Worker>,
     parent: Option<cache::Runtime>,
     connector: Option<connector::Runtime>,
+    resilience: Option<resilience::Owner>,
+    resilience_worker: Option<resilience::Worker>,
+    resilience_config: Option<resilience::Config>,
     source: events::Reader,
     production: production::Config,
     event_limit: usize,
@@ -168,6 +174,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         {
             return Err(Error::Configuration);
         }
+        // Install the policy parent before capturing the importer's scope.
+        // Its child may later move to optional-worker supervision; the policy
+        // parent remains with this producer generation throughout child gaps.
+        let resilience = config
+            .resilience
+            .map(|c| resilience::Owner::new(database.clone(), c))
+            .transpose()
+            .map_err(Error::Resilience)?;
+        let resilience_worker = resilience
+            .as_ref()
+            .map(resilience::Owner::start)
+            .transpose()
+            .map_err(Error::Resilience)?;
         let events = database.events();
         let cursor = events.cursor();
         let child = {
@@ -258,6 +277,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             pool: Some(pool),
             parent: Some(parent),
             connector: Some(connector),
+            resilience,
+            resilience_worker,
+            resilience_config: config.resilience,
             source: events,
             production: config.production,
             event_limit: config.events_per_step,
@@ -295,6 +317,21 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn votes(&self) -> votes::Client {
         self.owner.as_ref().expect("owner").votes()
+    }
+    pub(crate) fn optional_resilience(
+        &mut self,
+    ) -> Option<(
+        resilience::Source,
+        resilience::Config,
+        Option<resilience::Worker>,
+    )> {
+        self.resilience.as_ref().map(|owner| {
+            (
+                owner.source(),
+                self.resilience_config.expect("configured resilience"),
+                self.resilience_worker.take(),
+            )
+        })
     }
     pub fn parent(&self) -> cache::Client {
         self.parent.as_ref().expect("parent").client()
@@ -610,6 +647,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .shutdown()
             .map_err(|_| "parent cache panicked".to_string());
         let connector_joined = self.connector.take().expect("connector").shutdown().is_ok();
+        let resilience = self
+            .resilience_worker
+            .take()
+            .map(resilience::Worker::shutdown);
+        self.resilience.take();
         Shutdown {
             status: self.status.clone(),
             output: self.pending.take(),
@@ -624,6 +666,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             pool,
             parent,
             connector_joined,
+            resilience,
         }
     }
 }

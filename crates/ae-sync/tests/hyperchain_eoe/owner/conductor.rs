@@ -50,6 +50,7 @@ fn config(node: &Node, producing: bool) -> conductor::Config {
         },
         admission: Default::default(),
         snapshots: Default::default(),
+        resilience: None,
         gossip: Default::default(),
         parent: conductor::ParentConfig {
             cache: parent_cache::Config {
