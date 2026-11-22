@@ -560,6 +560,14 @@ async fn encrypted_gossip_reads_and_publishes_through_the_eoe_authority() {
     let node = Node::new();
     let (mut owner, worker, _) = owner(&node, 3, Default::default(), Default::default());
     let client = worker.client();
+    let cache = node.client().gossip_cache();
+    call(
+        &owner.client(),
+        runtime::Command::LiveGossipCache(Some(Arc::new(cache.clone()))),
+    )
+    .wait(Duration::from_secs(2))
+    .unwrap()
+    .unwrap();
     let (peers, incoming, peer_task) = node.service(Default::default());
     let (mut handle, _events, service) = gossip::create_with_vote_client(
         node.db.clone(),
@@ -611,6 +619,34 @@ async fn encrypted_gossip_reads_and_publishes_through_the_eoe_authority() {
         Default::default(),
     )
     .unwrap();
+    assert_eq!(cache.stats().unwrap().miss, 10.into());
+    let ordinary = node
+        .client()
+        .receive(Arc::new(Signed::decode(&wire[0]).unwrap()))
+        .unwrap();
+    assert_eq!(
+        ordinary.wait().unwrap().outcome,
+        ae_mempool::pool::PushOutcome::Cached
+    );
+    within(remote.send(&message).unwrap()).await.unwrap();
+    within(async {
+        loop {
+            if handle.status().counts.decoded == 1 {
+                break;
+            }
+            handle.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert_eq!(handle.status().counts.votes_admitted, 0);
+    assert_eq!(cache.stats().unwrap().hit, 2.into());
+    assert_eq!(owner.route().unwrap(), Routed::Idle);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), messages.recv())
+            .await
+            .is_err()
+    );
+    cache.reset().unwrap();
     within(remote.send(&message).unwrap()).await.unwrap();
     within(async {
         loop {

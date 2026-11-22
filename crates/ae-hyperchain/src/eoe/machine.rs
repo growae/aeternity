@@ -92,7 +92,7 @@ pub enum Event<V = ()> {
 // resource/storage failures discard staged effects and can retry. Reference
 // native exceptions retain effects emitted before the exception, while the
 // failed callback does not commit its next FSM state.
-pub trait Host: Clone {
+pub trait Host {
     type Error;
     type View;
     type Finalized;
@@ -227,7 +227,7 @@ impl Machine {
     pub fn buffered(&self) -> &[SignedTransaction<Transaction>] {
         &self.buffered
     }
-    pub fn step<H: Host>(
+    pub fn step<H: Host + Clone>(
         &mut self,
         event: Event<H::View>,
         host: &mut H,
@@ -236,25 +236,43 @@ impl Machine {
     ) -> Result<Transition<H::Finalized>, StepError<H::Error>> {
         self.check_limits(limits)?;
         Self::check_event(&event, limits)?;
-        let mut next = self.clone();
         let mut staged = host.clone();
-        let transition = match next.handle(event, &mut staged, order, limits) {
-            Ok(t) => t,
-            Err(e) => {
-                let native = match &e {
-                    StepError::Core(Failure::Native(_)) => true,
-                    StepError::Host(e) => !H::is_operational(e),
-                    _ => false,
-                };
-                if native {
-                    *host = staged;
-                }
-                return Err(e);
-            }
+        let result = self.apply_staged(event, &mut staged, order, limits);
+        let retain = match &result {
+            Ok(_) => true,
+            Err(StepError::Core(Failure::Native(_))) => true,
+            Err(StepError::Host(e)) => !H::is_operational(e),
+            _ => false,
         };
+        if retain {
+            *host = staged;
+        }
+        result
+    }
+    // The coordinator already owns an isolated host and commits/discards the
+    // complete callback, including its downstream queue/publication effects.
+    pub(super) fn step_staged<H: Host>(
+        &mut self,
+        event: Event<H::View>,
+        host: &mut H,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Transition<H::Finalized>, StepError<H::Error>> {
+        self.check_limits(limits)?;
+        Self::check_event(&event, limits)?;
+        self.apply_staged(event, host, order, limits)
+    }
+    fn apply_staged<H: Host>(
+        &mut self,
+        event: Event<H::View>,
+        host: &mut H,
+        order: &impl MapOrder,
+        limits: Limits,
+    ) -> Result<Transition<H::Finalized>, StepError<H::Error>> {
+        let mut next = self.clone();
+        let transition = next.handle(event, host, order, limits)?;
         next.check_limits(limits)?;
         *self = next;
-        *host = staged;
         Ok(transition)
     }
     fn check_limits(&self, limits: Limits) -> Result<(), Failure> {

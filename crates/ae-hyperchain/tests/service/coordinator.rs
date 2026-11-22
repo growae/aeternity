@@ -929,3 +929,5 @@ fn shared_vote_queries_keep_byte_credits_through_clones_and_shutdown() {
     drop(held);
     assert_eq!(client.retained_vote_reply_bytes(), 0);
 }
+
+mod gossip;

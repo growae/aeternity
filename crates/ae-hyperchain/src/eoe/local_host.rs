@@ -247,6 +247,14 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         signed: SignedTransaction<Transaction>,
         event: hc_votes::Event,
     ) -> Result<PushOutcome, Error> {
+        self.admit_using(signed, event, None)
+    }
+    pub(super) fn admit_using(
+        &mut self,
+        signed: SignedTransaction<Transaction>,
+        event: hc_votes::Event,
+        checker: Option<&mut dyn FnMut(Hash256) -> bool>,
+    ) -> Result<PushOutcome, Error> {
         let mut pool = self.pool.clone();
         let outcome = pool
             .push(
@@ -258,7 +266,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
                     consensus: self.tip.consensus,
                     limits: self.config.limits.pool,
                 },
-                |hash| self.gossip.contains(&hash),
+                |hash| checker.map_or_else(|| self.gossip.contains(&hash), |check| check(hash)),
             )
             .map_err(Error::Pool)?;
         if matches!(outcome, PushOutcome::Accepted { .. }) {
@@ -325,11 +333,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
         .map_err(Error::Payload)
     }
     fn publish(&mut self, vote: SignedTransaction<Transaction>) -> Result<bool, Error> {
-        match self.admit(vote, hc_votes::Event::Created) {
-            Ok(_) => Ok(true),
-            Err(Error::Pool(e)) if !Error::Pool(e.clone()).is_operational() => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.publish_using(vote, None)
     }
     fn finalize(
         &mut self,
@@ -371,5 +375,61 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
             self.outbox_bytes = old_bytes;
         }
         result
+    }
+}
+
+// A borrowed checker exists only inside the cache transaction. It cannot leak
+// into a cloned host or a later callback; the coordinator stages the host.
+pub(super) struct Cached<'h, 'c, A, C> {
+    pub host: &'h mut LocalHost<A, C>,
+    pub checker: Option<&'c mut dyn FnMut(Hash256) -> bool>,
+}
+impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
+    fn publish_using(
+        &mut self,
+        vote: SignedTransaction<Transaction>,
+        checker: Option<&mut dyn FnMut(Hash256) -> bool>,
+    ) -> Result<bool, Error> {
+        match self.admit_using(vote, hc_votes::Event::Created, checker) {
+            Ok(_) => Ok(true),
+            Err(Error::Pool(e)) if !Error::Pool(e.clone()).is_operational() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for Cached<'_, '_, A, C> {
+    type Error = Error;
+    type View = Arc<Trees<A, C>>;
+    type Finalized = Finalized;
+    fn is_operational(error: &Error) -> bool {
+        error.is_operational()
+    }
+    fn create_vote(
+        &mut self,
+        voter: AccountPublicKey,
+        epoch: &Unsigned,
+        kind: &Unsigned,
+        fields: &Payload,
+        limits: Limits,
+    ) -> Result<SignedTransaction<Transaction>, Error> {
+        self.host.create_vote(voter, epoch, kind, fields, limits)
+    }
+    fn publish(&mut self, vote: SignedTransaction<Transaction>) -> Result<bool, Error> {
+        let check = self
+            .checker
+            .as_mut()
+            .map(|c| &mut **c as &mut dyn FnMut(Hash256) -> bool);
+        self.host.publish_using(vote, check)
+    }
+    fn finalize(
+        &mut self,
+        epoch: &Unsigned,
+        leader: AccountPublicKey,
+        calldata: &[u8],
+        nonce_offset: &Unsigned,
+        view: Option<&Self::View>,
+    ) -> Result<Finalized, Error> {
+        self.host
+            .finalize(epoch, leader, calldata, nonce_offset, view)
     }
 }

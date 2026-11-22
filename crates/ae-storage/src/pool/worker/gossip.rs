@@ -118,6 +118,30 @@ impl GossipCache {
             .unwrap_or(false)
     }
 }
+impl ae_mempool::gossip::Transactional for GossipCache {
+    fn transact(&self, operation: ae_mempool::gossip::Transaction<'_>) {
+        let instance = self.instance().ok();
+        let mut guard = None;
+        let mut staged = None;
+        let mut attempted = false;
+        // Do not lock/clone for callbacks that never check a transaction hash
+        // (notably parent/finalization I/O). At most one bounded lock attempt
+        // is made per callback. A retired instance never overwrites its successor.
+        let commit = operation(&mut |hash| {
+            if !attempted {
+                attempted = true;
+                guard = instance
+                    .as_ref()
+                    .and_then(|cache| self.lock(cache, false).ok());
+                staged = guard.as_deref().cloned();
+            }
+            staged.as_mut().is_some_and(|cache| cache.check(hash))
+        });
+        if commit && let (Some(mut guard), Some(staged)) = (guard, staged) {
+            *guard = staged;
+        }
+    }
+}
 impl Client {
     pub fn gossip_cache(&self) -> GossipCache {
         self.shared.gossip.clone()

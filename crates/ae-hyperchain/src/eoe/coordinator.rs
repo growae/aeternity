@@ -117,6 +117,7 @@ pub struct Coordinator<A = MemoryStore, C = MemoryStore> {
     restarts: VecDeque<u64>,
     now: u64,
     stopped: bool,
+    gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
 }
 fn index(mode: Mode) -> usize {
     match mode {
@@ -147,6 +148,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
             restarts: VecDeque::new(),
             now: 0,
             stopped: false,
+            gossip: None,
         }
     }
     pub fn machine(&self, mode: Mode) -> &Machine {
@@ -175,6 +177,14 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
     }
     pub fn select_tip(&mut self, tip: SelectedTip<A, C>) {
         self.host.select_tip(tip);
+    }
+    // The live service overrides the offline membership snapshot. Its cache
+    // incarnation is independent of both EOE children and their vote pool.
+    pub fn set_live_gossip_cache(
+        &mut self,
+        cache: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
+    ) {
+        self.gossip = cache;
     }
     pub fn set_gossip_cache(&mut self, hashes: BTreeSet<Hash256>) -> Result<(), Error> {
         self.host.set_gossip_cache(hashes).map_err(Error::Host)
@@ -221,6 +231,29 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
         *self = next;
         Ok(value)
     }
+    fn transact_cached<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, Option<&mut dyn FnMut(Hash256) -> bool>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Some(cache) = self.gossip.clone() else {
+            return self.transact(|next| operation(next, None));
+        };
+        let mut result = None;
+        cache.transact(Box::new(|checker| {
+            let value = self.transact(|next| operation(next, Some(checker)));
+            // Native rejection still records the first-level cache miss.
+            // Operational failure rolls back the complete callback, including
+            // a late queue/outbox failure after admission already succeeded.
+            let commit = match &value {
+                Ok(_) => true,
+                Err(Error::Host(e)) => !e.is_operational(),
+                _ => false,
+            };
+            result = Some(value);
+            commit
+        }));
+        result.expect("cache transaction executes its operation")
+    }
     fn clock(&mut self, now: u64) -> Result<(), Error> {
         if now < self.now {
             Err(Error::TimeWentBackwards)
@@ -249,8 +282,11 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
         signed: SignedTransaction<Transaction>,
         event: hc_votes::Event,
     ) -> Result<PushOutcome, Error> {
-        self.transact(|next| {
-            let result = next.host.admit(signed, event).map_err(Error::Host)?;
+        self.transact_cached(|next, checker| {
+            let result = next
+                .host
+                .admit_using(signed, event, checker)
+                .map_err(Error::Host)?;
             next.route_outputs()?;
             Ok(result)
         })
@@ -403,7 +439,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
         if self.queue.is_empty() {
             return Ok(false);
         }
-        self.transact(|next| {
+        self.transact_cached(|next, checker| {
             let queued = next.queue.pop_front().unwrap();
             next.queued_bytes -= queued.bytes;
             let i = index(queued.mode);
@@ -414,8 +450,15 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
                 return Ok(true);
             }
             let old_state = next.children[i].state();
-            let result =
-                next.children[i].step(queued.event, &mut next.host, order, next.config.machine);
+            let result = next.children[i].step_staged(
+                queued.event,
+                &mut local_host::Cached {
+                    host: &mut next.host,
+                    checker,
+                },
+                order,
+                next.config.machine,
+            );
             next.clock(action_time())?;
             match result {
                 Ok(t) => {

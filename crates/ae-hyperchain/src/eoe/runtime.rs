@@ -63,6 +63,7 @@ pub enum Command<A = MemoryStore, C = MemoryStore> {
     Votes(VoteQuery),
     SelectTip(SelectedTip<A, C>),
     GossipCache(BTreeSet<Hash256>),
+    LiveGossipCache(Option<Arc<dyn ae_mempool::gossip::Transactional>>),
     Finalize {
         request: u64,
         view: Arc<Trees<A, C>>,
@@ -401,6 +402,7 @@ fn apply<A: NodeReader + Clone, C: NodeReader + Clone>(
         }
         Command::SelectTip(tip) => service.select_tip(tip),
         Command::GossipCache(hashes) => service.set_gossip_cache(hashes)?,
+        Command::LiveGossipCache(cache) => service.set_live_gossip_cache(cache),
         Command::Finalize { request, view } => service.request_finalize(request, view, now)?,
         Command::CancelRequest(request) => service.cancel_request(request)?,
         Command::Configure(config) => service.set_config(config),

@@ -318,3 +318,152 @@ fn managed_cache_lifecycle_matches_original_registered_process() {
         assert!(owner.is_none());
     }
 }
+
+#[test]
+fn transactional_checks_preserve_fifo_and_stats_on_rollback_and_exclude_concurrent_checks() {
+    use ae_mempool::gossip::Transactional;
+    let cache = GossipCache::new(2, 4).unwrap();
+    let a = ae_types::Hash256([1; 32]);
+    let b = ae_types::Hash256([2; 32]);
+    let c = ae_types::Hash256([3; 32]);
+    assert!(!cache.check(a));
+    assert!(!cache.check(b));
+    let before = cache.stats().unwrap();
+    cache.transact(Box::new(|check| {
+        assert!(!check(c));
+        assert!(check(b));
+        false
+    }));
+    assert_eq!(cache.stats().unwrap(), before);
+    let instance = cache.instance().unwrap();
+    assert_eq!(
+        instance.lock().unwrap().entries().collect::<Vec<_>>(),
+        vec![a, b]
+    );
+    let (ready, started) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let first = cache.clone();
+    let holder = thread::spawn(move || {
+        first.transact(Box::new(|check| {
+            assert!(!check(c));
+            ready.send(()).unwrap();
+            wait.recv().unwrap();
+            true
+        }))
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (done, completed) = mpsc::channel();
+    let second = cache.clone();
+    let reader = thread::spawn(move || done.send(second.check(c)).unwrap());
+    assert!(completed.recv_timeout(Duration::from_millis(20)).is_err());
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(completed.recv_timeout(Duration::from_secs(2)).unwrap());
+    reader.join().unwrap();
+    assert_eq!(
+        instance.lock().unwrap().entries().collect::<Vec<_>>(),
+        vec![b, c]
+    );
+    assert_eq!(cache.stats().unwrap().miss, 3.into());
+    assert_eq!(cache.stats().unwrap().hit, 1.into());
+    // A callback with no hash lookup never holds the cache lock.
+    cache.transact(Box::new(|_| {
+        cache.reset().unwrap();
+        cache.reconfigure(3).unwrap();
+        true
+    }));
+    assert_eq!(cache.stats().unwrap(), Default::default());
+}
+#[test]
+fn cache_transaction_retirement_never_overwrites_the_replacement_instance() {
+    use ae_mempool::gossip::Transactional;
+    let (cache, mut controller) = GossipCache::managed(2, 4).unwrap();
+    let owner = controller.start().unwrap();
+    let a = ae_types::Hash256([1; 32]);
+    let b = ae_types::Hash256([2; 32]);
+    let (ready, started) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let held = cache.clone();
+    let task = thread::spawn(move || {
+        held.transact(Box::new(|check| {
+            assert!(!check(a));
+            assert!(!check(b));
+            ready.send(()).unwrap();
+            wait.recv().unwrap();
+            true
+        }))
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    owner.shutdown();
+    let replacement = controller.start().unwrap();
+    assert!(!cache.check(a));
+    release.send(()).unwrap();
+    task.join().unwrap();
+    assert_eq!(cache.stats().unwrap().miss, 1.into());
+    assert_eq!(cache.stats().unwrap().hit, 0.into());
+    assert!(!cache.check(b));
+    assert!(replacement.is_running());
+    replacement.shutdown();
+    cache.transact(Box::new(|check| {
+        assert!(!check(a));
+        assert!(!check(a));
+        true
+    }));
+    let _replacement = controller.start().unwrap();
+    assert_eq!(cache.stats().unwrap(), Default::default());
+}
+#[test]
+fn transactional_cache_timeout_fails_open_without_a_late_write() {
+    use ae_mempool::gossip::Transactional;
+    let cache = GossipCache::default().with_timeout(Duration::from_millis(5));
+    let instance = cache.instance().unwrap();
+    let guard = instance.lock().unwrap();
+    let start = Instant::now();
+    cache.transact(Box::new(|check| {
+        for _ in 0..100 {
+            assert!(!check(ae_types::Hash256([1; 32])));
+        }
+        true
+    }));
+    assert!(start.elapsed() < Duration::from_millis(200));
+    drop(guard);
+    assert_eq!(cache.stats().unwrap(), Default::default());
+    assert!(!cache.check(ae_types::Hash256([1; 32])));
+}
+
+#[test]
+fn reset_and_reconfigure_follow_the_committed_cache_transaction() {
+    use ae_mempool::gossip::Transactional;
+    let (cache, mut controller) = GossipCache::managed(2, 4).unwrap();
+    let owner = controller.start().unwrap();
+    let (ready, started) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let held = cache.clone();
+    let first = thread::spawn(move || {
+        held.transact(Box::new(|check| {
+            assert!(!check(ae_types::Hash256([1; 32])));
+            ready.send(()).unwrap();
+            wait.recv().unwrap();
+            true
+        }))
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let later = cache.clone();
+    let (done, completed) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        later.reconfigure(1).unwrap();
+        later.reset().unwrap();
+        done.send(()).unwrap();
+    });
+    assert!(completed.recv_timeout(Duration::from_millis(20)).is_err());
+    release.send(()).unwrap();
+    first.join().unwrap();
+    completed.recv_timeout(Duration::from_secs(2)).unwrap();
+    writer.join().unwrap();
+    assert_eq!(cache.stats().unwrap(), Default::default());
+    assert_eq!(cache.instance().unwrap().lock().unwrap().capacity(), 1);
+    owner.shutdown();
+    let _replacement = controller.start().unwrap();
+    assert_eq!(cache.instance().unwrap().lock().unwrap().capacity(), 1);
+    assert_eq!(cache.stats().unwrap(), Default::default());
+}

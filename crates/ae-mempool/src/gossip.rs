@@ -3,6 +3,15 @@
 use ae_types::{Hash256, Unsigned};
 use std::collections::{BTreeSet, VecDeque};
 
+pub type Transaction<'a> = Box<dyn FnOnce(&mut dyn FnMut(Hash256) -> bool) -> bool + 'a>;
+// Service boundary for a callback whose local effects may roll back. Execute
+// the operation exactly once; true commits all checks, false discards them.
+// Unavailable caches supply a checker that always misses. Implementations
+// must exclude concurrent cache mutations while staging/committing a view.
+pub trait Transactional: Send + Sync {
+    fn transact(&self, operation: Transaction<'_>);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stats {
     pub hit: Unsigned,
