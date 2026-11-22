@@ -94,6 +94,15 @@ fn setup(
     index: usize,
     profile_name: &str,
 ) -> (Arc<Database>, Config<Otp26>) {
+    setup_events(path, corpus, index, profile_name, Default::default())
+}
+fn setup_events(
+    path: &super::Temporary,
+    corpus: &J,
+    index: usize,
+    profile_name: &str,
+    events: ae_storage::events::Config,
+) -> (Arc<Database>, Config<Otp26>) {
     let row = &corpus["rows"][index];
     let network = NetworkProfile::custom(
         b"ae_hc_reference".to_vec(),
@@ -173,7 +182,14 @@ fn setup(
         limits: Default::default(),
     };
     let db = Arc::new(
-        Database::open_with_config(&path.0, config.identity.clone(), read_config()).unwrap(),
+        Database::open_with_events(
+            &path.0,
+            config.identity.clone(),
+            read_config(),
+            Default::default(),
+            events,
+        )
+        .unwrap(),
     );
     let t = &row["genesis"]["trees"];
     let a = tree(&t["accounts"]);
@@ -214,6 +230,22 @@ pub struct Node {
     temporary: super::Temporary,
 }
 impl Node {
+    pub fn with_events(events: ae_storage::events::Config) -> Self {
+        let temporary = super::Temporary(std::env::temp_dir().join(format!(
+            "ae-hc-events-{}-{}",
+            std::process::id(),
+            super::NEXT.fetch_add(1, Ordering::Relaxed)
+        )));
+        let (db, config) = setup_events(&temporary, &DATA, 0, "profile", events);
+        Self {
+            db,
+            config,
+            index: 0,
+            corpus: &DATA,
+            profile_name: "profile",
+            temporary,
+        }
+    }
     pub fn new(index: usize) -> Self {
         Self::from_corpus(&DATA, index)
     }

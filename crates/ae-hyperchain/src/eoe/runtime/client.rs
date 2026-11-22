@@ -58,6 +58,12 @@ impl<A, C> Client<A, C> {
     pub fn is_closed(&self) -> bool {
         !self.control.alive.load(Ordering::Acquire) || self.control.stop.load(Ordering::Acquire)
     }
+    // Fail closed when an authoritative input source is lost. The output owner
+    // still owns draining/abandoning outputs and joining Runtime::shutdown.
+    // Accepted calls without replies remain unknown; never rebind or retry them.
+    pub fn request_stop(&self) {
+        self.control.stop.store(true, Ordering::Release);
+    }
     pub fn outstanding(&self) -> usize {
         self.control.calls.load(Ordering::Acquire)
     }

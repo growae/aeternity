@@ -26,6 +26,7 @@ pub enum Error {
     Finalization(finalization::Error),
     MissingKey(AccountPublicKey),
     ParentCache(cache::Error),
+    SelectedState(SelectedError),
 }
 impl Error {
     pub fn is_operational(&self) -> bool {
@@ -105,10 +106,22 @@ pub struct SelectedTip<A = MemoryStore, C = MemoryStore> {
     pub protocol: Protocol,
     pub consensus: ConsensusType,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedError {
+    ResourceLimit,
+    Backend(String),
+}
+// The live node captures one actual selected snapshot per operation. Pending
+// finalization asks for the current top when it completes, not the tip from a
+// possibly delayed top_changed notification. Explicit caller views bypass it.
+pub trait SelectedSource<A, C>: Send + Sync {
+    fn capture(&self) -> Result<SelectedTip<A, C>, SelectedError>;
+}
 #[derive(Clone)]
 pub struct LocalHost<A = MemoryStore, C = MemoryStore> {
     config: Config,
     tip: SelectedTip<A, C>,
+    selected_source: Option<Arc<dyn SelectedSource<A, C>>>,
     keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
     pool: VotePool,
     gossip: BTreeSet<Hash256>,
@@ -128,6 +141,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         Self {
             config,
             tip,
+            selected_source: None,
             keys: Arc::new(keys),
             pool: VotePool::default(),
             gossip: BTreeSet::new(),
@@ -141,6 +155,10 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     }
     pub fn select_tip(&mut self, tip: SelectedTip<A, C>) {
         self.tip = tip;
+    }
+    pub fn with_selected_source(mut self, source: Arc<dyn SelectedSource<A, C>>) -> Self {
+        self.selected_source = Some(source);
+        self
     }
     pub fn pool(&self) -> &VotePool {
         &self.pool
@@ -255,6 +273,19 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         event: hc_votes::Event,
         checker: Option<&mut dyn FnMut(Hash256) -> bool>,
     ) -> Result<PushOutcome, Error> {
+        let hash =
+            hc_votes::admission_hash(&signed, self.config.limits.pool).map_err(Error::Pool)?;
+        if checker.map_or_else(|| self.gossip.contains(&hash), |check| check(hash)) {
+            return Ok(PushOutcome::Cached);
+        }
+        // Native cache hits do not read the chain, including during recovery.
+        // On a miss, even wrong-type validation follows selected-state capture.
+        let selected = self
+            .selected_source
+            .as_ref()
+            .map(|s| s.capture().map_err(Error::SelectedState))
+            .transpose()?;
+        let tip = selected.as_ref().unwrap_or(&self.tip);
         let mut pool = self.pool.clone();
         let outcome = pool
             .push(
@@ -262,11 +293,11 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
                 event,
                 &Admission {
                     network: &self.config.network,
-                    protocol: self.tip.protocol,
-                    consensus: self.tip.consensus,
+                    protocol: tip.protocol,
+                    consensus: tip.consensus,
                     limits: self.config.limits.pool,
                 },
-                |hash| checker.map_or_else(|| self.gossip.contains(&hash), |check| check(hash)),
+                |_| false,
             )
             .map_err(Error::Pool)?;
         if matches!(outcome, PushOutcome::Accepted { .. }) {
@@ -343,7 +374,14 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
         nonce_offset: &Unsigned,
         view: Option<&Self::View>,
     ) -> Result<Finalized, Error> {
-        let Some(trees) = view.cloned().or_else(|| self.tip.trees.clone()) else {
+        let trees = match view {
+            Some(view) => Some(view.clone()),
+            None => match &self.selected_source {
+                Some(source) => source.capture().map_err(Error::SelectedState)?.trees,
+                None => self.tip.trees.clone(),
+            },
+        };
+        let Some(trees) = trees else {
             return Ok(Finalized::TopUnavailable);
         };
         let child_epoch = epoch.add(&2.into());
