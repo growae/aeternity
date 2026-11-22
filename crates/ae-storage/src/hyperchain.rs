@@ -2,7 +2,7 @@ use crate::{Committed, Database, Snapshot};
 use ae_chain::{block::Block, repository as repo};
 use ae_hyperchain::block::{Host, State};
 use ae_vm_fate::maps::MapOrder;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 pub mod candidate;
 #[cfg(test)]
 mod tests;
@@ -101,6 +101,7 @@ pub struct Owner<O, H> {
     config: Config<O>,
     live: Mutex<Live<H>>,
     _lease: Arc<()>,
+    pinning: Mutex<Weak<()>>,
 }
 impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
     pub fn start(database: Arc<Database>, config: Config<O>, host: H) -> Result<Self, repo::Error> {
@@ -142,7 +143,20 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
                 failed: false,
             }),
             _lease: checkpoint.1,
+            pinning: Mutex::new(Weak::new()),
         })
+    }
+    pub fn pinning_lease(&self) -> Result<Arc<()>, repo::Error> {
+        let mut lease = self
+            .pinning
+            .lock()
+            .map_err(|_| repo::Error::Backend("poisoned pinning lease".into()))?;
+        if lease.upgrade().is_some() {
+            return Err(repo::Error::Backend("pinning owner already active".into()));
+        }
+        let token = Arc::new(());
+        *lease = Arc::downgrade(&token);
+        Ok(token)
     }
     pub fn snapshot(&self) -> Result<(u64, State, H), repo::Error> {
         let mut live = self
@@ -161,6 +175,41 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
             live.state = checkpoint.state;
         }
         Ok((live.revision, live.state.clone(), live.host.clone()))
+    }
+    // aec_consensus_hc:leader_for_height is cache-only; it must never compute
+    // or install a schedule on behalf of the pinning agent.
+    pub fn cached_leader(
+        &self,
+        height: &num_bigint::BigInt,
+    ) -> Result<Option<ae_types::AccountPublicKey>, repo::Error> {
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| repo::Error::Backend("poisoned Hyperchain owner".into()))?;
+        if live.failed || self.database.events().info().failure.is_some() {
+            return Err(repo::Error::Backend(
+                "Hyperchain storage requires reopen".into(),
+            ));
+        }
+        let view = self.database.view()?;
+        if live.revision != view.status().revision {
+            let checkpoint = view.hyperchain_checkpoint()?;
+            live.revision = checkpoint.revision;
+            live.state = checkpoint.state;
+        }
+        match live.state.leaders.leader(height) {
+            Ok(ae_vm_fate::value::ObjectPayload::Bytes(bytes)) => {
+                Ok(Some(ae_types::AccountPublicKey(
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| repo::Error::Corrupt("cached leader width"))?,
+                )))
+            }
+            Ok(_) => Err(repo::Error::Corrupt("cached leader type")),
+            Err(ae_hyperchain::leader::Error::NotInCache) => Ok(None),
+            Err(_) => Err(repo::Error::Corrupt("cached leader lookup")),
+        }
     }
     // Producer and validation share this serial cache authority. The parent
     // snapshot is immutable; this callback performs no network/service I/O.

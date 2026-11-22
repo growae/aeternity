@@ -203,6 +203,24 @@ impl<O: MapOrder + Clone> Producer<O> {
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {
         self.database.ptr_eq(&Arc::downgrade(database))
     }
+    pub(crate) fn pinning_lease(&self) -> Result<Arc<()>, Error> {
+        self.check()?;
+        Ok(self.owner.upgrade().ok_or(Error::Closed)?.pinning_lease()?)
+    }
+    pub fn cached_leader(
+        &self,
+        height: &num_bigint::BigInt,
+    ) -> Result<Option<ae_types::AccountPublicKey>, Error> {
+        let context = self.context.upgrade().ok_or(Error::Closed)?;
+        producer_guard(&context)?;
+        let result = self
+            .owner
+            .upgrade()
+            .ok_or(Error::Closed)?
+            .cached_leader(height)?;
+        producer_guard(&context)?;
+        Ok(result)
+    }
     pub fn prepare(
         &self,
         request: storage::ProducerRequest,

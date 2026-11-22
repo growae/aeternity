@@ -203,6 +203,40 @@ fn setup_corpus(path: &Temp, corpus: &J, index: usize) -> (Arc<Database>, Config
 }
 
 #[test]
+fn pinning_lease_is_exclusive_and_leader_lookup_does_not_create_a_schedule() {
+    let path = Temp::new();
+    let (db, config) = setup(&path);
+    let owner = Owner::start(db, config, Parent::default()).unwrap();
+    let lease = owner.pinning_lease().unwrap();
+    let retained = lease.clone();
+    assert!(owner.pinning_lease().is_err());
+    drop(lease);
+    assert!(owner.pinning_lease().is_err());
+    drop(retained);
+    let _replacement = owner.pinning_lease().unwrap();
+    let before = owner.snapshot().unwrap();
+    assert_eq!(owner.cached_leader(&1.into()).unwrap(), None);
+    assert_eq!(owner.snapshot().unwrap(), before);
+    let b = block(&DATA["rows"][0]["rows"][0]);
+    owner.insert(&b, 1_000_000, Origin::Gossip).unwrap();
+    let after = owner.snapshot().unwrap();
+    assert!(!after.1.leaders.schedule().is_empty());
+    for (height, leader) in after.1.leaders.schedule() {
+        let ae_vm_fate::value::ObjectPayload::Bytes(bytes) = leader else {
+            panic!()
+        };
+        assert_eq!(
+            owner.cached_leader(height).unwrap(),
+            Some(AccountPublicKey(bytes.as_slice().try_into().unwrap()))
+        );
+    }
+    assert_eq!(owner.cached_leader(&1_000_000.into()).unwrap(), None);
+    assert_eq!(owner.snapshot().unwrap(), after);
+    owner.live.lock().unwrap().failed = true;
+    assert!(owner.cached_leader(&1.into()).is_err());
+}
+
+#[test]
 fn unacknowledged_hc_writes_never_install_live_caches_or_publish_success() {
     for mode in [1, 2] {
         let path = Temp::new();

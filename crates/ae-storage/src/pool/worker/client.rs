@@ -211,6 +211,12 @@ impl Client {
     pub fn inspect(&self, hash: Hash256) -> Result<Ticket<policy::Inspection>, Error> {
         self.submit(BASE_WEIGHT, move |s| s.inspect(hash))
     }
+    pub fn minimum_miner_gas_price(&self) -> Result<Ticket<Unsigned>, Error> {
+        self.submit(BASE_WEIGHT, |s| Ok(s.minimum_miner_gas_price()))
+    }
+    pub fn next_nonce(&self, account: AccountPublicKey) -> Result<Ticket<Option<Unsigned>>, Error> {
+        self.submit(BASE_WEIGHT, move |s| s.next_nonce(account))
+    }
     pub fn max_nonce(&self, account: AccountPublicKey) -> Result<Ticket<Option<Unsigned>>, Error> {
         self.submit(BASE_WEIGHT, move |s| s.max_nonce(account))
     }

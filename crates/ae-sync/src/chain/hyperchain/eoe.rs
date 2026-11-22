@@ -59,6 +59,9 @@ fn state_error(e: snapshots::Error) -> local_host::SelectedError {
     }
 }
 impl Source {
+    pub(crate) fn uses_database(&self, database: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(database))
+    }
     pub(crate) fn matches(&self, identity: &repo::Identity, network: &NetworkProfile) -> bool {
         &self.identity == identity && &self.network == network
     }

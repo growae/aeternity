@@ -1,6 +1,6 @@
 // Continuous PoS production and owned child shutdown. Scheduling follows
 // aec_conductor (aeternity fa2a6d7); ISC copyright: repository LICENSE.
-use super::{delivery, eoe, scoped};
+use super::{delivery, eoe, pinning, scoped};
 use crate::{chain, resilience, votes};
 use ae_chain::{publication, repository as repo};
 use ae_crypto::Ed25519SecretKey;
@@ -30,6 +30,8 @@ pub struct ParentConfig {
     pub seed: [u8; 16],
 }
 pub struct PinConfig {
+    pub signing: Option<crate::parent_pins::posting::Signing>,
+    pub agent: Option<pinning::Config>,
     pub nodes: Vec<crate::parent_pins::Node>,
     pub service: crate::parent_pins::Config,
 }
@@ -65,10 +67,12 @@ pub enum Error {
     Owner(owner::Error),
     Delivery(delivery::Error),
     Production(production::Error),
+    Pinning(pinning::Error),
     Supervision(eoe_runtime::Output),
 }
 #[derive(Debug)]
 pub enum Output {
+    Pinning(Box<pinning::Report>),
     Attempt(production::Completed),
     Stopped(Box<production::Stopped>),
     Rejected {
@@ -123,6 +127,7 @@ pub struct Shutdown<O> {
     pub parent: Result<cache::Exit, String>,
     pub connector_joined: bool,
     pub pins_joined: bool,
+    pub pinning: Option<Result<pinning::Exit, pinning::Error>>,
     pub resilience: Option<Result<(), resilience::Error>>,
 }
 pub struct TopDelivery {
@@ -142,6 +147,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     parent: Option<cache::Runtime>,
     connector: Option<connector::Runtime>,
     pins: Option<crate::parent_pins::Service>,
+    pinning: Option<pinning::Service>,
     resilience: Option<resilience::Owner>,
     resilience_worker: Option<resilience::Worker>,
     resilience_config: Option<resilience::Config>,
@@ -251,11 +257,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         .map_err(Error::Source)?;
         let targets = targets(selected.clone(), &execution)?;
         // Build both directions together. No replaceable connector link escapes.
+        let agent = config.parent.pins.as_ref().and_then(|p| p.agent.clone());
+        let pin_execution = agent.as_ref().map(|_| execution.clone());
         let pins = config
             .parent
             .pins
             .take()
-            .map(|pins| crate::parent_pins::Service::spawn(pins.nodes, pins.service))
+            .map(|pins| {
+                crate::parent_pins::Service::spawn_with_signing(
+                    pins.nodes,
+                    pins.service,
+                    pins.signing,
+                )
+            })
             .transpose()
             .map_err(|e| Error::Parent(format!("pin service: {e:?}")))?;
         config.production.parent_pins = pins.as_ref().map(crate::parent_pins::Service::client);
@@ -310,8 +324,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             votes::Publications::new(&database, config.eoe.votes).map_err(Error::Votes)?;
         let owner = owner::Owner::start(
             owner::Inputs {
-                source: selected,
-                database,
+                source: selected.clone(),
+                database: database.clone(),
                 publications,
                 gossip: config.gossip,
                 parent: Some(parent.client()),
@@ -322,6 +336,23 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         )
         .map_err(Error::Owner)?;
         let delivery = owner.parent_delivery(accepted).map_err(Error::Owner)?;
+        let pinning = agent
+            .map(|config| {
+                pinning::Service::spawn(
+                    pinning::Inputs {
+                        database,
+                        source: selected,
+                        execution: pin_execution.expect("agent execution"),
+                        producer: producer.clone(),
+                        pool: pool.client(),
+                        parent: pins.as_ref().expect("configured parent pins").client(),
+                        keys: owner.signing().clone(),
+                    },
+                    config,
+                )
+            })
+            .transpose()
+            .map_err(Error::Pinning)?;
         Ok(Self {
             owner: Some(owner),
             importer: Arc::new(importer),
@@ -332,6 +363,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             parent: Some(parent),
             connector: Some(connector),
             pins,
+            pinning,
             resilience,
             resilience_worker,
             resilience_config: config.resilience,
@@ -396,6 +428,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn parent_pins(&self) -> Option<crate::parent_pins::Client> {
         self.pins.as_ref().map(crate::parent_pins::Service::client)
+    }
+    pub fn pinning(&self) -> Option<pinning::Handle> {
+        self.pinning.as_ref().map(pinning::Service::handle)
     }
     pub fn attempt(&self) -> Option<&production::Attempt<O>> {
         self.attempt.as_ref()
@@ -481,6 +516,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // shutdown still joins every child and transfers this output intact.
         if self.pending.is_some() {
             return Ok(Progress::Output);
+        }
+        if let Some(agent) = &self.pinning {
+            if let Some(report) = agent.try_output() {
+                self.pending = Some(Output::Pinning(Box::new(report)));
+                return Ok(Progress::Output);
+            }
+            if let Some(error) = agent.handle().status().failure {
+                return Err(Error::Pinning(error));
+            }
         }
         let mut advanced = self.consume_events()?;
         let owner = self.owner.as_mut().expect("owner");
@@ -675,6 +719,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if let Some(attempt) = &mut self.attempt {
             attempt.cancel();
         }
+        if let Some(agent) = &self.pinning {
+            agent.handle().request_stop();
+        }
         self.importer.stop();
         if let Some(pins) = &self.pins {
             pins.stop();
@@ -705,8 +752,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // Delivery itself retains its previously acquired batch and receipt.
         let mut delivery = self.delivery.take().expect("delivery");
         let accepted = delivery.take_source_after_join();
+        let mut pinning = self.pinning.take().map(pinning::Service::shutdown);
         let owner = self.owner.take().expect("owner").shutdown();
         let pool = self.pool.take().expect("pool").shutdown();
+        if let Some(Ok(exit)) = &mut pinning {
+            exit.poll_children();
+        }
+        if let Some(Output::Pinning(report)) = &mut self.pending {
+            report.poll_children();
+        }
         let parent = self
             .parent
             .take()
@@ -735,6 +789,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             parent,
             connector_joined,
             pins_joined,
+            pinning,
             resilience,
         }
     }

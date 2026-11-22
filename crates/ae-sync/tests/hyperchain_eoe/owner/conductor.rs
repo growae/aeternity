@@ -4,6 +4,8 @@ mod connections;
 mod controls;
 #[path = "conductor/parent_http.rs"]
 mod parent_http;
+#[path = "conductor/pinning.rs"]
+mod pinning;
 #[path = "conductor/pins.rs"]
 mod pins;
 #[path = "conductor/targets.rs"]

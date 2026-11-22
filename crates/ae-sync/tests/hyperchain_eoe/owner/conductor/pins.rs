@@ -5,6 +5,8 @@ use std::sync::atomic::Ordering;
 fn configured(node: &Node, parent: &pinned::Parent) -> Conductor<Otp26> {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        signing: None,
+        agent: None,
         nodes: vec![parent.node.clone()],
         service: ae_sync::parent_pins::Config {
             maximum_pending: 1,
@@ -217,12 +219,16 @@ fn failed_pin_service_start_releases_all_constructor_leases() {
     let node = Node::new(0);
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        signing: None,
+        agent: None,
         nodes: vec![],
         service: Default::default(),
     });
     assert!(matches!(new(&node, cfg), Err(conductor::Error::Parent(_))));
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        signing: None,
+        agent: None,
         nodes: vec![],
         service: Default::default(),
     });

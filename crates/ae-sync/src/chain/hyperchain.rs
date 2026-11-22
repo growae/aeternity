@@ -5,6 +5,7 @@ pub mod conductor;
 pub mod delivery;
 pub mod eoe;
 pub mod packing;
+pub mod pinning;
 pub mod scoped;
 pub mod targets;
 

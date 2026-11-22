@@ -513,6 +513,32 @@ impl Service {
         self.finish(&stored, plan, || Ok(()))?;
         Ok(value)
     }
+    pub fn minimum_miner_gas_price(&self) -> Unsigned {
+        self.live.pool.config().minimum_miner_gas_price.clone()
+    }
+    // Native max strategy: generalized accounts use zero; otherwise choose
+    // max(selected account nonce, pooled nonce)+1. Missing accounts stay None.
+    pub fn next_nonce(&mut self, account: AccountPublicKey) -> Result<Option<Unsigned>, Failure> {
+        let db = self.db.clone();
+        let stored = db.pool_view()?;
+        let plan = self.plan(&stored)?;
+        let (hash, _) = tip(&stored)?;
+        let trees = stored.chain.trees(hash, self.config.overlay)?;
+        let value = match lookup(&trees.accounts, account)? {
+            None => None,
+            Some(account) if account.generalized => Some(0.into()),
+            Some(info) => Some(
+                plan.live
+                    .pool
+                    .max_nonce(account)
+                    .unwrap_or(&info.nonce)
+                    .max(&info.nonce)
+                    .add(&1.into()),
+            ),
+        };
+        self.finish(&stored, plan, || Ok(()))?;
+        Ok(value)
+    }
     pub fn max_nonce(&mut self, account: AccountPublicKey) -> Result<Option<Unsigned>, Failure> {
         let db = self.db.clone();
         let stored = db.pool_view()?;
