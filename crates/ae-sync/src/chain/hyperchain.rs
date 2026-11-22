@@ -1,6 +1,7 @@
 use super::*;
 use ae_hyperchain::block::Host;
 use ae_storage::{Committed, Snapshot, hyperchain as storage};
+pub mod conductor;
 pub mod delivery;
 pub mod eoe;
 pub mod packing;

@@ -86,6 +86,9 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
             acknowledged: 0,
         }
     }
+    pub(crate) fn take_source_after_join(&mut self) -> Result<Effects, chain::Error> {
+        self.source.take()
+    }
     pub fn pending(&self) -> &VecDeque<Effect> {
         &self.pending
     }

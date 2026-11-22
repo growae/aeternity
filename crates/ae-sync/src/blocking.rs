@@ -296,6 +296,9 @@ impl Pool {
     pub fn stop(&self) {
         self.0.stop();
     }
+    pub(crate) fn join_blocking(&self) {
+        self.0.join();
+    }
     pub async fn join(&self) {
         loop {
             if self

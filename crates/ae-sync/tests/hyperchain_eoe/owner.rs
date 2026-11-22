@@ -1,5 +1,7 @@
 #[path = "owner/candidate.rs"]
 mod candidate;
+#[path = "owner/conductor.rs"]
+mod conductor;
 #[path = "owner/producer.rs"]
 mod producer;
 #[path = "owner/production.rs"]
