@@ -68,6 +68,33 @@ fn integer(v: &Value) -> Option<Unsigned> {
         _ => None,
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidNegotiation;
+impl TryFrom<Negotiation> for eoe::Negotiation {
+    type Error = InvalidNegotiation;
+    fn try_from(n: Negotiation) -> Result<Self, Self::Error> {
+        let i = n.info;
+        Ok(Self {
+            epoch: integer(&i.epoch).ok_or(InvalidNegotiation)?,
+            height: unsigned(&n.slot).ok_or(InvalidNegotiation)?,
+            current_length: unsigned(&i.length).ok_or(InvalidNegotiation)?,
+            leader: address(&n.leader).ok_or(InvalidNegotiation)?,
+            validators: i
+                .validators
+                .ok_or(InvalidNegotiation)?
+                .into_iter()
+                .map(|s| {
+                    Ok((
+                        address(&s.address).ok_or(InvalidNegotiation)?,
+                        integer(&s.stake).ok_or(InvalidNegotiation)?,
+                    ))
+                })
+                .collect::<Result<_, Self::Error>>()?,
+            hash: n.hash,
+            seed: i.seed,
+        })
+    }
+}
 impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone, S: chain::Source<A, C>> block::Host
     for LiveHost<P, A, C, S>
 {
@@ -113,32 +140,8 @@ impl<P: PinSource, A: NodeReader + Clone, C: NodeReader + Clone, S: chain::Sourc
         Ok(address(key).is_some_and(|k| self.keys.set_candidate(k).is_ok()))
     }
     fn negotiate(&mut self, n: Negotiation) -> Result<(), Self::Error> {
-        let i = n.info;
-        let epoch = integer(&i.epoch).ok_or(Error::UnsupportedInput)?;
-        let height = unsigned(&n.slot).ok_or(Error::UnsupportedInput)?;
-        let current_length = unsigned(&i.length).ok_or(Error::UnsupportedInput)?;
-        let leader = address(&n.leader).ok_or(Error::UnsupportedInput)?;
-        let validators = i
-            .validators
-            .ok_or(Error::UnsupportedInput)?
-            .into_iter()
-            .map(|s| {
-                Ok((
-                    address(&s.address).ok_or(Error::UnsupportedInput)?,
-                    integer(&s.stake).ok_or(Error::UnsupportedInput)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Self::Error>>()?;
         self.coordinator
-            .negotiate(eoe::Negotiation {
-                epoch,
-                height,
-                hash: n.hash,
-                leader,
-                validators,
-                seed: i.seed,
-                current_length,
-            })
+            .negotiate(n.try_into().map_err(|_| Error::UnsupportedInput)?)
             .map_err(Error::Coordinator)
     }
 }

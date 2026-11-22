@@ -84,6 +84,65 @@ where
 pub struct Accepted<O, H> {
     owner: Weak<storage::Owner<O, H>>,
     database: Weak<Database>,
+    context: Weak<crate::chain::Context<O>>,
+}
+// Read/prepare capability for this exact execution owner. It does not keep a
+// retired importer alive or acquire a second leader cache.
+pub struct Producer<O> {
+    owner: Weak<storage::Owner<O, inputs::Effects>>,
+    database: Weak<Database>,
+    context: Weak<crate::chain::Context<O>>,
+}
+impl<O: MapOrder + Clone> Accepted<O, inputs::Effects> {
+    pub fn producer(&self) -> Producer<O> {
+        Producer {
+            owner: self.owner.clone(),
+            database: self.database.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
+impl<O: MapOrder + Clone> Producer<O> {
+    pub fn uses_database(&self, database: &Arc<Database>) -> bool {
+        self.database.ptr_eq(&Arc::downgrade(database))
+    }
+    pub fn prepare(
+        &self,
+        request: storage::ProducerRequest,
+        mut check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<storage::Produced, Error> {
+        let context = self.context.upgrade().ok_or(Error::Closed)?;
+        self.owner
+            .upgrade()
+            .ok_or(Error::Closed)?
+            .prepare_producer(request, || {
+                if context.stopped.load(Ordering::Acquire)
+                    || context.policy_scope.is_closed()
+                    || !context.db.policy_ready()
+                {
+                    return Err(Error::Closed);
+                }
+                if context.db.policy_recovery_required()
+                    || context
+                        .recovery
+                        .lock()
+                        .map_err(|_| Error::RecoveryRequired)?
+                        .is_some()
+                {
+                    return Err(Error::RecoveryRequired);
+                }
+                check()
+            })
+            .map_err(|e| match e {
+                storage::ProducerError::Repository(e) => Error::Storage(e),
+                storage::ProducerError::RecoveryRequired => Error::RecoveryRequired,
+                storage::ProducerError::Guard(e) => e,
+                storage::ProducerError::Execution(e) => Error::Validation {
+                    operational: e.operational,
+                    reason: e.reason,
+                },
+            })
+    }
 }
 impl<O: MapOrder + Clone, H: Clone + Default> Accepted<O, H> {
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {
@@ -142,10 +201,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
             execution,
             P::State::default(),
         )?);
-        let accepted = Accepted {
-            owner: Arc::downgrade(&owner),
-            database: Arc::downgrade(&db),
-        };
+        let weak_owner = Arc::downgrade(&owner);
+        let database = Arc::downgrade(&db);
         let importer = Self::with_strategy(
             db,
             strategy::Strategy::Hyperchain(Box::new(Strategy {
@@ -156,6 +213,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
             })),
             config,
         )?;
+        let accepted = Accepted {
+            owner: weak_owner,
+            database,
+            context: Arc::downgrade(&importer.context),
+        };
         Ok((importer, accepted))
     }
 }

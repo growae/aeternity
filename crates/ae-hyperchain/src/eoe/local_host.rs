@@ -172,6 +172,11 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     pub(crate) fn signing_keys(&self) -> Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>> {
         self.keys.clone()
     }
+    // Immutable key material is shared; candidate/active selection belongs to
+    // the producer's staged Keys value and exposes no secret bytes.
+    pub fn signer(&self) -> crate::signing::Keys {
+        crate::signing::Keys::from_shared(self.keys.clone())
+    }
     pub fn update_epoch(&mut self, epoch: Unsigned) {
         self.pool.update_epoch(epoch);
     }

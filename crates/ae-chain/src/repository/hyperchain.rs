@@ -13,6 +13,7 @@ use num_bigint::{BigInt, Sign};
 use std::sync::Arc;
 pub mod inputs;
 pub mod journal;
+pub mod producer;
 
 pub use ae_hyperchain::chain::Profile;
 pub type Reader<S, O> = chain::Reader<Overlay<S>, Overlay<S>, O, Snapshot<S>>;

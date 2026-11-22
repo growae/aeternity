@@ -5,6 +5,7 @@ use crate::votes;
 use ae_hyperchain::{eoe, parent_block::ParentBlock, parent_cache::runtime as parent};
 use ae_storage::pool::worker::GossipCache;
 
+pub mod producer;
 mod requests;
 use requests::Requests;
 pub use requests::{Completion, Request, RequestError};
@@ -50,12 +51,15 @@ pub enum Error {
     UnexpectedRequest(u64),
     CancelRejected(u64, coordinator::Error),
     WorkerPanicked,
+    Producer(super::super::delivery::Error),
+    ProductionSource(crate::chain::Error),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     Idle,
     Advanced,
     Backpressured,
+    ProducerReady,
     // ParentBlock has already been broadcast internally. Observing it here
     // must not send it back through NotifyParent. Supervision outputs likewise
     // need an explicit node policy; draining them is not successful recovery.
@@ -68,6 +72,7 @@ pub struct Shutdown {
     pub retained_vote: Option<runtime::Output>,
     pub epoch_cursor: events::Cursor,
     pub errors: Vec<Error>,
+    pub producer: Option<producer::Pending>,
 }
 pub struct Owner {
     source: Arc<Source>,
@@ -78,6 +83,9 @@ pub struct Owner {
     requests: Requests,
     pending: Option<runtime::Output>,
     failure: Option<Error>,
+    signing: ae_hyperchain::signing::Keys,
+    producer_binding: repo::hyperchain::producer::Binding,
+    production: Option<producer::Pending>,
 }
 impl Owner {
     pub fn start(
@@ -99,9 +107,16 @@ impl Owner {
             return Err(Error::Configuration);
         }
         let requests = Requests::new(config.calls)?;
+        let producer_binding = repo::hyperchain::producer::Binding {
+            network: config.eoe.host.network.clone(),
+            election: config.eoe.host.election_contract,
+            parent_start: config.eoe.host.parent_start_height.clone(),
+            parent_length: config.eoe.host.parent_epoch_length.clone(),
+            block_time: config.eoe.block_time.clone(),
+        };
         // Install both shared services before starting the runtime. No input
         // can race startup with an offline gossip cache or absent parent cache.
-        let Connected { runtime, epochs } = inputs
+        let (Connected { runtime, epochs }, signing) = inputs
             .source
             .connect_with(
                 config.eoe,
@@ -125,6 +140,9 @@ impl Owner {
             requests,
             pending: None,
             failure: None,
+            signing,
+            producer_binding,
+            production: None,
         })
     }
     fn client(&self) -> Client {
@@ -159,6 +177,65 @@ impl Owner {
     }
     pub fn pending_requests(&self) -> usize {
         self.requests.pending()
+    }
+    // This synchronous inspection runs through the importer's execution owner
+    // and its real snapshot. Drive step afterward to deliver accepted parent
+    // and negotiation effects before exposing the decision/signing selection.
+    pub fn prepare_producer<O: MapOrder + Clone>(
+        &mut self,
+        source: &super::super::scoped::Producer<O>,
+        input: producer::Input,
+    ) -> Result<(), Error> {
+        self.ready()?;
+        if self.production.is_some() {
+            return Err(Error::Backpressured);
+        }
+        let database = self.source.database.upgrade().ok_or(Error::Closed)?;
+        if !source.uses_database(&database) {
+            return Err(Error::Configuration);
+        }
+        let parent = self.parent.clone().ok_or(Error::Configuration)?;
+        let client = self.client();
+        let captured = parent.snapshot().cache;
+        let prepared = source
+            .prepare(
+                ae_storage::hyperchain::ProducerRequest {
+                    binding: self.producer_binding.clone(),
+                    input,
+                    keys: self.signing.clone(),
+                    parent: captured,
+                },
+                || {
+                    if parent.is_closed() || client.is_closed() {
+                        Err(crate::chain::Error::Closed)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .map_err(Error::ProductionSource)?;
+        self.production = Some(producer::Pending::new(prepared, parent, client));
+        Ok(())
+    }
+    pub fn production(&self) -> Option<&producer::Pending> {
+        self.production.as_ref()
+    }
+    pub fn take_production(&mut self) -> Option<producer::Decision> {
+        if self.failure.is_some()
+            || self.client().is_closed()
+            || !self
+                .production
+                .as_ref()
+                .is_some_and(producer::Pending::ready)
+        {
+            return None;
+        }
+        let (signing, decision) = self.production.take().expect("ready producer").finish();
+        self.signing = signing;
+        Some(decision)
+    }
+    pub fn signing(&self) -> &ae_hyperchain::signing::Keys {
+        &self.signing
     }
     // Capture the explicit caller view at invocation, as vote_results/0 does.
     // Pending callbacks still use LocalHost's then-current selected source.
@@ -233,9 +310,13 @@ impl Owner {
         match &self.failure {
             None | Some(Error::CancelRejected(_, _)) => (),
             Some(Error::Source(super::Error::ResourceLimit | super::Error::Rejected(_))) => (),
+            Some(Error::Producer(error)) if producer::retryable(error) => (),
             Some(e) => return Err(e.clone()),
         }
         self.epochs.retry(limits).map_err(Error::Source)?;
+        if let Some(production) = &mut self.production {
+            production.retry().map_err(Error::Producer)?;
+        }
         self.failure = None;
         Ok(())
     }
@@ -249,7 +330,8 @@ impl Owner {
                 e,
                 Error::CancelRejected(_, _)
                     | Error::Source(super::Error::ResourceLimit | super::Error::Rejected(_))
-            ) {
+            ) && !matches!(e,Error::Producer(error) if producer::retryable(error))
+            {
                 self.client().request_stop();
             }
             self.failure = Some(e.clone());
@@ -267,6 +349,13 @@ impl Owner {
         let client = self.client();
         let calls = self.requests.poll(&client)?;
         let epoch = self.epochs.step().map_err(Error::Source)?;
+        let producing = self
+            .production
+            .as_mut()
+            .map(producer::Pending::step)
+            .transpose()
+            .map_err(Error::Producer)?
+            .unwrap_or(false);
         let output = self.output.as_mut().expect("live owner");
         if self.pending.is_none() {
             match output.route().map_err(Error::Votes)? {
@@ -286,7 +375,14 @@ impl Owner {
             };
         }
         Ok(
-            if calls
+            if self
+                .production
+                .as_ref()
+                .is_some_and(producer::Pending::ready)
+            {
+                Progress::ProducerReady
+            } else if calls
+                || producing
                 || matches!(
                     epoch,
                     super::Progress::Loaded
@@ -331,6 +427,7 @@ impl Owner {
             retained_vote,
             epoch_cursor: self.epochs.cursor().clone(),
             errors,
+            producer: self.production.take(),
         }
     }
 }

@@ -6,7 +6,26 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod tests;
 
+pub use repo::hyperchain::producer;
 pub use repo::{HyperchainConfig as Config, HyperchainError as PrepareError};
+
+pub struct Produced {
+    pub prepared: producer::Prepared,
+    pub cursor: crate::events::Cursor,
+}
+pub struct ProducerRequest {
+    pub binding: producer::Binding,
+    pub input: producer::Input,
+    pub keys: ae_hyperchain::signing::Keys,
+    pub parent: Arc<ae_hyperchain::parent_cache::Cache>,
+}
+#[derive(Debug)]
+pub enum ProducerError<G> {
+    Repository(repo::Error),
+    Execution(producer::Failure),
+    Guard(G),
+    RecoveryRequired,
+}
 
 // A scoped execution host may borrow the insertion's RocksDB snapshot. Only
 // its isolated, owned acceptance state survives the attempt. Capturing and
@@ -63,7 +82,8 @@ struct Live<H> {
 }
 // Exactly one execution owner per open database. Hosts must provide isolated
 // snapshots: Clone cannot undo I/O or mutations through shared interior state.
-// Commit acknowledgement is the only boundary that advances accepted state.
+// Durable state advances only on commit acknowledgement. Native rejections
+// and producer reads can retain transient cache entries without a block write.
 pub struct Owner<O, H> {
     database: Arc<Database>,
     config: Config<O>,
@@ -129,6 +149,54 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
             live.state = checkpoint.state;
         }
         Ok((live.revision, live.state.clone(), live.host.clone()))
+    }
+    // Producer and validation share this serial cache authority. The parent
+    // snapshot is immutable; this callback performs no network/service I/O.
+    // Prepared effects belong to the caller and are not insertion's outbox.
+    pub fn prepare_producer<G>(
+        &self,
+        request: ProducerRequest,
+        mut check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Produced, ProducerError<G>> {
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| ProducerError::RecoveryRequired)?;
+        if live.failed || self.database.events().info().failure.is_some() {
+            return Err(ProducerError::RecoveryRequired);
+        }
+        if !request.binding.matches(&self.config) {
+            return Err(ProducerError::Repository(repo::Error::Identity));
+        }
+        check().map_err(ProducerError::Guard)?;
+        let (view, cursor) = self
+            .database
+            .event_snapshot()
+            .map_err(ProducerError::Repository)?;
+        if live.revision != view.status().revision {
+            let checkpoint = view
+                .hyperchain_checkpoint()
+                .map_err(ProducerError::Repository)?;
+            live.revision = checkpoint.revision;
+            live.state = checkpoint.state;
+        }
+        let mut state = live.state.clone();
+        let prepared = producer::prepare(
+            &view,
+            &self.config,
+            &request.input.config,
+            &request.input.now,
+            &mut state,
+            request.keys,
+            request.parent,
+        )
+        .map_err(ProducerError::Execution)?;
+        check().map_err(ProducerError::Guard)?;
+        if self.database.events().info().failure.is_some() {
+            return Err(ProducerError::RecoveryRequired);
+        }
+        live.state = state;
+        Ok(Produced { prepared, cursor })
     }
     // Transfer accepted input effects to their single consumer. This never
     // drains an in-flight candidate or a host awaiting recovery.

@@ -142,6 +142,7 @@ impl Source {
         order: impl MapOrder + Send + 'static,
     ) -> Result<Connected, Error> {
         self.connect_with(config, keys, order, None, None)
+            .map(|(connected, _)| connected)
     }
     fn connect_with(
         self: &Arc<Self>,
@@ -150,7 +151,7 @@ impl Source {
         order: impl MapOrder + Send + 'static,
         gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
         parent: Option<ae_hyperchain::parent_cache::runtime::Client>,
-    ) -> Result<Connected, Error> {
+    ) -> Result<(Connected, ae_hyperchain::signing::Keys), Error> {
         config.epochs.validate()?;
         if config.host.network != self.network {
             return Err(Error::Identity);
@@ -187,6 +188,7 @@ impl Source {
             _lease: lease,
         }));
         host.set_parent_cache(parent);
+        let signer = host.signer();
         let mut coordinator =
             coordinator::Coordinator::new(host, config.block_time, config.coordinator);
         coordinator.set_live_gossip_cache(gossip);
@@ -202,7 +204,7 @@ impl Source {
             failure: None,
             acknowledged: 0,
         };
-        Ok(Connected { runtime, epochs })
+        Ok((Connected { runtime, epochs }, signer))
     }
 }
 struct Live {

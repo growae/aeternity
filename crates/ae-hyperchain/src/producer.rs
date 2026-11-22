@@ -73,7 +73,7 @@ pub enum Error<E, A = MemoryStore, C = MemoryStore> {
     ResourceLimit,
 }
 impl<E, A, C> Error<E, A, C> {
-    fn operational<H: Host<Error = E>>(&self) -> bool {
+    pub fn is_operational<H: Host<Error = E>>(&self) -> bool {
         match self {
             Self::Block(e) => e.operational::<H>(),
             Self::Chain(e) => e.is_operational(),
@@ -275,7 +275,7 @@ pub fn next<
         &mut staged_host,
         config,
     );
-    if !result.as_ref().is_err_and(|e| e.operational::<H>()) {
+    if !result.as_ref().is_err_and(|e| e.is_operational::<H>()) {
         *state = staged_state;
         *host = staged_host;
     }
