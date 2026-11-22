@@ -176,6 +176,7 @@ where
     let dependencies = super::workers::Bindings {
         upnp: None,
         upnp_listener: None,
+        votes: None,
         keys: None,
         routing: None,
         analytics: None,
@@ -233,6 +234,16 @@ where
     if let Some(cache) = &cache
         && let Some(pool) = dependencies.admission.current()
         && !cache.uses_cache(&pool.client.gossip_cache())
+    {
+        return Err(Error::Configuration);
+    }
+    if dependencies
+        .votes
+        .as_ref()
+        .is_some_and(|v| !v.uses_database(&inputs.database))
+        || (dependencies.admission.managed()
+            && dependencies.votes.is_some()
+                != (inputs.execution.consensus() == ae_protocol::ConsensusType::Pos))
     {
         return Err(Error::Configuration);
     }
@@ -354,6 +365,14 @@ where
         {
             return Err(Error::Dependency(Child::Gossip));
         }
+        if self
+            .dependencies
+            .votes
+            .as_ref()
+            .is_some_and(|v| v.is_closed())
+        {
+            return Err(Error::Dependency(Child::Gossip));
+        }
         if self.dependencies.gc.as_ref().is_some_and(|gc| {
             gc.is_closed()
                 || (!gc.managed()
@@ -396,6 +415,11 @@ where
             if self.dependencies.admission.current().is_some()
                 && self
                     .dependencies
+                    .votes
+                    .as_ref()
+                    .is_none_or(|v| v.current().is_some())
+                && self
+                    .dependencies
                     .resilience
                     .as_ref()
                     .is_none_or(|r| r.current().is_some())
@@ -430,6 +454,7 @@ where
             tokio::select! {
                 _ = self.stopped.changed() => return Err(Error::Closed),
                 _ = self.dependencies.admission.changed() => (),
+                _ = async {match &mut self.dependencies.votes {Some(v)=>v.changed().await,None=>std::future::pending().await}}=>(),
                 _ = async { match &mut self.dependencies.resilience { Some(r) => r.changed().await, None => std::future::pending().await } } => (),
                 _ = async { match &mut self.dependencies.capabilities {Some(c)=>c.changed().await,None=>std::future::pending().await}}=>(),
                 _ = async {match &mut self.dependencies.analytics {Some(a)=>a.changed().await,None=>std::future::pending().await}}=>(),

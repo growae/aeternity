@@ -6,7 +6,7 @@ use ae_p2p::{
 };
 use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_storage::{Database, pool::worker};
-use ae_tx::{HcVote, TransactionKind};
+use ae_tx::TransactionKind;
 use ae_types::Unsigned;
 use std::{
     collections::{BTreeMap, VecDeque, hash_map::RandomState},
@@ -22,6 +22,7 @@ pub use service::Service;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Configuration,
+    VoteWorker(crate::votes::Error),
     Busy,
     Closed,
     Timeout,
@@ -198,7 +199,7 @@ enum Command {
         epoch: Unsigned,
         kind: Option<Unsigned>,
         maximum: usize,
-        reply: oneshot::Sender<Result<Vec<HcVote>, Error>>,
+        reply: oneshot::Sender<Result<crate::votes::Batch, Error>>,
         _permit: OwnedSemaphorePermit,
     },
 }
@@ -265,7 +266,7 @@ impl Handle {
         epoch: Unsigned,
         kind: Option<Unsigned>,
         maximum: usize,
-    ) -> Result<Ticket<Vec<HcVote>>, Error> {
+    ) -> Result<Ticket<crate::votes::Batch>, Error> {
         if maximum > self.config.votes.maximum_entries {
             return Err(Error::Busy);
         }
@@ -315,6 +316,8 @@ struct Context {
     network: NetworkProfile,
     consensus: ConsensusType,
     votes: Arc<Mutex<votes::VotePool>>,
+    managed_votes: Option<crate::votes::Binding>,
+    vote_replies: Arc<Semaphore>,
     published: mpsc::Sender<Arc<Signed>>,
     config: Config,
 }
@@ -344,6 +347,39 @@ pub(crate) fn create_bound(
     consensus: ConsensusType,
     config: Config,
 ) -> Result<(Handle, Events, Service), Error> {
+    create_with_votes(
+        db, binding, peers, incoming, network, consensus, config, None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn create_with_votes(
+    db: Arc<Database>,
+    binding: crate::bindings::Admission,
+    peers: impl Into<pool::Reader>,
+    incoming: pool::Events,
+    network: NetworkProfile,
+    consensus: ConsensusType,
+    config: Config,
+    managed_votes: Option<crate::votes::Binding>,
+) -> Result<(Handle, Events, Service), Error> {
+    if binding.managed() && (consensus == ConsensusType::Pos) != managed_votes.is_some() {
+        return Err(Error::Configuration);
+    }
+    if let Some(votes) = &managed_votes
+        && (consensus != ConsensusType::Pos || !votes.uses_database(&db))
+    {
+        return Err(Error::Configuration);
+    }
+    let vote_consumer = managed_votes
+        .as_ref()
+        .map(|v| {
+            v.current()
+                .ok_or(crate::votes::Error::Worker(crate::votes::Fault::Stopped))?
+                .publications()
+                .listen()
+        })
+        .transpose()
+        .map_err(Error::VoteWorker)?;
     config.validate()?;
     if !binding.uses_database(&db) {
         return Err(Error::Configuration);
@@ -390,6 +426,8 @@ pub(crate) fn create_bound(
         network,
         consensus,
         votes: Arc::new(Mutex::new(Default::default())),
+        managed_votes,
+        vote_replies: Arc::new(Semaphore::new(config.command_bytes)),
         published,
         config,
     };
@@ -400,6 +438,7 @@ pub(crate) fn create_bound(
         receiver,
         forwarded,
         vote_events,
+        vote_consumer,
         policies,
         stopped,
         status,

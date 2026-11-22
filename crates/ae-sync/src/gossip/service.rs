@@ -10,12 +10,14 @@ pub struct Service {
     commands: mpsc::Receiver<Command>,
     forwarded: mpsc::Sender<pool::Forwarded>,
     vote_events: mpsc::Receiver<Arc<Signed>>,
+    vote_consumer: Option<crate::votes::Consumer>,
     policies: watch::Receiver<Policy>,
     stopped: watch::Receiver<bool>,
     status: watch::Sender<Status>,
     current: Status,
     cursor: worker::events::Cursor,
     pending: VecDeque<Arc<Signed>>,
+    pending_vote: Option<crate::votes::Publication>,
     tasks: Tasks<Key, Done>,
     active: usize,
     next_id: u64,
@@ -35,6 +37,7 @@ impl Service {
         commands: mpsc::Receiver<Command>,
         forwarded: mpsc::Sender<pool::Forwarded>,
         vote_events: mpsc::Receiver<Arc<Signed>>,
+        vote_consumer: Option<crate::votes::Consumer>,
         policies: watch::Receiver<Policy>,
         stopped: watch::Receiver<bool>,
         status: watch::Sender<Status>,
@@ -57,12 +60,14 @@ impl Service {
             commands,
             forwarded,
             vote_events,
+            vote_consumer,
             policies,
             stopped,
             status,
             current,
             cursor,
             pending: VecDeque::new(),
+            pending_vote: None,
             tasks: Tasks::new(),
             active: 0,
             next_id: 0,
@@ -82,6 +87,7 @@ impl Service {
         }
         self.tasks.clear();
         self.pending.clear();
+        self.pending_vote.take();
         self.vote_events.close();
         self.jobs.stop();
         self.feed_jobs.stop();
@@ -125,6 +131,12 @@ impl Service {
                 },
                 vote = self.vote_events.recv(), if !self.sending && self.pending.is_empty() => {
                     if let Some(tx)=vote {self.pending.push_back(tx);}
+                },
+                vote = async { match &mut self.vote_consumer {Some(c)=>c.recv().await,None=>std::future::pending().await} }, if !self.sending && self.pending.is_empty() => {
+                    match vote {
+                        Some(publication)=>{self.pending.push_back(publication.transaction.clone());self.pending_vote=Some(publication);}
+                        None=>{self.current.last_error=Some(Error::Closed);break;}
+                    }
                 },
                 (key,result) = self.tasks.next() => self.finished(key,result),
             }
@@ -172,6 +184,7 @@ impl Service {
         if !self.sending && !self.pending.is_empty() {
             if self.current.policy.enabled {
                 let tx = self.pending.pop_front().unwrap();
+                let publication = self.pending_vote.take();
                 let ctx = self.context.clone();
                 let jobs = self.jobs.clone();
                 let peers = self.peers.clone();
@@ -182,13 +195,13 @@ impl Service {
                 self.sending = true;
                 let timeout = ctx.config.fanout_timeout;
                 self.tasks.insert(Key::Fanout, async move {
-                    Done::Fanout(
-                        operations::bounded(
-                            timeout,
-                            operations::fanout(ctx, jobs, peers, tx, policy, random, round),
-                        )
-                        .await,
+                    let result = operations::bounded(
+                        timeout,
+                        operations::fanout(ctx, jobs, peers, tx, policy, random, round),
                     )
+                    .await;
+                    drop(publication);
+                    Done::Fanout(result)
                 });
             } else {
                 self.current.counts.suppressed = self
@@ -197,6 +210,7 @@ impl Service {
                     .suppressed
                     .saturating_add(self.pending.len() as u64);
                 self.pending.clear();
+                self.pending_vote.take();
             }
         }
         if !self.feeding && !self.sending && self.pending.is_empty() {

@@ -30,3 +30,5 @@ pub mod transport;
 pub mod upnp;
 
 pub mod resilience;
+
+pub mod votes;

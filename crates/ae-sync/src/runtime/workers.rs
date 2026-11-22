@@ -1,7 +1,8 @@
 use crate::peer::capabilities::worker as capabilities;
+use crate::votes;
 use crate::{analytics, bindings, blocking, pool_gc, resilience, routing, upnp};
 use ae_chain::repository::retention;
-use ae_protocol::NetworkProfile;
+use ae_protocol::{ConsensusType, NetworkProfile};
 use ae_storage::{Database, gc, pool};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -17,6 +18,7 @@ pub struct GarbageCollection {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub upnp: Option<upnp::Config>,
+    pub votes: votes::Config,
     pub routing: Option<routing::Setup>,
     pub analytics: Option<analytics::Config>,
     pub pool_gc: Option<pool_gc::Config>,
@@ -32,6 +34,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             upnp: None,
+            votes: Default::default(),
             routing: None,
             analytics: None,
             pool_gc: Some(Default::default()),
@@ -56,6 +59,7 @@ pub enum Child {
     Resilience,
     Capabilities,
     GarbageCollection,
+    Votes,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -83,6 +87,8 @@ pub struct Status {
     pub ready: bool,
     pub joined: bool,
     pub upnp_generation: u64,
+    pub votes_generation: u64,
+    pub votes: Option<votes::Info>,
     pub upnp: Option<upnp::Info>,
     pub upnp_cleanup_error: Option<upnp::Error>,
     pub admission_generation: u64,
@@ -108,6 +114,7 @@ pub struct Status {
 #[derive(Clone)]
 pub struct Bindings {
     pub upnp: Option<bindings::Binding<upnp::Client>>,
+    pub votes: Option<votes::Binding>,
     pub upnp_listener: Option<upnp::ListenerSource>,
     pub routing: Option<bindings::MetricsRouting>,
     pub analytics: Option<bindings::PeerAnalytics>,
@@ -178,6 +185,9 @@ pub struct Service {
     cache: pool::worker::GossipCache,
     upnp: Option<upnp::Worker>,
     upnp_binding: Option<bindings::Owner<upnp::Client>>,
+    votes: Option<votes::Worker>,
+    votes_binding: Option<bindings::Owner<votes::Client>>,
+    vote_publications: Option<votes::Publications>,
     admission: Option<pool::worker::Worker>,
     gc: Option<gc::worker::Worker>,
     keys: Option<crate::keys::Worker>,
@@ -224,6 +234,12 @@ pub fn create(
     let jobs =
         blocking::Pool::named("ae-worker-supervisor", 1, 2, 256).map_err(|_| Error::Worker)?;
     let (upnp_binding, upnp) = if config.upnp.is_some() {
+        let (owner, reader) = bindings::Owner::new(&database);
+        (Some(owner), Some(reader))
+    } else {
+        (None, None)
+    };
+    let (votes_binding, votes) = if config.pool.consensus == ConsensusType::Pos {
         let (owner, reader) = bindings::Owner::new(&database);
         (Some(owner), Some(reader))
     } else {
@@ -288,6 +304,7 @@ pub fn create(
             commands,
             bindings: Bindings {
                 upnp,
+                votes,
                 upnp_listener,
                 admission,
                 gc,
@@ -306,6 +323,9 @@ pub fn create(
             cache,
             admission: None,
             upnp_binding,
+            votes: None,
+            votes_binding,
+            vote_publications: None,
             gc: None,
             keys: None,
             upnp: None,
@@ -347,6 +367,7 @@ enum Started {
     Keys(crate::keys::Worker),
     Admission(pool::worker::Worker),
     Gc(gc::worker::Worker),
+    Votes(votes::Worker, votes::Publications),
 }
 impl Service {
     fn stopping(&self) -> bool {
@@ -362,6 +383,7 @@ impl Service {
     fn generation(&self, child: Child) -> u64 {
         match child {
             Child::Upnp => self.current.upnp_generation,
+            Child::Votes => self.current.votes_generation,
             Child::Resilience => self.current.resilience_generation,
             Child::Capabilities => self.current.capabilities_generation,
             Child::Routing => self.current.routing_generation,
@@ -374,6 +396,7 @@ impl Service {
     }
     fn publish(&mut self) {
         self.current.upnp = self.upnp.as_ref().map(|w| w.info());
+        self.current.votes = self.votes.as_ref().map(|w| w.info());
         self.current.resilience = self.resilience.as_ref().map(|w| w.info());
         self.current.capabilities = self.capabilities.as_ref().map(|w| w.info());
         self.current.routing = self.routing.as_ref().map(|w| w.info());
@@ -393,6 +416,7 @@ impl Service {
         let config = self.config.clone();
         let network = self.network.clone();
         let cache = self.cache.clone();
+        let vote_publications = self.vote_publications.clone();
         let admission_binding = self.admission_binding.clone();
         let routing_store = self.routing_owner.as_ref().map(|o| o.store());
         let resilience_source = self.resilience_owner.as_ref().map(|o| o.source());
@@ -405,6 +429,26 @@ impl Service {
                         child,
                         reason: e.to_string(),
                     }),
+                Child::Votes => {
+                    let start = || -> Result<Started, votes::Error> {
+                        let publications = match vote_publications {
+                            Some(p) => p,
+                            None => votes::Publications::new(&db, config.votes)?,
+                        };
+                        let worker = votes::Worker::spawn(
+                            db,
+                            network,
+                            cache,
+                            config.votes,
+                            publications.clone(),
+                        )?;
+                        Ok(Started::Votes(worker, publications))
+                    };
+                    start().map_err(|e| Error::Start {
+                        child,
+                        reason: e.to_string(),
+                    })
+                }
                 Child::Resilience => {
                     let config = config.resilience.ok_or(Error::Missing)?;
                     let start = || -> Result<Started, resilience::Error> {
@@ -518,6 +562,15 @@ impl Service {
                 self.upnp = Some(worker);
                 self.current.upnp_generation = generation;
             }
+            Started::Votes(worker, publications) => {
+                self.votes_binding
+                    .as_ref()
+                    .expect("configured PoS vote pool")
+                    .install(worker.client(), generation);
+                self.vote_publications = Some(publications);
+                self.votes = Some(worker);
+                self.current.votes_generation = generation;
+            }
             Started::Resilience(worker, owner) => {
                 if let Some(owner) = owner {
                     self.resilience_owner = Some(owner);
@@ -597,6 +650,17 @@ impl Service {
                     binding.withdraw();
                 }
                 self.upnp.take().map(|worker| {
+                    worker.request_shutdown();
+                    self.jobs.submit(128, move |_| {
+                        let _ = worker.shutdown();
+                    })
+                })
+            }
+            Child::Votes => {
+                if let Some(binding) = &self.votes_binding {
+                    binding.withdraw();
+                }
+                self.votes.take().map(|worker| {
                     worker.request_shutdown();
                     self.jobs.submit(128, move |_| {
                         let _ = worker.shutdown();
@@ -794,6 +858,12 @@ impl Service {
         if self.stopping() {
             return Ok(());
         }
+        if self.config.pool.consensus == ConsensusType::Pos {
+            self.start(Child::Votes).await?;
+        }
+        if self.stopping() {
+            return Ok(());
+        }
         self.current.ready = true;
         self.publish();
         let mut interval = tokio::time::interval(self.config.poll);
@@ -825,6 +895,8 @@ impl Service {
                 Some(Child::Capabilities)
             } else if self.gc.as_ref().is_some_and(|w| !w.info().running) {
                 Some(Child::GarbageCollection)
+            } else if self.votes.as_ref().is_some_and(|w| !w.info().running) {
+                Some(Child::Votes)
             } else {
                 None
             };
@@ -838,7 +910,7 @@ impl Service {
                 _ = self.stopped.changed() => return Ok(()),
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Ok(()); };
-                    let result = if (command.child == Child::Upnp && self.config.upnp.is_none()) || (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
+                    let result = if (command.child == Child::Votes && self.config.pool.consensus != ConsensusType::Pos) || (command.child == Child::Upnp && self.config.upnp.is_none()) || (command.child == Child::Resilience && self.config.resilience.is_none()) || (command.child == Child::Capabilities && self.config.capabilities.is_none()) || (command.child == Child::PoolMaintenance && self.config.pool_gc.is_none()) || (command.child == Child::Analytics && self.config.analytics.is_none()) || (command.child == Child::Routing && self.config.routing.is_none()) || (command.child == Child::GarbageCollection && self.config.gc.is_none()) || (command.child == Child::Keys && self.config.keys.is_none()) { Err(Error::Missing) }
                         else if command.generation != self.generation(command.child) { Err(Error::Stale) }
                         else { self.requested(&command).await };
                     let terminal = result.as_ref().err().filter(|e| !matches!(e, Error::Stale | Error::Missing)).cloned();
@@ -854,6 +926,7 @@ impl Service {
         if command.stop_only {
             match command.child {
                 Child::Upnp => self.upnp.as_ref().unwrap().request_shutdown(),
+                Child::Votes => self.votes.as_ref().unwrap().request_shutdown(),
                 Child::Resilience => self.resilience.as_ref().unwrap().request_shutdown(),
                 Child::Capabilities => self.capabilities.as_ref().unwrap().request_shutdown(),
                 Child::Routing => self.routing.as_ref().unwrap().request_shutdown(),
@@ -913,6 +986,9 @@ impl Service {
             binding.withdraw();
         }
         self.pool_binding.withdraw();
+        if let Some(binding) = &self.votes_binding {
+            binding.withdraw();
+        }
         if let Some(binding) = &self.routing_binding {
             binding.withdraw();
         }
@@ -935,6 +1011,7 @@ impl Service {
             binding.withdraw();
         }
         for child in [
+            Child::Votes,
             Child::GarbageCollection,
             Child::Capabilities,
             Child::Resilience,
@@ -951,6 +1028,12 @@ impl Service {
         }
         if let Some(binding) = &self.capabilities_binding {
             binding.close();
+        }
+        if let Some(binding) = &self.votes_binding {
+            binding.close();
+        }
+        if let Some(publications) = &self.vote_publications {
+            publications.close();
         }
         self.pool_binding.close();
         if let Some(binding) = &self.pool_gc_binding {
@@ -1000,6 +1083,12 @@ impl Drop for Service {
         }
         if let Some(binding) = &self.capabilities_binding {
             binding.close();
+        }
+        if let Some(binding) = &self.votes_binding {
+            binding.close();
+        }
+        if let Some(publications) = &self.vote_publications {
+            publications.close();
         }
         self.pool_binding.close();
         if let Some(binding) = &self.pool_gc_binding {

@@ -1598,3 +1598,6 @@ mod pool_gc;
 
 #[path = "peer_runtime/resilience.rs"]
 mod resilience;
+
+#[path = "peer_runtime/vote_owner.rs"]
+mod vote_owner;

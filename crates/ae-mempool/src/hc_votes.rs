@@ -129,31 +129,7 @@ impl VotePool {
     ) -> Result<PushOutcome, Error> {
         let tx = signed.transaction().view();
         let limits = admission.limits;
-        // Nested envelopes repeatedly encode their inner bytes. Bound their
-        // total work before hashing, including the gossip-cache fast path.
-        let encoding_work = tx
-            .layers()
-            .iter()
-            .try_fold(tx.leaf().wire_size(), |n, layer| {
-                n.checked_add(layer.wire_size())
-            })
-            .and_then(|n| n.checked_add(signed.signatures().len().saturating_mul(64)));
-        if tx.layers().len() > limits.signatures.max_layers
-            || encoding_work.is_none_or(|n| n > limits.maximum_encoding_work_bytes)
-        {
-            return Err(Error::ResourceLimit);
-        }
-        // Bound large signatures/transactions before constructing hash input.
-        if tx.wire_size() > limits.maximum_encoded_bytes
-            || signed.signatures().len().saturating_mul(64) > limits.maximum_encoded_bytes
-        {
-            return Err(Error::ResourceLimit);
-        }
-        let encoded = signed.encode();
-        if encoded.len() > limits.maximum_encoded_bytes {
-            return Err(Error::ResourceLimit);
-        }
-        let hash = ae_crypto::blake2b_256(&encoded);
+        let (hash, encoded_bytes) = encoded(signed, limits)?;
         if gossip_contains(hash) {
             return Ok(PushOutcome::Cached);
         }
@@ -179,7 +155,7 @@ impl VotePool {
         if inserted {
             let bytes = self
                 .retained_wire_bytes
-                .checked_add(encoded.len())
+                .checked_add(encoded_bytes)
                 .ok_or(Error::ResourceLimit)?;
             if self.votes.len() >= limits.maximum_entries
                 || bytes > limits.maximum_retained_wire_bytes
@@ -203,4 +179,45 @@ impl VotePool {
             event,
         })
     }
+}
+
+// Performs the same bounded hashing used by push, without reading selected
+// chain state. Runtime owners use this for the native cache-before-validation
+// fast path; a cache miss still goes through the complete push checks.
+pub fn admission_hash(
+    signed: &SignedTransaction<Transaction>,
+    limits: Limits,
+) -> Result<Hash256, Error> {
+    encoded(signed, limits).map(|(hash, _)| hash)
+}
+fn encoded(
+    signed: &SignedTransaction<Transaction>,
+    limits: Limits,
+) -> Result<(Hash256, usize), Error> {
+    let tx = signed.transaction().view();
+    // Nested envelopes repeatedly encode their inner bytes. Bound their
+    // total work before hashing, including the gossip-cache fast path.
+    let encoding_work = tx
+        .layers()
+        .iter()
+        .try_fold(tx.leaf().wire_size(), |n, layer| {
+            n.checked_add(layer.wire_size())
+        })
+        .and_then(|n| n.checked_add(signed.signatures().len().saturating_mul(64)));
+    if tx.layers().len() > limits.signatures.max_layers
+        || encoding_work.is_none_or(|n| n > limits.maximum_encoding_work_bytes)
+    {
+        return Err(Error::ResourceLimit);
+    }
+    // Bound large signatures/transactions before constructing hash input.
+    if tx.wire_size() > limits.maximum_encoded_bytes
+        || signed.signatures().len().saturating_mul(64) > limits.maximum_encoded_bytes
+    {
+        return Err(Error::ResourceLimit);
+    }
+    let encoded = signed.encode();
+    if encoded.len() > limits.maximum_encoded_bytes {
+        return Err(Error::ResourceLimit);
+    }
+    Ok((ae_crypto::blake2b_256(&encoded), encoded.len()))
 }

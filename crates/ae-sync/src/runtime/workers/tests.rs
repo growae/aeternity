@@ -1156,3 +1156,128 @@ async fn resilience_start_failure_unwinds_prior_children_and_shares_restart_budg
     assert_eq!(status.restart_attempts, 6);
     assert!(status.joined && old.info().joined && old.source().is_closed());
 }
+
+#[tokio::test]
+async fn votes_are_pos_only_and_invalid_configuration_fails_after_all_other_workers() {
+    for consensus in [ConsensusType::Pow, ConsensusType::Pos] {
+        let mut node = Node::new();
+        node.stop_worker();
+        let mut config = settings();
+        config.pool.consensus = consensus;
+        config.votes.events = 0;
+        let (mut handle, service) = create(
+            node.db.clone(),
+            NetworkProfile::mainnet(),
+            config,
+            Default::default(),
+        )
+        .unwrap();
+        let bindings = handle.bindings();
+        if consensus == ConsensusType::Pow {
+            assert!(bindings.votes.is_none());
+            let task = tokio::spawn(service.run());
+            ready(&mut handle).await;
+            assert_eq!(handle.status().votes_generation, 0);
+            assert_eq!(
+                handle.restart(Child::Votes, 0).unwrap().wait().await,
+                Err(Error::Missing)
+            );
+            handle.shutdown();
+            assert!(within(task).await.unwrap().joined);
+        } else {
+            let status = within(service.run()).await;
+            assert!(matches!(
+                status.error,
+                Some(Error::Start {
+                    child: Child::Votes,
+                    ..
+                })
+            ));
+            assert!(status.joined);
+            assert_eq!(status.votes_generation, 0);
+            assert_eq!(status.admission_generation, 1);
+            assert_eq!(status.gc_generation, 1);
+            assert_eq!(status.capabilities_generation, 1);
+            assert!(bindings.votes.unwrap().is_closed());
+            assert!(
+                !bindings
+                    .admission
+                    .snapshot()
+                    .value
+                    .unwrap()
+                    .client
+                    .info()
+                    .running
+            );
+            assert!(
+                bindings
+                    .capabilities
+                    .unwrap()
+                    .snapshot()
+                    .value
+                    .unwrap()
+                    .info()
+                    .joined
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn vote_panics_share_the_worker_budget_without_restarting_healthy_siblings() {
+    let mut node = Node::new();
+    node.stop_worker();
+    let mut config = settings();
+    config.pool.consensus = ConsensusType::Pos;
+    let (mut handle, service) = create(
+        node.db.clone(),
+        NetworkProfile::mainnet(),
+        config,
+        Default::default(),
+    )
+    .unwrap();
+    let task = tokio::spawn(service.run());
+    ready(&mut handle).await;
+    let bindings = handle.bindings();
+    let binding = bindings.votes.unwrap();
+    let admission = bindings.admission.current().unwrap().client;
+    for i in 0..6 {
+        let old = binding.current().unwrap();
+        let before = handle.status();
+        if i % 2 == 0 {
+            old.fail();
+        } else {
+            stopped_child(&handle, Child::Capabilities, before.capabilities_generation).await;
+        }
+        within(async {
+            loop {
+                let next = handle.status();
+                if !next.running
+                    || (i % 2 == 0 && next.votes_generation > before.votes_generation)
+                    || (i % 2 == 1 && next.capabilities_generation > before.capabilities_generation)
+                {
+                    break;
+                }
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        if i < 5 {
+            assert_eq!(handle.status().admission_generation, 1);
+            assert_eq!(handle.status().gc_generation, 1);
+            assert!(admission.info().running);
+            if i % 2 == 0 {
+                assert!(old.info().joined);
+                assert!(matches!(
+                    old.stats(),
+                    Err(votes::Error::Worker(votes::Fault::Stopped))
+                ));
+            }
+        }
+    }
+    let status = within(task).await.unwrap();
+    assert_eq!(status.error, Some(Error::RestartLimit));
+    assert_eq!(status.restart_attempts, 6);
+    assert!(status.joined && binding.is_closed());
+    assert!(!admission.info().running);
+}

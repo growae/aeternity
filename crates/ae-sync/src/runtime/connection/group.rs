@@ -94,7 +94,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         self.add(Child::Network, move || handle.shutdown(), async move {
             Failure::new(Child::Network, service.run().await.status.failure)
         });
-        let (gossip, incoming, service) = gossip::create_bound(
+        let (gossip, incoming, service) = gossip::create_with_votes(
             db.clone(),
             dependencies.admission.clone(),
             network.peers(),
@@ -102,6 +102,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
             network_profile,
             consensus,
             config.gossip,
+            dependencies.votes.clone(),
         )
         .map_err(|e| Failure::new(Child::Gossip, e))?;
         let handle = gossip.clone();

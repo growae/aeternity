@@ -6,7 +6,7 @@ impl Context {
         Signed::decode_with_state_config(bytes, config.transaction, config.state)
             .map_err(|_| Error::Protocol)
     }
-    fn vote(
+    fn local_vote(
         &self,
         tx: Arc<Signed>,
         event: votes::Event,
@@ -37,6 +37,53 @@ impl Context {
             slot.send(tx);
         }
         Ok(result)
+    }
+}
+fn vote_error(error: crate::votes::Error) -> Error {
+    match error {
+        crate::votes::Error::Pool(e) => Error::Votes(e),
+        crate::votes::Error::Protocol => Error::Protocol,
+        crate::votes::Error::Storage => Error::Storage,
+        crate::votes::Error::Worker(crate::votes::Fault::Busy) => Error::Busy,
+        crate::votes::Error::Worker(crate::votes::Fault::Stopped) => Error::Closed,
+        e => Error::VoteWorker(e),
+    }
+}
+async fn vote(
+    context: Context,
+    jobs: blocking::Pool,
+    tx: Arc<Signed>,
+    event: votes::Event,
+    bytes: usize,
+) -> Result<votes::PushOutcome, Error> {
+    if let Some(binding) = context.managed_votes {
+        let encoded = jobs
+            .submit_wait(bytes.max(1), move |cancel| {
+                if cancel.cancelled() {
+                    return Err(Error::Closed);
+                }
+                Ok(tx.encode())
+            })
+            .await?
+            .await??;
+        crate::votes::call(&binding, |client| client.push(encoded.clone(), event))
+            .await
+            .map_err(vote_error)
+    } else {
+        let slot = context
+            .published
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| Error::Closed)?;
+        jobs.submit_wait(bytes.max(1), move |cancel| {
+            if cancel.cancelled() {
+                return Err(Error::Closed);
+            }
+            context.local_vote(tx, event, slot)
+        })
+        .await?
+        .await?
     }
 }
 pub(super) async fn incoming(
@@ -97,22 +144,14 @@ pub(super) async fn incoming(
     let held = received;
     for (tx, bytes) in transactions {
         if tx.transaction().view().kind() == TransactionKind::HcVote {
-            let ctx = context.clone();
-            let slot = ctx
-                .published
-                .clone()
-                .reserve_owned()
-                .await
-                .map_err(|_| Error::Closed)?;
-            let result = jobs
-                .submit_wait(bytes.max(1), move |cancel| {
-                    if cancel.cancelled() {
-                        return Err(Error::Closed);
-                    }
-                    ctx.vote(tx, votes::Event::Received, slot)
-                })
-                .await?
-                .await?;
+            let result = vote(
+                context.clone(),
+                jobs.clone(),
+                tx,
+                votes::Event::Received,
+                bytes,
+            )
+            .await;
             match result {
                 Ok(votes::PushOutcome::Accepted { .. }) => counts.votes += 1,
                 Ok(votes::PushOutcome::Cached) => (),
@@ -165,21 +204,18 @@ pub(super) async fn command(
             _permit: permit,
         } => {
             let result = bounded(timeout, async {
-                let slot = context
-                    .published
-                    .clone()
-                    .reserve_owned()
-                    .await
-                    .map_err(|_| Error::Closed)?;
-                jobs.submit_wait(bytes.len().max(1), move |cancel| {
-                    if cancel.cancelled() {
-                        return Err(Error::Closed);
-                    }
-                    let tx = Arc::new(context.decode(&bytes)?);
-                    context.vote(tx, event, slot)
-                })
-                .await?
-                .await?
+                let ctx = context.clone();
+                let weight = bytes.len().max(1);
+                let tx = jobs
+                    .submit_wait(weight, move |cancel| {
+                        if cancel.cancelled() {
+                            return Err(Error::Closed);
+                        }
+                        Ok(Arc::new(ctx.decode(&bytes)?))
+                    })
+                    .await?
+                    .await??;
+                vote(context, jobs, tx, event, weight).await
             })
             .await;
             if matches!(&result, Ok(votes::PushOutcome::Accepted { .. })) {
@@ -198,19 +234,25 @@ pub(super) async fn command(
             _permit: permit,
         } => {
             let result = bounded(timeout, async {
-                jobs.submit_wait(epoch.as_bytes().len().saturating_add(128), move |cancel| {
-                    if cancel.cancelled() {
-                        return Err(Error::Closed);
-                    }
-                    context
-                        .votes
-                        .lock()
-                        .map_err(|_| Error::Storage)?
-                        .update_epoch(epoch);
-                    Ok(())
-                })
-                .await?
-                .await?
+                if let Some(binding) = context.managed_votes {
+                    crate::votes::call(&binding, |c| c.advance_epoch(epoch.clone()))
+                        .await
+                        .map_err(vote_error)
+                } else {
+                    jobs.submit_wait(epoch.as_bytes().len().saturating_add(128), move |cancel| {
+                        if cancel.cancelled() {
+                            return Err(Error::Closed);
+                        }
+                        context
+                            .votes
+                            .lock()
+                            .map_err(|_| Error::Storage)?
+                            .update_epoch(epoch);
+                        Ok(())
+                    })
+                    .await?
+                    .await?
+                }
             })
             .await;
             let error = result.as_ref().err().cloned();
@@ -233,22 +275,28 @@ pub(super) async fn command(
                 .saturating_add(kind.as_ref().map_or(0, |k| k.as_bytes().len()))
                 .saturating_add(128);
             let result = bounded(timeout, async {
-                jobs.submit_wait(weight, move |cancel| {
-                    if cancel.cancelled() {
-                        return Err(Error::Closed);
-                    }
-                    let votes = context
-                        .votes
-                        .lock()
-                        .map_err(|_| Error::Storage)?
-                        .peek(&epoch, kind.as_ref())
-                        .take(maximum)
-                        .cloned()
-                        .collect();
-                    Ok(votes)
-                })
-                .await?
-                .await?
+                if let Some(binding) = context.managed_votes {
+                    crate::votes::call(&binding, |c| c.peek(epoch.clone(), kind.clone(), maximum))
+                        .await
+                        .map_err(vote_error)
+                } else {
+                    jobs.submit_wait(weight, move |cancel| {
+                        if cancel.cancelled() {
+                            return Err(Error::Closed);
+                        }
+                        let pool = context.votes.lock().map_err(|_| Error::Storage)?;
+                        crate::votes::snapshot(
+                            &pool,
+                            &epoch,
+                            kind.as_ref(),
+                            maximum,
+                            &context.vote_replies,
+                        )
+                        .map_err(vote_error)
+                    })
+                    .await?
+                    .await?
+                }
             })
             .await;
             let error = result.as_ref().err().cloned();

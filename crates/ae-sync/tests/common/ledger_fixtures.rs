@@ -23,6 +23,12 @@ mod otp_order;
 
 // Explicit isolated-reference profiles, not a deployed-mainnet attestation.
 pub fn execution(network: &NetworkProfile) -> Owned {
+    execution_with_consensus(network, ae_protocol::ConsensusType::Pow)
+}
+pub fn execution_with_consensus(
+    network: &NetworkProfile,
+    consensus: ae_protocol::ConsensusType,
+) -> Owned {
     let context = machine::Context {
         current_contract: [0; 32],
         vm_version: ae_vm_fate::types::Version::Three,
@@ -49,7 +55,10 @@ pub fn execution(network: &NetworkProfile) -> Owned {
         difficulty: 0.into(),
         block_gas_limit: 6_000_000.into(),
         network_id: network.network_id().to_vec(),
-        consensus: context::Consensus::Pow,
+        consensus: match consensus {
+            ae_protocol::ConsensusType::Pow => context::Consensus::Pow,
+            ae_protocol::ConsensusType::Pos => context::Consensus::Pos,
+        },
         key_hash: [0; 32],
     };
     let fate = fate::Config {
@@ -79,6 +88,7 @@ pub fn execution(network: &NetworkProfile) -> Owned {
         store_order: ae_vm_aevm::store::OrderProfile::Otp26Word64Crc32c,
     };
     Owned::capture(&transactions::Config {
+        consensus,
         fate: Some(&fate),
         aevm: Some(&aevm),
         ..transactions::Config::primitives(network)
