@@ -40,6 +40,17 @@ pub trait Inputs<H, G> {
         block: &Block,
         previous: &H,
     ) -> Result<Self::Host<'db>, G>;
+    // Called only after an operational preparation failure, outside the
+    // database writer. Add bounded immutable facts to the original host and
+    // return true to replay against the same child snapshot and base state.
+    fn acquire<'db>(
+        &mut self,
+        _host: &mut Self::Host<'db>,
+        _error: &PrepareError<Self::Error, Snapshot<'db>>,
+        _check: &mut dyn FnMut() -> Result<(), G>,
+    ) -> Result<bool, G> {
+        Ok(false)
+    }
     fn detach(host: Self::Host<'_>) -> H;
 }
 
@@ -279,19 +290,30 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         let mut state = live.state.clone();
         let mut config = self.config.clone();
         config.limits.policy.origin = origin;
-        let prepared =
-            repo::prepare_hyperchain(&view, block, &config, now_ms, &mut state, &mut host);
-        check().map_err(Error::Guard)?;
-        let update = match prepared {
-            Ok(update) => update,
-            Err(error) => {
-                // Native modeled rejections can populate leader caches. They
-                // have no durable block/event and disappear on restart.
-                if !error.is_operational::<I::Host<'_>>() {
-                    live.state = state;
-                    live.host = I::detach(host);
+        let update = loop {
+            let prepared =
+                repo::prepare_hyperchain(&view, block, &config, now_ms, &mut state, &mut host);
+            check().map_err(Error::Guard)?;
+            match prepared {
+                Ok(update) => break update,
+                Err(error) => {
+                    if error.is_operational::<I::Host<'_>>()
+                        && inputs
+                            .acquire(&mut host, &error, &mut check)
+                            .map_err(Error::Guard)?
+                    {
+                        check().map_err(Error::Guard)?;
+                        state = live.state.clone();
+                        continue;
+                    }
+                    // Native modeled rejections can populate leader caches. They
+                    // have no durable block/event and disappear on restart.
+                    if !error.is_operational::<I::Host<'_>>() {
+                        live.state = state;
+                        live.host = I::detach(host);
+                    }
+                    return Err(Error::Prepare(Box::new(error)));
                 }
-                return Err(Error::Prepare(Box::new(error)));
             }
         };
         // Detach before the writer: it may allocate, but it must have no

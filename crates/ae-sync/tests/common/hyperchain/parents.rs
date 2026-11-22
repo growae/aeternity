@@ -78,13 +78,16 @@ impl Pair {
         Self::with_targets(missing, vec![1.into(), 6.into()])
     }
     pub fn with_targets(missing: bool, targets: Vec<BigInt>) -> Self {
+        Self::with_finality(missing, targets, 2)
+    }
+    pub fn with_finality(missing: bool, targets: Vec<BigInt>, finality: u64) -> Self {
         let mailbox = cache::Mailbox::new(
             Cache::new(
                 parent_cache::Config {
                     child_start_height: 0.into(),
                     max_size: 200.into(),
                     retry_interval: 1000.into(),
-                    finality: 2.into(),
+                    finality: finality.into(),
                 },
                 ChildTop {
                     height: 0.into(),

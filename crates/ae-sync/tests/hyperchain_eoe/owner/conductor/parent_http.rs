@@ -1,6 +1,7 @@
 use super::*;
 use ae_codec::api::{self, ApiType};
 use ae_sync::parent_blocks::{Backend, Chain, Config as HttpConfig, Node as HttpNode};
+use ae_types::Hash256;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -108,8 +109,8 @@ impl Drop for Parent {
         }
     }
 }
-#[test]
-fn live_http_parent_drives_automatic_targets_entropy_and_signed_epoch_production() {
+#[tokio::test]
+async fn live_http_parent_drives_production_and_cold_passive_imports_across_epochs() {
     let node = Node::new(1);
     let (parent, backend) = Parent::start();
     let mut cfg = config(&node, true);
@@ -125,7 +126,7 @@ fn live_http_parent_drives_automatic_targets_entropy_and_signed_epoch_production
             })
             .collect(),
         cfg,
-        backend,
+        backend.clone(),
     )
     .unwrap();
     let mut wall = 1000;
@@ -172,6 +173,45 @@ fn live_http_parent_drives_automatic_targets_entropy_and_signed_epoch_production
     }
     let report = shutdown(c);
     assert!(report.owner.errors.is_empty());
+    let view = node.db.view().unwrap();
+    let tip = view.status().tip.unwrap();
+    let mut hash = tip;
+    let mut chain = vec![];
+    while hash != node.config.identity.genesis {
+        let block = view.require_block(hash).unwrap();
+        hash = Hash256(block.header().common().previous_hash);
+        chain.push(block);
+    }
+    chain.reverse();
+    let passive = Node::new(1);
+    let mut cfg = config(&passive, false);
+    cfg.parent.hosts = backend.hosts();
+    let c = Conductor::start(
+        passive.db.clone(),
+        passive.config.clone(),
+        Default::default(),
+        cfg,
+        backend,
+    )
+    .unwrap();
+    for block in chain {
+        let hash = block.hash().unwrap();
+        c.importer()
+            .import_block(block.encode().unwrap(), 1_000_000)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let imported = passive.db.view().unwrap();
+        imported.verify_tip().unwrap();
+        assert_eq!(
+            imported.require_record(hash).unwrap().roots,
+            view.require_record(hash).unwrap().roots
+        );
+    }
+    assert_eq!(passive.db.view().unwrap().status().tip, Some(tip));
+    assert_eq!(c.status().attempts, 0);
+    assert!(shutdown(c).owner.errors.is_empty());
     for height in [-4, 1, 6, 16, 21, 26] {
         assert!(
             parent.requests.lock().unwrap().contains(&height),

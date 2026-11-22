@@ -97,22 +97,16 @@ async fn passive_imports_advance_live_target_fetches_and_restart_at_committed_ti
     let node = Node::new(6);
     let mut c = automatic(&node, false);
     wait(|| cached(&c, 16));
-    // Received execution consumes captured entropy. Populate it through the
-    // real public lookup path before importing the frozen native chain, whose
-    // signatures and state roots were generated with those parent blocks.
-    for h in [1, 6] {
-        c.parent()
-            .get_block(h.into(), 5000.into())
-            .unwrap()
-            .unwrap();
-    }
-    for b in node.blocks() {
+    // No manual cache warm-up: received validation acquires its own missing
+    // entropy through the parent service before retrying the same snapshot.
+    for (i, b) in node.blocks().into_iter().enumerate() {
         c.importer()
             .import_block(b.encode().unwrap(), 1_000_000)
             .unwrap()
             .wait()
             .await
             .unwrap();
+        node.check(i);
     }
     let end = Instant::now() + Duration::from_secs(10);
     while !cached(&c, 26) {

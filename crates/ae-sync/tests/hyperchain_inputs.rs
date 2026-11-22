@@ -25,6 +25,8 @@ use std::{
 const NOW: u64 = 1_000_000;
 
 use common::hyperchain::parents::{Pair, key, wait};
+#[path = "hyperchain_inputs/entropy.rs"]
+mod entropy;
 
 #[tokio::test]
 async fn scoped_live_parent_snapshots_execute_all_native_finalized_chains() {
@@ -493,9 +495,8 @@ async fn missing_parent_requests_and_effect_limits_are_retryable_without_block_w
             panic!()
         };
         pair.client
-            .call(parent_cache::Event::Get(height.clone()))
+            .get_block(height.clone(), 1000.into())
             .unwrap()
-            .wait(Duration::from_secs(5))
             .unwrap();
     }
     wait(|| pair.client.snapshot().cache.lookup(&1.into()).is_ok());

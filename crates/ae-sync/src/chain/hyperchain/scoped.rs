@@ -2,6 +2,7 @@ use super::*;
 use ae_chain::repository::hyperchain::inputs;
 use ae_hyperchain::parent_cache::runtime as cache;
 use std::sync::Weak;
+mod entropy;
 
 // Capture may perform bounded service I/O; the returned host must contain
 // only immutable snapshots and isolated staged effects. Its child reads may
@@ -19,6 +20,16 @@ pub trait ParentInputs: Send + Sync + 'static {
         block: &Block,
         previous: &Self::State,
     ) -> Result<Self::Host<'db>, Self::Error>;
+    // Bounded service acquisition between deterministic preparations. The
+    // guard is checked during waits; this never runs under the writer.
+    fn acquire<'db>(
+        &self,
+        _host: &mut Self::Host<'db>,
+        _error: &repository::HyperchainError<Self::HostError, Snapshot<'db>>,
+        _check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        Ok(false)
+    }
     fn detach(host: Self::Host<'_>) -> Self::State;
 }
 
@@ -42,6 +53,14 @@ impl<P: ParentInputs> storage::Inputs<P::State, Error> for Capture<'_, P> {
     }
     fn detach(host: Self::Host<'_>) -> P::State {
         P::detach(host)
+    }
+    fn acquire<'db>(
+        &mut self,
+        host: &mut Self::Host<'db>,
+        error: &repository::HyperchainError<Self::Error, Snapshot<'db>>,
+        check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        self.0.acquire(host, error, check)
     }
 }
 struct ScopedExecution<O, P: ParentInputs> {
@@ -335,7 +354,7 @@ impl<P: PinInputs> ParentInputs for Cached<P> {
         }
         let pins = self.pins.capture(child, block).map_err(CachedError::Pins)?;
         self.check()?;
-        inputs::Captured::new(
+        let mut host = inputs::Captured::new(
             child.clone(),
             cache.cache,
             pins,
@@ -344,7 +363,17 @@ impl<P: PinInputs> ParentInputs for Cached<P> {
             previous.clone(),
             self.limits,
         )
-        .map_err(CachedError::Inputs)
+        .map_err(CachedError::Inputs)?;
+        host.require_entropy();
+        Ok(host)
+    }
+    fn acquire<'db>(
+        &self,
+        host: &mut Self::Host<'db>,
+        error: &repository::HyperchainError<inputs::InputError, Snapshot<'db>>,
+        check: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        entropy::acquire(self, host, error, check)
     }
     fn detach(host: Self::Host<'_>) -> inputs::Effects {
         host.into_effects()

@@ -16,6 +16,8 @@ pub enum Effect {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    pub maximum_entropy_entries: usize,
+    pub maximum_entropy_bytes: usize,
     pub maximum_effects: usize,
     pub maximum_effect_bytes: usize,
     pub maximum_pin_entries: usize,
@@ -25,6 +27,8 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            maximum_entropy_entries: 32,
+            maximum_entropy_bytes: 16 * 1024 * 1024,
             maximum_effects: 4096,
             maximum_effect_bytes: 16 * 1024 * 1024,
             maximum_pin_entries: 4096,
@@ -37,6 +41,8 @@ impl Default for Limits {
 #[derive(Debug, Clone)]
 pub enum InputError {
     ResourceLimit,
+    EntropyNotCaptured(BigInt),
+    InvalidEntropy,
     PinNotCaptured(Vec<u8>),
     Selection(Error),
 }
@@ -185,6 +191,8 @@ pub struct Captured<S> {
     parent_length: Unsigned,
     effects: Effects,
     limits: Limits,
+    entropy: Option<BTreeMap<BigInt, Option<ParentBlock>>>,
+    entropy_bytes: usize,
 }
 impl<S: Read> Captured<S> {
     pub fn new(
@@ -223,7 +231,52 @@ impl<S: Read> Captured<S> {
             parent_length,
             effects,
             limits,
+            entropy: None,
+            entropy_bytes: 0,
         })
+    }
+    // Enable demand-driven acquisition by the insertion owner. Execution
+    // remains deterministic: a miss carries the request out as an error.
+    pub fn require_entropy(&mut self) {
+        self.entropy.get_or_insert_with(BTreeMap::new);
+    }
+    pub fn capture_entropy(
+        &mut self,
+        height: BigInt,
+        block: Option<ParentBlock>,
+    ) -> Result<(), InputError> {
+        let entries = self.entropy.as_mut().ok_or(InputError::InvalidEntropy)?;
+        if entries.contains_key(&height)
+            || block
+                .as_ref()
+                .is_some_and(|b| BigInt::from_bytes_be(Sign::Plus, b.height.as_bytes()) != height)
+        {
+            return Err(InputError::InvalidEntropy);
+        }
+        let mut bytes = self
+            .entropy_bytes
+            .checked_add(integer_size(&height))
+            .and_then(|n| n.checked_add(1))
+            .ok_or(InputError::ResourceLimit)?;
+        if let Some(block) = &block {
+            for size in [
+                block.hash.len(),
+                block.previous_hash.as_ref().map_or(0, Vec::len),
+                block.height.as_bytes().len(),
+                block.time.as_bytes().len(),
+            ] {
+                bytes = bytes.checked_add(size).ok_or(InputError::ResourceLimit)?;
+            }
+        }
+        if integer_size(&height) > self.limits.maximum_integer_bytes
+            || entries.len() >= self.limits.maximum_entropy_entries
+            || bytes > self.limits.maximum_entropy_bytes
+        {
+            return Err(InputError::ResourceLimit);
+        }
+        entries.insert(height, block);
+        self.entropy_bytes = bytes;
+        Ok(())
     }
     pub fn revision(&self) -> u64 {
         self.child.status().revision
@@ -250,14 +303,29 @@ impl<S: Read> Host for Captured<S> {
         if integer_size(&height) > self.limits.maximum_integer_bytes {
             return Err(InputError::ResourceLimit);
         }
-        match self.cache.lookup(&height) {
-            Ok(block) => {
+        let block = match self.cache.lookup(&height) {
+            Ok(block) => Some(block),
+            Err(_) => match &self.entropy {
+                None => None,
+                Some(entries) => match entries.get(&height) {
+                    Some(block) => block.as_ref(),
+                    None => {
+                        if entries.len() >= self.limits.maximum_entropy_entries {
+                            return Err(InputError::ResourceLimit);
+                        }
+                        return Err(InputError::EntropyNotCaptured(height));
+                    }
+                },
+            },
+        };
+        match block {
+            Some(block) => {
                 // Bound before cloning a block retained by the cache owner.
                 self.effects.parent(epoch, block, self.limits)?;
                 let hash = block.hash.clone();
                 Ok(Some(hash))
             }
-            Err(_) => {
+            None => {
                 self.effects
                     .push(Effect::RequestParent(height), self.limits)?;
                 Ok(None)
