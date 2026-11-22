@@ -6,6 +6,7 @@ pub mod delivery;
 pub mod eoe;
 pub mod packing;
 pub mod scoped;
+pub mod targets;
 
 // The runtime captures immutable parent-chain data once per block attempt.
 // Child-chain reads use this insertion's snapshot. Host clones must isolate

@@ -155,7 +155,40 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         config: Config,
         backend: Arc<impl Backend>,
+    ) -> Result<Self, Error> {
+        Self::start_inner(
+            database,
+            execution,
+            keys,
+            config,
+            backend,
+            |source, execution| {
+                super::targets::Live::new(&source, execution).map_err(Error::Source)
+            },
+        )
+    }
+    // Explicit alternate provider for controlled networks and reference tests.
+    // Ordinary startup derives targets from the same live snapshot authority
+    // used by committed epochs and candidate/EOE state access.
+    pub fn start_with_targets(
+        database: Arc<Database>,
+        execution: repo::HyperchainConfig<O>,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        config: Config,
+        backend: Arc<impl Backend>,
         targets: impl cache::Targets,
+    ) -> Result<Self, Error> {
+        Self::start_inner(database, execution, keys, config, backend, |_, _| {
+            Ok(targets)
+        })
+    }
+    fn start_inner<T: cache::Targets>(
+        database: Arc<Database>,
+        execution: repo::HyperchainConfig<O>,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        config: Config,
+        backend: Arc<impl Backend>,
+        targets: impl FnOnce(Arc<eoe::Source>, &repo::HyperchainConfig<O>) -> Result<T, Error>,
     ) -> Result<Self, Error> {
         if config.producing && !config.block_producer {
             return Err(Error::NotBlockProducer);
@@ -207,6 +240,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             config.snapshots,
         )
         .map_err(Error::Source)?;
+        let targets = targets(selected.clone(), &execution)?;
         // Build both directions together. No replaceable connector link escapes.
         let mailbox = cache::Mailbox::new(
             parent_cache::Cache::new(config.parent.cache, child),

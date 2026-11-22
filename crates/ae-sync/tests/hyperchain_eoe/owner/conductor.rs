@@ -2,6 +2,8 @@
 mod connections;
 #[path = "conductor/controls.rs"]
 mod controls;
+#[path = "conductor/targets.rs"]
+mod targets;
 use super::*;
 use ae_hyperchain::{
     parent_cache::{self, runtime as cache},
@@ -73,7 +75,7 @@ fn config(node: &Node, producing: bool) -> conductor::Config {
     }
 }
 fn new(node: &Node, c: conductor::Config) -> Result<Conductor<Otp26>, conductor::Error> {
-    Conductor::start(
+    Conductor::start_with_targets(
         node.db.clone(),
         node.config.clone(),
         [12, 13, 14]
