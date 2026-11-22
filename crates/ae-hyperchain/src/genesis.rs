@@ -19,6 +19,33 @@ use ae_vm_fate::{
 };
 use num_bigint::{BigInt, Sign};
 
+// aec_consensus_hc:genesis_raw_header/0 followed by the state-root assignment
+// in aec_block_genesis. Genesis has no release-info extension at any protocol.
+pub fn header(
+    network: &ae_protocol::NetworkProfile,
+    start_time: u64,
+    roots: &ae_state::StateRoots,
+) -> Result<ae_codec::headers::KeyHeader, ae_protocol::ProfileError> {
+    Ok(ae_codec::headers::KeyHeader {
+        common: ae_codec::headers::CommonHeader {
+            version: network.protocol_at(0)? as u32,
+            height: 0,
+            previous_hash: ae_state::genesis::CONTRIBUTORS_MESSAGES_HASH,
+            previous_key_hash: [0; 32],
+            state_hash: roots.hash().0,
+        },
+        miner: [0; 32],
+        beneficiary: [0; 32],
+        target: 0,
+        seal: [0; 42],
+        nonce: 0,
+        time: start_time,
+        info: None,
+        hole: false,
+        end_of_epoch: false,
+    })
+}
+
 pub const CREATE_GAS: u64 = 10_000_000;
 pub const CREATE_GAS_PRICE: u64 = 10_000_000_000;
 pub const DUMMY_FEE: u64 = 1_000_000_000_000_000;

@@ -279,9 +279,25 @@ pub fn bootstrap<S: Read>(
             entry.map_err(Error::from)?;
         }
     }
-    let difficulty = Target(header.target)
-        .difficulty()
-        .map_err(|_| InsertError::WrongGenesis)?;
+    let difficulty = match view.identity.consensus {
+        ConsensusType::Pow => Target(header.target)
+            .difficulty()
+            .map_err(|_| InsertError::WrongGenesis)?,
+        ConsensusType::Pos => {
+            if header.target != 0
+                || header.miner != [0; 32]
+                || header.beneficiary != [0; 32]
+                || header.seal != [0; 42]
+                || header.nonce != 0
+                || header.info.is_some()
+                || header.common.previous_key_hash != [0; 32]
+                || header.common.previous_hash != ae_state::genesis::CONTRIBUTORS_MESSAGES_HASH
+            {
+                return Err(InsertError::WrongGenesis);
+            }
+            0.into()
+        }
+    };
     let record = Record {
         roots: Roots::of(trees),
         difficulty,
@@ -529,7 +545,7 @@ pub fn prepare<S: Read, O: MapOrder>(
     rules: &key_execution::Rules,
     limits: Limits,
 ) -> Result<Update, InsertError<S>> {
-    if config.consensus != ConsensusType::Pow {
+    if config.consensus != ConsensusType::Pow || view.identity.consensus != ConsensusType::Pow {
         return Err(InsertError::WrongConsensus);
     }
     if !view.identity.matches(config.network) || view.identity.genesis != rules.genesis_hash {

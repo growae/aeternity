@@ -141,7 +141,7 @@ fn full_state_scan_detects_deep_damage_and_keeps_the_original_rocksdb_snapshot()
 }
 #[test]
 fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
-    for schema in 1..=8 {
+    for schema in 1..=9 {
         use ae_trie::Value;
         use ae_tx::{SignedTransaction, Spend, Transaction, TransactionLeaf};
         use ae_types::{AccountPublicKey, Id, IdTag};
@@ -159,6 +159,7 @@ fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records
             panic!()
         };
         fields[0] = Value::Bytes(vec![schema]);
+        fields.truncate(5);
         let legacy = Value::List(fields).encode();
         let legacy_block = db
             .view()
@@ -215,7 +216,7 @@ fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records
 
 #[test]
 fn failed_legacy_validation_never_advances_the_schema_marker() {
-    for schema in 1..=8 {
+    for schema in 1..=9 {
         use ae_trie::Value;
         let dir = Temp::new();
         let id = identity();
@@ -235,6 +236,7 @@ fn failed_legacy_validation_never_advances_the_schema_marker() {
             panic!()
         };
         fields[0] = Value::Bytes(vec![schema]);
+        fields.truncate(5);
         let legacy = Value::List(fields).encode();
         let legacy_block = db
             .view()
@@ -481,7 +483,7 @@ fn finalized_record_corruption_and_future_schema_never_reinitialize_storage() {
     let List(mut fields) = ae_trie::Value::decode(&id.encode()).unwrap() else {
         panic!()
     };
-    fields[0] = Bytes(vec![10]);
+    fields[0] = Bytes(vec![11]);
     let encoded = List(fields).encode();
     db.db.put(repo::IDENTITY, &encoded).unwrap();
     drop(db);
@@ -658,4 +660,73 @@ fn startup_community_recovery_is_atomic_bounded_and_idempotent() {
     drop(db);
     let db = Database::open(&dir.0, id).unwrap();
     assert_eq!(db.view().unwrap().status().revision, 2);
+}
+
+#[test]
+fn persisted_consensus_binds_header_mode_without_changing_legacy_pow_archive_ownership() {
+    use ae_codec::headers::HeaderMode;
+    use ae_protocol::ConsensusType;
+    use ae_trie::Value;
+    let pow = identity();
+    let Value::List(fields) = Value::decode(&pow.encode()).unwrap() else {
+        panic!()
+    };
+    assert_eq!(fields.len(), 6);
+    let mut legacy = fields[..5].to_vec();
+    legacy[0] = Value::Bytes(vec![7]);
+    assert_eq!(pow.binding(), Value::List(legacy.clone()).encode());
+    for version in 1..=9 {
+        legacy[0] = Value::Bytes(vec![version]);
+        assert_eq!(
+            Identity::decode(&Value::List(legacy.clone()).encode()).unwrap(),
+            pow
+        );
+    }
+    let pos = Identity::for_consensus(
+        &NetworkProfile::uat(),
+        pow.genesis,
+        pow.execution_profile,
+        ConsensusType::Pos,
+    );
+    assert_ne!(pos.binding(), pow.binding());
+    assert_eq!(Identity::decode(&pos.encode()).unwrap(), pos);
+    for malformed in [
+        Value::List(Vec::new()),
+        Value::List(fields[..5].to_vec()),
+        Value::List([fields.clone(), vec![Value::Bytes(Vec::new())]].concat()),
+        Value::List([vec![Value::Bytes(vec![9])], fields[1..].to_vec()].concat()),
+    ] {
+        assert!(Identity::decode(&malformed.encode()).is_err());
+    }
+    let temp = Temp::new();
+    let config = ReadConfig {
+        mode: HeaderMode::Hyperchain,
+        ..Default::default()
+    };
+    assert!(matches!(
+        Database::open_with_config(&temp.0, pow.clone(), config.clone()),
+        Err(Error::Identity)
+    ));
+    assert!(!temp.0.exists());
+    let db = Database::open(&temp.0, pow.clone()).unwrap();
+    let original = db.db.get(repo::IDENTITY).unwrap().unwrap();
+    drop(db);
+    assert!(matches!(
+        Database::open_with_config(&temp.0, pos, config),
+        Err(Error::Identity)
+    ));
+    let db = Database::open(&temp.0, pow.clone()).unwrap();
+    assert_eq!(db.db.get(repo::IDENTITY).unwrap().unwrap(), original);
+    // Unknown consensus encodings are corruption, not a fallback to PoW.
+    let Value::List(mut fields) = Value::decode(&pow.encode()).unwrap() else {
+        panic!()
+    };
+    fields[5] = Value::Bytes(vec![2]);
+    let bad = Value::List(fields).encode();
+    assert!(Identity::decode(&bad).is_err());
+    db.db.put(repo::IDENTITY, &bad).unwrap();
+    drop(db);
+    assert!(Database::open(&temp.0, pow).is_err());
+    let raw = DB::open_default(&temp.0).unwrap();
+    assert_eq!(raw.get(repo::IDENTITY).unwrap(), Some(bad));
 }

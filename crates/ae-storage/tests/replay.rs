@@ -157,6 +157,7 @@ fn schema_seven_replay_ownership_and_partial_progress_resume_after_upgrade() {
         panic!()
     };
     fields[0] = Value::Bytes(vec![7]);
+    fields.truncate(5);
     let legacy = Value::List(fields).encode();
     assert_eq!(id.binding(), legacy);
     for initialized in [false, true] {

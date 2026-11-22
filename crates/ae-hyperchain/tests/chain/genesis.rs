@@ -117,7 +117,14 @@ fn context(row: &J, t: Trees, h: u64) -> chain::View {
     v.environment.network_id = b"ae_hc_reference".to_vec();
     v
 }
-fn queries(r: &Reader<MemoryStore, MemoryStore, Otp26>, v: &chain::View, rows: &J) {
+fn queries<
+    A: ae_trie::NodeWriter + Clone + std::fmt::Debug,
+    C: ae_trie::NodeWriter + Clone + std::fmt::Debug,
+>(
+    r: &Reader<A, C, Otp26>,
+    v: &chain::View<A, C>,
+    rows: &J,
+) {
     let env = RunEnv::View(Arc::new(v.clone()));
     let roots = v.trees.roots();
     for row in rows.as_array().unwrap() {
@@ -434,4 +441,453 @@ fn epoch_work_limits_never_publish_temporary_funding_or_staking_changes() {
     })
     .unwrap();
     check(&done, &row["lifecycle"][7]["trees"]);
+}
+
+#[test]
+fn production_contract_genesis_commits_reopens_and_queries_persistent_roots() {
+    use ae_chain::repository::{self as repo, Identity, ReadConfig};
+    use ae_codec::headers::{Header, HeaderMode};
+    use ae_protocol::ConsensusType;
+    use ae_storage::Database;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    for row in DATA["rows"].as_array().unwrap() {
+        let r = reader(row);
+        let initial = trees(&row["initial"]);
+        let context = context(row, initial.clone(), 0);
+        let transformed = with_execution(&r.profile, &context, |cfg| {
+            g::transform(&initial, &plan(row), &context.context, cfg)
+        })
+        .unwrap();
+        let roots = transformed.roots();
+        let header = g::header(&r.profile.network, 0, &roots).unwrap();
+        let hash = Header::Key(header.clone()).hash().unwrap();
+        let identity = Identity::for_consensus(
+            &r.profile.network,
+            hash,
+            ae_crypto::blake2b_256(b"isolated HC OTP26 genesis profile"),
+            ConsensusType::Pos,
+        );
+        let config = ReadConfig {
+            mode: HeaderMode::Hyperchain,
+            ..Default::default()
+        };
+        let path = Directory(std::env::temp_dir().join(format!(
+            "ae-hc-genesis-{}-{}",
+            std::process::id(),
+            row["protocol"]
+        )));
+        let database =
+            Database::open_with_config(&path.0, identity.clone(), config.clone()).unwrap();
+        let before = database.view().unwrap().status();
+        let small = repo::Limits {
+            commit_bytes: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            repo::bootstrap(
+                &database.view().unwrap(),
+                &r.profile.network,
+                &header,
+                &transformed,
+                small
+            ),
+            Err(repo::InsertError::Repository(repo::Error::ResourceLimit))
+        ));
+        assert_eq!(database.view().unwrap().status(), before);
+        let first = repo::bootstrap(
+            &database.view().unwrap(),
+            &r.profile.network,
+            &header,
+            &transformed,
+            Default::default(),
+        )
+        .unwrap();
+        let stale = repo::bootstrap(
+            &database.view().unwrap(),
+            &r.profile.network,
+            &header,
+            &transformed,
+            Default::default(),
+        )
+        .unwrap();
+        database.commit(first).unwrap();
+        assert!(database.commit(stale).is_err());
+        assert_eq!(database.view().unwrap().status().revision, 1);
+        assert_eq!(
+            database
+                .view()
+                .unwrap()
+                .require_record(hash)
+                .unwrap()
+                .difficulty,
+            0.into()
+        );
+        assert!(matches!(
+            repo::bootstrap(
+                &database.view().unwrap(),
+                &r.profile.network,
+                &header,
+                &transformed,
+                Default::default()
+            ),
+            Err(repo::InsertError::Repository(repo::Error::NotEmpty))
+        ));
+        drop(database);
+        // A mode mismatch is rejected even though genesis has no HC-only flags.
+        assert!(matches!(
+            Database::open(&path.0, identity.clone()),
+            Err(repo::Error::Identity)
+        ));
+        let pow = Identity::new(&r.profile.network, hash, identity.execution_profile);
+        assert!(matches!(
+            Database::open(&path.0, pow),
+            Err(repo::Error::Identity)
+        ));
+        let database = Database::open_with_config(&path.0, identity.clone(), config).unwrap();
+        {
+            let pinned = database.view().unwrap();
+            pinned.verify_tip().unwrap();
+            assert!(matches!(
+                repo::View::load_with_config(pinned.source().clone(), Default::default()),
+                Err(repo::Error::Identity)
+            ));
+            let rules = ae_chain::key::Rules::new(
+                ae_chain::admission::PowRules {
+                    now_ms: 0,
+                    micro_cycle_ms: 3_000,
+                    configured_gas_limit: 6_000_000.into(),
+                    body_limits: Default::default(),
+                },
+                hash,
+            );
+            // Persistence does not enable the currently PoW-only importer.
+            for consensus in [ConsensusType::Pow, ConsensusType::Pos] {
+                let mut execution =
+                    ae_execution::transactions::Config::primitives(&r.profile.network);
+                execution.consensus = consensus;
+                assert!(matches!(
+                    repo::prepare(
+                        &pinned,
+                        &ae_chain::block::Block::Key(header.clone()),
+                        &execution,
+                        &rules,
+                        Default::default()
+                    ),
+                    Err(repo::InsertError::WrongConsensus)
+                ));
+            }
+            assert_eq!(
+                pinned.require_block(hash).unwrap().header(),
+                Header::Key(header.clone())
+            );
+            let persisted = pinned.trees(hash, Default::default()).unwrap();
+            assert_eq!(persisted.roots(), roots);
+            let stored = chain::View {
+                trees: Arc::new(persisted),
+                context: context.context.clone(),
+                environment: context.environment.clone(),
+                history: context.history.clone(),
+                aevm: context.aevm.clone(),
+            };
+            let reader = Reader {
+                selected: chain::Selected::new(Default::default()),
+                profile: r.profile.clone(),
+            };
+            queries(&reader, &stored, &row["queries"]);
+            let mut scan = pinned.scan_state(hash, Default::default()).unwrap();
+            while !scan.is_complete() {
+                scan.next_page(Default::default()).unwrap();
+            }
+            assert_eq!(pinned.status().tip, Some(hash));
+            assert_eq!(pinned.canonical_key(0).unwrap(), Some(hash));
+        }
+        drop(database);
+        check(&initial, &row["initial"]);
+    }
+}
+
+#[test]
+fn genesis_header_bytes_hashes_and_zero_score_match_the_original_callbacks() {
+    use ae_codec::headers::{Header, HeaderMode};
+    let fixture: J =
+        serde_json::from_str(include_str!("../fixtures/erlang_hc_bootstrap.json")).unwrap();
+    for row in fixture["rows"].as_array().unwrap() {
+        let protocol = row["protocol"].as_u64().unwrap() as u32;
+        let network = NetworkProfile::custom(
+            b"ae_hc_reference".to_vec(),
+            vec![Activation {
+                height: 0,
+                protocol: Protocol::try_from(protocol).unwrap(),
+            }],
+        )
+        .unwrap();
+        let roots = if row["label"] == "empty" {
+            Default::default()
+        } else {
+            let state = DATA["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["protocol"] == row["protocol"])
+                .unwrap();
+            trees(&state["stages"][5]["trees"]).roots()
+        };
+        let header = g::header(&network, row["time"].as_u64().unwrap(), &roots).unwrap();
+        assert_eq!(header.common.state_hash.as_slice(), bytes(&row["root"]));
+        assert_eq!(row["difficulty"], 0);
+        let full = Header::Key(header.clone());
+        assert_eq!(full.encode().unwrap(), bytes(&row["bytes"]));
+        assert_eq!(full.hash().unwrap().as_ref(), bytes(&row["hash"]));
+        assert_eq!(
+            Header::decode(&bytes(&row["bytes"]), HeaderMode::Hyperchain).unwrap(),
+            full
+        );
+        let mut raw = header;
+        raw.common.state_hash = [0; 32];
+        let raw = Header::Key(raw);
+        assert_eq!(raw.encode().unwrap(), bytes(&row["raw_bytes"]));
+        assert_eq!(raw.hash().unwrap().as_ref(), bytes(&row["raw_hash"]));
+    }
+}
+
+#[test]
+fn bootstrap_rejects_noncanonical_hyperchain_genesis_without_writes() {
+    use ae_chain::repository::{self as repo, Identity, ReadConfig};
+    use ae_codec::headers::{Header, HeaderMode};
+    use ae_protocol::ConsensusType;
+    let network = reader(&DATA["rows"][2]).profile.network.clone();
+    let state = trees(&DATA["rows"][2]["initial"]);
+    let good = g::header(&network, 123, &state.roots()).unwrap();
+    for field in 0..13 {
+        let mut header = good.clone();
+        match field {
+            0 => header.target = 1,
+            1 => header.miner[0] = 1,
+            2 => header.beneficiary[0] = 1,
+            3 => header.seal[0] = 1,
+            4 => header.nonce = 1,
+            5 => header.info = Some([1; 4]),
+            6 => header.common.previous_key_hash[0] = 1,
+            7 => header.common.previous_hash[0] ^= 1,
+            8 => header.hole = true,
+            9 => header.end_of_epoch = true,
+            10 => header.common.height = 1,
+            11 => header.common.state_hash[0] ^= 1,
+            12 => header.common.version = 7,
+            _ => unreachable!(),
+        }
+        // Bind the deliberately invalid header, so validation cannot pass just
+        // by rejecting a different configured genesis hash.
+        let identity = Identity::for_consensus(
+            &network,
+            Header::Key(header.clone()).hash().unwrap(),
+            ae_types::Hash256::ZERO,
+            ConsensusType::Pos,
+        );
+        let path =
+            std::env::temp_dir().join(format!("ae-hc-bad-genesis-{}-{field}", std::process::id()));
+        let database = ae_storage::Database::open_with_config(
+            &path,
+            identity,
+            ReadConfig {
+                mode: HeaderMode::Hyperchain,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = database.view().unwrap().status();
+        assert!(
+            matches!(
+                repo::bootstrap(
+                    &database.view().unwrap(),
+                    &network,
+                    &header,
+                    &state,
+                    Default::default()
+                ),
+                Err(repo::InsertError::WrongGenesis)
+            ),
+            "field {field}"
+        );
+        assert_eq!(database.view().unwrap().status(), before);
+        drop(database);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[test]
+fn bootstrap_crash_worker() {
+    use ae_chain::repository::{self as repo, Identity, ReadConfig};
+    use ae_codec::headers::{Header, HeaderMode};
+    use std::io::{BufRead, Write};
+    let Ok(path) = std::env::var("AE_HC_BOOTSTRAP_CRASH_PATH") else {
+        return;
+    };
+    let row = &DATA["rows"][2];
+    let r = reader(row);
+    let state = trees(&row["stages"][5]["trees"]);
+    let header = g::header(&r.profile.network, 42, &state.roots()).unwrap();
+    let identity = Identity::for_consensus(
+        &r.profile.network,
+        Header::Key(header.clone()).hash().unwrap(),
+        ae_types::Hash256::ZERO,
+        ae_protocol::ConsensusType::Pos,
+    );
+    let database = ae_storage::Database::open_with_config(
+        path,
+        identity,
+        ReadConfig {
+            mode: HeaderMode::Hyperchain,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let plan = repo::bootstrap(
+        &database.view().unwrap(),
+        &r.profile.network,
+        &header,
+        &state,
+        Default::default(),
+    )
+    .unwrap();
+    println!("AE_HC_BOOTSTRAP_READY");
+    std::io::stdout().flush().unwrap();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "commit");
+    database.commit(plan).unwrap();
+    println!("AE_HC_BOOTSTRAP_DURABLE");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn killed_hyperchain_bootstrap_recovers_a_complete_genesis_or_empty_database() {
+    use ae_chain::repository::{Identity, Read, ReadConfig};
+    use ae_codec::headers::{Header, HeaderMode};
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let row = &DATA["rows"][2];
+    let r = reader(row);
+    let state = trees(&row["stages"][5]["trees"]);
+    let header = g::header(&r.profile.network, 42, &state.roots()).unwrap();
+    let hash = Header::Key(header.clone()).hash().unwrap();
+    let identity = Identity::for_consensus(
+        &r.profile.network,
+        hash,
+        ae_types::Hash256::ZERO,
+        ae_protocol::ConsensusType::Pos,
+    );
+    let config = ReadConfig {
+        mode: HeaderMode::Hyperchain,
+        ..Default::default()
+    };
+    for phase in ["before", "after", "race0", "race1", "race5", "race10"] {
+        let path = Directory(std::env::temp_dir().join(format!(
+            "ae-hc-bootstrap-crash-{}-{phase}",
+            std::process::id()
+        )));
+        let database =
+            ae_storage::Database::open_with_config(&path.0, identity.clone(), config.clone())
+                .unwrap();
+        let before = database.view().unwrap().source().prefix(&[], 100).unwrap();
+        drop(database);
+        let mut child = Worker(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "genesis::bootstrap_crash_worker", "--nocapture"])
+                .env("AE_HC_BOOTSTRAP_CRASH_PATH", &path.0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let output = child.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let listener = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(output).lines() {
+                if sender.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait = |marker: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let line = receiver
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|e| panic!("worker {phase} before {marker}: {e}"));
+                if line == marker {
+                    break;
+                }
+            }
+        };
+        wait("AE_HC_BOOTSTRAP_READY");
+        if phase != "before" {
+            let input = child.0.stdin.as_mut().unwrap();
+            input.write_all(b"commit\n").unwrap();
+            input.flush().unwrap();
+            if phase == "after" {
+                wait("AE_HC_BOOTSTRAP_DURABLE");
+            } else {
+                std::thread::sleep(Duration::from_millis(
+                    phase.strip_prefix("race").unwrap().parse().unwrap(),
+                ));
+            }
+        }
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        listener.join().unwrap();
+        let database =
+            ae_storage::Database::open_with_config(&path.0, identity.clone(), config.clone())
+                .unwrap();
+        let view = database.view().unwrap();
+        let revision = view.status().revision;
+        assert!(revision <= 1);
+        if phase == "before" {
+            assert_eq!(revision, 0);
+        } else if phase == "after" {
+            assert_eq!(revision, 1);
+        }
+        if revision == 0 {
+            assert_eq!(view.source().prefix(&[], 100).unwrap(), before);
+        } else {
+            view.verify_tip().unwrap();
+            assert_eq!(view.status().tip, Some(hash));
+            assert_eq!(view.canonical_key(0).unwrap(), Some(hash));
+            assert_eq!(view.require_record(hash).unwrap().difficulty, 0.into());
+            assert_eq!(
+                view.require_block(hash).unwrap().header(),
+                Header::Key(header.clone())
+            );
+            let stored = view.trees(hash, Default::default()).unwrap();
+            assert_eq!(stored.roots(), state.roots());
+            let mut scan = view.scan_state(hash, Default::default()).unwrap();
+            while !scan.is_complete() {
+                scan.next_page(Default::default()).unwrap();
+            }
+        }
+        eprintln!("HC bootstrap crash recovery {phase}: revision {revision}");
+    }
 }

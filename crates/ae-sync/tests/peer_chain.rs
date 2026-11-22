@@ -69,6 +69,11 @@ fn mode(profile: &Json) -> HeaderMode {
 fn database(profile: &Json, scenario: &Json) -> Store {
     let mut values = BTreeMap::new();
     let identity = Identity {
+        consensus: if mode(profile) == HeaderMode::Hyperchain {
+            ae_protocol::ConsensusType::Pos
+        } else {
+            ae_protocol::ConsensusType::Pow
+        },
         network: b"ae_dev_peer_chain".to_vec(),
         genesis: hash(&profile["genesis"]),
         protocols: Hash256([0; 32]),

@@ -142,7 +142,9 @@ impl Database {
     ) -> Result<Self, Error> {
         notifications.chain.validate()?;
         notifications.gc.validate()?;
-        if Identity::decode(&identity.encode())? != identity {
+        if Identity::decode(&identity.encode())? != identity
+            || identity.header_mode() != config.mode
+        {
             return Err(Error::Identity);
         }
         let mut o = Options::default();

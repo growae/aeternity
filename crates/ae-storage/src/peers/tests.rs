@@ -391,7 +391,7 @@ fn corrupt_record_metadata_and_future_schema_never_silently_reset() {
         assert!(Writer::start(db.clone(), Default::default()).is_err());
         assert_eq!(db.db.get(&key).unwrap().unwrap(), bytes);
     }
-    for schema in 1..=8 {
+    for schema in 1..=9 {
         for bad in [
             vec![0],
             Value::List(vec![number(2), number(1), number(0), number(0)]).encode(),
@@ -402,6 +402,7 @@ fn corrupt_record_metadata_and_future_schema_never_silently_reset() {
                 panic!()
             };
             fields[0] = number(schema);
+            fields.truncate(5);
             let legacy = Value::List(fields).encode();
             db.db.put(repo::IDENTITY, &legacy).unwrap();
             db.db.put(METADATA, &bad).unwrap();

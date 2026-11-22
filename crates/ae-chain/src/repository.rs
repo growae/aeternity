@@ -2,7 +2,7 @@
 // their original encodings; this database is not an Erlang/Mnesia directory.
 use crate::{block::Block, fraud};
 use ae_crypto::blake2b_256;
-use ae_protocol::NetworkProfile;
+use ae_protocol::{ConsensusType, NetworkProfile};
 use ae_state::{
     StateRoots, Trees, accounts::Accounts, calls::Calls, channels::Channels, contracts::Contracts,
     names::Names, oracles::Oracles,
@@ -113,6 +113,7 @@ pub trait Read: NodeReader + Clone {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    pub consensus: ConsensusType,
     pub network: Vec<u8>,
     pub genesis: Hash256,
     pub protocols: Hash256,
@@ -120,7 +121,16 @@ pub struct Identity {
 }
 impl Identity {
     pub fn new(network: &NetworkProfile, genesis: Hash256, execution_profile: Hash256) -> Self {
+        Self::for_consensus(network, genesis, execution_profile, ConsensusType::Pow)
+    }
+    pub fn for_consensus(
+        network: &NetworkProfile,
+        genesis: Hash256,
+        execution_profile: Hash256,
+        consensus: ConsensusType,
+    ) -> Self {
         Self {
+            consensus,
             network: network.network_id().into(),
             genesis,
             protocols: protocols(network),
@@ -131,35 +141,61 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(9)
+        self.encode_version(10)
     }
     // Archive ownership was introduced with version 7. Bind the identity
     // fields using that stable layout, independently of writer capabilities.
     pub fn binding(&self) -> Vec<u8> {
-        self.encode_version(7)
+        match self.consensus {
+            ConsensusType::Pow => self.encode_version(7),
+            ConsensusType::Pos => self.encode_version(10),
+        }
+    }
+    pub fn header_mode(&self) -> ae_codec::headers::HeaderMode {
+        match self.consensus {
+            ConsensusType::Pow => ae_codec::headers::HeaderMode::ProofOfWork,
+            ConsensusType::Pos => ae_codec::headers::HeaderMode::Hyperchain,
+        }
     }
     fn encode_version(&self, version: u64) -> Vec<u8> {
-        list(vec![
+        let mut fields = vec![
             number(version),
             binary(&self.network),
             binary(self.genesis.0),
             binary(self.protocols.0),
             binary(self.execution_profile.0),
-        ])
-        .encode()
+        ];
+        if version >= 10 {
+            fields.push(number(match self.consensus {
+                ConsensusType::Pow => 0,
+                ConsensusType::Pos => 1,
+            }));
+        }
+        list(fields).encode()
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let v = decode(bytes)?;
-        let a = fields(&v, 5)?;
-        let version = integer(&a[0])?;
-        if !matches!(version, 1..=9) {
+        let all = items(&v)?;
+        let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
+        if !matches!(version, 1..=10) {
             return Err(Error::Corrupt("schema version"));
         }
+        let a = fields(&v, if version >= 10 { 6 } else { 5 })?;
+        let consensus = if version < 10 {
+            ConsensusType::Pow
+        } else {
+            match integer(&a[5])? {
+                0 => ConsensusType::Pow,
+                1 => ConsensusType::Pos,
+                _ => return Err(Error::Corrupt("identity consensus")),
+            }
+        };
         let network = blob(&a[1])?.to_vec();
         if network.is_empty() || network.len() > 1024 {
             return Err(Error::Identity);
         }
         let id = Self {
+            consensus,
             network,
             genesis: hash(&a[2])?,
             protocols: hash(&a[3])?,
@@ -451,6 +487,9 @@ impl<S: Read> View<S> {
                 .get(IDENTITY)?
                 .ok_or(Error::Corrupt("missing identity"))?,
         )?;
+        if identity.header_mode() != config.mode {
+            return Err(Error::Identity);
+        }
         let status = Status::decode(
             &source
                 .get(STATUS)?
