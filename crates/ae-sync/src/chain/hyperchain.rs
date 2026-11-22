@@ -3,6 +3,7 @@ use ae_hyperchain::block::Host;
 use ae_storage::{Committed, Snapshot, hyperchain as storage};
 pub mod delivery;
 pub mod eoe;
+pub mod packing;
 pub mod scoped;
 
 // The runtime captures immutable parent-chain data once per block attempt.

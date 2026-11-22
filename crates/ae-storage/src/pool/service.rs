@@ -108,6 +108,50 @@ fn lookup<S: ae_trie::NodeReader>(
         .map(|a| a.map(policy::AccountInfo::from))
         .map_err(policy::Error::Account)
 }
+struct Selection<'a> {
+    gas: u64,
+    ignore: &'a BTreeSet<Hash256>,
+    options: policy::SelectOptions,
+}
+fn select<S: Read>(
+    pool: &mut policy::Pool,
+    view: &repo::View<S>,
+    block: Hash256,
+    input: Selection<'_>,
+    overlay: ae_trie::OverlayLimits,
+    now: impl FnMut() -> i64,
+) -> Result<policy::Candidate, Failure> {
+    // Native get_candidate/4 returns before loading the parent in this case.
+    if input.gas < policy::MIN_TRANSACTION_GAS {
+        return Ok(policy::Candidate {
+            block,
+            transactions: vec![],
+            gas_left: input.gas,
+            expired: false,
+            work: 0,
+        });
+    }
+    let header = view.require_block(block)?.header();
+    let trees = view.trees(block, overlay)?;
+    Ok(pool.candidate(
+        policy::CandidateRequest {
+            block,
+            height: header.common().height,
+            protocol: Protocol::try_from(header.common().version).map_err(Error::Protocol)?,
+            max_gas: input.gas,
+            ignore: input.ignore,
+            options: input.options,
+        },
+        |k| lookup(&trees.accounts, k),
+        now,
+    )?)
+}
+#[derive(Debug, Clone)]
+pub struct FailedTransaction {
+    pub hash: Hash256,
+    pub reason: String,
+    pub tuple: bool,
+}
 fn restore<S: Read>(stored: &Stored<S>, config: &Config) -> Result<Live, Failure> {
     let (hash, header) = tip(stored)?;
     let height = header.common().height;
@@ -493,23 +537,61 @@ impl Service {
         options: policy::SelectOptions,
         now: impl FnMut() -> i64,
     ) -> Result<policy::Candidate, Failure> {
+        self.candidate_using::<Snapshot<'_>>(None, gas, ignore, options, now)
+    }
+    // Use this captured committed parent for account nonce/height/protocol.
+    // Pool membership and visits still belong to the one current live pool.
+    pub fn candidate_at<S: Read>(
+        &mut self,
+        view: &repo::View<S>,
+        block: Hash256,
+        gas: u64,
+        ignore: &BTreeSet<Hash256>,
+        options: policy::SelectOptions,
+        now: impl FnMut() -> i64,
+    ) -> Result<policy::Candidate, Failure> {
+        self.candidate_using(Some((view, block)), gas, ignore, options, now)
+    }
+    fn candidate_using<S: Read>(
+        &mut self,
+        parent: Option<(&repo::View<S>, Hash256)>,
+        gas: u64,
+        ignore: &BTreeSet<Hash256>,
+        options: policy::SelectOptions,
+        now: impl FnMut() -> i64,
+    ) -> Result<policy::Candidate, Failure> {
         let db = self.db.clone();
         let stored = db.pool_view()?;
+        if let Some((view, _)) = parent
+            && (view.source().source_id() != stored.chain.source().source_id()
+                || view.identity() != stored.chain.identity())
+        {
+            return Err(Error::Identity.into());
+        }
         let mut plan = self.plan(&stored)?;
-        let (block, header) = tip(&stored)?;
-        let trees = stored.chain.trees(block, self.config.overlay)?;
-        let result = plan.live.pool.candidate(
-            policy::CandidateRequest {
-                block,
-                height: header.common().height,
-                protocol: Protocol::try_from(header.common().version).map_err(Error::Protocol)?,
-                max_gas: gas,
-                ignore,
-                options,
-            },
-            |k| lookup(&trees.accounts, k),
-            now,
-        )?;
+        let input = Selection {
+            gas,
+            ignore,
+            options,
+        };
+        let result = match parent {
+            Some((view, hash)) => select(
+                &mut plan.live.pool,
+                view,
+                hash,
+                input,
+                self.config.overlay,
+                now,
+            ),
+            None => select(
+                &mut plan.live.pool,
+                &stored.chain,
+                stored.chain.status().tip.ok_or(Error::Uninitialized)?,
+                input,
+                self.config.overlay,
+                now,
+            ),
+        }?;
         self.finish(&stored, plan, || Ok(()))?;
         Ok(result)
     }
@@ -519,22 +601,41 @@ impl Service {
         reason: &str,
         tuple: bool,
     ) -> Result<bool, Failure> {
+        Ok(self.record_failures(&[FailedTransaction {
+            hash,
+            reason: reason.into(),
+            tuple,
+        }])?[0])
+    }
+    // One acknowledgement covers the ordered native failed_txs batch. An
+    // operational failure publishes none of its counts or membership changes.
+    pub fn record_failures(
+        &mut self,
+        failures: &[FailedTransaction],
+    ) -> Result<Vec<bool>, Failure> {
+        if failures.len() > self.config.limits.work {
+            return Err(Error::ResourceLimit.into());
+        }
         let db = self.db.clone();
         let stored = db.pool_view()?;
         let mut plan = self.plan(&stored)?;
-        let limit = plan.live.pool.transaction(hash).and_then(|tx| {
-            self.config.failures.limit(
-                kind_name(tx.transaction().view().kind()),
-                self.config.failures.reason(reason, tuple),
-            )
-        });
-        let removed = plan.live.pool.record_failure(hash, limit)?;
-        if removed {
-            plan.live.members.remove(&hash);
-            plan.writes.insert(repo::key(MEMBERS, hash.0), None);
+        let mut result = Vec::with_capacity(failures.len());
+        for f in failures {
+            let limit = plan.live.pool.transaction(f.hash).and_then(|tx| {
+                self.config.failures.limit(
+                    kind_name(tx.transaction().view().kind()),
+                    self.config.failures.reason(&f.reason, f.tuple),
+                )
+            });
+            let removed = plan.live.pool.record_failure(f.hash, limit)?;
+            if removed {
+                plan.live.members.remove(&f.hash);
+                plan.writes.insert(repo::key(MEMBERS, f.hash.0), None);
+            }
+            result.push(removed);
         }
         self.finish(&stored, plan, || Ok(()))?;
-        Ok(removed)
+        Ok(result)
     }
     pub fn ttl(&mut self, hash: Hash256) -> Result<i128, Failure> {
         self.refresh()?;

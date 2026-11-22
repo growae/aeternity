@@ -1,6 +1,6 @@
 use super::*;
 use std::ops::Bound::{Included, Unbounded};
-const MIN_GAS: u64 = 15_000;
+pub const MIN_TRANSACTION_GAS: u64 = 15_000;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SelectOptions {
     pub deadline: Option<i64>,
@@ -308,15 +308,15 @@ impl<F: FnMut(AccountPublicKey) -> Result<Option<AccountInfo>, Error>, T: FnMut(
         }
     }
     fn walk(&mut self, visited: bool) -> Result<(), Error> {
-        if self.expired || self.gas <= MIN_GAS {
+        if self.expired || self.gas <= MIN_TRANSACTION_GAS {
             return Ok(());
         }
         let pool = self.pool;
         let map = if visited { &pool.visited } else { &pool.active };
         let mut iter = map.keys().peekable();
-        while iter.peek().is_some() && self.gas > MIN_GAS {
+        while iter.peek().is_some() && self.gas > MIN_TRANSACTION_GAS {
             for key in iter.by_ref().take(20) {
-                if self.gas <= MIN_GAS || self.expired {
+                if self.gas <= MIN_TRANSACTION_GAS || self.expired {
                     break;
                 }
                 self.consider(key, visited)?;

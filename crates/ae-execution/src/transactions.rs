@@ -17,6 +17,7 @@ pub mod accounting;
 pub mod batch;
 mod failures;
 pub mod owned;
+pub mod reasons;
 mod signatures;
 mod wrappers;
 pub use signatures::{

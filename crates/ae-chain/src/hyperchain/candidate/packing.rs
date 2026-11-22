@@ -38,6 +38,8 @@ impl Deadlines {
             && (packed || self.ceiling.is_some_and(|d| now() >= d))
     }
 }
+pub type FinishFailure<E, A, C> = (Box<Packing<A, C>>, Error<E, A, C>);
+
 pub struct PackRequest<'a> {
     pub parent: Hash256,
     pub gas: &'a BigInt,
@@ -168,11 +170,17 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Packing<A, C> {
             rejected: receipt.rejected,
         })
     }
-    pub fn finish<E>(mut self) -> Result<Micro<A, C>, Error<E, A, C>> {
+    pub fn finish<E>(self) -> Result<Micro<A, C>, Error<E, A, C>> {
+        self.try_finish().map_err(|(_, error)| error)
+    }
+    // Retain the complete attempt if final root construction cannot finish.
+    pub fn try_finish<E>(mut self) -> Result<Micro<A, C>, FinishFailure<E, A, C>> {
         if !self.done || self.awaiting {
-            return Err(Error::Sequence);
+            return Err((Box::new(self), Error::Sequence));
         }
-        self.candidate.refresh::<E>()?;
+        if let Err(error) = self.candidate.refresh::<E>() {
+            return Err((Box::new(self), error));
+        }
         Ok(self.candidate)
     }
 }

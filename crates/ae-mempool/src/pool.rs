@@ -18,7 +18,7 @@ mod selection;
 #[cfg(test)]
 mod tests;
 pub use maintenance::{FailureSettings, Reconcile};
-pub use selection::{Candidate, CandidateRequest, SelectOptions};
+pub use selection::{Candidate, CandidateRequest, MIN_TRANSACTION_GAS, SelectOptions};
 pub type Signed = SignedTransaction<Transaction>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {

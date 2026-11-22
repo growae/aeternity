@@ -114,8 +114,14 @@ fn spend_transitions_errors_events_and_state_roots_match_original_erlang() {
         }
         let result = process_spend(&tx, &mut accounts, &names, &ctx);
         if let Some(expected) = case.get("error").or_else(|| case.get("crash")) {
+            let error = result.unwrap_err();
+            if case.get("crash").is_none() {
+                let mapped = ae_execution::transactions::reasons::primitive(&error).unwrap();
+                assert_eq!(mapped.tag, expected.as_str().unwrap());
+                assert!(!mapped.tuple);
+            }
             assert_eq!(
-                reason(&result.unwrap_err()),
+                reason(&error),
                 expected.as_str().unwrap(),
                 "{}",
                 case["label"]

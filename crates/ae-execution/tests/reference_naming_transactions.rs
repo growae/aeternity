@@ -234,6 +234,16 @@ fn all_five_naming_callbacks_match_original_erlang_bytes_rules_events_and_roots(
             }
             Err(e) => {
                 assert_eq!(Some(reason(&e)), row["error"].as_str(), "{label}: {e:?}");
+                if let Some(mapped) = ae_execution::transactions::reasons::primitive(&e) {
+                    if !mapped.tuple {
+                        assert_eq!(Some(mapped.tag), row["error"].as_str(), "{label}");
+                    }
+                } else {
+                    assert!(matches!(
+                        e,
+                        Error::ReferenceException { .. } | Error::Name(NameError::IllegalSalt)
+                    ));
+                }
                 let class = match e {
                     Error::ReferenceException { class, .. } => Some(class),
                     _ => None,
@@ -299,6 +309,16 @@ fn optional_update_fields_and_fixed_ttls_match_original_primops() {
             }
             Err(e) => {
                 assert_eq!(Some(reason(&e)), row["error"].as_str(), "{label}: {e:?}");
+                if let Some(mapped) = ae_execution::transactions::reasons::primitive(&e) {
+                    if !mapped.tuple {
+                        assert_eq!(Some(mapped.tag), row["error"].as_str(), "{label}");
+                    }
+                } else {
+                    assert!(matches!(
+                        e,
+                        Error::ReferenceException { .. } | Error::Name(NameError::IllegalSalt)
+                    ));
+                }
                 assert_eq!(snapshot(&accounts, &names), row["initial"], "{label}");
             }
         }

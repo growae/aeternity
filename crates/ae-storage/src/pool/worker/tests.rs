@@ -603,3 +603,56 @@ fn worker_panic_resolves_queued_replies_and_can_restore_persisted_state() {
     );
     next.shutdown().unwrap();
 }
+
+#[test]
+fn failure_batch_keeps_one_receipt_across_timeout_and_rejects_excessive_requests() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let worker = spawn(db.clone());
+    let client = worker.client();
+    let h = tx().hash();
+    client.force_push(tx()).unwrap().wait().unwrap();
+    let (release, first) = gate(&client);
+    let report = crate::pool::FailedTransaction {
+        hash: h,
+        reason: "insufficient_funds".into(),
+        tuple: false,
+    };
+    let batch = client
+        .record_failures(vec![report.clone(), report])
+        .unwrap();
+    assert_eq!(batch.wait_timeout(Duration::ZERO), Err(Error::Timeout));
+    release.send(()).unwrap();
+    first.wait().unwrap();
+    assert_eq!(
+        batch.wait_timeout(Duration::from_secs(5)).unwrap(),
+        vec![false, false]
+    );
+    assert_eq!(batch.wait_timeout(Duration::ZERO), Err(Error::Disconnected));
+    assert_eq!(client.inspect(h).unwrap().wait().unwrap().failures, 2);
+    let submitted = client.info().submitted;
+    assert_eq!(
+        client
+            .record_failures(vec![crate::pool::FailedTransaction {
+                hash: h,
+                reason: "x".repeat(settings().single_request_bytes),
+                tuple: false
+            }])
+            .err(),
+        Some(Error::RequestTooLarge)
+    );
+    assert_eq!(client.info().submitted, submitted);
+    let clock = client.clock();
+    let now = clock.now();
+    let instant = clock.instant(now).unwrap();
+    assert!(Instant::now().saturating_duration_since(instant) < Duration::from_secs(1));
+    assert_eq!(
+        clock.instant(now + 9).unwrap().duration_since(instant),
+        Duration::from_millis(9)
+    );
+    assert_eq!(
+        clock.instant(-1).unwrap() + Duration::from_millis(1),
+        clock.instant(0).unwrap()
+    );
+    worker.shutdown().unwrap();
+}

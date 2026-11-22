@@ -17,7 +17,7 @@ mod key;
 mod packing;
 pub(crate) use key::template as key_template;
 pub use key::{Key, KeyInput};
-pub use packing::{Deadlines, PackRequest, Packing, Timeout};
+pub use packing::{Deadlines, FinishFailure, PackRequest, Packing, Timeout};
 pub type Signed = SignedTransaction<Transaction>;
 
 #[derive(Debug, Clone, Copy)]

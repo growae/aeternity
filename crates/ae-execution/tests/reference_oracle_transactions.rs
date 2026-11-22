@@ -225,6 +225,11 @@ fn oracle_callbacks_match_original_acceptance_events_and_all_state_roots() {
                     Error::ReferenceException { .. }
                         | Error::OracleAbi(abi::Error::StoredFateFormat(_))
                 );
+                if !exceptional {
+                    let mapped = ae_execution::transactions::reasons::primitive(&e).unwrap();
+                    assert_eq!(mapped.tag, row["error"].as_str().unwrap());
+                    assert!(!mapped.tuple);
+                }
                 assert_eq!(
                     exceptional,
                     row.get("exception").is_some(),

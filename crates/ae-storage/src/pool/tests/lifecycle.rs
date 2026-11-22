@@ -332,3 +332,109 @@ fn explicit_gc_signed_ttl_metrics_and_failed_commit_preserve_durable_records() {
     let mut restored = Service::start(db, NetworkProfile::mainnet(), config()).unwrap();
     assert!(restored.peek(10, None, None).unwrap().is_empty());
 }
+
+#[test]
+fn explicit_candidate_binds_database_and_returns_below_minimum_before_parent_lookup() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
+    let view = db.view().unwrap();
+    let absent = Hash256([99; 32]);
+    for gas in [0, 14999] {
+        let got = service
+            .candidate_at(
+                &view,
+                absent,
+                gas,
+                &BTreeSet::new(),
+                Default::default(),
+                || panic!("low gas must not read clock"),
+            )
+            .unwrap();
+        assert_eq!(got.block, absent);
+        assert!(got.transactions.is_empty());
+        assert_eq!(got.gas_left, gas);
+        assert!(!got.expired);
+    }
+    assert!(
+        service
+            .candidate_at(
+                &view,
+                absent,
+                15000,
+                &BTreeSet::new(),
+                Default::default(),
+                || 0
+            )
+            .is_err()
+    );
+    let other = Temp::new();
+    let foreign = database(&other);
+    let other_view = foreign.view().unwrap();
+    assert!(matches!(
+        service.candidate_at(
+            &other_view,
+            absent,
+            0,
+            &BTreeSet::new(),
+            Default::default(),
+            || 0
+        ),
+        Err(Failure::Repository(Error::Identity))
+    ));
+}
+#[test]
+fn failure_batches_preserve_duplicate_order_and_roll_back_every_count_on_failed_commit() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let t = tx();
+    let h = t.hash();
+    let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
+    service.force_push(t.clone()).unwrap();
+    drop(service);
+    let mut limited = config();
+    limited.commit_bytes = 0;
+    let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), limited).unwrap();
+    let report = |reason: &str| FailedTransaction {
+        hash: h,
+        reason: reason.into(),
+        tuple: false,
+    };
+    let before = service.inspect(h).unwrap();
+    let revision = db.pool_view().unwrap().revision();
+    assert_eq!(
+        service.record_failures(&[report("unrecognized"), report("crash")]),
+        Err(Failure::Repository(Error::ResourceLimit))
+    );
+    assert_eq!(service.inspect(h).unwrap(), before);
+    assert_eq!(db.pool_view().unwrap().revision(), revision);
+    assert_eq!(db.pool_view().unwrap().location(h).unwrap(), Location::Pool);
+    service.recover(config()).unwrap();
+    let mut batch = vec![report("unrecognized"); 6];
+    batch.push(FailedTransaction {
+        hash: Hash256([99; 32]),
+        reason: "crash".into(),
+        tuple: false,
+    });
+    assert_eq!(
+        service.record_failures(&batch).unwrap(),
+        vec![false, false, false, false, true, false, false]
+    );
+    assert_eq!(
+        db.pool_view().unwrap().location(h).unwrap(),
+        Location::Deleted
+    );
+    assert_eq!(
+        db.pool_view().unwrap().transaction(h).unwrap().as_ref(),
+        Some(t.as_ref())
+    );
+    drop(service);
+    drop(db);
+    let db = database(&temp);
+    let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
+    assert!(service.peek(100, None, None).unwrap().is_empty());
+    assert_eq!(
+        db.pool_view().unwrap().location(h).unwrap(),
+        Location::Deleted
+    );
+}

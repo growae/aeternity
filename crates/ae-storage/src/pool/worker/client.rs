@@ -10,6 +10,25 @@ pub struct SelectOptions {
     pub ceiling: Option<Instant>,
     pub packed: bool,
 }
+// The same origin is used by worker deadline checks and candidate packing.
+// Conversion is explicit and checked; a different worker cannot reinterpret
+// an opaque timestamp supplied without its originating clock.
+#[derive(Debug, Clone, Copy)]
+pub struct Clock(Instant);
+impl Clock {
+    pub fn now(self) -> i64 {
+        i64::try_from(self.0.elapsed().as_millis()).unwrap_or(i64::MAX)
+    }
+    pub fn instant(self, milliseconds: i64) -> Result<Instant, Error> {
+        let duration = Duration::from_millis(milliseconds.unsigned_abs());
+        if milliseconds < 0 {
+            self.0.checked_sub(duration)
+        } else {
+            self.0.checked_add(duration)
+        }
+        .ok_or(Error::RequestTooLarge)
+    }
+}
 #[derive(Clone)]
 pub struct Client {
     pub(super) shared: Arc<Shared>,
@@ -56,6 +75,12 @@ impl Client {
     }
     pub fn uses_database(&self, db: &Arc<Database>) -> bool {
         self.shared.database.ptr_eq(&Arc::downgrade(db))
+    }
+    pub fn uses_source(&self, source_id: u64) -> bool {
+        self.shared
+            .database
+            .upgrade()
+            .is_some_and(|db| db.source_id == source_id)
     }
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
@@ -192,8 +217,33 @@ impl Client {
     pub fn delete(&self, hash: Hash256) -> Result<Ticket<()>, Error> {
         self.submit(BASE_WEIGHT, move |s| s.delete(hash))
     }
+    pub fn clock(&self) -> Clock {
+        Clock(self.shared.origin)
+    }
     pub fn candidate(
         &self,
+        gas: u64,
+        ignore: BTreeSet<Hash256>,
+        options: SelectOptions,
+    ) -> Result<Ticket<policy::Candidate>, Error> {
+        self.queue_candidate(None, gas, ignore, options)
+    }
+    pub fn candidate_at(
+        &self,
+        view: ae_chain::repository::View<crate::snapshots::Reader>,
+        block: Hash256,
+        gas: u64,
+        ignore: BTreeSet<Hash256>,
+        options: SelectOptions,
+    ) -> Result<Ticket<policy::Candidate>, Error> {
+        self.queue_candidate(Some((view, block)), gas, ignore, options)
+    }
+    fn queue_candidate(
+        &self,
+        parent: Option<(
+            ae_chain::repository::View<crate::snapshots::Reader>,
+            Hash256,
+        )>,
         gas: u64,
         ignore: BTreeSet<Hash256>,
         options: SelectOptions,
@@ -202,6 +252,11 @@ impl Client {
             .len()
             .checked_mul(64)
             .and_then(|n| n.checked_add(BASE_WEIGHT))
+            .and_then(|n| {
+                n.checked_add(parent.as_ref().map_or(0, |(v, _)| {
+                    std::mem::size_of_val(v) + v.identity().network.len()
+                }))
+            })
             .ok_or(Error::RequestTooLarge)?;
         let origin = self.shared.origin;
         let stamp = |time: Instant| -> Result<i64, Error> {
@@ -219,10 +274,29 @@ impl Client {
             packed: options.packed,
         };
         self.submit(bytes, move |s| {
-            s.candidate(gas, &ignore, options, || {
-                i64::try_from(origin.elapsed().as_millis()).unwrap_or(i64::MAX)
-            })
+            let now = || i64::try_from(origin.elapsed().as_millis()).unwrap_or(i64::MAX);
+            match parent {
+                Some((view, block)) => s.candidate_at(&view, block, gas, &ignore, options, now),
+                None => s.candidate(gas, &ignore, options, now),
+            }
         })
+    }
+    pub fn record_failures(
+        &self,
+        failures: Vec<crate::pool::FailedTransaction>,
+    ) -> Result<Ticket<Vec<bool>>, Error> {
+        let storage = failures
+            .capacity()
+            .checked_mul(std::mem::size_of::<crate::pool::FailedTransaction>())
+            .ok_or(Error::RequestTooLarge)?;
+        let mut bytes = sum([BASE_WEIGHT, storage])?;
+        for f in &failures {
+            bytes = sum([bytes, f.reason.capacity()])?;
+            if bytes > self.shared.settings.single_request_bytes {
+                return Err(Error::RequestTooLarge);
+            }
+        }
+        self.submit(bytes, move |s| s.record_failures(&failures))
     }
     pub fn record_failure(
         &self,
