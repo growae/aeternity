@@ -163,6 +163,14 @@ fn original_pow_key_candidates_match_temporary_and_final_bytes_and_all_state_tre
                 let candidate =
                     Candidate::prepare(&trees, parent, history, config, rules, input(row))
                         .unwrap_or_else(|e| panic!("case {index}: {e:?}"));
+                let owned = transactions::owned::Owned::capture(config).unwrap();
+                let captured = owned.with_config(|execution| {
+                    Candidate::prepare(&trees, parent, history, execution, rules, input(row))
+                        .unwrap_or_else(|e| panic!("owned case {index}: {e:?}"))
+                });
+                assert_eq!(captured.temporary(), candidate.temporary());
+                assert_eq!(captured.trees().roots(), candidate.trees().roots());
+                assert_eq!(captured.fees(), candidate.fees());
                 assert_eq!(
                     hex::encode(Header::Key(candidate.temporary().clone()).encode().unwrap()),
                     row["result"]["temporary"],
@@ -181,6 +189,16 @@ fn original_pow_key_candidates_match_temporary_and_final_bytes_and_all_state_tre
                         &adjustment,
                     )
                     .unwrap();
+                assert_eq!(
+                    captured
+                        .finish(
+                            row["clocks"][1].as_u64().unwrap(),
+                            HIGHEST_TARGET,
+                            &adjustment,
+                        )
+                        .unwrap(),
+                    final_header
+                );
                 assert_eq!(
                     hex::encode(Block::Key(final_header).encode().unwrap()),
                     row["result"]["block"],
