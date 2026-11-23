@@ -33,7 +33,61 @@ impl std::fmt::Debug for Node {
             .finish_non_exhaustive()
     }
 }
+impl Drop for Node {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some((user, password)) = &mut self.credentials {
+            user.zeroize();
+            password.zeroize();
+        }
+    }
+}
 impl Node {
+    // aehttpc:parse_node_url drops the path/query/fragment and does not decode
+    // userinfo. A password may contain colons; split only its first separator.
+    pub fn from_config_url(chain: Chain, value: &str) -> Result<Self, Error> {
+        if value.len() > 4096 || value.bytes().any(|b| b <= 32 || b >= 127 || b == b'\\') {
+            return Err(Error::Configuration);
+        }
+        let (scheme, rest) = if let Some(rest) = value.strip_prefix("//") {
+            ("http", rest)
+        } else if let Some(parts) = value.split_once("://") {
+            parts
+        } else if value.contains(':') {
+            return Err(Error::Configuration);
+        } else {
+            return Self::from_config_url(chain, "http://localhost");
+        };
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return Err(Error::Configuration);
+        }
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let (host, credentials) = match authority.rsplit_once('@') {
+            Some((info, host)) => {
+                let (user, password) = info.split_once(':').ok_or(Error::Configuration)?;
+                if info.contains('@') {
+                    return Err(Error::Configuration);
+                }
+                (
+                    host,
+                    Some((user.as_bytes().to_vec(), password.as_bytes().to_vec())),
+                )
+            }
+            None => (authority, None),
+        };
+        if host.is_empty() {
+            return Err(Error::Configuration);
+        }
+        let mut node = Self::new(chain, &format!("{scheme}://{host}"), Some((vec![], vec![])))?;
+        node.credentials = credentials;
+        Ok(node)
+    }
+    pub fn origin(&self) -> &url::Url {
+        &self.origin
+    }
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
     pub fn new(
         chain: Chain,
         origin: &str,
@@ -105,6 +159,7 @@ pub enum Error {
     ResourceLimit,
     Deadline,
     Worker,
+    NoParents,
     Redirect,
 }
 struct Lookup {
@@ -128,6 +183,9 @@ pub struct Client {
     requests: SyncSender<Job>,
     stopped: Arc<AtomicBool>,
     config: Arc<Config>,
+    chain: Chain,
+    has_nodes: bool,
+    signing_network: Option<Arc<[u8]>>,
 }
 // One bounded lookup. Dropping the receipt cancels queued or active work.
 // Polling never waits for the parent service or its transport.
@@ -168,6 +226,14 @@ impl Request {
     }
 }
 impl Client {
+    pub fn chain(&self) -> Result<Chain, Error> {
+        self.check()?;
+        Ok(self.chain)
+    }
+    pub fn signing_network(&self) -> Result<Option<Arc<[u8]>>, Error> {
+        self.check()?;
+        Ok(self.signing_network.clone())
+    }
     // Nonblocking lifetime check, safe under a storage writer. Never performs I/O.
     pub fn check(&self) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
@@ -188,6 +254,9 @@ impl Client {
     }
     pub fn request(&self, hash: &[u8]) -> Result<Request, Error> {
         self.check()?;
+        if !self.has_nodes {
+            return Err(Error::NoParents);
+        }
         if hash.len() > self.config.maximum_hash_bytes {
             return Err(Error::ResourceLimit);
         }
@@ -229,10 +298,21 @@ impl Service {
         config: Config,
         signing: Option<posting::Signing>,
     ) -> Result<Self, Error> {
+        let chain = nodes.first().ok_or(Error::Configuration)?.chain;
+        Self::spawn_configured(chain, nodes, config, signing)
+    }
+    // A configured connector can start without hosts. Queries then fail as
+    // operationally unavailable, never as an absent pin or a broadcast retry.
+    pub fn spawn_configured(
+        chain: Chain,
+        nodes: Vec<Node>,
+        config: Config,
+        signing: Option<posting::Signing>,
+    ) -> Result<Self, Error> {
         if signing.as_ref().is_some_and(|s| s.network.len() > 4096) {
             return Err(Error::Configuration);
         }
-        if nodes.is_empty()
+        if nodes.iter().any(|n| n.chain != chain)
             || nodes.len() > 32
             || !(1..=1024).contains(&config.maximum_pending)
             || !(1..=65536).contains(&config.maximum_hash_bytes)
@@ -251,7 +331,9 @@ impl Service {
             return Err(Error::Configuration);
         }
         // Native pin calls use only [NodeSpec | _], with no majority or fallback.
-        let node = nodes.into_iter().next().expect("nonempty parents");
+        let node = nodes.into_iter().next();
+        let has_nodes = node.is_some();
+        let signing_network = signing.as_ref().map(|s| Arc::from(s.network.clone()));
         let config = Arc::new(config);
         let transport = transport::Transport::new(config.clone())?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -273,16 +355,19 @@ impl Service {
                 };
                 match job {
                 Job::Lookup(job) => {
-                let value = runtime.block_on(async {
+                let value = if let Some(node) = &node { runtime.block_on(async {
                     tokio::select! {
                         biased;
                         error = transport::cancelled(&stop, &job.cancel, job.deadline) => Err(error),
-                        result = lookup::fetch(&transport, &node, &job.hash) => result,
+                        result = lookup::fetch(&transport, node, &job.hash) => result,
                     }
-                });
+                }) } else { Err(Error::NoParents) };
                 let _ = job.reply.try_send(value);
                 }
-                Job::Post(job) => posting::run(&runtime, &transport, &node, signing.as_ref(), &stop, job),
+                Job::Post(job) => match &node {
+                    Some(node) => posting::run(&runtime, &transport, node, signing.as_ref(), &stop, job),
+                    None => posting::unavailable(job),
+                },
                 }
             }
         }).map_err(|_| Error::Spawn)?;
@@ -291,6 +376,9 @@ impl Service {
                 requests,
                 stopped,
                 config,
+                chain,
+                has_nodes,
+                signing_network,
             },
             worker: Some(worker),
         })

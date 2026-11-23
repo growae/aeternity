@@ -1,6 +1,6 @@
 // Continuous PoS production and owned child shutdown. Scheduling follows
 // aec_conductor (aeternity fa2a6d7); ISC copyright: repository LICENSE.
-use super::{delivery, eoe, pinning, scoped};
+use super::{delivery, eoe, parent, pinning, scoped};
 use crate::{chain, resilience, votes};
 use ae_chain::{publication, repository as repo};
 use ae_crypto::Ed25519SecretKey;
@@ -30,6 +30,9 @@ pub struct ParentConfig {
     pub seed: [u8; 16],
 }
 pub struct PinConfig {
+    pub chain: crate::parent_pins::Chain,
+    pub network: Vec<u8>,
+    pub accounts: BTreeMap<AccountPublicKey, AccountPublicKey>,
     pub signing: Option<crate::parent_pins::posting::Signing>,
     pub agent: Option<pinning::Config>,
     pub nodes: Vec<crate::parent_pins::Node>,
@@ -68,6 +71,7 @@ pub enum Error {
     Delivery(delivery::Error),
     Production(production::Error),
     Pinning(pinning::Error),
+    Utilities(parent::Error),
     Supervision(eoe_runtime::Output),
 }
 #[derive(Debug)]
@@ -148,6 +152,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     connector: Option<connector::Runtime>,
     pins: Option<crate::parent_pins::Service>,
     pinning: Option<pinning::Service>,
+    parent_utilities: Option<parent::Client<O>>,
     resilience: Option<resilience::Owner>,
     resilience_worker: Option<resilience::Worker>,
     resilience_config: Option<resilience::Config>,
@@ -206,7 +211,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if config.producing && !config.block_producer {
             return Err(Error::NotBlockProducer);
         }
-        if config.events_per_step == 0
+        if config
+            .parent
+            .pins
+            .as_ref()
+            .is_some_and(|p| p.network.len() > 4096 || p.accounts.len() > 65536)
+            || config.events_per_step == 0
             || config.production.parent_pins.is_some()
             || (config.parent.pins.is_some() && !config.production.pins.is_empty())
             || config.events_per_step > 65_536
@@ -258,13 +268,21 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let targets = targets(selected.clone(), &execution)?;
         // Build both directions together. No replaceable connector link escapes.
         let agent = config.parent.pins.as_ref().and_then(|p| p.agent.clone());
-        let pin_execution = agent.as_ref().map(|_| execution.clone());
+        let pin_execution = config.parent.pins.as_ref().map(|_| execution.clone());
+        let metadata = config.parent.pins.as_ref().map(|p| {
+            (
+                p.network.clone(),
+                p.accounts.clone(),
+                p.service.maximum_payload_bytes,
+            )
+        });
         let pins = config
             .parent
             .pins
             .take()
             .map(|pins| {
-                crate::parent_pins::Service::spawn_with_signing(
+                crate::parent_pins::Service::spawn_configured(
+                    pins.chain,
                     pins.nodes,
                     pins.service,
                     pins.signing,
@@ -320,6 +338,21 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         )
         .map_err(Error::Importer)?;
         let producer = accepted.producer();
+        let parent_utilities = metadata
+            .map(|(network, accounts, maximum_payload_bytes)| {
+                parent::Client::new(parent::Inputs {
+                    database: database.clone(),
+                    source: selected.clone(),
+                    execution: pin_execution.as_ref().expect("pin execution").clone(),
+                    producer: producer.clone(),
+                    pins: pins.as_ref().expect("pin service").client(),
+                    network,
+                    accounts,
+                    maximum_payload_bytes,
+                })
+            })
+            .transpose()
+            .map_err(Error::Utilities)?;
         let publications =
             votes::Publications::new(&database, config.eoe.votes).map_err(Error::Votes)?;
         let owner = owner::Owner::start(
@@ -345,7 +378,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                         execution: pin_execution.expect("agent execution"),
                         producer: producer.clone(),
                         pool: pool.client(),
-                        parent: pins.as_ref().expect("configured parent pins").client(),
+                        parent: parent_utilities.as_ref().expect("parent utilities").clone(),
                         keys: owner.signing().clone(),
                     },
                     config,
@@ -364,6 +397,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             connector: Some(connector),
             pins,
             pinning,
+            parent_utilities,
             resilience,
             resilience_worker,
             resilience_config: config.resilience,
@@ -428,6 +462,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn parent_pins(&self) -> Option<crate::parent_pins::Client> {
         self.pins.as_ref().map(crate::parent_pins::Service::client)
+    }
+    pub fn parent_utilities(&self) -> Option<parent::Client<O>> {
+        self.parent_utilities.clone()
     }
     pub fn pinning(&self) -> Option<pinning::Handle> {
         self.pinning.as_ref().map(pinning::Service::handle)

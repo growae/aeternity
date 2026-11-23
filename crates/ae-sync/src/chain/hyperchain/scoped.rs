@@ -203,6 +203,9 @@ impl<O: MapOrder + Clone> Producer<O> {
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {
         self.database.ptr_eq(&Arc::downgrade(database))
     }
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.owner.ptr_eq(&other.owner) && self.context.ptr_eq(&other.context)
+    }
     pub(crate) fn pinning_lease(&self) -> Result<Arc<()>, Error> {
         self.check()?;
         Ok(self.owner.upgrade().ok_or(Error::Closed)?.pinning_lease()?)

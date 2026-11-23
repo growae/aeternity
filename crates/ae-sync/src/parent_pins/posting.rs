@@ -111,6 +111,9 @@ impl Request {
 impl Client {
     pub fn post(&self, post: Post) -> Result<Request, Error> {
         self.check()?;
+        if !self.has_nodes {
+            return Err(Error::NoParents);
+        }
         for n in [&post.amount, &post.fee] {
             if n.as_bytes().len() > self.config.maximum_number_digits
                 || num_bigint::BigUint::from_bytes_be(n.as_bytes())
@@ -179,4 +182,10 @@ pub(super) fn run(
         Err(failure) => job.progress.failure(failure),
     };
     let _ = job.reply.try_send(result);
+}
+
+pub(super) fn unavailable(job: Job) {
+    let _ = job
+        .reply
+        .try_send(Outcome::NotSubmitted(Failure::Local(Error::NoParents)));
 }

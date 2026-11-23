@@ -5,6 +5,9 @@ use std::sync::atomic::Ordering;
 fn configured(node: &Node, parent: &pinned::Parent) -> Conductor<Otp26> {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        chain: ae_sync::parent_pins::Chain::Aeternity,
+        network: b"parent_network".to_vec(),
+        accounts: Default::default(),
         signing: None,
         agent: None,
         nodes: vec![parent.node.clone()],
@@ -219,14 +222,23 @@ fn failed_pin_service_start_releases_all_constructor_leases() {
     let node = Node::new(0);
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        chain: ae_sync::parent_pins::Chain::Aeternity,
+        network: b"parent_network".to_vec(),
+        accounts: Default::default(),
         signing: None,
         agent: None,
         nodes: vec![],
-        service: Default::default(),
+        service: ae_sync::parent_pins::Config {
+            maximum_pending: 0,
+            ..Default::default()
+        },
     });
     assert!(matches!(new(&node, cfg), Err(conductor::Error::Parent(_))));
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        chain: ae_sync::parent_pins::Chain::Aeternity,
+        network: b"parent_network".to_vec(),
+        accounts: Default::default(),
         signing: None,
         agent: None,
         nodes: vec![],

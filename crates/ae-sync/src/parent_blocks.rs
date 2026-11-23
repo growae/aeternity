@@ -53,13 +53,19 @@ pub struct Backend {
 }
 impl Backend {
     pub fn new(nodes: Vec<Node>, config: Config) -> Result<Self, Error> {
+        if nodes.is_empty()
+            || nodes
+                .iter()
+                .any(|n| n.chain != Chain::Aeternity && n.credentials.is_none())
+        {
+            return Err(Error::Configuration);
+        }
+        Self::configured(nodes, config)
+    }
+    pub fn configured(nodes: Vec<Node>, config: Config) -> Result<Self, Error> {
         if !(1..=32).contains(&config.maximum_hosts)
-            || nodes.is_empty()
             || nodes.len() > config.maximum_hosts
-            || nodes.iter().any(|n| {
-                n.chain != nodes[0].chain
-                    || (n.chain != Chain::Aeternity && n.credentials.is_none())
-            })
+            || nodes.iter().any(|n| n.chain != nodes[0].chain)
             || config.request_timeout.is_zero()
             || config.request_timeout > Duration::from_secs(60)
             || !(1..=65536).contains(&config.maximum_hash_bytes)

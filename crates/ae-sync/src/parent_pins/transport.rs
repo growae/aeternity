@@ -113,6 +113,9 @@ impl Transport {
         path: &str,
         body: Option<&[u8]>,
     ) -> Result<Option<http::Response>, Error> {
+        if body.is_some() && node.chain != super::Chain::Aeternity && node.credentials.is_none() {
+            return Err(Error::Configuration);
+        }
         let addresses = self.addresses(node).await?;
         let mut stream = None;
         for address in addresses {

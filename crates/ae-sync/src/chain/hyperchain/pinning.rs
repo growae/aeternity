@@ -1,5 +1,5 @@
 // Owned aec_pinning_agent event processing, aeternity fa2a6d7.
-use super::{eoe, scoped};
+use super::{eoe, parent, scoped};
 use crate::{chain, parent_pins};
 use ae_chain::{publication, repository as repo};
 use ae_hyperchain::{pinning as core, signing::Keys};
@@ -7,7 +7,7 @@ use ae_storage::{Database, events, pool};
 use ae_types::AccountPublicKey;
 use ae_vm_fate::maps::MapOrder;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -20,7 +20,6 @@ mod host;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub accounts: BTreeMap<AccountPublicKey, AccountPublicKey>,
     pub outputs: usize,
     pub maximum_event_bytes: usize,
     pub maximum_events: usize,
@@ -30,7 +29,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            accounts: BTreeMap::new(),
             outputs: 16,
             maximum_event_bytes: 16 << 20,
             maximum_events: 1024,
@@ -53,6 +51,7 @@ pub enum Error {
     Events(events::Error),
     Source(chain::Error),
     Parent(parent_pins::Error),
+    Utilities(parent::Error),
     Pool(pool::worker::Error),
     Transaction(core::Error),
 }
@@ -157,7 +156,7 @@ pub struct Inputs<O> {
     pub execution: repo::HyperchainConfig<O>,
     pub producer: scoped::Producer<O>,
     pub pool: pool::worker::Client,
-    pub parent: parent_pins::Client,
+    pub parent: parent::Client<O>,
     pub keys: Keys,
 }
 pub struct Service {
@@ -172,7 +171,7 @@ impl Service {
         config: Config,
     ) -> Result<Self, Error> {
         if !(1..=4096).contains(&config.outputs)
-            || config.accounts.len() > 65536
+            || !input.parent.bound_to(&input.producer, &input.source)
             || !(1..=65536).contains(&config.maximum_events)
             || !(1..=1 << 30).contains(&config.maximum_event_bytes)
             || config.poll.is_zero()
@@ -190,7 +189,7 @@ impl Service {
             return Err(Error::Configuration);
         }
         input.producer.check().map_err(Error::Source)?;
-        input.parent.check().map_err(Error::Parent)?;
+        input.parent.check().map_err(Error::Utilities)?;
         let lease = input.producer.pinning_lease().map_err(Error::Source)?;
         let source = input.database.events();
         let cursor = source.cursor();

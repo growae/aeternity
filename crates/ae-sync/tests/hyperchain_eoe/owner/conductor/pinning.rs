@@ -71,7 +71,23 @@ impl Wallet {
                 };
                 let (head, body) = request(&mut s);
                 count.fetch_add(1, Ordering::AcqRel);
-                let response = if head.starts_with("POST /v3/transactions ") {
+                let response = if head.starts_with("GET /v3/key-blocks/") {
+                    let path = head.split_whitespace().nth(1).unwrap();
+                    let h = if path == "/v3/key-blocks/current" {
+                        16
+                    } else {
+                        path.strip_prefix("/v3/key-blocks/height/")
+                            .unwrap()
+                            .parse::<i64>()
+                            .unwrap()
+                    };
+                    if h < 0 {
+                        let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                        continue;
+                    }
+                    let h = h as u64;
+                    json!({"hash":api::encode(ApiType::KeyBlockHash,&key(1000+h)),"prev_key_hash":api::encode(ApiType::KeyBlockHash,&key(999+h)),"height":h,"time":h*100})
+                } else if head.starts_with("POST /v3/transactions ") {
                     let (ApiType::Transaction, bytes) =
                         api::decode(body["tx"].as_str().unwrap()).unwrap()
                     else {
@@ -140,6 +156,12 @@ fn configured(
 fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        chain: parent_pins::Chain::Aeternity,
+        network: b"parent_network".to_vec(),
+        accounts: [12, 13, 14]
+            .into_iter()
+            .map(|n| (signer(n).public_key(), signer(99).public_key()))
+            .collect(),
         nodes: vec![wallet.node.clone()],
         service: parent_pins::Config {
             request_timeout: Duration::from_secs(2),
@@ -150,13 +172,7 @@ fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
             network: b"parent_network".to_vec(),
             keys: Keys::new([signer(99)]),
         }),
-        agent: Some(pinning::Config {
-            accounts: [12, 13, 14]
-                .into_iter()
-                .map(|n| (signer(n).public_key(), signer(99).public_key()))
-                .collect(),
-            ..Default::default()
-        }),
+        agent: Some(pinning::Config::default()),
     });
     cfg
 }
@@ -463,15 +479,7 @@ async fn disabled_unmapped_and_failed_startup_do_not_leak_owners_or_post_transac
     assert!(c.pinning().is_none());
     shutdown(c);
     let mut c = configured(&node, &wallet, |cfg| {
-        cfg.parent
-            .pins
-            .as_mut()
-            .unwrap()
-            .agent
-            .as_mut()
-            .unwrap()
-            .accounts
-            .clear()
+        cfg.parent.pins.as_mut().unwrap().accounts.clear()
     });
     let mut reports = vec![];
     prefix(&node, &mut c, &mut reports, 9).await;
@@ -594,3 +602,6 @@ async fn event_gap_while_parent_post_is_pending_retains_receipt_and_stops_replay
     )));
     assert_eq!(children(&reports).len(), 1);
 }
+
+#[path = "pinning/utilities.rs"]
+mod utilities;

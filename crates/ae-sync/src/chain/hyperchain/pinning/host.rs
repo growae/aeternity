@@ -1,5 +1,4 @@
 use super::*;
-use ae_hyperchain::{chain::RunEnv, pin};
 use ae_types::Unsigned;
 use num_bigint::BigInt;
 pub(super) struct Host<O> {
@@ -7,7 +6,7 @@ pub(super) struct Host<O> {
     pub execution: repo::HyperchainConfig<O>,
     pub producer: scoped::Producer<O>,
     pub pool: pool::worker::Client,
-    pub parent: parent_pins::Client,
+    pub parent: parent::Client<O>,
     pub keys: Keys,
     pub config: Config,
     pub shared: Arc<Shared>,
@@ -22,7 +21,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
         if !self.pool.info().accepting {
             return Err(Error::Closed);
         }
-        self.parent.check().map_err(Error::Parent)
+        self.parent.check().map_err(Error::Utilities)
     }
     fn read<T>(
         &self,
@@ -67,67 +66,6 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
         }
         Ok(miner.max(protocol.minimum_gas_price().into()))
     }
-    fn pin_data(&self) -> Result<pin::Parent, Error> {
-        self.check()?;
-        let source = self.source.upgrade().ok_or(Error::Closed)?;
-        let captured = source
-            .snapshots()
-            .view()
-            .map_err(|_| Error::State("selected snapshot"))?;
-        let view = captured.value;
-        let tip = view.status().tip.ok_or(Error::State("selected tip"))?;
-        let block = view
-            .require_block(tip)
-            .map_err(|_| Error::State("selected block"))?;
-        let mut profile = self.execution.profile.as_ref().clone();
-        profile.network = view
-            .protocol_profile(
-                &profile.network,
-                block.header().common().height,
-                self.execution.limits.history,
-            )
-            .map_err(|_| Error::State("selected protocol"))?;
-        let query = repo::hyperchain::Config {
-            overlays: self.execution.limits.overlay,
-            maximum_history_headers: self.execution.limits.history,
-            configured_block_gas_limit: self.execution.rules.configured_gas_limit.clone(),
-            aevm: self.execution.aevm.clone(),
-        };
-        let reader = repo::hyperchain::reader(
-            view.clone(),
-            &self.execution.identity,
-            Arc::new(profile),
-            query,
-        )
-        .map_err(|_| Error::State("selected reader"))?;
-        let info = reader
-            .epoch_info(&RunEnv::Top)
-            .map_err(|_| Error::State("current epoch"))?;
-        let ae_vm_fate::value::Value::Integer(epoch) = info.epoch else {
-            return Err(Error::State("epoch integer"));
-        };
-        let height: BigInt = info.first - 1;
-        let h: u64 = height
-            .clone()
-            .try_into()
-            .map_err(|_| Error::State("previous epoch height"))?;
-        let hash = view
-            .canonical_key(h)
-            .map_err(|_| Error::State("previous epoch key"))?
-            .ok_or(Error::State("missing previous epoch key"))?;
-        // Native connector checks the current epoch's final leader separately
-        // from the leader of the triggering event. It does not use event First.
-        self.producer
-            .cached_leader(&info.last)
-            .map_err(Error::Source)?
-            .ok_or(Error::LeaderUnavailable)?;
-        self.check()?;
-        Ok(pin::Parent {
-            epoch: epoch - 1,
-            height,
-            block_hash: hash.0.to_vec(),
-        })
-    }
     fn child(
         &mut self,
         kind: ChildKind,
@@ -148,6 +86,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             keys: &self.keys,
             limits: self.config.transaction,
         };
+        if self.parent.metadata().map_err(Error::Utilities)?.signer == parent::Signer::None {
+            return Err(Error::Transaction(core::Error::Signing));
+        }
         let tx = match kind {
             ChildKind::Note => core::note(input),
             ChildKind::Proof => core::proof(self.execution.profile.contracts.election, input),
@@ -213,23 +154,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
             .ok_or(Error::LeaderUnavailable)
     }
     fn mapped(&self, leader: AccountPublicKey) -> bool {
-        self.config.accounts.contains_key(&leader)
+        self.parent.mapped(leader)
     }
     fn post(&mut self, leader: AccountPublicKey) -> Result<Option<Vec<u8>>, Error> {
         let fee = self.minimum_gas_price()?.mul_u64(1_000_000);
-        let post = parent_pins::posting::Post {
-            pin: self.pin_data()?,
-            account: *self
-                .config
-                .accounts
-                .get(&leader)
-                .ok_or(Error::Configuration)?,
-            amount: 1.into(),
-            fee,
-        };
+        let post = self
+            .parent
+            .prepare_post(leader, 1.into(), fee)
+            .map_err(Error::Utilities)?;
         let mut request = loop {
             self.check()?;
-            match self.parent.post(post.clone()) {
+            match self.parent.service().post(post.clone()) {
                 Ok(r) => break r,
                 Err(parent_pins::Error::Busy) => thread::sleep(self.config.poll),
                 Err(e) => return Err(Error::Parent(e)),
@@ -257,7 +192,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
         let Some(hash) = hash else { return Ok(false) };
         let mut request = loop {
             self.check()?;
-            match self.parent.request(hash) {
+            match self.parent.service().request(hash) {
                 Ok(r) => break r,
                 Err(parent_pins::Error::Busy) => thread::sleep(self.config.poll),
                 Err(e) => return Err(Error::Parent(e)),
