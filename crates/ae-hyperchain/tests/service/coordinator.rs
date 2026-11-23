@@ -2,6 +2,7 @@ use super::*;
 use ae_hyperchain::eoe::{coordinator as api, runtime};
 use api::{CallFailure, Coordinator, ServiceOutput};
 use std::time::Duration;
+mod lifecycle;
 static COORDINATOR: LazyLock<J> =
     LazyLock::new(|| unpack(include_str!("../fixtures/erlang_hc_coordinator.json")));
 fn negotiation(epoch: u64) -> Negotiation {

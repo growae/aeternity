@@ -46,11 +46,24 @@ impl Drop for Lease {
 // independently of the request bridge. Stopping/replacing a bridge leaves
 // its accepted publications in this owner or the bounded EOE output queues.
 pub struct Owner<A, C> {
-    runtime: runtime::Runtime<A, C>,
+    runtime: Option<runtime::Runtime<A, C>>,
+    client: runtime::Client<A, C>,
+    route: runtime::Route<A, C>,
+    retained: std::collections::VecDeque<runtime::Output>,
+    retired: Option<Retirement>,
     publications: Publications,
     _claim: publications::Claim,
     attached: Arc<AtomicBool>,
+    routed: AtomicBool,
     pending: Option<runtime::Output>,
+}
+#[derive(Debug)]
+pub struct Retirement {
+    pub info: runtime::Info,
+    pub state: Option<coordinator::Snapshot>,
+    pub result: Result<(), String>,
+    pub queued: Vec<runtime::Submission>,
+    pub interrupted: Option<runtime::Submission>,
 }
 pub struct StartError<A, C> {
     pub error: Error,
@@ -74,16 +87,92 @@ impl<A, C> Owner<A, C> {
             Ok(claim) => claim,
             Err(error) => return Err(Box::new(StartError { error, runtime })),
         };
+        let client = runtime.client();
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
+            route: runtime::Route::new(client.clone()),
+            client,
+            retained: Default::default(),
+            retired: None,
             publications,
             _claim: claim,
             attached: Arc::new(AtomicBool::new(false)),
+            routed: AtomicBool::new(false),
             pending: None,
         })
     }
     pub fn client(&self) -> runtime::Client<A, C> {
-        self.runtime.client()
+        self.client.clone()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .is_none_or(runtime::Runtime::is_finished)
+    }
+    pub fn replacement_pending(&self) -> bool {
+        self.client.replacement_pending()
+    }
+    // Retain the publication claim while joining the old generation. All
+    // outputs, including the current backpressured vote, drain through route.
+    pub fn begin_retirement(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        self.route.replace(None);
+        let runtime::Retired {
+            info,
+            state,
+            result,
+            outputs,
+            queued,
+            interrupted,
+        } = runtime.retire();
+        self.retained.extend(outputs);
+        self.retired = Some(Retirement {
+            info,
+            state,
+            result,
+            queued,
+            interrupted,
+        });
+    }
+    pub fn retirement(&self) -> Option<&Retirement> {
+        self.retired.as_ref()
+    }
+    pub fn retained_outputs(&self) -> usize {
+        self.retained.len() + usize::from(self.pending.is_some())
+    }
+    // A receipt is transferred only after every old output has been routed or
+    // explicitly taken by the owner. A replacement cannot bypass that order.
+    pub fn take_retirement(&mut self) -> Option<Retirement> {
+        if self.retained_outputs() == 0 {
+            self.retired.take()
+        } else {
+            None
+        }
+    }
+    pub fn replace_runtime(
+        &mut self,
+        runtime: runtime::Runtime<A, C>,
+    ) -> Result<(), Box<StartError<A, C>>> {
+        let error = if self.client.network() != runtime.client().network() {
+            Some(Fault::Configuration.into())
+        } else if self.runtime.is_some()
+            || self.retired.is_some()
+            || self.retained_outputs() != 0
+            || (self.attached.load(Ordering::Acquire) && !self.routed.load(Ordering::Acquire))
+        {
+            Some(Fault::Busy.into())
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(Box::new(StartError { error, runtime }));
+        }
+        self.client = runtime.client();
+        self.route.replace(Some(self.client.clone()));
+        self.runtime = Some(runtime);
+        Ok(())
     }
     pub fn pending(&self) -> Option<&runtime::Output> {
         self.pending.as_ref()
@@ -97,13 +186,20 @@ impl<A, C> Owner<A, C> {
     // exact output at the head and propagates through the bounded runtime.
     pub fn route(&mut self) -> Result<Routed, Error> {
         if self.pending.is_none() {
-            self.pending = match self.runtime.recv_timeout(Duration::ZERO) {
-                Ok(output) => Some(output),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Routed::Idle),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::AuthorityClosed);
+            self.pending = if let Some(runtime) = &self.runtime {
+                match runtime.recv_timeout(Duration::ZERO) {
+                    Ok(output) => Some(output),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Routed::Idle),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(Error::AuthorityClosed);
+                    }
                 }
+            } else {
+                self.retained.pop_front()
             };
+            if self.pending.is_none() {
+                return Ok(Routed::Idle);
+            }
         }
         let Some(runtime::Output::Service(coordinator::ServiceOutput::Publication(
             local_host::Output::Vote { signed, .. },
@@ -132,7 +228,14 @@ impl<A, C> Owner<A, C> {
     // Explicit shutdown, like Runtime::shutdown, abandons undrained output.
     // Keep this owner alive when stopping a bridge to preserve accepted work.
     pub fn shutdown(self) -> thread::Result<()> {
-        self.runtime.shutdown()
+        self.route.replace(None);
+        match self.runtime {
+            Some(runtime) => runtime.shutdown(),
+            None => match self.retired.and_then(|retired| retired.result.err()) {
+                Some(error) => Err(Box::new(error)),
+                None => Ok(()),
+            },
+        }
     }
 }
 
@@ -142,13 +245,13 @@ enum Request {
     Query(runtime::VoteQuery),
 }
 trait Endpoint: Send + Sync {
-    fn submit(&self, request: Request) -> Result<runtime::Call, Error>;
+    fn submit(&self, request: Request) -> Result<(runtime::Call, bool), Error>;
 }
 impl<A, C> Endpoint for runtime::Client<A, C>
 where
     Self: Send + Sync,
 {
-    fn submit(&self, request: Request) -> Result<runtime::Call, Error> {
+    fn submit(&self, request: Request) -> Result<(runtime::Call, bool), Error> {
         let command = match request {
             Request::Admit(signed, event) => runtime::Command::Admit {
                 signed: Box::new(Arc::unwrap_or_clone(signed)),
@@ -157,11 +260,26 @@ where
             Request::Epoch(epoch) => runtime::Command::NewEpoch(epoch),
             Request::Query(query) => runtime::Command::Votes(query),
         };
-        self.call(command).map_err(|error| match error {
-            runtime::SubmitError::Full(_) => Fault::Busy.into(),
-            runtime::SubmitError::Disconnected(_) => Error::AuthorityClosed,
-            runtime::SubmitError::ResourceLimit(_) => policy::Error::ResourceLimit.into(),
-        })
+        self.call(command)
+            .map(|call| (call, false))
+            .map_err(|error| match error {
+                runtime::SubmitError::Full(_) => Fault::Busy.into(),
+                runtime::SubmitError::Disconnected(_) => Error::AuthorityClosed,
+                runtime::SubmitError::ResourceLimit(_) => policy::Error::ResourceLimit.into(),
+            })
+    }
+}
+impl<A, C> Endpoint for runtime::Route<A, C>
+where
+    runtime::Client<A, C>: Send + Sync,
+{
+    fn submit(&self, request: Request) -> Result<(runtime::Call, bool), Error> {
+        let client = self.current().ok_or(Fault::Busy)?;
+        match Endpoint::submit(&client, request) {
+            Ok((call, _)) => Ok((call, true)),
+            Err(Error::AuthorityClosed) if client.replacement_pending() => Err(Fault::Busy.into()),
+            Err(error) => Err(error),
+        }
     }
 }
 pub(super) struct Authority {
@@ -174,7 +292,7 @@ impl Authority {
         if self.stop.load(Ordering::Acquire) {
             return Err(Fault::Stopped.into());
         }
-        let mut call = self.endpoint.submit(request)?;
+        let (mut call, supervised) = self.endpoint.submit(request)?;
         let started = Instant::now();
         loop {
             match call.try_reply() {
@@ -184,16 +302,17 @@ impl Authority {
                         e => Error::Authority(e),
                     });
                 }
-                Err(_) => return Err(Error::UnknownReceipt(ReceiptError::Closed)),
+                Err(_) => return Err(unknown(&call, supervised, ReceiptError::Closed)),
                 Ok(None) => (),
             }
             // Once submitted, shutdown or a lost/timed-out receipt has an
-            // unknown outcome. Poison this bridge; never auto-resubmit it.
+            // unknown outcome. Only a known replaceable generation may leave
+            // a supervised bridge usable. Never auto-resubmit the command.
             if self.stop.load(Ordering::Acquire) {
-                return Err(Error::UnknownReceipt(ReceiptError::Interrupted));
+                return Err(unknown(&call, supervised, ReceiptError::Interrupted));
             }
             if started.elapsed() >= self.limits.receipt_timeout {
-                return Err(Error::UnknownReceipt(ReceiptError::TimedOut));
+                return Err(unknown(&call, supervised, ReceiptError::TimedOut));
             }
             thread::sleep(Duration::from_millis(1));
         }
@@ -230,6 +349,13 @@ impl Authority {
         }
     }
 }
+fn unknown(call: &runtime::Call, supervised: bool, error: ReceiptError) -> Error {
+    if supervised && call.replacement_pending() {
+        Error::RetiredReceipt(error)
+    } else {
+        Error::UnknownReceipt(error)
+    }
+}
 impl Worker {
     // Explicit composition: selected tip/protocol and epochs belong to this
     // EOE instance. No independent pool or admission protocol is constructed.
@@ -238,6 +364,31 @@ impl Worker {
         config: Config,
         owner: &Owner<A, C>,
         limits: Limits,
+    ) -> Result<Self, Error>
+    where
+        runtime::Client<A, C>: Send + Sync,
+    {
+        Self::attach_eoe_inner(database, config, owner, limits, false)
+    }
+    // Keep one vote service/client while the composing supervisor replaces
+    // EOE generations. Calls already accepted retain their original receipt.
+    pub fn attach_supervised_eoe<A: 'static, C: 'static>(
+        database: Arc<Database>,
+        config: Config,
+        owner: &Owner<A, C>,
+        limits: Limits,
+    ) -> Result<Self, Error>
+    where
+        runtime::Client<A, C>: Send + Sync,
+    {
+        Self::attach_eoe_inner(database, config, owner, limits, true)
+    }
+    fn attach_eoe_inner<A: 'static, C: 'static>(
+        database: Arc<Database>,
+        config: Config,
+        owner: &Owner<A, C>,
+        limits: Limits,
+        supervised: bool,
     ) -> Result<Self, Error>
     where
         runtime::Client<A, C>: Send + Sync,
@@ -267,9 +418,14 @@ impl Worker {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Fault::Busy)?;
         let lease = Lease(owner.attached.clone());
+        owner.routed.store(supervised, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let authority = Authority {
-            endpoint: Box::new(endpoint),
+            endpoint: if supervised {
+                Box::new(owner.route.clone())
+            } else {
+                Box::new(endpoint)
+            },
             stop: stop.clone(),
             limits,
         };

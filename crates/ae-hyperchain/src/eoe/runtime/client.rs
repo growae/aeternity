@@ -2,6 +2,8 @@ use super::*;
 use std::sync::{atomic::AtomicUsize, mpsc::TryRecvError};
 
 pub(super) struct Control {
+    pub admission: std::sync::Mutex<()>,
+    pub health: std::sync::Mutex<Health>,
     pub alive: AtomicBool,
     pub stop: Arc<AtomicBool>,
     calls: AtomicUsize,
@@ -17,6 +19,8 @@ impl Control {
         network: ae_protocol::NetworkProfile,
     ) -> Self {
         Self {
+            admission: std::sync::Mutex::new(()),
+            health: std::sync::Mutex::new(Health::Running),
             alive: AtomicBool::new(true),
             stop,
             calls: AtomicUsize::new(0),
@@ -65,12 +69,14 @@ impl<A, C> Client<A, C> {
     // still owns draining/abandoning outputs and joining Runtime::shutdown.
     // Accepted calls without replies remain unknown; never rebind or retry them.
     pub fn request_stop(&self) {
+        let _gate = self.control.admission.lock().expect("EOE admission");
         self.control.stop.store(true, Ordering::Release);
     }
     pub fn outstanding(&self) -> usize {
         self.control.calls.load(Ordering::Acquire)
     }
     pub fn call(&self, command: Command<A, C>) -> Result<Call, SubmitError<A, C>> {
+        let _gate = self.control.admission.lock().expect("EOE admission");
         if self.is_closed() {
             return Err(SubmitError::Disconnected(Box::new(command)));
         }
@@ -117,6 +123,17 @@ pub struct Call {
     _credit: Arc<Credit>,
 }
 impl Call {
+    // The accepted command remains bound to this generation. A lost receipt
+    // from a replaceable worker must still be reported as unknown, never
+    // resubmitted automatically to its replacement.
+    pub fn replacement_pending(&self) -> bool {
+        let control = &self._credit.0;
+        (control.stop.load(Ordering::Acquire) || !control.alive.load(Ordering::Acquire))
+            && !matches!(
+                *control.health.lock().expect("EOE health"),
+                Health::WorkStopped(_)
+            )
+    }
     // Read at most one completion. An outer error has an unknown command
     // outcome; an inner error is the worker's acknowledged rejection.
     pub fn try_reply(&mut self) -> Result<Option<Result<Applied, coordinator::Error>>, CallError> {

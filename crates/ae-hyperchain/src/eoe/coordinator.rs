@@ -17,6 +17,16 @@ use std::{
 pub const RESTART_PERIOD_SECONDS: u64 = 30;
 pub const MAXIMUM_RESTARTS: usize = 3;
 
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub generations: [u64; 2],
+    pub pending_requests: Vec<u64>,
+    pub queued_events: usize,
+    pub pool_epoch: Unsigned,
+    pub pool_entries: usize,
+    pub stopped: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub maximum_queued_events: usize,
@@ -126,6 +136,16 @@ fn index(mode: Mode) -> usize {
     }
 }
 impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            generations: self.generations,
+            pending_requests: self.pending.keys().copied().collect(),
+            queued_events: self.queue.len(),
+            pool_epoch: self.host.pool().epoch().clone(),
+            pool_entries: self.host.pool().len(),
+            stopped: self.stopped,
+        }
+    }
     pub fn new(host: LocalHost<A, C>, block_time: Unsigned, config: Config) -> Self {
         let stakers = host.stakers();
         Self {

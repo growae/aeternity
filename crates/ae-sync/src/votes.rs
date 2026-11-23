@@ -62,6 +62,9 @@ pub enum Error {
     Authority(ae_hyperchain::eoe::coordinator::Error),
     AuthorityClosed,
     UnknownReceipt(eoe::ReceiptError),
+    // A supervised EOE generation ended after accepting this command. Its
+    // outcome remains unknown, but the stable bridge can serve later calls.
+    RetiredReceipt(eoe::ReceiptError),
 }
 impl From<Fault> for Error {
     fn from(e: Fault) -> Self {

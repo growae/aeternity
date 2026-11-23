@@ -23,6 +23,11 @@ use std::{
 
 mod client;
 pub use client::{Call, CallError, Client};
+mod lifecycle;
+pub use lifecycle::{Health, Info, Retired, Submission};
+mod route;
+use lifecycle::{Pending, WorkerExit};
+pub use route::Route;
 mod votes;
 pub use votes::{VoteQuery, VoteSnapshot};
 
@@ -110,7 +115,7 @@ struct Request<A, C> {
 pub struct Runtime<A = MemoryStore, C = MemoryStore> {
     sender: Option<SyncSender<Request<A, C>>>,
     receiver: Option<Receiver<Output>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<WorkerExit>>,
     maximum_command_bytes: usize,
     stop: Arc<AtomicBool>,
     control: Arc<client::Control>,
@@ -156,16 +161,43 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
                     }
                 }
                 let replies = worker_control.vote_replies.clone();
-                let _end = End(worker_control);
-                run(
-                    coordinator,
-                    order,
-                    config,
-                    commands,
-                    outputs,
-                    worker_stop,
-                    replies,
-                )
+                let _end = End(worker_control.clone());
+                let mut pending = Pending::default();
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(
+                        &mut coordinator,
+                        order,
+                        config,
+                        Driver {
+                            commands: &commands,
+                            outputs,
+                            stop: worker_stop,
+                            replies,
+                            control: &worker_control,
+                            pending: &mut pending,
+                        },
+                    )
+                }))
+                .err();
+                let _gate = worker_control.admission.lock().expect("EOE admission");
+                worker_control.stop.store(true, Ordering::Release);
+                worker_control.alive.store(false, Ordering::Release);
+                let queued = commands.try_iter().map(|r| r.reply.submission()).collect();
+                let mut retained = pending.output.into_iter().collect::<Vec<_>>();
+                while let Some(output) = coordinator.pop_output() {
+                    retained.push(Output::Service(output));
+                }
+                let mut health = worker_control.health.lock().expect("EOE health");
+                if !matches!(*health, Health::WorkStopped(_)) {
+                    *health = Health::Stopped;
+                }
+                WorkerExit {
+                    state: coordinator.snapshot(),
+                    outputs: retained,
+                    queued,
+                    interrupted: pending.command,
+                    panic,
+                }
             })?;
         Ok(Self {
             sender: Some(sender),
@@ -190,6 +222,7 @@ impl<A, C> Runtime<A, C> {
         sequence: u64,
         command: Command<A, C>,
     ) -> Result<(), SubmitError<A, C>> {
+        let _gate = self.control.admission.lock().expect("EOE admission");
         if !self.control.alive.load(Ordering::Acquire) || self.stop.load(Ordering::Acquire) {
             return Err(SubmitError::Disconnected(Box::new(command)));
         }
@@ -216,12 +249,16 @@ impl<A, C> Runtime<A, C> {
             .recv_timeout(timeout)
     }
     pub fn shutdown(mut self) -> thread::Result<()> {
-        self.stop.store(true, Ordering::Release);
+        self.client().request_stop();
         // Dropping the receive side releases a worker blocked by output
         // backpressure. Dropping the sender releases its idle receive wait.
         self.receiver.take();
         self.sender.take();
-        self.worker.take().expect("live worker").join()
+        let exit = self.worker.take().expect("live worker").join()?;
+        match exit.panic {
+            Some(panic) => Err(panic),
+            None => Ok(()),
+        }
     }
 }
 impl<A, C> Drop for Runtime<A, C> {
@@ -270,15 +307,28 @@ fn command_size<A, C>(command: &Command<A, C>, maximum: usize) -> Result<(), Fai
     };
     Ok(())
 }
-fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
-    mut service: Coordinator<A, C>,
-    order: impl MapOrder,
-    config: Config,
-    commands: Receiver<Request<A, C>>,
+struct Driver<'a, A, C> {
+    commands: &'a Receiver<Request<A, C>>,
     outputs: SyncSender<Output>,
     stop: Arc<AtomicBool>,
     replies: Arc<votes::Budget>,
+    control: &'a client::Control,
+    pending: &'a mut Pending,
+}
+fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
+    service: &mut Coordinator<A, C>,
+    order: impl MapOrder,
+    config: Config,
+    driver: Driver<'_, A, C>,
 ) {
+    let Driver {
+        commands,
+        outputs,
+        stop,
+        replies,
+        control,
+        pending,
+    } = driver;
     let started = Instant::now();
     let start_ms = service.now();
     let mut blocked = false;
@@ -287,7 +337,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
             return;
         }
         while let Some(output) = service.pop_output() {
-            if outputs.send(Output::Service(output)).is_err() {
+            if !pending.send(Output::Service(output), &outputs, &stop) {
                 return;
             }
         }
@@ -297,13 +347,14 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
         let now = start_ms
             .saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         if let Err(error) = service.advance(now) {
-            if !blocked && outputs.send(Output::WorkStopped(error)).is_err() {
+            *control.health.lock().expect("EOE health") = Health::WorkStopped(error.clone());
+            if !blocked && !pending.send(Output::WorkStopped(error), &outputs, &stop) {
                 return;
             }
             blocked = true;
         }
         while let Some(output) = service.pop_output() {
-            if outputs.send(Output::Service(output)).is_err() {
+            if !pending.send(Output::Service(output), &outputs, &stop) {
                 return;
             }
         }
@@ -320,20 +371,32 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
         };
         match commands.recv_timeout(wait) {
             Ok(Request { reply, command }) => {
+                pending.command = Some(reply.submission());
                 let now = start_ms.saturating_add(
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 );
-                let stop = matches!(command, Command::Stop);
+                let command_stop = matches!(command, Command::Stop);
                 let retry = matches!(command, Command::Retry | Command::Configure(_));
-                let result = service
-                    .advance(now)
-                    .and_then(|()| apply(&mut service, command, now, &replies));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    service
+                        .advance(now)
+                        .and_then(|()| apply(service, command, now, &replies))
+                }))
+                .unwrap_or_else(|panic| {
+                    // Publish closure before unwinding drops the private
+                    // receipt. Its caller can then classify a lost reply
+                    // against this exact generation without a race.
+                    control.stop.store(true, Ordering::Release);
+                    std::panic::resume_unwind(panic)
+                });
                 if retry && result.is_ok() {
                     blocked = false;
+                    *control.health.lock().expect("EOE health") = Health::Running;
                 }
+                pending.command = None;
                 let disconnected = match reply {
                     ReplyTo::Stream(sequence) => {
-                        outputs.send(Output::Applied { sequence, result }).is_err()
+                        !pending.send(Output::Applied { sequence, result }, &outputs, &stop)
                     }
                     ReplyTo::Caller { reply, .. } => {
                         // The one-slot private reply cannot block on an unread
@@ -342,7 +405,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                         false
                     }
                 };
-                if disconnected || stop {
+                if disconnected || command_stop {
                     return;
                 }
             }
@@ -367,7 +430,9 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                     .and_then(|()| service.timed_step(&order, clock));
                 if let Err(error) = result {
                     blocked = true;
-                    if outputs.send(Output::WorkStopped(error)).is_err() {
+                    *control.health.lock().expect("EOE health") =
+                        Health::WorkStopped(error.clone());
+                    if !pending.send(Output::WorkStopped(error), &outputs, &stop) {
                         return;
                     }
                     break;

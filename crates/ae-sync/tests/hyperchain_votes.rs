@@ -1,4 +1,6 @@
 mod common;
+#[path = "hyperchain_votes/mod.rs"]
+mod retirement;
 use ae_crypto::Ed25519SecretKey;
 use ae_hyperchain::{
     eoe::{self, coordinator, local_host, runtime},
