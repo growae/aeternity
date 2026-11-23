@@ -102,6 +102,7 @@ fn eoe_departure(error: &Error) -> bool {
 pub enum Output {
     Pinning(Box<pinning::Report>),
     ConsensusSupervision(supervision::Notice),
+    VoteSupervision(owner::vote_pool::Notice),
     Attempt(production::Completed),
     Stopped(Box<production::Stopped>),
     Rejected {
@@ -134,6 +135,7 @@ pub enum Progress {
 #[derive(Debug, Clone)]
 pub struct Status {
     pub consensus: supervision::Status,
+    pub votes: owner::vote_pool::Status,
     pub producing: bool,
     pub stopping: bool,
     pub stops: u64,
@@ -462,6 +464,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let consensus =
             supervision::Supervisor::new(factory, connector_factory, Some(cache_factory), notices);
         let consensus_status = consensus.status();
+        let votes_status = owner.vote_status();
         Ok(Self {
             owner: Some(owner),
             importer: Arc::new(importer),
@@ -488,6 +491,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             tick: None,
             status: Status {
                 consensus: consensus_status,
+                votes: votes_status,
                 producing: config.producing,
                 stopping: false,
                 stops: 0,
@@ -506,7 +510,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         })
     }
     pub fn status(&self) -> Status {
-        self.status.clone()
+        let mut status = self.status.clone();
+        if let Some(owner) = &self.owner {
+            status.votes = owner.vote_status();
+        }
+        status
     }
     pub fn importer(&self) -> Arc<chain::Importer<O>> {
         self.importer.clone()
@@ -516,6 +524,21 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn votes(&self) -> votes::Client {
         self.owner.as_ref().expect("owner").votes()
+    }
+    pub fn vote_binding(&self) -> votes::Binding {
+        self.owner.as_ref().expect("owner").vote_binding()
+    }
+    pub fn request_vote_restart(
+        &self,
+        generation: u64,
+    ) -> Result<(), owner::vote_pool::ControlError> {
+        self.owner
+            .as_ref()
+            .expect("owner")
+            .request_vote_restart(generation)
+    }
+    pub(crate) fn worker_group(&self) -> crate::runtime::restart::workers::Group {
+        self.owner.as_ref().expect("owner").worker_group()
     }
     pub fn eoe(&self) -> eoe::Client {
         self.owner.as_ref().expect("owner").runtime_client()
@@ -615,6 +638,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 return Ok(Progress::Advanced);
             }
             self.status.failure = Some(e.clone());
+            self.owner.as_ref().expect("owner").close_vote_binding();
+            if matches!(e, Error::Owner(owner::Error::VoteRestartLimit)) {
+                self.owner.as_ref().expect("owner").stop_votes();
+                self.pool.as_ref().expect("pool").request_shutdown();
+                if let Some(worker) = &self.resilience_worker {
+                    worker.request_shutdown();
+                }
+            }
         }
         result
     }
@@ -627,6 +658,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if !self.pool().info().accepting {
             return Err(Error::Closed);
         }
+        self.owner
+            .as_mut()
+            .expect("owner")
+            .poll_votes()
+            .map_err(Error::Owner)?;
         let health = self.parent().snapshot().health;
         if matches!(health, cache::Health::Failed(_))
             && self
@@ -722,6 +758,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // Retained outputs apply backpressure to production, not ownership:
         // shutdown still joins every child and transfers this output intact.
         if self.pending.is_some() {
+            return Ok(Progress::Output);
+        }
+        if let Some(notice) = self.owner.as_mut().expect("owner").take_vote_notice() {
+            self.pending = Some(Output::VoteSupervision(notice));
             return Ok(Progress::Output);
         }
         if let Some(notice) = self.consensus.take_notice() {
@@ -990,6 +1030,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let mut delivery = self.delivery.take().expect("delivery");
         let accepted = delivery.take_source_after_join();
         let mut pinning = self.pinning.take().map(pinning::Service::shutdown);
+        self.status.votes = self.owner.as_ref().expect("owner").vote_status();
         let owner = self.owner.take().expect("owner").shutdown();
         let pool = self.pool.take().expect("pool").shutdown();
         if let Some(Ok(exit)) = &mut pinning {

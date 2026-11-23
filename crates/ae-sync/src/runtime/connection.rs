@@ -242,10 +242,7 @@ where
     let dependencies = super::workers::Bindings {
         upnp: None,
         upnp_listener: None,
-        votes: Some(crate::votes::Binding::fixed(
-            &inputs.database,
-            producer.votes(),
-        )),
+        votes: Some(producer.vote_binding()),
         keys: None,
         routing: None,
         analytics: None,

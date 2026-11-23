@@ -153,6 +153,22 @@ impl<T: Clone> Owner<T> {
     pub fn withdraw(&self) {
         self.0.send_modify(|value| value.available = false);
     }
+    // Mirror availability without sharing publisher ownership. Closing this
+    // local binding must neither close its source nor be undone by a late poll.
+    pub(crate) fn mirror(&self, source: Snapshot<T>) {
+        self.0.send_if_modified(|current| {
+            if current.closed
+                || (Arc::ptr_eq(&current.lease, &source.lease)
+                    && current.available == source.available
+                    && current.closed == source.closed
+                    && current.generation == source.generation)
+            {
+                return false;
+            }
+            *current = source;
+            true
+        });
+    }
     pub fn close(&self) {
         self.0.send_modify(|value| {
             value.available = false;

@@ -5,10 +5,7 @@ use ae_chain::repository::retention;
 use ae_protocol::{ConsensusType, NetworkProfile};
 use ae_storage::{Database, gc, pool};
 use std::{sync::Arc, time::Duration};
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    time::Instant,
-};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub mod hyperchain;
 
@@ -219,8 +216,8 @@ pub struct Service {
     commands: mpsc::Receiver<Restart>,
     published: watch::Sender<Status>,
     current: Status,
-    budget: super::restart::Budget,
-    origin: Instant,
+    group: super::restart::workers::Group,
+    children_ready: bool,
     #[cfg(test)]
     restart_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
@@ -268,7 +265,7 @@ fn create_inner(
         votes_binding
             .as_ref()
             .expect("borrowed PoS votes")
-            .install(external.votes.clone(), 1);
+            .mirror(external.votes.snapshot());
     }
     let (routing_binding, routing) = if config.routing.is_some() {
         let (owner, reader) = bindings::Owner::new(&database);
@@ -318,12 +315,18 @@ fn create_inner(
         running: true,
         borrowed_producer: external.is_some(),
         admission_generation: u64::from(external.is_some()),
-        votes_generation: u64::from(external.is_some()),
+        votes_generation: external
+            .as_ref()
+            .map_or(0, |e| e.votes.snapshot().generation),
         ..Default::default()
     };
     let (published, status) = watch::channel(current.clone());
     let (stop, stopped) = watch::channel(false);
     let (commands, receiver) = mpsc::channel(32);
+    let group = external
+        .as_ref()
+        .map(|e| e.group.clone())
+        .unwrap_or_default();
     Ok((
         Handle {
             stopped: stop,
@@ -378,8 +381,8 @@ fn create_inner(
             commands: receiver,
             published,
             current,
-            budget: Default::default(),
-            origin: Instant::now(),
+            group,
+            children_ready: false,
             #[cfg(test)]
             restart_gate: None,
         },
@@ -402,6 +405,9 @@ impl Service {
         *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
     fn healthy(&self) -> Result<(), Error> {
+        if self.group.exhausted() {
+            return Err(Error::RestartLimit);
+        }
         if let Some(external) = &self.external {
             external.healthy()?;
         }
@@ -437,8 +443,22 @@ impl Service {
         self.current.admission = self.admission.as_ref().map(|w| w.info());
         if let Some(external) = &self.external {
             self.current.admission = Some(external.pool.info());
-            self.current.votes = Some(external.votes.info());
+            let mut snapshot = external.votes.snapshot();
+            self.current.votes = snapshot.value.as_ref().map(votes::Client::info);
+            self.current.votes_generation = snapshot.generation;
+            snapshot.available &= self.current.votes.as_ref().is_some_and(|v| v.accepting);
+            self.votes_binding
+                .as_ref()
+                .expect("borrowed votes")
+                .mirror(snapshot);
         }
+        self.current.restart_attempts = self.group.attempts();
+        self.current.ready = self.children_ready
+            && !self.group.exhausted()
+            && self
+                .external
+                .as_ref()
+                .is_none_or(|e| e.votes.current().is_some_and(|v| v.info().accepting));
         self.current.gc = self.gc.as_ref().map(|w| w.info());
         self.published.send_replace(self.current.clone());
     }
@@ -824,16 +844,20 @@ impl Service {
         Ok(())
     }
     async fn replace(&mut self, child: Child) -> Result<u64, Error> {
-        // One budget belongs to this supervisor, shared by all children.
-        self.current.ready = false;
+        self.children_ready = false;
         self.publish();
+        let group = self.group.clone();
+        let mut permit = tokio::select! {
+            biased;
+            _ = self.stopped.changed() => return Err(Error::Closed),
+            permit = group.acquire() => permit,
+        };
         loop {
             if self.stopping() {
                 return Err(Error::Closed);
             }
             self.healthy()?;
-            self.current.restart_attempts += 1;
-            let allowed = self.budget.record(self.origin.elapsed().as_secs());
+            let allowed = permit.record();
             self.retire(child).await?;
             if !allowed {
                 return Err(Error::RestartLimit);
@@ -849,7 +873,7 @@ impl Service {
             self.healthy()?;
             match self.start(child).await {
                 Ok(()) => {
-                    self.current.ready = true;
+                    self.children_ready = true;
                     self.publish();
                     return Ok(self.generation(child));
                 }
@@ -927,7 +951,7 @@ impl Service {
             return Ok(());
         }
         self.healthy()?;
-        self.current.ready = true;
+        self.children_ready = true;
         self.publish();
         let mut interval = tokio::time::interval(self.config.poll);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1039,7 +1063,7 @@ impl Service {
         {
             self.current.error = Some(error);
         }
-        self.current.ready = false;
+        self.children_ready = false;
         self.commands.close();
         while let Ok(command) = self.commands.try_recv() {
             let _ = command.reply.send(Err(Error::Closed));

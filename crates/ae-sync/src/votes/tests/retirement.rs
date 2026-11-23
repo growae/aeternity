@@ -295,3 +295,97 @@ async fn terminal_hub_loss_is_reported_and_cannot_start_a_new_pool() {
         ));
     }
 }
+
+#[tokio::test]
+async fn automatic_recovery_never_resubmits_an_accepted_ticket_after_actor_panic() {
+    use crate::chain::hyperchain::eoe::{self as live, owner as managed};
+    for index in [1, 3, 5] {
+        let node = Hyperchain::new(index);
+        let config = Config::default();
+        let source = live::Source::new(
+            node.db.clone(),
+            node.config.identity.clone(),
+            node.config.profile.network.clone(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut owner = managed::Owner::start(
+            managed::Inputs {
+                source,
+                database: node.db.clone(),
+                publications: Publications::new(&node.db, config).unwrap(),
+                gossip: Default::default(),
+                parent: None,
+            },
+            managed::Config {
+                eoe: live::Config {
+                    host: ae_hyperchain::eoe::local_host::Config {
+                        network: node.config.profile.network.clone(),
+                        election_contract: node.config.profile.contracts.election,
+                        parent_epoch_length: 5.into(),
+                        parent_start_height: 1.into(),
+                        limits: Default::default(),
+                    },
+                    block_time: 10000.into(),
+                    coordinator: Default::default(),
+                    runtime: Default::default(),
+                    epochs: Default::default(),
+                },
+                votes: config,
+                pool: Default::default(),
+                calls: Default::default(),
+            },
+            Default::default(),
+            node.config.profile.order.clone(),
+        )
+        .unwrap();
+        let old = owner.votes();
+        let binding = owner.vote_binding();
+        let eoe = owner.runtime_client();
+        let (blocked, release) = gate(&old, true).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts = calls.clone();
+        let waiting = tokio::spawn(async move {
+            call(&binding, |client| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                client.stats()
+            })
+            .await
+        });
+        within(async {
+            while old.info().pending != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        release.release();
+        within(async {
+            while owner.vote_status().generation != 2 {
+                owner.step().unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(matches!(
+            within(blocked).await,
+            Err(Error::Worker(Fault::Disconnected))
+        ));
+        assert!(matches!(
+            within(waiting).await.unwrap(),
+            Err(Error::Worker(Fault::Disconnected))
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(old.info().joined && eoe.same_runtime(&owner.runtime_client()));
+        assert_eq!(owner.votes().info().submitted, 0);
+        let Some(managed::vote_pool::Notice::Retired { worker, .. }) = owner.take_vote_notice()
+        else {
+            panic!("retirement");
+        };
+        assert_eq!(worker.result, Err(Error::Worker(Fault::Panicked)));
+        assert!(matches!(
+            owner.take_vote_notice(),
+            Some(managed::vote_pool::Notice::Restarted { generation: 2 })
+        ));
+        assert!(owner.shutdown().errors.is_empty());
+    }
+}

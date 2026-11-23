@@ -11,6 +11,7 @@ pub mod producer;
 pub mod production;
 pub mod recovery;
 mod requests;
+pub mod vote_pool;
 use requests::Requests;
 pub use requests::{Completion, Request, RequestError};
 
@@ -50,6 +51,7 @@ pub enum Error {
     State(local_host::SelectedError),
     TopUnavailable,
     Votes(votes::Error),
+    VoteRestartLimit,
     ReceiptLost(u64),
     UnexpectedReply(u64),
     UnexpectedRequest(u64),
@@ -80,12 +82,13 @@ pub struct Shutdown {
     pub epoch_cursor: events::Cursor,
     pub errors: Vec<Error>,
     pub producer: Option<producer::Pending>,
+    pub vote_notices: Vec<vote_pool::Notice>,
 }
 pub struct Owner {
     source: Arc<Source>,
     parent: Option<parent::Client>,
     output: Option<votes::eoe::Owner<StateReader, StateReader>>,
-    votes: Option<votes::Worker>,
+    votes: vote_pool::Pool,
     epochs: Epochs,
     factory: Factory,
     recovery: Option<recovery::Recovery>,
@@ -168,19 +171,20 @@ impl Owner {
             .map_err(Error::Source)?;
         let output = votes::eoe::Owner::new(runtime, inputs.publications)
             .map_err(|e| Error::Votes(e.error.clone()))?;
-        let votes = votes::Worker::spawn_independent(
+        let votes = vote_pool::Pool::start(
             inputs.database,
             inputs.gossip,
             config.votes,
             output.relay().expect("independent pool relay"),
             pool_limits,
+            config.calls.requests,
         )
         .map_err(Error::Votes)?;
         Ok(Self {
             source: inputs.source,
             parent: inputs.parent,
             output: Some(output),
-            votes: Some(votes),
+            votes,
             epochs,
             factory,
             recovery: None,
@@ -209,7 +213,7 @@ impl Owner {
         Ok(())
     }
     pub fn votes(&self) -> votes::Client {
-        self.votes.as_ref().expect("live vote pool").client()
+        self.votes.client()
     }
     pub(crate) fn replace_parent(&mut self, client: parent::Client) {
         self.parent = Some(client);
@@ -422,11 +426,13 @@ impl Owner {
         if let Some(e) = &self.failure {
             return Err(e.clone());
         }
-        let result = if self.recovery.is_some() {
-            self.drain_retirement()
-        } else {
-            self.advance()
-        };
+        let result = self.poll_votes().and_then(|()| {
+            if self.recovery.is_some() {
+                self.drain_retirement()
+            } else {
+                self.advance()
+            }
+        });
         if let Err(e) = &result {
             if !matches!(
                 e,
@@ -439,19 +445,13 @@ impl Owner {
                 if let Some(relay) = self.output.as_ref().and_then(votes::eoe::Owner::relay) {
                     relay.hub().close();
                 }
+                self.votes.close();
             }
             self.failure = Some(e.clone());
         }
         result
     }
     fn advance(&mut self) -> Result<Progress, Error> {
-        let votes = self.votes.as_ref().expect("live vote pool").info();
-        if let Some(error) = votes.failure {
-            return Err(Error::Votes(error));
-        }
-        if !votes.accepting {
-            return Err(Error::Votes(votes::Fault::Stopped.into()));
-        }
         let client = self.client();
         let calls = self.requests.poll(&client)?;
         let epoch = self.epochs.step().map_err(Error::Source)?;
@@ -516,9 +516,7 @@ impl Owner {
         if let Some(output) = &self.output {
             output.client().request_stop();
         }
-        if let Some(votes) = self.votes.take()
-            && let Err(error) = votes.shutdown()
-        {
+        if let Err(error) = self.votes.shutdown() {
             errors.push(Error::Votes(error));
         }
         let retained_vote = self
@@ -557,12 +555,13 @@ impl Owner {
             epoch_cursor: self.epochs.cursor().clone(),
             errors,
             producer: self.production.take(),
+            vote_notices: self.votes.take_notices(),
         }
     }
 }
 impl Drop for Owner {
     fn drop(&mut self) {
-        if self.output.is_some() || self.votes.is_some() {
+        if self.output.is_some() {
             let _ = self.finish();
         }
     }

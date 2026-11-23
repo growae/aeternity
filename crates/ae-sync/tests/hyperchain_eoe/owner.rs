@@ -8,6 +8,8 @@ mod producer;
 mod production;
 #[path = "owner/recovery.rs"]
 mod recovery;
+#[path = "owner/vote_recovery.rs"]
+mod vote_recovery;
 use super::*;
 use ae_storage::pool::worker::GossipCache;
 use ae_sync::{chain::hyperchain::eoe::owner as managed, votes};

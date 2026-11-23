@@ -65,7 +65,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Handle<O> {
 }
 pub(super) struct External {
     pub pool: pool::worker::Client,
-    pub votes: votes::Client,
+    pub votes: votes::Binding,
+    pub group: super::super::restart::workers::Group,
     pub resilience: Option<resilience::Source>,
     pub resilience_worker: Option<resilience::Worker>,
     check: Box<dyn Fn() -> Result<(), Error> + Send + Sync>,
@@ -76,7 +77,7 @@ impl External {
         if !self.pool.info().accepting {
             return Err(Error::Dependency(Child::Admission));
         }
-        if !self.votes.info().accepting {
+        if self.votes.is_closed() {
             return Err(Error::Dependency(Child::Votes));
         }
         Ok(())
@@ -105,7 +106,8 @@ pub fn create<O: MapOrder + Clone + Send + Sync + 'static>(
     };
     let external = External {
         pool,
-        votes: producer.votes(),
+        votes: producer.vote_binding(),
+        group: producer.worker_group(),
         resilience,
         resilience_worker,
         check: Box::new(move || {

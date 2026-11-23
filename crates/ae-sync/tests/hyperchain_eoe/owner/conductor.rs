@@ -14,6 +14,8 @@ mod pinning;
 mod pins;
 #[path = "conductor/targets.rs"]
 mod targets;
+#[path = "conductor/vote_supervision.rs"]
+mod vote_supervision;
 use super::*;
 use ae_hyperchain::{
     parent_cache::{self, runtime as cache},

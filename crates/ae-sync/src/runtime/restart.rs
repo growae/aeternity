@@ -3,6 +3,7 @@
 #[derive(Default)]
 pub(crate) struct Window<const INTENSITY: usize, const PERIOD: u64>(Vec<u64>);
 pub(super) type Budget = Window<5, 10>;
+pub(crate) mod workers;
 impl<const INTENSITY: usize, const PERIOD: u64> Window<INTENSITY, PERIOD> {
     pub fn record(&mut self, now: u64) -> bool {
         self.0.retain(|time| *time >= now.saturating_sub(PERIOD));

@@ -10,6 +10,74 @@ use tokio::task::JoinHandle;
 #[path = "connections/workers.rs"]
 mod workers;
 
+#[tokio::test]
+async fn existing_connection_gossip_waits_through_a_vote_gap_and_uses_the_new_pool() {
+    let node = Node::new(1);
+    let (mut c, controller) = prepared(&node);
+    let identity = Arc::new(noise::Identity::from_secret([91; 32]));
+    let (mut handle, service) =
+        connections::create_hyperchain(&c, identity, controller, settings(), || {
+            Ok(Default::default())
+        })
+        .unwrap();
+    let task = tokio::spawn(service.run());
+    let generation = ready(&mut handle, 1).await;
+    let first = vote(&node, eoe::Mode::Fork, eoe::VoteType::Vote, 13);
+    assert!(matches!(
+        within(
+            generation
+                .gossip
+                .push_vote(first.encode(), hc_votes::Event::Received)
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap(),
+        hc_votes::PushOutcome::Accepted { .. }
+    ));
+    let old = c.votes();
+    c.request_vote_restart(1).unwrap();
+    let ticket = generation.gossip.peek_votes(7.into(), None, 10).unwrap();
+    let waiting = tokio::spawn(async move { ticket.wait().await });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    super::vote_supervision::replaced(&mut c, 2);
+    assert!(within(waiting).await.unwrap().unwrap().is_empty());
+    let next = vote(&node, eoe::Mode::Length, eoe::VoteType::Vote, 14);
+    assert!(matches!(
+        within(
+            generation
+                .gossip
+                .push_vote(next.encode(), hc_votes::Event::Received)
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap(),
+        hc_votes::PushOutcome::Accepted { .. }
+    ));
+    assert_eq!(
+        within(
+            generation
+                .gossip
+                .peek_votes(7.into(), None, 10)
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(old.info().joined && handle.status().running);
+    assert_eq!(handle.current().unwrap().number, generation.number);
+    handle.shutdown();
+    let stopped = within(task).await.unwrap();
+    assert!(stopped.joined && stopped.error.is_none(), "{stopped:?}");
+    assert!(c.votes().info().accepting);
+    assert!(shutdown(c).owner.errors.is_empty());
+}
+
 fn settings() -> connections::Config {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
