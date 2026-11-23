@@ -1,5 +1,7 @@
 use super::*;
 use std::collections::VecDeque;
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub struct Stopped {
@@ -111,6 +113,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
         }
         if let Some(producer) = &mut self.producer {
             producer.retire_cache(old).map_err(Error::Effects)?;
+        }
+        if let Some(micro) = &mut self.micro {
+            micro.retire_cache(old).map_err(Error::Build)?;
         }
         if let Some(effects) = &mut self.attempt.effects
             && let Some(error) = effects.retire_cache(old).map_err(Error::Effects)?

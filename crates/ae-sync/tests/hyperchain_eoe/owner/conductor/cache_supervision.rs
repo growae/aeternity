@@ -137,6 +137,9 @@ async fn cache_replacement_rebuilds_at_selected_tip_without_replacing_importer_o
 fn active_production_settles_old_generation_before_resuming_after_cache_replacement() {
     for stage in [
         Progress::Started,
+        Progress::Production(production::Progress::Micro(
+            managed::candidate::Progress::Prepared,
+        )),
         Progress::Production(production::Progress::KeyPrepared),
         Progress::Production(production::Progress::Submitted(production::Kind::Key)),
     ] {

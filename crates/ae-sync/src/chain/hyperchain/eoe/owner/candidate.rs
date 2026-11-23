@@ -471,10 +471,23 @@ pub(super) struct Retiring {
 }
 impl Retiring {
     pub(super) fn retire_eoe(&mut self, old: &super::Client) -> Result<(), Error> {
-        if let Some(effects) = &mut self.effects {
-            self.report.effect_error = effects.retire_eoe(old).map_err(Error::Effects)?;
+        if let Some(effects) = &mut self.effects
+            && let Some(error) = effects.retire_eoe(old).map_err(Error::Effects)?
+        {
+            self.report.effect_error = Some(error);
         }
         self.eoe_retired = true;
+        Ok(())
+    }
+    pub(super) fn retire_cache(
+        &mut self,
+        old: &ae_hyperchain::parent_cache::runtime::Client,
+    ) -> Result<(), Error> {
+        if let Some(effects) = &mut self.effects
+            && let Some(error) = effects.retire_cache(old).map_err(Error::Effects)?
+        {
+            self.report.effect_error = Some(error);
+        }
         Ok(())
     }
     pub fn step(&mut self) -> Result<bool, Error> {
