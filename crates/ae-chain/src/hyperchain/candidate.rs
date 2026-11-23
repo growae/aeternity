@@ -15,10 +15,12 @@ use num_bigint::BigInt;
 use std::sync::Arc;
 mod key;
 mod packing;
+mod pow;
 mod votes;
 pub(crate) use key::template as key_template;
 pub use key::{Key, KeyInput};
 pub use packing::{Deadlines, FinishFailure, PackRequest, Packing, Timeout};
+pub use pow::{PowParent, PowStart};
 pub use votes::{VoteError, VoteProgress, VoteResults, Votes};
 pub type Signed = SignedTransaction<Transaction>;
 
@@ -50,6 +52,7 @@ pub enum Error<E, A = MemoryStore, C = MemoryStore> {
     Signing(signing::Error),
     ResourceLimit,
     WrongParent,
+    ParentDifficulty(ae_consensus::target::TargetError),
     NoUpdate,
     Full,
     Sequence,
@@ -66,7 +69,9 @@ impl<E, A, C> Error<E, A, C> {
             Self::Chain(e) => e.is_operational::<H>(),
             Self::Transactions(e) => e.failure.is_operational(),
             Self::Accounting(e) => e.is_operational(),
-            Self::ResourceLimit | Self::Tree(_) | Self::Sequence => true,
+            Self::ResourceLimit | Self::Tree(_) | Self::Sequence | Self::ParentDifficulty(_) => {
+                true
+            }
             _ => false,
         }
     }
@@ -207,6 +212,9 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Micro<A, C> {
     }
     pub fn trees(&self) -> &Arc<Trees<A, C>> {
         &self.view.trees
+    }
+    pub fn environment(&self) -> &ae_vm_fate::machine::program::remote::context::Environment {
+        &self.view.environment
     }
     pub fn context(&self) -> &ae_execution::Context {
         &self.view.context

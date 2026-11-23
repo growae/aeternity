@@ -683,3 +683,6 @@ mod storage;
 
 #[path = "key.rs"]
 mod key;
+
+#[path = "pow_candidates.rs"]
+mod pow_candidates;
