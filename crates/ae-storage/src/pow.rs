@@ -2,6 +2,25 @@
 use crate::snapshots;
 use ae_chain::repository::pow;
 use ae_vm_fate::maps::MapOrder;
+use std::sync::Arc;
+
+// The volatile generator is exclusive for this opened database. A joined
+// exit may retain this lease while an accepted pool receipt is quarantined.
+pub struct GeneratorLease(Arc<()>);
+impl GeneratorLease {
+    pub fn acquire(database: &crate::Database) -> Result<Self, snapshots::Error> {
+        let mut owner = database
+            .pow_generator_owner
+            .lock()
+            .map_err(|_| snapshots::Error::Worker("poisoned PoW generator ownership".into()))?;
+        if owner.upgrade().is_some() {
+            return Err(snapshots::Error::AlreadyRunning);
+        }
+        let lease = Self(Arc::new(()));
+        *owner = Arc::downgrade(&lease.0);
+        Ok(lease)
+    }
+}
 
 pub struct Prepared<O> {
     pub value: pow::Prepared<snapshots::Reader, O>,
