@@ -9,22 +9,37 @@ pub struct Status {
     pub pinning_generation: u64,
     pub connector_generation: u64,
     pub cache_generation: u64,
+    pub eoe_generation: u64,
     pub attempts: u64,
     pub restarting: bool,
     pub pinning_restarting: bool,
     pub connector_restarting: bool,
     pub cache_restarting: bool,
+    pub eoe_restarting: bool,
     pub pending_notices: usize,
 }
 
 mod cache_supervision;
+mod eoe_supervision;
 #[cfg(test)]
 mod tests;
 pub use cache_supervision::{CacheExit, RetiredTop};
 pub(super) use cache_supervision::{CacheFactory, CacheInputs};
+pub use eoe_supervision::{EoeExit, EoeSettlement};
 
 #[derive(Debug)]
 pub enum Notice {
+    EoeRetired {
+        generation: u64,
+        child: Box<EoeExit>,
+    },
+    EoeRestarted {
+        generation: u64,
+    },
+    EoeStartFailed {
+        attempt: u64,
+        error: owner::Error,
+    },
     CacheRetired {
         generation: u64,
         child: Box<CacheExit>,
@@ -70,6 +85,7 @@ impl Notice {
 pub struct Shutdown {
     pub status: Status,
     pub notices: Vec<Notice>,
+    pub retiring_eoe: Option<EoeSettlement>,
 }
 pub(super) struct ConnectorFactory {
     // Fields drop in order: discard the callable's backend reference before
@@ -145,6 +161,7 @@ pub(super) struct Supervisor<O> {
     status: Status,
     notices: VecDeque<Notice>,
     limit: usize,
+    retiring_eoe: Option<EoeSettlement>,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
     pub(super) fn new(
@@ -158,6 +175,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
                 pinning_generation: u64::from(factory.is_some()),
                 connector_generation: 1,
                 cache_generation: u64::from(cache.is_some()),
+                eoe_generation: 1,
                 ..Default::default()
             },
             factory,
@@ -167,13 +185,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
             origin: None,
             notices: VecDeque::new(),
             limit,
+            retiring_eoe: None,
         }
     }
     pub(super) fn status(&self) -> Status {
         Status {
             restarting: self.status.pinning_restarting
                 || self.status.connector_restarting
-                || self.status.cache_restarting,
+                || self.status.cache_restarting
+                || self.status.eoe_restarting,
             pending_notices: self.notices.len(),
             ..self.status.clone()
         }
@@ -331,6 +351,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
         if let Some(cache) = &self.cache {
             cache.route.replace(None);
         }
-        Shutdown { status, notices }
+        Shutdown {
+            status,
+            notices,
+            retiring_eoe: self.retiring_eoe.take(),
+        }
     }
 }

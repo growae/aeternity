@@ -1,4 +1,6 @@
 mod common;
+#[path = "hyperchain_eoe/factory.rs"]
+mod factory;
 #[path = "hyperchain_eoe/owner.rs"]
 mod owner;
 use ae_chain::{

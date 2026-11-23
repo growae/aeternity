@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod capacity;
+pub use capacity::Capacity;
 mod client;
 pub use client::{Call, CallError, Client};
 mod lifecycle;
@@ -124,20 +126,24 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
     Runtime<A, C>
 {
     pub fn spawn(
-        mut coordinator: Coordinator<A, C>,
+        coordinator: Coordinator<A, C>,
         order: impl MapOrder + Send + 'static,
         config: Config,
     ) -> io::Result<Self> {
-        if config.command_capacity == 0
-            || config.output_capacity == 0
-            || config.batch_steps == 0
-            || config.maximum_command_bytes == 0
-            || config.maximum_vote_reply_bytes == 0
-            || config.maximum_vote_reply_bytes > 1 << 30
-        {
+        let capacity = Capacity::new(config)?;
+        Self::spawn_with_capacity(coordinator, order, config, capacity)
+    }
+    pub fn spawn_with_capacity(
+        mut coordinator: Coordinator<A, C>,
+        order: impl MapOrder + Send + 'static,
+        config: Config,
+        capacity: Capacity,
+    ) -> io::Result<Self> {
+        capacity::validate(config)?;
+        if !capacity.matches(config) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "EOE runtime limits must be positive",
+                "EOE capacity mismatch",
             ));
         }
         let (sender, commands) = mpsc::sync_channel(config.command_capacity);
@@ -148,6 +154,7 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
         let control = Arc::new(client::Control::new(
             stop.clone(),
             config,
+            capacity,
             coordinator.host().network().clone(),
             coordinator.host().independent_pool().cloned(),
         ));
@@ -167,7 +174,7 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
                         self.0.alive.store(false, Ordering::Release);
                     }
                 }
-                let replies = worker_control.vote_replies.clone();
+                let replies = worker_control.capacity.votes.clone();
                 let _end = End(worker_control.clone());
                 let mut pending = Pending::default();
                 let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

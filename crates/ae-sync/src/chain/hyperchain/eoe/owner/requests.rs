@@ -70,6 +70,19 @@ enum Receipt {
     Submit(runtime::Call),
     Cancel(runtime::Call),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptKind {
+    Submit,
+    Cancel,
+}
+#[derive(Debug)]
+pub struct RetiredRequest {
+    pub id: u64,
+    pub receipt: Option<(ReceiptKind, ReceiptObservation)>,
+    pub outcome: RequestError,
+}
+pub type ReceiptObservation =
+    Result<Option<Result<runtime::Applied, coordinator::Error>>, runtime::CallError>;
 struct Pending {
     lease: Arc<Lease>,
     reply: SyncSender<Result<Completion, RequestError>>,
@@ -259,6 +272,32 @@ impl Requests {
             .map(|(id, p)| {
                 let _ = p.reply.try_send(Err(RequestError::Unknown));
                 id
+            })
+            .collect()
+    }
+    // The old runtime is joined and every retained output has been routed.
+    // A known rejected submission stays known; all other unfinished calls
+    // remain unknown. Neither result authorizes replay after replacement.
+    pub fn retire(&mut self) -> Vec<RetiredRequest> {
+        std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|(id, mut pending)| {
+                let receipt = pending.receipt.as_mut().map(|receipt| match receipt {
+                    Receipt::Submit(call) => (ReceiptKind::Submit, call.try_reply()),
+                    Receipt::Cancel(call) => (ReceiptKind::Cancel, call.try_reply()),
+                });
+                let outcome = match &receipt {
+                    Some((ReceiptKind::Submit, Ok(Some(Err(error))))) => {
+                        RequestError::Rejected(error.clone())
+                    }
+                    _ => RequestError::Unknown,
+                };
+                let _ = pending.reply.try_send(Err(outcome.clone()));
+                RetiredRequest {
+                    id,
+                    receipt,
+                    outcome,
+                }
             })
             .collect()
     }

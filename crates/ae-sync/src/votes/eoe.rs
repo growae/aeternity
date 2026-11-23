@@ -127,6 +127,12 @@ impl<A, C> Owner<A, C> {
     pub fn client(&self) -> runtime::Client<A, C> {
         self.client.clone()
     }
+    pub(crate) fn runtime_route(&self) -> runtime::Route<A, C> {
+        self.route.clone()
+    }
+    pub(crate) fn take_retained_output(&mut self) -> Option<runtime::Output> {
+        self.pending.take().or_else(|| self.retained.pop_front())
+    }
     pub fn is_finished(&self) -> bool {
         self.runtime
             .as_ref()

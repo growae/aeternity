@@ -25,6 +25,7 @@ pub struct Retiring<O> {
     ready: bool,
     failure: Option<Error>,
     cache_retired: bool,
+    eoe_retired: bool,
 }
 impl<O> std::fmt::Debug for Retiring<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,10 +73,32 @@ impl Owner {
             ready: false,
             failure: None,
             cache_retired: false,
+            eoe_retired: false,
         })
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
+    pub(crate) fn retire_eoe(&mut self, old: &super::super::Client) -> Result<(), Error> {
+        if !old.is_closed() {
+            return Err(Error::Binding);
+        }
+        if !self.attempt.client.same_runtime(old) {
+            return Ok(());
+        }
+        if let Some(producer) = &mut self.producer {
+            producer.retire_eoe(old).map_err(Error::Effects)?;
+        }
+        if let Some(micro) = &mut self.micro {
+            micro.retire_eoe(old).map_err(Error::Build)?;
+        }
+        if let Some(effects) = &mut self.attempt.effects
+            && let Some(error) = effects.retire_eoe(old).map_err(Error::Effects)?
+        {
+            self.report.as_mut().expect("report").key_effect_error = Some(error);
+        }
+        self.eoe_retired = true;
+        Ok(())
+    }
     pub(crate) fn retire_cache(
         &mut self,
         old: &ae_hyperchain::parent_cache::runtime::Client,
@@ -89,9 +112,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
         if let Some(producer) = &mut self.producer {
             producer.retire_cache(old).map_err(Error::Effects)?;
         }
-        if let Some(effects) = &mut self.attempt.effects {
-            self.report.as_mut().expect("report").key_effect_error =
-                effects.retire_cache(old).map_err(Error::Effects)?;
+        if let Some(effects) = &mut self.attempt.effects
+            && let Some(error) = effects.retire_cache(old).map_err(Error::Effects)?
+        {
+            self.report.as_mut().expect("report").key_effect_error = Some(error);
         }
         self.cache_retired = true;
         Ok(())
@@ -137,7 +161,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
         result
     }
     fn advance(&mut self, owner: &Owner, importer: &Importer<O>) -> Result<bool, Error> {
-        if !self.attempt.client.same_runtime(&owner.client())
+        if (!self.eoe_retired && !self.attempt.client.same_runtime(&owner.client()))
             || !self.attempt.source.uses_importer(importer)
         {
             return Err(Error::Binding);
@@ -178,6 +202,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
                 Ok(true) => (),
                 Err(e) if producer::retryable(&e) && !p.in_flight() => (),
                 Err(e) if self.cache_retired && cache_departure(&e) && !p.in_flight() => (),
+                Err(e) if self.eoe_retired && delivery::eoe_departure(&e) && !p.in_flight() => (),
                 Err(e) => return Err(Error::Effects(e)),
             }
             report.producer = Some(self.producer.take().expect("producer").discard());

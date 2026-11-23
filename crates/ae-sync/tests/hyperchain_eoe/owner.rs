@@ -6,6 +6,8 @@ mod conductor;
 mod producer;
 #[path = "owner/production.rs"]
 mod production;
+#[path = "owner/recovery.rs"]
+mod recovery;
 use super::*;
 use ae_storage::pool::worker::GossipCache;
 use ae_sync::{chain::hyperchain::eoe::owner as managed, votes};

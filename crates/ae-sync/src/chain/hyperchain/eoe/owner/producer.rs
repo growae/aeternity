@@ -213,6 +213,32 @@ impl Pending {
         }
         Ok(())
     }
+    pub(super) fn retire_eoe(&mut self, old: &Client) -> Result<(), Error> {
+        if !old.is_closed() || !self.client.same_runtime(old) {
+            return Err(Error::Configuration);
+        }
+        let negotiation = matches!(self.receipt, Some(Receipt::Negotiation(_)));
+        if let Some(Receipt::Eoe(call) | Receipt::Negotiation(call)) = &mut self.receipt {
+            let failure = match call.try_reply() {
+                Ok(None) => return Err(Error::Configuration),
+                Ok(Some(Ok(runtime::Applied::Unit))) => {
+                    if negotiation {
+                        self.prepared.negotiation = None;
+                    } else {
+                        self.parents.pop_front().expect("accepted EOE effect");
+                    }
+                    self.acknowledged = self.acknowledged.saturating_add(1);
+                    None
+                }
+                Ok(Some(Ok(_))) => Some(Error::UnexpectedReply(Target::Eoe)),
+                Ok(Some(Err(e))) => Some(Error::Eoe(e)),
+                Err(_) => Some(Error::ReceiptLost(Target::Eoe)),
+            };
+            self.receipt = None;
+            self.failure = failure;
+        }
+        Ok(())
+    }
     pub(super) fn discard(self) -> Cancelled {
         assert!(!self.in_flight());
         Cancelled {

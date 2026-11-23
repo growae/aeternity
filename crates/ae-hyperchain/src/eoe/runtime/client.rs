@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::{atomic::AtomicUsize, mpsc::TryRecvError};
+use std::sync::mpsc::TryRecvError;
 
 pub(super) struct Control {
     pub admission: std::sync::Mutex<()>,
@@ -7,10 +7,8 @@ pub(super) struct Control {
     pub wake: pool::Wake,
     pub alive: AtomicBool,
     pub stop: Arc<AtomicBool>,
-    calls: AtomicUsize,
-    maximum_calls: usize,
+    pub capacity: Capacity,
     maximum_command_bytes: usize,
-    pub vote_replies: Arc<votes::Budget>,
     network: ae_protocol::NetworkProfile,
     pool: Option<pool::Hub>,
 }
@@ -18,6 +16,7 @@ impl Control {
     pub fn new(
         stop: Arc<AtomicBool>,
         config: Config,
+        capacity: Capacity,
         network: ae_protocol::NetworkProfile,
         pool: Option<pool::Hub>,
     ) -> Self {
@@ -27,10 +26,8 @@ impl Control {
             health: std::sync::Mutex::new(Health::Running),
             alive: AtomicBool::new(true),
             stop,
-            calls: AtomicUsize::new(0),
-            maximum_calls: config.command_capacity,
+            capacity,
             maximum_command_bytes: config.maximum_command_bytes,
-            vote_replies: Arc::new(votes::Budget::new(config.maximum_vote_reply_bytes)),
             network,
             pool,
         }
@@ -39,7 +36,7 @@ impl Control {
 pub(super) struct Credit(Arc<Control>);
 impl Drop for Credit {
     fn drop(&mut self) {
-        self.0.calls.fetch_sub(1, Ordering::AcqRel);
+        self.0.capacity.calls.used.fetch_sub(1, Ordering::AcqRel);
     }
 }
 // Fixed service incarnation. Clones neither restart nor rebind the worker.
@@ -68,7 +65,7 @@ impl<A, C> Client<A, C> {
         &self.control.network
     }
     pub fn retained_vote_reply_bytes(&self) -> usize {
-        self.control.vote_replies.used()
+        self.control.capacity.retained_vote_bytes()
     }
     pub fn is_closed(&self) -> bool {
         !self.control.alive.load(Ordering::Acquire) || self.control.stop.load(Ordering::Acquire)
@@ -82,7 +79,7 @@ impl<A, C> Client<A, C> {
         self.control.wake.notify();
     }
     pub fn outstanding(&self) -> usize {
-        self.control.calls.load(Ordering::Acquire)
+        self.control.capacity.outstanding()
     }
     pub fn call(&self, command: Command<A, C>) -> Result<Call, SubmitError<A, C>> {
         let _gate = self.control.admission.lock().expect("EOE admission");
@@ -94,9 +91,12 @@ impl<A, C> Client<A, C> {
         }
         if self
             .control
+            .capacity
             .calls
+            .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(1).filter(|_| n < self.control.maximum_calls)
+                n.checked_add(1)
+                    .filter(|_| n < self.control.capacity.calls.maximum)
             })
             .is_err()
         {

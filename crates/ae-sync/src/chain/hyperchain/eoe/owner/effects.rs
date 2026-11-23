@@ -61,6 +61,27 @@ impl Pending {
         self.receipt = None;
         Ok(result)
     }
+    pub(super) fn retire_eoe(&mut self, old: &Client) -> Result<Option<Error>, Error> {
+        if !old.is_closed() || !self.client.same_runtime(old) {
+            return Err(Error::Configuration);
+        }
+        let Some(Receipt::Eoe(call)) = &mut self.receipt else {
+            return Ok(None);
+        };
+        let result = match call.try_reply() {
+            Ok(None) => return Err(Error::Configuration),
+            Ok(Some(Ok(runtime::Applied::Unit))) => {
+                self.pending.pop_front().expect("accepted candidate effect");
+                self.acknowledged = self.acknowledged.saturating_add(1);
+                None
+            }
+            Ok(Some(Ok(_))) => Some(Error::UnexpectedReply(Target::Eoe)),
+            Ok(Some(Err(e))) => Some(Error::Eoe(e)),
+            Err(_) => Some(Error::ReceiptLost(Target::Eoe)),
+        };
+        self.receipt = None;
+        Ok(result)
+    }
     pub fn step(&mut self) -> Result<Progress, Error> {
         if let Some(receipt) = &mut self.receipt {
             let result = match receipt {

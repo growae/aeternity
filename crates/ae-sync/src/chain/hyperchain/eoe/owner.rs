@@ -9,6 +9,7 @@ pub mod candidate;
 mod effects;
 pub mod producer;
 pub mod production;
+pub mod recovery;
 mod requests;
 use requests::Requests;
 pub use requests::{Completion, Request, RequestError};
@@ -74,6 +75,8 @@ pub struct Shutdown {
     pub retained_output: Option<runtime::Output>,
     pub retained_vote: Option<runtime::Output>,
     pub retained_publication: Option<eoe::pool::Publication>,
+    pub retirement: Option<votes::eoe::Retirement>,
+    pub retired_outputs: VecDeque<runtime::Output>,
     pub epoch_cursor: events::Cursor,
     pub errors: Vec<Error>,
     pub producer: Option<producer::Pending>,
@@ -84,6 +87,8 @@ pub struct Owner {
     output: Option<votes::eoe::Owner<StateReader, StateReader>>,
     votes: Option<votes::Worker>,
     epochs: Epochs,
+    factory: Factory,
+    recovery: Option<recovery::Recovery>,
     requests: Requests,
     pending: Option<runtime::Output>,
     failure: Option<Error>,
@@ -97,7 +102,7 @@ impl Owner {
         inputs: Inputs,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
-        order: impl MapOrder + Send + 'static,
+        order: impl MapOrder + Clone + Send + 'static,
     ) -> Result<Self, Error> {
         Self::start_inner(inputs, config, keys, order, None)
     }
@@ -105,7 +110,7 @@ impl Owner {
         inputs: Inputs,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
-        order: impl MapOrder + Send + 'static,
+        order: impl MapOrder + Clone + Send + 'static,
         route: parent::Route,
     ) -> Result<Self, Error> {
         Self::start_inner(inputs, config, keys, order, Some(route))
@@ -114,7 +119,7 @@ impl Owner {
         inputs: Inputs,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
-        order: impl MapOrder + Send + 'static,
+        order: impl MapOrder + Clone + Send + 'static,
         route: Option<parent::Route>,
     ) -> Result<Self, Error> {
         if !inputs
@@ -142,9 +147,14 @@ impl Owner {
         };
         // Install both shared services before starting the runtime. No input
         // can race startup with an offline gossip cache or absent parent cache.
-        let (Connected { runtime, epochs }, signing) = inputs
+        let Recoverable {
+            runtime,
+            epochs,
+            factory,
+            signing,
+        } = inputs
             .source
-            .connect_with(
+            .connect_recoverable_with(
                 config.eoe,
                 keys,
                 order,
@@ -172,6 +182,8 @@ impl Owner {
             output: Some(output),
             votes: Some(votes),
             epochs,
+            factory,
+            recovery: None,
             requests,
             pending: None,
             failure: None,
@@ -185,6 +197,9 @@ impl Owner {
         self.output.as_ref().expect("live owner").client()
     }
     fn ready(&self) -> Result<(), Error> {
+        if self.recovery.is_some() {
+            return Err(Error::Backpressured);
+        }
         if let Some(e) = &self.failure {
             return Err(e.clone());
         }
@@ -383,11 +398,9 @@ impl Owner {
             return Err(Error::Configuration);
         }
         let cache = self.parent.clone().ok_or(Error::Configuration)?;
-        Ok(super::super::delivery::Delivery::new(
-            source,
-            cache,
-            self.client(),
-        ))
+        let mut delivery = super::super::delivery::Delivery::new(source, cache, self.client());
+        delivery.set_eoe_route(self.output.as_ref().expect("output").runtime_route());
+        Ok(delivery)
     }
     // Resolve a known rejected cancellation/epoch command explicitly. Unknown
     // receipts, lost sources and closed authorities cannot be rebound/retried.
@@ -409,13 +422,18 @@ impl Owner {
         if let Some(e) = &self.failure {
             return Err(e.clone());
         }
-        let result = self.advance();
+        let result = if self.recovery.is_some() {
+            self.drain_retirement()
+        } else {
+            self.advance()
+        };
         if let Err(e) = &result {
             if !matches!(
                 e,
                 Error::CancelRejected(_, _)
                     | Error::Source(super::Error::ResourceLimit | super::Error::Rejected(_))
             ) && !matches!(e,Error::Producer(error) if producer::retryable(error))
+                && !(recovery::departure(e) && self.replacement_pending())
             {
                 self.client().request_stop();
                 if let Some(relay) = self.output.as_ref().and_then(votes::eoe::Owner::relay) {
@@ -492,6 +510,9 @@ impl Owner {
     }
     fn finish(&mut self) -> Shutdown {
         let mut errors = self.failure.clone().into_iter().collect::<Vec<_>>();
+        if let Some(recovery) = &mut self.recovery {
+            errors.extend(recovery.previous_failure.take());
+        }
         if let Some(output) = &self.output {
             output.client().request_stop();
         }
@@ -508,6 +529,19 @@ impl Owner {
             .output
             .as_mut()
             .and_then(votes::eoe::Owner::take_pending_publication);
+        let mut retired_outputs = VecDeque::new();
+        let mut retirement = None;
+        if self.recovery.is_some()
+            && let Some(output) = &mut self.output
+        {
+            while let Some(retained) = output.take_retained_output() {
+                retired_outputs.push_back(retained);
+            }
+            retirement = output.take_retirement();
+            if retirement.as_ref().is_some_and(|r| r.result.is_err()) {
+                errors.push(Error::WorkerPanicked);
+            }
+        }
         if let Some(output) = self.output.take()
             && output.shutdown().is_err()
         {
@@ -518,6 +552,8 @@ impl Owner {
             retained_output: self.pending.take(),
             retained_vote,
             retained_publication,
+            retirement,
+            retired_outputs,
             epoch_cursor: self.epochs.cursor().clone(),
             errors,
             producer: self.production.take(),

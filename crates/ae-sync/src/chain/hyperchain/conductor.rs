@@ -77,6 +77,27 @@ pub enum Error {
     ConsensusRestartLimit,
     Supervision(eoe_runtime::Output),
 }
+fn eoe_departure(error: &Error) -> bool {
+    use owner::candidate;
+    match error {
+        Error::Owner(e) | Error::Production(production::Error::Owner(e)) => {
+            owner::recovery::departure(e)
+        }
+        Error::Delivery(e) | Error::Production(production::Error::Effects(e)) => {
+            delivery::eoe_departure(e)
+        }
+        Error::Production(production::Error::Closed) => true,
+        Error::Production(production::Error::Build(e)) => match e {
+            candidate::Error::Closed | candidate::Error::Request(owner::RequestError::Unknown) => {
+                true
+            }
+            candidate::Error::Owner(e) => owner::recovery::departure(e),
+            candidate::Error::Effects(e) => delivery::eoe_departure(e),
+            _ => false,
+        },
+        _ => false,
+    }
+}
 #[derive(Debug)]
 pub enum Output {
     Pinning(Box<pinning::Report>),
@@ -496,6 +517,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     pub fn votes(&self) -> votes::Client {
         self.owner.as_ref().expect("owner").votes()
     }
+    pub fn eoe(&self) -> eoe::Client {
+        self.owner.as_ref().expect("owner").runtime_client()
+    }
     pub(crate) fn optional_resilience(
         &mut self,
     ) -> Option<(
@@ -582,6 +606,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         let result = self.advance(wall_ms, now);
         if let Err(e) = &result {
+            if self
+                .owner
+                .as_ref()
+                .is_some_and(owner::Owner::replacement_pending)
+                && eoe_departure(e)
+            {
+                return Ok(Progress::Advanced);
+            }
             self.status.failure = Some(e.clone());
         }
         result
@@ -608,10 +640,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if matches!(health, connector::Health::WorkStopped(_)) {
             return Err(Error::Parent(format!("connector: {health:?}")));
         }
-        if self
+        if (self
             .parent
             .as_ref()
             .is_some_and(cache::Runtime::replacement_pending)
+            || self
+                .owner
+                .as_ref()
+                .is_some_and(owner::Owner::replacement_pending))
             && let Some(attempt) = self.attempt.take()
         {
             match self
@@ -664,6 +700,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .and_then(|_| {
                 self.consensus
                     .poll(&mut self.pinning, &mut self.connector, now)
+            })
+            .and_then(|_| {
+                self.consensus
+                    .poll_eoe(self.owner.as_mut().expect("owner"), now, |old, exit| {
+                        exit.delivery = delivery.retire_eoe(old).map_err(Error::Delivery)?;
+                        if let Some(retiring) = retiring {
+                            retiring.retire_eoe(old).map_err(Error::Production)?;
+                        }
+                        Ok(())
+                    })
             });
         self.status.consensus = self.consensus.status();
         supervised?;
@@ -686,6 +732,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if self.status.consensus.cache_restarting {
             return Ok(Progress::Advanced);
         }
+        if self.status.consensus.eoe_restarting && !self.owner.as_ref().expect("owner").recovering()
+        {
+            return Ok(Progress::Advanced);
+        }
         if let Some(agent) = &self.pinning {
             if let Some(report) = agent.try_output() {
                 self.pending = Some(Output::Pinning(Box::new(report)));
@@ -704,11 +754,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 coordinator::ServiceOutput::Publication(local_host::Output::ParentBlock { .. }),
             )) => advanced = true,
             owner::Progress::Output(o) => {
-                let fatal = matches!(
+                // The final native stop output can become visible just before
+                // its worker returns. Close admission now; joining and output
+                // retirement still precede replacement on the next step.
+                if matches!(
                     o,
-                    eoe_runtime::Output::WorkStopped(_)
-                        | eoe_runtime::Output::Service(coordinator::ServiceOutput::Stopped)
-                );
+                    eoe_runtime::Output::Service(coordinator::ServiceOutput::Stopped)
+                ) {
+                    owner.runtime_client().request_stop();
+                }
+                let fatal = matches!(o, eoe_runtime::Output::WorkStopped(_));
                 self.pending = Some(Output::Supervision(o.clone()));
                 if fatal {
                     return Err(Error::Supervision(o));
@@ -719,6 +774,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             _ => advanced = true,
         }
         self.status.epoch_revision = owner.epoch_cursor().revision();
+        if owner.recovering() {
+            return Ok(Progress::Advanced);
+        }
         match self
             .delivery
             .as_mut()

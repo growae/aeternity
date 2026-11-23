@@ -146,11 +146,21 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         tip: SelectedTip<A, C>,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
     ) -> Self {
+        Self::with_shared_keys(config, tip, Arc::new(keys))
+    }
+    // Replacement hosts share immutable key material while receiving fresh
+    // local state, shutdown controls and outboxes. Producer key selection is
+    // retained separately by its owner.
+    pub fn with_shared_keys(
+        config: Config,
+        tip: SelectedTip<A, C>,
+        keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
+    ) -> Self {
         Self {
             config,
             tip,
             selected_source: None,
-            keys: Arc::new(keys),
+            keys,
             pool: VotePool::default(),
             independent: None,
             staged: None,

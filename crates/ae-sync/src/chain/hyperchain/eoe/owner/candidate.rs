@@ -194,6 +194,7 @@ impl<O: MapOrder + Clone> Build<O> {
             effects: self.effects.take(),
             report: Cancelled::default(),
             failure: None,
+            eoe_retired: false,
         }
     }
     pub fn retry(&mut self) -> Result<(), Error> {
@@ -466,8 +467,16 @@ pub(super) struct Retiring {
     effects: Option<effects::Pending>,
     report: Cancelled,
     failure: Option<Error>,
+    eoe_retired: bool,
 }
 impl Retiring {
+    pub(super) fn retire_eoe(&mut self, old: &super::Client) -> Result<(), Error> {
+        if let Some(effects) = &mut self.effects {
+            self.report.effect_error = effects.retire_eoe(old).map_err(Error::Effects)?;
+        }
+        self.eoe_retired = true;
+        Ok(())
+    }
     pub fn step(&mut self) -> Result<bool, Error> {
         if let Some(e) = &self.failure {
             return Err(e.clone());
@@ -483,7 +492,9 @@ impl Retiring {
             match request.try_reply() {
                 Ok(None) => return Ok(false),
                 Ok(Some(_completion)) => self.report.finalization = Some(Ok(())),
-                Err(RequestError::Unknown) => return Err(Error::Request(RequestError::Unknown)),
+                Err(RequestError::Unknown) if !self.eoe_retired => {
+                    return Err(Error::Request(RequestError::Unknown));
+                }
                 Err(e) => self.report.finalization = Some(Err(e)),
             }
             self.request = None;

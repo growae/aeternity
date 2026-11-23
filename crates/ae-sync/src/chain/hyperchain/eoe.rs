@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+mod factory;
+pub use factory::{Factory, Recoverable};
 pub mod owner;
 pub mod service;
 pub type StateReader = ae_storage::hyperchain::candidate::Store;
@@ -188,94 +190,61 @@ impl Source {
         services: Services,
     ) -> Result<(Connected, ae_hyperchain::signing::Keys), Error> {
         config.epochs.validate()?;
-        let Services {
-            gossip,
-            parent,
-            route,
-            pool,
-        } = services;
         if config.host.network != self.network {
             return Err(Error::Identity);
         }
-        // Both entry points reserve runtime ownership under the epoch gate.
-        // A legacy connection must not create a second feed during an
-        // independent runtime gap, when only the epoch lease remains alive.
-        let (epoch_lease, lease) = {
-            let mut epochs_live = self
-                .epochs_live
-                .lock()
-                .map_err(|_| Error::Worker("poisoned epoch owner".into()))?;
-            if epochs_live.upgrade().is_some() {
-                return Err(Error::AlreadyRunning);
-            }
-            let mut live = self
-                .live
-                .lock()
-                .map_err(|_| Error::Worker("poisoned EOE source owner".into()))?;
-            if live.upgrade().is_some() {
-                return Err(Error::AlreadyRunning);
-            }
-            let lease = Arc::new(());
-            *live = Arc::downgrade(&lease);
-            let epoch_lease = pool.as_ref().map(|_| {
-                let lease = Arc::new(());
-                *epochs_live = Arc::downgrade(&lease);
-                lease
-            });
-            (epoch_lease, lease)
-        };
-        let initial = self.capture().map_err(Error::State)?;
-        let cursor = initial.metadata.cursor.clone();
-        let protocol = initial.tip.protocol;
-        // Do not pin the startup tip for the whole runtime. Native admission
-        // and pending finalization read the then-current chain, independently
-        // of notification backlog. A newly started pool has epoch zero.
-        drop(initial);
-        let mut host = local_host::LocalHost::new(
-            config.host,
-            Tip {
-                trees: None,
-                protocol,
-                consensus: ConsensusType::Pos,
+        let pool = services.pool.clone();
+        let limits = config.epochs;
+        let recipe = factory::Recipe::new(config, keys, services)?;
+        let (epoch_lease, lease) = self.reserve(pool.is_some())?;
+        let (runtime, signing, cursor) = recipe.spawn(self, lease, order)?;
+        let target = match pool {
+            Some(hub) => Target::Independent {
+                hub,
+                _lease: epoch_lease.expect("epoch lease"),
             },
-            keys,
-        )
-        .with_selected_source(Arc::new(Live {
-            source: self.clone(),
-            _lease: lease,
-        }));
-        if let Some(hub) = &pool {
-            host = host
-                .with_independent_pool(hub.clone())
-                .map_err(Error::StateHost)?;
+            None => Target::Legacy(runtime.client()),
+        };
+        let epochs = self.epochs(cursor, target, limits);
+        Ok((Connected { runtime, epochs }, signing))
+    }
+    // Reserve both ownership domains under one gate. A legacy connection
+    // cannot create a second feed during an independent runtime gap.
+    fn reserve(&self, independent: bool) -> Result<(Option<Arc<()>>, Arc<()>), Error> {
+        let mut epochs_live = self
+            .epochs_live
+            .lock()
+            .map_err(|_| Error::Worker("poisoned epoch owner".into()))?;
+        if epochs_live.upgrade().is_some() {
+            return Err(Error::AlreadyRunning);
         }
-        host.set_parent_cache(parent);
-        if let Some(route) = route {
-            host.set_parent_route(route);
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| Error::Worker("poisoned EOE source owner".into()))?;
+        if live.upgrade().is_some() {
+            return Err(Error::AlreadyRunning);
         }
-        let signer = host.signer();
-        let mut coordinator =
-            coordinator::Coordinator::new(host, config.block_time, config.coordinator);
-        coordinator.set_live_gossip_cache(gossip);
-        let runtime = Runtime::spawn(coordinator, order, config.runtime)
-            .map_err(|e| Error::Worker(e.to_string()))?;
-        let epochs = Epochs {
+        let lease = Arc::new(());
+        *live = Arc::downgrade(&lease);
+        let epoch = independent.then(|| {
+            let lease = Arc::new(());
+            *epochs_live = Arc::downgrade(&lease);
+            lease
+        });
+        Ok((epoch, lease))
+    }
+    fn epochs(self: &Arc<Self>, cursor: events::Cursor, target: Target, config: Limits) -> Epochs {
+        Epochs {
             source: self.clone(),
             cursor,
-            target: match pool {
-                Some(hub) => Target::Independent {
-                    hub,
-                    _lease: epoch_lease.expect("epoch lease"),
-                },
-                None => Target::Legacy(runtime.client()),
-            },
-            config: config.epochs,
+            target,
+            config,
             pending: None,
             receipt: None,
             failure: None,
             acknowledged: 0,
-        };
-        Ok((Connected { runtime, epochs }, signer))
+        }
     }
 }
 #[derive(Default)]
@@ -294,6 +263,7 @@ impl local_host::SelectedSource<StateReader, StateReader> for Live {
         self.source.capture().map(|s| s.tip)
     }
 }
+#[derive(Clone)]
 pub struct Config {
     pub host: local_host::Config,
     pub block_time: Unsigned,

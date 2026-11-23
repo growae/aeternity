@@ -4,6 +4,8 @@ mod connections;
 mod connector_supervision;
 #[path = "conductor/controls.rs"]
 mod controls;
+#[path = "conductor/eoe_supervision.rs"]
+mod eoe_supervision;
 #[path = "conductor/parent_http.rs"]
 mod parent_http;
 #[path = "conductor/pinning.rs"]

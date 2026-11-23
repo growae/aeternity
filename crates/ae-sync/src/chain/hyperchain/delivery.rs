@@ -67,11 +67,17 @@ pub struct RetiredCacheCall {
     // Closed means no result was observed from the joined old generation.
     pub result: Result<parent_cache::Reply, cache::Error>,
 }
+#[derive(Debug)]
+pub struct RetiredEoeCall {
+    pub effect: Effect,
+    pub result: Result<Result<eoe::Applied, coordinator::Error>, eoe::CallError>,
+}
 pub struct Delivery<O, A, C> {
     source: Accepted<O, Effects>,
     cache: cache::Client,
     route: Option<cache::Route>,
     eoe: eoe::Client<A, C>,
+    eoe_route: Option<eoe::Route<A, C>>,
     config: Config,
     pending: VecDeque<Effect>,
     retained_bytes: usize,
@@ -86,6 +92,7 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
             cache,
             route: None,
             eoe,
+            eoe_route: None,
             config: Config::default(),
             pending: VecDeque::new(),
             retained_bytes: 0,
@@ -96,6 +103,44 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
     }
     pub(crate) fn set_route(&mut self, route: cache::Route) {
         self.route = Some(route);
+    }
+    pub(crate) fn set_eoe_route(&mut self, route: eoe::Route<A, C>) {
+        self.eoe_route = Some(route);
+    }
+    // Only the unsent suffix may follow a replacement. An accepted call stays
+    // bound to its joined generation, including unknown execution outcomes.
+    pub(crate) fn retire_eoe(
+        &mut self,
+        old: &eoe::Client<A, C>,
+    ) -> Result<Option<RetiredEoeCall>, Error> {
+        if !old.is_closed() || self.eoe_route.is_none() {
+            return Err(Error::Configuration);
+        }
+        if !self.eoe.same_runtime(old) {
+            return Ok(None);
+        }
+        let retired = if let Some(Receipt::Eoe(call)) = &mut self.receipt {
+            let result = match call.try_reply() {
+                Ok(None) => return Err(Error::Configuration),
+                Ok(Some(result)) => Ok(result),
+                Err(error) => Err(error),
+            };
+            self.receipt = None;
+            let effect = self.pending.pop_front().expect("accepted EOE effect");
+            if matches!(result, Ok(Ok(eoe::Applied::Unit))) {
+                self.acknowledged = self.acknowledged.saturating_add(1);
+            }
+            if self.pending.is_empty() {
+                self.retained_bytes = 0;
+            }
+            Some(RetiredEoeCall { effect, result })
+        } else {
+            None
+        };
+        if self.halted.as_ref().is_some_and(eoe_departure) {
+            self.halted = None;
+        }
+        Ok(retired)
     }
     // The supervisor calls this only after joining this exact cache. Preserve
     // its observed result; a lost read is reported and never submitted again.
@@ -224,6 +269,9 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
         if let Some(route) = &self.route {
             self.cache = route.current().ok_or(Error::Closed(Target::Cache))?;
         }
+        if let Some(route) = &self.eoe_route {
+            self.eoe = route.current().ok_or(Error::Closed(Target::Eoe))?;
+        }
         if self.cache.is_closed() {
             return Err(Error::Closed(Target::Cache));
         }
@@ -282,4 +330,10 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
         });
         Ok(Progress::Submitted)
     }
+}
+pub(crate) fn eoe_departure(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Closed(Target::Eoe) | Error::ReceiptLost(Target::Eoe)
+    )
 }
