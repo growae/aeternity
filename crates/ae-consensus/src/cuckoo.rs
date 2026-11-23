@@ -7,6 +7,8 @@ use ae_types::Hash256;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::BTreeMap;
 
+pub mod solver;
+
 pub const MAINNET_EDGE_BITS: u8 = 29;
 
 pub fn sealing_bytes(header: &KeyHeader) -> Result<Vec<u8>, HeaderError> {
@@ -57,17 +59,7 @@ pub fn verify_proof_from_hash(hash: Hash256, nonce: u64, solution: &[u64], edge_
     if solution.iter().any(|x| *x > mask) || solution.windows(2).any(|p| p[0] >= p[1]) {
         return false;
     }
-    let mut header = STANDARD.encode(hash.0).into_bytes();
-    header.extend_from_slice(STANDARD.encode(nonce.to_le_bytes()).as_bytes());
-    header.resize(80, 0);
-    let seed = blake2b_256(&header);
-    let keys = std::array::from_fn(|i| {
-        u64::from_le_bytes(
-            seed.0[8 * i..8 * i + 8]
-                .try_into()
-                .expect("fixed key slice"),
-        )
-    });
+    let keys = keys(hash, nonce);
     let edges: Vec<(u64, u64)> = solution
         .iter()
         .map(|n| {
@@ -78,6 +70,19 @@ pub fn verify_proof_from_hash(hash: Hash256, nonce: u64, solution: &[u64], edge_
         })
         .collect();
     is_single_cycle(&edges)
+}
+fn keys(hash: Hash256, nonce: u64) -> [u64; 4] {
+    let mut header = STANDARD.encode(hash.0).into_bytes();
+    header.extend_from_slice(STANDARD.encode(nonce.to_le_bytes()).as_bytes());
+    header.resize(80, 0);
+    let seed = blake2b_256(&header);
+    std::array::from_fn(|i| {
+        u64::from_le_bytes(
+            seed.0[8 * i..8 * i + 8]
+                .try_into()
+                .expect("fixed key slice"),
+        )
+    })
 }
 fn is_single_cycle(edges: &[(u64, u64)]) -> bool {
     let mut adjacent: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
