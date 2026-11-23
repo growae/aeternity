@@ -123,6 +123,26 @@ pub struct TransactionInput<'a> {
     pub keys: &'a Keys,
     pub limits: Limits,
 }
+pub struct UnsignedInput<'a> {
+    pub leader: AccountPublicKey,
+    pub nonce: Unsigned,
+    pub minimum_gas_price: Unsigned,
+    pub parent_hash: &'a [u8],
+    pub network: &'a [u8],
+    pub limits: Limits,
+}
+impl<'a> TransactionInput<'a> {
+    fn unsigned(&self) -> UnsignedInput<'a> {
+        UnsignedInput {
+            leader: self.leader,
+            nonce: self.nonce.clone(),
+            minimum_gas_price: self.minimum_gas_price.clone(),
+            parent_hash: self.parent_hash,
+            network: self.network,
+            limits: self.limits,
+        }
+    }
+}
 fn sign(
     tx: Transaction,
     input: &TransactionInput<'_>,
@@ -135,7 +155,7 @@ fn sign(
         .map_err(|_| Error::Signing)?;
     Ok(SignedTransaction::new(tx, vec![signature]))
 }
-fn check(input: &TransactionInput<'_>) -> Result<(), Error> {
+fn check(input: &UnsignedInput<'_>) -> Result<(), Error> {
     if input.parent_hash.len() > input.limits.hash_bytes
         || input.network.len() > input.limits.network_bytes
         || [&input.nonce, &input.minimum_gas_price]
@@ -148,6 +168,9 @@ fn check(input: &TransactionInput<'_>) -> Result<(), Error> {
     }
 }
 pub fn note(input: TransactionInput<'_>) -> Result<SignedTransaction<Transaction>, Error> {
+    sign(note_unsigned(input.unsigned())?, &input)
+}
+pub fn note_unsigned(input: UnsignedInput<'_>) -> Result<Transaction, Error> {
     check(&input)?;
     let mut tx = Spend::new(input.leader, Id::new(IdTag::Account, input.leader.0))
         .map_err(|_| Error::Encoding)?;
@@ -158,12 +181,15 @@ pub fn note(input: TransactionInput<'_>) -> Result<SignedTransaction<Transaction
         crate::pin::encode_child(input.parent_hash, input.limits.hash_bytes.saturating_add(3))
             .map_err(|_| Error::ResourceLimit)?,
     );
-    sign(Transaction::new(TransactionLeaf::Spend(tx)), &input)
+    Ok(Transaction::new(TransactionLeaf::Spend(tx)))
 }
 pub fn proof(
     contract: [u8; 32],
     input: TransactionInput<'_>,
 ) -> Result<SignedTransaction<Transaction>, Error> {
+    sign(proof_unsigned(contract, input.unsigned())?, &input)
+}
+pub fn proof_unsigned(contract: [u8; 32], input: UnsignedInput<'_>) -> Result<Transaction, Error> {
     check(&input)?;
     let call_data = ae_vm_fate::abi::create_calldata(
         b"pin",
@@ -184,5 +210,5 @@ pub fn proof(
     tx.set_fee(input.minimum_gas_price.mul_u64(1_000_000));
     tx.set_gas(1_000_000.into());
     tx.set_gas_price(input.minimum_gas_price.clone());
-    sign(Transaction::new(TransactionLeaf::Contract(tx)), &input)
+    Ok(Transaction::new(TransactionLeaf::Contract(tx)))
 }

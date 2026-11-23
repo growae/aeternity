@@ -118,7 +118,7 @@ fn signing() -> Signing {
     seed[31] = 7;
     Signing {
         network: b"parent_network".to_vec(),
-        keys: Keys::new([Ed25519SecretKey::from_seed(&seed)]),
+        keys: Keys::new([Ed25519SecretKey::from_seed(&seed)]).into(),
     }
 }
 fn post() -> Post {

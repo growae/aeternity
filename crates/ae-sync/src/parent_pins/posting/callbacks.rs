@@ -168,10 +168,39 @@ pub(super) async fn post(
             let signing = signing.ok_or(Failure::MissingKey)?;
             let mut message = signing.network.clone();
             message.extend_from_slice(&tx.encode());
-            let signature = signing
-                .keys
-                .sign(post.account, &message)
-                .map_err(|_| Failure::MissingKey)?;
+            let signature = match &signing.keys {
+                super::SigningKeys::Local(keys) => keys
+                    .sign(post.account, &message)
+                    .map_err(|_| Failure::MissingKey)?,
+                super::SigningKeys::Worker(binding) => {
+                    let ticket = loop {
+                        if binding.is_closed() {
+                            return Err(Failure::Signing(crate::preset_keys::Error::Stopped));
+                        }
+                        if let Some(client) = binding.current() {
+                            match client.sign_binary(&message, post.account) {
+                                Ok(ticket) => break ticket,
+                                Err(
+                                    crate::preset_keys::Error::Busy
+                                    | crate::preset_keys::Error::Stopped,
+                                ) => (),
+                                Err(error) => return Err(Failure::Signing(error)),
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    };
+                    *progress.signing.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(ticket.clone());
+                    loop {
+                        if let Some(result) = ticket.try_result() {
+                            let signature = result.map_err(Failure::Signing)?;
+                            *progress.signing.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                            break signature;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+            };
             let bytes = SignedTransaction::new(tx, vec![signature]).encode();
             let value = json!({"tx":api::encode(ApiType::Transaction, &bytes)});
             publish(

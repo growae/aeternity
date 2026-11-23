@@ -1,4 +1,5 @@
 use super::*;
+use ae_tx::CanonicalTransaction;
 use ae_types::Unsigned;
 use num_bigint::BigInt;
 pub(super) struct Host<O> {
@@ -7,7 +8,7 @@ pub(super) struct Host<O> {
     pub producer: scoped::Producer<O>,
     pub pool: crate::bindings::Admission,
     pub parent: parent::Client<O>,
-    pub keys: Keys,
+    pub keys: parent_pins::posting::SigningKeys,
     pub config: Config,
     pub shared: Arc<Shared>,
     pub effects: Vec<Effect>,
@@ -192,23 +193,73 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             .read(|pool| pool.next_nonce(leader))?
             .unwrap_or_else(|| 1.into());
         let minimum_gas_price = self.minimum_gas_price()?;
-        let input = core::TransactionInput {
+        let input = core::UnsignedInput {
             leader,
             nonce,
             minimum_gas_price,
             parent_hash: hash,
             network: self.execution.profile.network.network_id(),
-            keys: &self.keys,
             limits: self.config.transaction,
         };
         if self.parent.metadata().map_err(Error::Utilities)?.signer == parent::Signer::None {
             return Err(Error::Transaction(core::Error::Signing));
         }
         let tx = match kind {
-            ChildKind::Note => core::note(input),
-            ChildKind::Proof => core::proof(self.execution.profile.contracts.election, input),
+            ChildKind::Note => core::note_unsigned(input),
+            ChildKind::Proof => {
+                core::proof_unsigned(self.execution.profile.contracts.election, input)
+            }
         }
         .map_err(Error::Transaction)?;
+        let mut message = self.execution.profile.network.network_id().to_vec();
+        message.extend_from_slice(&tx.encode());
+        let signature = match &self.keys {
+            parent_pins::posting::SigningKeys::Local(keys) => keys
+                .sign(leader, &message)
+                .map_err(|_| Error::Transaction(core::Error::Signing))?,
+            parent_pins::posting::SigningKeys::Worker(binding) => {
+                let ticket = loop {
+                    self.check()?;
+                    if binding.is_closed() {
+                        return Err(Error::Preset(crate::preset_keys::Error::Stopped));
+                    }
+                    if let Some(client) = binding.current() {
+                        match client.sign_binary(&message, leader) {
+                            Ok(ticket) => break ticket,
+                            Err(
+                                crate::preset_keys::Error::Busy
+                                | crate::preset_keys::Error::Stopped,
+                            ) => (),
+                            Err(error) => return Err(Error::Preset(error)),
+                        }
+                    }
+                    thread::sleep(self.config.poll);
+                };
+                let observed = self.effects.len();
+                self.effects.push(Effect::Signing {
+                    kind,
+                    transaction: Arc::new(tx.clone()),
+                    receipt: ticket.clone().into(),
+                });
+                loop {
+                    self.check()?;
+                    if let Some(result) = ticket.wait_timeout(self.config.poll) {
+                        if let Effect::Signing { receipt, .. } = &mut self.effects[observed] {
+                            *receipt = crate::preset_keys::Observed::Known(result.clone());
+                        }
+                        break result.map_err(|error| match error {
+                            crate::preset_keys::Error::Signing(error)
+                                if *error == ae_hyperchain::signing::Error::MissingKey =>
+                            {
+                                Error::Transaction(core::Error::Signing)
+                            }
+                            error => Error::Preset(error),
+                        })?;
+                    }
+                }
+            }
+        };
+        let tx = ae_tx::SignedTransaction::new(tx, vec![signature]);
         let record = children::Record {
             intent,
             transaction: tx.encode(),

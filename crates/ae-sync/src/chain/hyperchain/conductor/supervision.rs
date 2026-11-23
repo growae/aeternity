@@ -10,17 +10,20 @@ pub struct Status {
     pub connector_generation: u64,
     pub cache_generation: u64,
     pub eoe_generation: u64,
+    pub key_generation: u64,
     pub attempts: u64,
     pub restarting: bool,
     pub pinning_restarting: bool,
     pub connector_restarting: bool,
     pub cache_restarting: bool,
     pub eoe_restarting: bool,
+    pub keys_restarting: bool,
     pub pending_notices: usize,
 }
 
 mod cache_supervision;
 mod eoe_supervision;
+mod key_supervision;
 #[cfg(test)]
 mod tests;
 pub use cache_supervision::{CacheExit, RetiredTop};
@@ -29,6 +32,18 @@ pub use eoe_supervision::{EoeExit, EoeSettlement};
 
 #[derive(Debug)]
 pub enum Notice {
+    KeysRetired {
+        generation: u64,
+        info: crate::preset_keys::Info,
+        previous_failure: Option<owner::Error>,
+    },
+    KeysRestarted {
+        generation: u64,
+    },
+    KeysStartFailed {
+        attempt: u64,
+        error: owner::Error,
+    },
     EoeRetired {
         generation: u64,
         child: Box<EoeExit>,
@@ -176,6 +191,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
                 connector_generation: 1,
                 cache_generation: u64::from(cache.is_some()),
                 eoe_generation: 1,
+                key_generation: 1,
                 ..Default::default()
             },
             factory,
@@ -193,7 +209,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
             restarting: self.status.pinning_restarting
                 || self.status.connector_restarting
                 || self.status.cache_restarting
-                || self.status.eoe_restarting,
+                || self.status.eoe_restarting
+                || self.status.keys_restarting,
             pending_notices: self.notices.len(),
             ..self.status.clone()
         }

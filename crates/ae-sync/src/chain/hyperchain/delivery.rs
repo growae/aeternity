@@ -44,6 +44,7 @@ pub enum Error {
     Closed(Target),
     Cache(cache::Error),
     Eoe(coordinator::Error),
+    Preset(crate::preset_keys::Error),
     // Submitted work may have executed. It must not be silently resubmitted.
     ReceiptLost(Target),
     UnexpectedReply(Target),

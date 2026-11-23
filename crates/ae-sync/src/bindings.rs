@@ -21,6 +21,7 @@ pub type PeerAnalytics = Binding<crate::analytics::Client>;
 pub type MetricsRouting = Binding<crate::routing::Client>;
 pub type Admission = Binding<Pool>;
 pub type GarbageCollection = Binding<gc::Client>;
+pub type PresetKeys = Binding<crate::preset_keys::Client>;
 
 #[derive(Clone)]
 pub struct Binding<T: Clone> {

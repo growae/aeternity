@@ -100,6 +100,20 @@ fn eoe_departure(error: &Error) -> bool {
         _ => false,
     }
 }
+fn key_departure(error: &Error) -> bool {
+    use crate::preset_keys::Error as KeyError;
+    match error {
+        Error::Owner(e) | Error::Production(production::Error::Owner(e)) => owner::key_departure(e),
+        Error::Production(production::Error::Preset(
+            KeyError::Stopped | KeyError::Disconnected,
+        )) => true,
+        Error::Delivery(delivery::Error::Preset(KeyError::Stopped | KeyError::Disconnected))
+        | Error::Production(production::Error::Effects(delivery::Error::Preset(
+            KeyError::Stopped | KeyError::Disconnected,
+        ))) => true,
+        _ => false,
+    }
+}
 #[derive(Debug)]
 pub enum Output {
     Pinning(Box<pinning::Report>),
@@ -320,6 +334,22 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         )
         .map_err(Error::Source)?;
         let targets = targets(selected.clone(), &execution)?;
+        let keys = Arc::new(keys);
+        let mut configured_keys = ae_hyperchain::signing::Keys::from_shared(keys.clone());
+        if let Some(pins) = &config.parent.pins
+            && let Some(signing) = &pins.signing
+        {
+            match &signing.keys {
+                crate::parent_pins::posting::SigningKeys::Local(parent_keys) => {
+                    configured_keys = configured_keys.merged(parent_keys);
+                }
+                crate::parent_pins::posting::SigningKeys::Worker(_) => {
+                    return Err(Error::Configuration);
+                }
+            }
+        }
+        let key_service = owner::KeyService::start(&database, configured_keys)
+            .map_err(|error| Error::Owner(owner::Error::Preset(error)))?;
         // Build both directions together. Only supervision owns the connector link.
         let agent = config.parent.pins.as_ref().and_then(|p| p.agent.clone());
         let pin_execution = config.parent.pins.as_ref().map(|_| execution.clone());
@@ -334,12 +364,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .parent
             .pins
             .take()
-            .map(|pins| {
+            .map(|mut pins| {
                 let journal = crate::parent_pins::posting::Journal {
                     database: database.clone(),
                     network: pins.network.clone(),
                     limits: pins.journal,
                 };
+                if let Some(signing) = &mut pins.signing {
+                    signing.keys =
+                        crate::parent_pins::posting::SigningKeys::Worker(key_service.binding());
+                }
                 crate::parent_pins::Service::spawn_journalled(
                     pins.chain,
                     pins.nodes,
@@ -445,6 +479,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             keys,
             order,
             route.clone(),
+            key_service,
         )
         .map_err(Error::Owner)?;
         pool.set_group(owner.worker_group());
@@ -465,6 +500,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                     },
                     config,
                     pool.binding(),
+                    owner.preset_key_binding(),
                 )
             })
             .transpose()
@@ -550,6 +586,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn vote_binding(&self) -> votes::Binding {
         self.owner.as_ref().expect("owner").vote_binding()
+    }
+    pub fn preset_key_binding(&self) -> crate::bindings::PresetKeys {
+        self.owner.as_ref().expect("owner").preset_key_binding()
+    }
+    pub fn request_key_restart(&self, generation: u64) -> Result<(), Error> {
+        if self.status.failure.is_some() || generation != self.status.consensus.key_generation {
+            return Err(Error::Configuration);
+        }
+        self.owner
+            .as_ref()
+            .expect("owner")
+            .request_keys_restart()
+            .map_err(Error::Owner)
     }
     pub fn request_vote_restart(
         &self,
@@ -678,9 +727,29 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             {
                 return Ok(Progress::Advanced);
             }
+            if self
+                .owner
+                .as_ref()
+                .is_some_and(owner::Owner::keys_replacement_pending)
+                && key_departure(e)
+            {
+                return Ok(Progress::Advanced);
+            }
             self.status.failure = Some(e.clone());
             self.pool.close();
             self.owner.as_ref().expect("owner").close_vote_binding();
+            self.owner.as_ref().expect("owner").close_keys();
+            if matches!(e, Error::ConsensusRestartLimit) {
+                self.eoe().request_stop();
+                self.parent().request_stop();
+                self.connector().request_stop();
+                if let Some(agent) = &self.pinning {
+                    agent.handle().request_stop();
+                }
+                if let Some(pins) = &self.pins {
+                    pins.stop();
+                }
+            }
             if matches!(
                 e,
                 Error::Owner(owner::Error::VoteRestartLimit) | Error::PoolRestartLimit
@@ -726,7 +795,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             || self
                 .owner
                 .as_ref()
-                .is_some_and(owner::Owner::replacement_pending))
+                .is_some_and(owner::Owner::replacement_pending)
+            || self
+                .owner
+                .as_ref()
+                .is_some_and(owner::Owner::keys_replacement_pending))
             && let Some(attempt) = self.attempt.take()
         {
             match self
@@ -789,6 +862,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             })
             .and_then(|_| {
                 self.consensus
+                    .poll_keys(self.owner.as_mut().expect("owner"), now)
+            })
+            .and_then(|_| {
+                self.consensus
                     .poll_eoe(self.owner.as_mut().expect("owner"), now, |old, exit| {
                         exit.delivery = delivery.retire_eoe(old).map_err(Error::Delivery)?;
                         if let Some(retiring) = retiring {
@@ -824,6 +901,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             return Ok(Progress::Output);
         }
         if self.status.consensus.cache_restarting {
+            return Ok(Progress::Advanced);
+        }
+        if self.status.consensus.keys_restarting {
             return Ok(Progress::Advanced);
         }
         if self.status.consensus.eoe_restarting && !self.owner.as_ref().expect("owner").recovering()

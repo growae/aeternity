@@ -1,16 +1,19 @@
 // One composing owner for committed epochs, received votes, local EOE output
 // and producer calls. The node drives step and consumes every returned output.
 use super::*;
-use crate::votes;
+use crate::{preset_keys, votes};
 use ae_hyperchain::{eoe, parent_block::ParentBlock, parent_cache::runtime as parent};
 use ae_storage::pool::worker::GossipCache;
 
 pub mod candidate;
 mod effects;
+mod key_service;
 pub mod producer;
 pub mod production;
 pub mod recovery;
 mod requests;
+pub(crate) use key_service::KeyService;
+pub(crate) use key_service::departure as key_departure;
 pub mod vote_pool;
 use requests::Requests;
 pub use requests::{Completion, Request, RequestError};
@@ -59,6 +62,7 @@ pub enum Error {
     WorkerPanicked,
     Producer(super::super::delivery::Error),
     ProductionSource(crate::chain::Error),
+    Preset(preset_keys::Error),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
@@ -83,6 +87,7 @@ pub struct Shutdown {
     pub errors: Vec<Error>,
     pub producer: Option<producer::Pending>,
     pub vote_notices: Vec<vote_pool::Notice>,
+    pub keys: Option<preset_keys::Info>,
 }
 pub struct Owner {
     source: Arc<Source>,
@@ -96,6 +101,7 @@ pub struct Owner {
     pending: Option<runtime::Output>,
     failure: Option<Error>,
     signing: ae_hyperchain::signing::Keys,
+    keys: Option<KeyService>,
     producer_binding: repo::hyperchain::producer::Binding,
     production: Option<producer::Pending>,
     attempt: Arc<std::sync::atomic::AtomicBool>,
@@ -107,23 +113,25 @@ impl Owner {
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Clone + Send + 'static,
     ) -> Result<Self, Error> {
-        Self::start_inner(inputs, config, keys, order, None)
+        Self::start_inner(inputs, config, Arc::new(keys), order, None, None)
     }
     pub(crate) fn start_routed(
         inputs: Inputs,
         config: Config,
-        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
         order: impl MapOrder + Clone + Send + 'static,
         route: parent::Route,
+        key_service: KeyService,
     ) -> Result<Self, Error> {
-        Self::start_inner(inputs, config, keys, order, Some(route))
+        Self::start_inner(inputs, config, keys, order, Some(route), Some(key_service))
     }
     fn start_inner(
         inputs: Inputs,
         config: Config,
-        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
         order: impl MapOrder + Clone + Send + 'static,
         route: Option<parent::Route>,
+        key_service: Option<KeyService>,
     ) -> Result<Self, Error> {
         if !inputs
             .source
@@ -157,7 +165,7 @@ impl Owner {
             signing,
         } = inputs
             .source
-            .connect_recoverable_with(
+            .connect_recoverable_shared(
                 config.eoe,
                 keys,
                 order,
@@ -171,6 +179,11 @@ impl Owner {
             .map_err(Error::Source)?;
         let output = votes::eoe::Owner::new(runtime, inputs.publications)
             .map_err(|e| Error::Votes(e.error.clone()))?;
+        let keys = match key_service {
+            Some(keys) => keys,
+            None => KeyService::start(&inputs.database, signing.clone()).map_err(Error::Preset)?,
+        };
+        let signing = keys.template();
         let votes = vote_pool::Pool::start(
             inputs.database,
             inputs.gossip,
@@ -192,6 +205,7 @@ impl Owner {
             pending: None,
             failure: None,
             signing,
+            keys: Some(keys),
             producer_binding,
             production: None,
             attempt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -214,6 +228,59 @@ impl Owner {
     }
     pub fn votes(&self) -> votes::Client {
         self.votes.client()
+    }
+    pub fn preset_keys(&self) -> preset_keys::Client {
+        self.keys.as_ref().expect("live preset-key owner").client()
+    }
+    pub fn preset_key_binding(&self) -> crate::bindings::PresetKeys {
+        self.keys.as_ref().expect("live preset-key owner").binding()
+    }
+    pub(crate) fn keys_replacement_pending(&self) -> bool {
+        self.keys
+            .as_ref()
+            .is_some_and(KeyService::replacement_pending)
+    }
+    pub(crate) fn keys_finished(&self) -> bool {
+        self.keys.as_ref().is_some_and(KeyService::finished)
+    }
+    pub(crate) fn keys_retired(&self) -> bool {
+        self.keys.as_ref().is_some_and(KeyService::retired)
+    }
+    pub(crate) fn request_keys_restart(&self) -> Result<(), Error> {
+        self.keys
+            .as_ref()
+            .ok_or(Error::Closed)?
+            .request_restart()
+            .map_err(Error::Preset)
+    }
+    pub(crate) fn close_keys(&self) {
+        if let Some(keys) = &self.keys {
+            keys.close();
+        }
+    }
+    pub(crate) fn retire_keys(&mut self) -> Result<(preset_keys::Info, Option<Error>), Error> {
+        let info = self
+            .keys
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .retire()
+            .map_err(Error::Preset)?;
+        let failure = if self.failure.as_ref().is_some_and(key_departure) {
+            self.failure.take()
+        } else {
+            None
+        };
+        Ok((info, failure))
+    }
+    pub(crate) fn restart_keys(&mut self, generation: u64) -> Result<(), Error> {
+        let keys = self.keys.as_mut().ok_or(Error::Closed)?;
+        keys.restart(generation).map_err(Error::Preset)?;
+        self.signing = keys.template();
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_key_restart_for_test(&mut self, panic: bool) {
+        self.keys.as_mut().expect("key owner").restart_fault = Some(panic);
     }
     pub(crate) fn replace_parent(&mut self, client: parent::Client) {
         self.parent = Some(client);
@@ -264,13 +331,20 @@ impl Owner {
         }
         let parent = self.parent.clone().ok_or(Error::Configuration)?;
         let client = self.client();
+        let keys = self.preset_keys();
+        let snapshot = keys.snapshot().map_err(|e| match e {
+            preset_keys::Error::Busy => Error::Backpressured,
+            e => Error::Preset(e),
+        })?;
         let captured = parent.snapshot().cache;
         let prepared = source
             .prepare(
                 ae_storage::hyperchain::ProducerRequest {
                     binding: self.producer_binding.clone(),
                     input,
-                    keys: self.signing.clone(),
+                    // Only successful candidate selection is staged. Preserve
+                    // the worker's current active/candidate state on a miss.
+                    keys: self.signing.fresh(),
                     parent: captured,
                 },
                 || {
@@ -282,7 +356,9 @@ impl Owner {
                 },
             )
             .map_err(Error::ProductionSource)?;
-        self.production = Some(producer::Pending::new(prepared, parent, client));
+        self.production = Some(producer::Pending::new(
+            prepared, parent, client, keys, snapshot,
+        ));
         Ok(())
     }
     pub fn production(&self) -> Option<&producer::Pending> {
@@ -440,6 +516,7 @@ impl Owner {
                     | Error::Source(super::Error::ResourceLimit | super::Error::Rejected(_))
             ) && !matches!(e,Error::Producer(error) if producer::retryable(error))
                 && !(recovery::departure(e) && self.replacement_pending())
+                && !(key_departure(e) && self.keys_replacement_pending())
             {
                 self.client().request_stop();
                 if let Some(relay) = self.output.as_ref().and_then(votes::eoe::Owner::relay) {
@@ -556,6 +633,7 @@ impl Owner {
             errors,
             producer: self.production.take(),
             vote_notices: self.votes.take_notices(),
+            keys: self.keys.take().map(KeyService::shutdown),
         }
     }
 }

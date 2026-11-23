@@ -3,10 +3,12 @@
 use super::{Owner, candidate, effects, producer};
 mod pins;
 mod retirement;
+mod signatures;
 use crate::chain::{
     self, Importer,
     hyperchain::{delivery, packing, scoped},
 };
+use crate::preset_keys;
 use ae_chain::{
     block::Block,
     hyperchain::candidate as core,
@@ -21,6 +23,7 @@ use ae_types::{AccountPublicKey, Hash256};
 use ae_vm_fate::{maps::MapOrder, value::ObjectPayload};
 use num_bigint::BigInt;
 pub use retirement::{Retiring, Stopped};
+pub use signatures::SigningReceipts;
 use std::{
     sync::{
         Arc,
@@ -69,6 +72,7 @@ pub enum Error {
     Key { operational: bool, reason: String },
     Effects(delivery::Error),
     Signing(signing::Error),
+    Preset(preset_keys::Error),
     Encoding(ae_chain::block::Error),
     Admission(chain::Failure),
 }
@@ -168,7 +172,8 @@ pub struct Attempt<O> {
     decision: Option<producer::Decision>,
     decisions: u64,
     leader: Option<AccountPublicKey>,
-    keys: Option<signing::Keys>,
+    keys: preset_keys::Client,
+    signatures: SigningReceipts,
     hole: bool,
     is_eoe: bool,
     micro: Option<candidate::Build<O>>,
@@ -246,7 +251,8 @@ impl Owner {
             decision: None,
             decisions: 0,
             leader: None,
-            keys: None,
+            keys: self.preset_keys(),
+            signatures: Default::default(),
             hole: false,
             is_eoe: false,
             micro: None,
@@ -310,6 +316,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
     }
     pub fn admission_in_flight(&self) -> bool {
         self.receipt.is_some()
+    }
+    pub fn signing_receipts(&self) -> SigningReceipts {
+        self.signatures.clone()
     }
     // A terminally stopped attempt may transfer its unread receipt to the
     // lifecycle owner for reconciliation. Its sticky failure still forbids
@@ -398,6 +407,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
         now: Instant,
     ) -> Result<Progress, Error> {
         if !self.client.same_runtime(&owner.client())
+            || !self.keys.same_worker(&owner.preset_keys())
             || !self.source.uses_importer(importer)
             || !Arc::ptr_eq(&self._lease.0, &owner.attempt)
         {
@@ -412,17 +422,20 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
             return Err(Error::Time);
         }
         self.tick = Some(now);
+        self.signatures.poll();
         match self.phase {
             Phase::Decide => {
-                owner
-                    .prepare_producer_inner(
-                        &self.source,
-                        producer::Input {
-                            now: wall_ms.into(),
-                            config: self.config.producer.clone(),
-                        },
-                    )
-                    .map_err(Error::Owner)?;
+                match owner.prepare_producer_inner(
+                    &self.source,
+                    producer::Input {
+                        now: wall_ms.into(),
+                        config: self.config.producer.clone(),
+                    },
+                ) {
+                    Ok(()) => (),
+                    Err(super::Error::Backpressured) => return Ok(Progress::Waiting),
+                    Err(error) => return Err(Error::Owner(error)),
+                }
                 self.phase = Phase::Decision;
                 Ok(Progress::DecisionRequested)
             }
@@ -458,7 +471,6 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                         self.leader = Some(AccountPublicKey(
                             bytes.try_into().map_err(|_| Error::InvalidLeader)?,
                         ));
-                        self.keys = Some(owner.signing.clone());
                         self.hole = holes.is_some();
                         if let Some(holes) = holes {
                             if after > 0.into() {
@@ -549,16 +561,33 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                         self.skipped = Some(Skipped::Empty);
                         None
                     }
-                    Ok(owned::Candidate::Micro(p)) => Some(Block::Micro(
-                        p.candidate
-                            .signed::<()>(
-                                self.keys.as_ref().expect("signing"),
-                                self.leader.expect("leader"),
-                            )
-                            .map_err(|e| {
-                                Error::Build(candidate::Error::Packing(packing::execution(e)))
-                            })?,
-                    )),
+                    Ok(owned::Candidate::Micro(p)) => {
+                        if self.signatures.micro.is_none() {
+                            match self
+                                .keys
+                                .sign_micro(p.candidate.block().header.clone(), self.leader)
+                            {
+                                Ok(ticket) => self.signatures.micro = Some(ticket.into()),
+                                Err(preset_keys::Error::Busy) => return Ok(Progress::Waiting),
+                                Err(error) => return Err(Error::Preset(error)),
+                            }
+                            return Ok(Progress::Waiting);
+                        }
+                        let Some(result) = self
+                            .signatures
+                            .micro
+                            .as_ref()
+                            .expect("micro signature")
+                            .try_result()
+                        else {
+                            return Ok(Progress::Waiting);
+                        };
+                        let header = result.map_err(Error::Preset)?;
+                        self.signatures.micro = None;
+                        let mut block = p.candidate.block().clone();
+                        block.header = header;
+                        Some(Block::Micro(block))
+                    }
                     _ => return Err(Error::Binding),
                 };
                 self.acknowledged = self
@@ -690,20 +719,57 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                 let Some(Block::Key(header)) = &mut self.block else {
                     return Err(Error::Binding);
                 };
-                let keys = self.keys.as_mut().expect("keys");
-                match keys.seal(header).map_err(Error::Signing)? {
-                    signing::Seal::Found(seal) => {
-                        header.seal = seal;
-                        owner.signing = keys.clone();
-                        self.key = None;
-                        self.phase = Phase::Submit(Kind::Key);
-                        Ok(Progress::Signed(Kind::Key))
+                let by = AccountPublicKey(header.beneficiary);
+                if self.signatures.candidate.is_none() {
+                    match self.keys.set_candidate(by) {
+                        Ok(ticket) => self.signatures.candidate = Some(ticket.into()),
+                        Err(preset_keys::Error::Busy) => return Ok(Progress::Waiting),
+                        Err(error) => return Err(Error::Preset(error)),
                     }
-                    signing::Seal::NoSolution { retry_ms } => {
-                        self.sleep(now, &retry_ms.into(), Wake::Seal)?;
-                        Ok(Progress::Waiting)
-                    }
+                    return Ok(Progress::Waiting);
                 }
+                let Some(selected) = self
+                    .signatures
+                    .candidate
+                    .as_ref()
+                    .expect("candidate selection")
+                    .try_result()
+                else {
+                    return Ok(Progress::Waiting);
+                };
+                match selected {
+                    Ok(()) => (),
+                    Err(preset_keys::Error::KeyNotFound) => {
+                        self.signatures.candidate = None;
+                        self.sleep(now, &1000.into(), Wake::Seal)?;
+                        return Ok(Progress::Waiting);
+                    }
+                    Err(error) => return Err(Error::Preset(error)),
+                }
+                if self.signatures.key.is_none() {
+                    match self.keys.key_header_signature(header.clone(), by) {
+                        Ok(ticket) => self.signatures.key = Some(ticket.into()),
+                        Err(preset_keys::Error::Busy) => return Ok(Progress::Waiting),
+                        Err(error) => return Err(Error::Preset(error)),
+                    }
+                    return Ok(Progress::Waiting);
+                }
+                let Some(signature) = self
+                    .signatures
+                    .key
+                    .as_ref()
+                    .expect("key signature")
+                    .try_result()
+                else {
+                    return Ok(Progress::Waiting);
+                };
+                header.seal = signing::seal_signature(signature.map_err(Error::Preset)?);
+                owner.signing.set_candidate(by).map_err(Error::Signing)?;
+                self.signatures.candidate = None;
+                self.signatures.key = None;
+                self.key = None;
+                self.phase = Phase::Submit(Kind::Key);
+                Ok(Progress::Signed(Kind::Key))
             }
             Phase::Submit(kind) => {
                 let bytes = self

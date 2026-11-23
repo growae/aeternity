@@ -29,12 +29,18 @@ pub struct Pending {
     client: Client,
     failure: Option<Error>,
     acknowledged: u64,
+    keys: preset_keys::Client,
+    snapshot: preset_keys::Ticket<preset_keys::Snapshot>,
+    selection: Option<preset_keys::Ticket<preset_keys::Snapshot>>,
+    selected: Option<preset_keys::Snapshot>,
 }
 impl Pending {
     pub(super) fn new(
         mut produced: ae_storage::hyperchain::Produced,
         cache: parent::Client,
         client: Client,
+        keys: preset_keys::Client,
+        snapshot: preset_keys::Ticket<preset_keys::Snapshot>,
     ) -> Self {
         let parents = produced.prepared.parents.drain().into();
         Self {
@@ -46,6 +52,10 @@ impl Pending {
             client,
             failure: None,
             acknowledged: 0,
+            keys,
+            snapshot,
+            selection: None,
+            selected: None,
         }
     }
     pub fn remaining_parents(&self) -> &VecDeque<Effect> {
@@ -62,6 +72,11 @@ impl Pending {
     }
     pub fn in_flight(&self) -> bool {
         self.receipt.is_some()
+            || self.snapshot.try_result().is_none()
+            || self
+                .selection
+                .as_ref()
+                .is_some_and(|t| t.try_result().is_none())
     }
     pub fn failure(&self) -> Option<&Error> {
         self.failure.as_ref()
@@ -74,6 +89,7 @@ impl Pending {
             && self.prepared.negotiation.is_none()
             && self.receipt.is_none()
             && self.failure.is_none()
+            && self.selected.is_some()
     }
     pub(super) fn retry(&mut self) -> Result<(), Error> {
         if let Some(error) = &self.failure
@@ -160,7 +176,7 @@ impl Pending {
             }
             None => match &self.prepared.negotiation {
                 Some(input) => runtime::Command::Negotiate(input.clone()),
-                None => return Ok(false),
+                None => return self.select(),
             },
         };
         let negotiation = matches!(command, runtime::Command::Negotiate(_));
@@ -178,11 +194,39 @@ impl Pending {
             Err(runtime::SubmitError::ResourceLimit(_)) => Err(Error::ResourceLimit),
         }
     }
+    fn select(&mut self) -> Result<bool, Error> {
+        if self.selected.is_some() {
+            return Ok(false);
+        }
+        if let Some(ticket) = &self.selection {
+            let Some(result) = ticket.try_result() else {
+                return Ok(false);
+            };
+            self.selected = Some(result.map_err(Error::Preset)?);
+            return Ok(true);
+        }
+        let Some(snapshot) = self.snapshot.try_result() else {
+            return Ok(false);
+        };
+        let snapshot = snapshot.map_err(Error::Preset)?;
+        let Some(candidate) = self.prepared.keys.candidate() else {
+            self.selected = Some(snapshot);
+            return Ok(true);
+        };
+        let mut selection = snapshot.selection;
+        selection.candidate = Some(candidate);
+        match self.keys.commit_selection(snapshot, selection) {
+            Ok(ticket) => self.selection = Some(ticket),
+            Err(preset_keys::Error::Busy) => return Ok(false),
+            Err(error) => return Err(Error::Preset(error)),
+        }
+        Ok(true)
+    }
     pub(super) fn settle(&mut self) -> Result<bool, Error> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
-        if self.in_flight() {
+        if self.receipt.is_some() {
             self.step()?;
         }
         Ok(!self.in_flight())
@@ -247,13 +291,26 @@ impl Pending {
             negotiation: self.prepared.negotiation,
             acknowledged: self.acknowledged,
             failure: self.failure,
+            snapshot: self.snapshot.try_result().expect("settled snapshot"),
+            selection: self
+                .selection
+                .map(|t| t.try_result().expect("settled selection")),
         }
     }
     pub(super) fn finish(self) -> (ae_hyperchain::signing::Keys, Decision) {
         assert!(self.ready());
         let p = self.prepared;
+        let selection = self.selected.expect("selected keys").selection;
+        let mut keys = p.keys.fresh();
+        if let Some(active) = selection.active {
+            keys.promote(active).expect("configured active key");
+        }
+        if let Some(candidate) = selection.candidate {
+            keys.set_candidate(candidate)
+                .expect("configured candidate key");
+        }
         (
-            p.keys,
+            keys,
             Decision {
                 outcome: p.decision,
                 status: p.status,
@@ -282,4 +339,6 @@ pub struct Cancelled {
     pub negotiation: Option<eoe::Negotiation>,
     pub acknowledged: u64,
     pub failure: Option<Error>,
+    pub snapshot: Result<preset_keys::Snapshot, preset_keys::Error>,
+    pub selection: Option<Result<preset_keys::Snapshot, preset_keys::Error>>,
 }

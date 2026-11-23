@@ -16,12 +16,24 @@ use std::{
 };
 mod callbacks;
 pub(crate) mod journal;
+#[cfg(test)]
+mod managed_tests;
 pub use journal::Config as Journal;
 
 #[derive(Clone)]
 pub struct Signing {
     pub network: Vec<u8>,
-    pub keys: Keys,
+    pub keys: SigningKeys,
+}
+#[derive(Clone)]
+pub enum SigningKeys {
+    Local(Keys),
+    Worker(crate::bindings::PresetKeys),
+}
+impl From<Keys> for SigningKeys {
+    fn from(keys: Keys) -> Self {
+        Self::Local(keys)
+    }
 }
 #[derive(Debug, Clone)]
 pub struct Post {
@@ -39,6 +51,11 @@ pub enum Failure {
     NoSuitableUtxo,
     Journal(ae_storage::parent_posts::Failure),
     Recovered,
+    Signing(crate::preset_keys::Error),
+    SigningInterrupted {
+        cause: Box<Failure>,
+        receipt: Box<crate::preset_keys::Observed<ae_types::Signature>>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
@@ -62,16 +79,44 @@ pub enum Outcome {
         reason: Failure,
     },
 }
+impl Outcome {
+    pub fn poll_signing(&mut self) {
+        if let Self::NotSubmitted(Failure::SigningInterrupted { receipt, .. }) = self {
+            receipt.poll();
+        }
+    }
+}
 #[derive(Clone, Default)]
-struct Progress(Arc<Mutex<Option<Submission>>>);
+struct Progress {
+    submission: Arc<Mutex<Option<Submission>>>,
+    signing: Arc<Mutex<Option<crate::preset_keys::Ticket<ae_types::Signature>>>>,
+}
 impl Progress {
     fn begin(&self, submission: Submission) {
-        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(submission);
+        *self.submission.lock().unwrap_or_else(|p| p.into_inner()) = Some(submission);
     }
     fn failure(&self, reason: Failure) -> Outcome {
-        match self.0.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        match self
+            .submission
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
             Some(submission) => Outcome::Unknown { submission, reason },
-            None => Outcome::NotSubmitted(reason),
+            None => Outcome::NotSubmitted(
+                match self
+                    .signing
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                {
+                    Some(receipt) => Failure::SigningInterrupted {
+                        cause: Box::new(reason),
+                        receipt: Box::new(receipt.into()),
+                    },
+                    None => reason,
+                },
+            ),
         }
     }
 }
@@ -186,7 +231,7 @@ pub(super) fn run(
             hash,
             submission: job
                 .progress
-                .0
+                .submission
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()

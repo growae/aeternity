@@ -195,7 +195,7 @@ impl Source {
         }
         let pool = services.pool.clone();
         let limits = config.epochs;
-        let recipe = factory::Recipe::new(config, keys, services)?;
+        let recipe = factory::Recipe::new(config, Arc::new(keys), services)?;
         let (epoch_lease, lease) = self.reserve(pool.is_some())?;
         let (runtime, signing, cursor) = recipe.spawn(self, lease, order)?;
         let target = match pool {

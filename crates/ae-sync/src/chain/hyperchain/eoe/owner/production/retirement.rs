@@ -18,6 +18,7 @@ pub struct Stopped {
     pub acknowledged_key_effects: u64,
     pub key_effect_error: Option<delivery::Error>,
     pub key_preparation: Option<Result<(), chain::Error>>,
+    pub signing: SigningReceipts,
 }
 pub struct Retiring<O> {
     attempt: Attempt<O>,
@@ -66,6 +67,7 @@ impl Owner {
             acknowledged_key_effects: 0,
             key_effect_error: None,
             key_preparation: None,
+            signing: attempt.signing_receipts(),
         };
         Ok(Retiring {
             attempt,
@@ -194,6 +196,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
             self.record_candidate(result);
         }
         let report = self.report.as_mut().expect("report");
+        report.signing.poll();
+        if report.signing.pending() {
+            return Ok(false);
+        }
         if let Some(receipt) = &mut self.attempt.receipt {
             let Some(result) = receipt.try_result() else {
                 return Ok(false);
@@ -223,6 +229,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
                 Err(e) if producer::retryable(&e) && !p.in_flight() => (),
                 Err(e) if self.cache_retired && cache_departure(&e) && !p.in_flight() => (),
                 Err(e) if self.eoe_retired && delivery::eoe_departure(&e) && !p.in_flight() => (),
+                Err(delivery::Error::Preset(_)) if !p.in_flight() => (),
                 Err(e) => return Err(Error::Effects(e)),
             }
             report.producer = Some(self.producer.take().expect("producer").discard());

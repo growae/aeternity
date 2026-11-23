@@ -1,0 +1,342 @@
+{
+  "policy": {
+    "intensity": 3,
+    "period": 30
+  },
+  "lifecycle": [
+    {
+      "after": {
+        "active": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_active"
+            }
+          ]
+        },
+        "candidate": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_candidate"
+            }
+          ]
+        },
+        "ready": true
+      },
+      "before": {
+        "active": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+            }
+          ]
+        },
+        "candidate": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674"
+            }
+          ]
+        },
+        "ready": true
+      },
+      "kind": "normal",
+      "old_client": {
+        "atom": "noproc"
+      },
+      "siblings_unchanged": true,
+      "signature": {
+        "bytes": "b37e0ff9f884985e47566f6a74da6da668ca6a891cf76e851b5acecd7eb2ef55034e365063aa041e833e7fd7894013020294119cd1532d410f0f12edae82e001"
+      },
+      "worker_changed": true
+    },
+    {
+      "after": {
+        "active": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_active"
+            }
+          ]
+        },
+        "candidate": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_candidate"
+            }
+          ]
+        },
+        "ready": true
+      },
+      "before": {
+        "active": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+            }
+          ]
+        },
+        "candidate": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674"
+            }
+          ]
+        },
+        "ready": true
+      },
+      "kind": "killed",
+      "old_client": {
+        "atom": "noproc"
+      },
+      "siblings_unchanged": true,
+      "signature": {
+        "bytes": "b37e0ff9f884985e47566f6a74da6da668ca6a891cf76e851b5acecd7eb2ef55034e365063aa041e833e7fd7894013020294119cd1532d410f0f12edae82e001"
+      },
+      "worker_changed": true
+    },
+    {
+      "after": {
+        "active": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_active"
+            }
+          ]
+        },
+        "candidate": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "no_candidate"
+            }
+          ]
+        },
+        "ready": true
+      },
+      "kind": "queued_candidate_killed",
+      "old_reply": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "killed"
+          }
+        ]
+      },
+      "old_request_replayed": false,
+      "siblings_unchanged": true
+    },
+    {
+      "fourth_child": "aec_preset_keys",
+      "kind": "shared_consensus_exhaustion",
+      "root_stopped": true,
+      "steps": [
+        {
+          "attempt": 1,
+          "child": "aec_preset_keys",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        },
+        {
+          "attempt": 2,
+          "child": "cache",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        },
+        {
+          "attempt": 3,
+          "child": "eoe",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        }
+      ]
+    },
+    {
+      "fourth_child": "aec_preset_keys",
+      "kind": "shared_consensus_exhaustion",
+      "root_stopped": true,
+      "steps": [
+        {
+          "attempt": 1,
+          "child": "aec_preset_keys",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        },
+        {
+          "attempt": 2,
+          "child": "aec_preset_keys",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        },
+        {
+          "attempt": 3,
+          "child": "aec_preset_keys",
+          "keys_state": {
+            "active": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_active"
+                }
+              ]
+            },
+            "candidate": {
+              "tuple": [
+                {
+                  "atom": "error"
+                },
+                {
+                  "atom": "no_candidate"
+                }
+              ]
+            },
+            "ready": true
+          },
+          "replacement": true
+        }
+      ]
+    }
+  ]
+}

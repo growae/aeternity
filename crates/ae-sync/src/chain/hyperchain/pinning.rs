@@ -67,6 +67,7 @@ pub enum Error {
     RecoveryGap(u64),
     RecoveryReorganization(u64),
     StaleEpoch,
+    Preset(crate::preset_keys::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
@@ -93,6 +94,11 @@ impl std::fmt::Debug for ChildResult {
 pub enum Effect {
     Parent(parent_pins::posting::Outcome),
     RecoveredParent(durable::ParentResult),
+    Signing {
+        kind: ChildKind,
+        transaction: Arc<ae_tx::Transaction>,
+        receipt: crate::preset_keys::Observed<ae_types::Signature>,
+    },
     Child {
         kind: ChildKind,
         transaction: Arc<ae_mempool::pool::Signed>,
@@ -109,6 +115,11 @@ pub struct Report {
 impl Report {
     pub fn poll_children(&mut self) {
         for e in &mut self.effects {
+            match e {
+                Effect::Signing { receipt, .. } => receipt.poll(),
+                Effect::Parent(outcome) => outcome.poll_signing(),
+                _ => (),
+            }
             if let Effect::Child { result, .. } = e
                 && let ChildResult::Pending(ticket) = result
             {
@@ -191,20 +202,28 @@ pub(crate) struct Factory<O> {
     config: Config,
     lease: Arc<()>,
     pool: Option<crate::bindings::Admission>,
+    keys: crate::bindings::PresetKeys,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
     pub(crate) fn start_managed(
         input: Inputs<O>,
         config: Config,
         pool: crate::bindings::Admission,
+        keys: crate::bindings::PresetKeys,
     ) -> Result<(Service, Self), Error> {
-        let service =
-            Service::spawn_inner(input.clone(), config.clone(), None, Some(pool.clone()))?;
+        let service = Service::spawn_inner(
+            input.clone(),
+            config.clone(),
+            None,
+            Some(pool.clone()),
+            Some(keys.clone()),
+        )?;
         let factory = Self {
             input,
             config,
             lease: service.lease.clone(),
             pool: Some(pool),
+            keys,
         };
         Ok((service, factory))
     }
@@ -214,6 +233,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
             self.config.clone(),
             Some(self.lease.clone()),
             self.pool.clone(),
+            Some(self.keys.clone()),
         )
     }
 }
@@ -247,13 +267,14 @@ impl Service {
         input: Inputs<O>,
         config: Config,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(input, config, None, None)
+        Self::spawn_inner(input, config, None, None, None)
     }
     fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
         input: Inputs<O>,
         config: Config,
         lease: Option<Arc<()>>,
         managed_pool: Option<crate::bindings::Admission>,
+        managed_keys: Option<crate::bindings::PresetKeys>,
     ) -> Result<Self, Error> {
         if !(1..=4096).contains(&config.outputs)
             || !input.parent.bound_to(&input.producer, &input.source)
@@ -271,6 +292,9 @@ impl Service {
             || !input.producer.uses_database(&input.database)
             || !input.pool.uses_database(&input.database)
             || managed_pool
+                .as_ref()
+                .is_some_and(|p| !p.uses_database(&input.database))
+            || managed_keys
                 .as_ref()
                 .is_some_and(|p| !p.uses_database(&input.database))
         {
@@ -318,7 +342,9 @@ impl Service {
             pool: managed_pool
                 .unwrap_or_else(|| crate::bindings::Admission::fixed(&input.database, input.pool)),
             parent: input.parent,
-            keys: input.keys,
+            keys: managed_keys
+                .map(parent_pins::posting::SigningKeys::Worker)
+                .unwrap_or_else(|| input.keys.into()),
             config: config.clone(),
             shared: shared.clone(),
             effects: vec![],

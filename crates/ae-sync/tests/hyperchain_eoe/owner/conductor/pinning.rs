@@ -174,7 +174,7 @@ fn configuration_at(node: &Node, endpoint: &parent_pins::Node) -> conductor::Con
         },
         signing: Some(parent_pins::posting::Signing {
             network: b"parent_network".to_vec(),
-            keys: Keys::new([signer(99)]),
+            keys: Keys::new([signer(99)]).into(),
         }),
         agent: Some(pinning::Config::default()),
     });
@@ -244,6 +244,41 @@ fn children(
             _ => None,
         })
         .collect()
+}
+#[tokio::test]
+async fn pinning_signs_parent_note_and_proof_after_key_worker_replacement() {
+    let node = Node::new(0);
+    let wallet = Wallet::new();
+    let mut c = configured(&node, &wallet, |_| {});
+    let old = c.preset_key_binding().current().unwrap();
+    c.request_key_restart(1).unwrap();
+    let mut reports = vec![];
+    let end = Instant::now() + Duration::from_secs(5);
+    while c.status().consensus.key_generation != 2 {
+        drain(&mut c, &mut reports);
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(old.info().joined);
+    prefix(&node, &mut c, &mut reports, 9).await;
+    assert_eq!(wallet.posted.lock().unwrap().len(), 1);
+    assert_eq!(children(&reports).len(), 2);
+    let receipts: Vec<_> = reports
+        .iter()
+        .flat_map(|r| &r.effects)
+        .filter_map(|e| match e {
+            pinning::Effect::Signing { receipt, .. } => Some(receipt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert!(
+        receipts
+            .iter()
+            .all(|r| matches!(r, ae_sync::preset_keys::Observed::Known(Ok(_))))
+    );
+    assert_eq!(old.capacity().usage().requests, 0);
+    shutdown(c);
 }
 #[tokio::test]
 async fn conductor_agent_posts_parent_and_admits_note_and_exact_height_proof() {

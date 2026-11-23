@@ -43,7 +43,7 @@ fn native_error(e: Error) -> Value {
         Error::KeyNotFound => "key_not_found",
         Error::NoActive => "no_active",
         Error::NoCandidate => "no_candidate",
-        Error::Signing(signing::Error::MissingKey) => "not_found",
+        Error::Signing(error) if *error == signing::Error::MissingKey => "not_found",
         e => panic!("unexpected native result {e:?}"),
     })]})
 }
@@ -145,6 +145,68 @@ fn pause(c: &Client) -> (Ticket<()>, mpsc::Sender<()>) {
         .unwrap();
     wait.recv_timeout(Duration::from_secs(5)).unwrap();
     (ticket, release)
+}
+
+#[test]
+fn panic_closes_admission_before_publishing_an_unknown_reply() {
+    struct DelayedUnwind {
+        job: Box<dyn Job>,
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Job for DelayedUnwind {
+        fn run(self: Box<Self>, state: &mut State) {
+            let Self {
+                job,
+                entered,
+                release,
+            } = *self;
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(state)))
+                .expect_err("injected job panic");
+            // The executing Pending has unwound, but the worker's outer
+            // catch has not run. This makes the departure race deterministic.
+            let _ = entered.send(());
+            let _ = release.recv();
+            std::panic::resume_unwind(panic);
+        }
+    }
+    let (w, c) = worker();
+    let (gate, start) = pause(&c);
+    let unknown: Ticket<()> = c
+        .submit(0, || {
+            |s| {
+                s.select(Selection {
+                    active: None,
+                    candidate: Some(key(1)),
+                })?;
+                panic!("preset selection committed before reply")
+            }
+        })
+        .unwrap();
+    let (entered, observed) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    {
+        let mut queue = lock(&c.0.queue);
+        assert_eq!(queue.jobs.len(), 1);
+        let job = queue.jobs.pop_front().unwrap();
+        queue.jobs.push_back(Box::new(DelayedUnwind {
+            job,
+            entered,
+            release: held,
+        }));
+    }
+    start.send(()).unwrap();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unknown.try_result(), Some(Err(Error::Disconnected)));
+    assert!(!w.is_finished());
+    assert!(
+        !c.info().accepting,
+        "unknown reply must already advertise worker departure"
+    );
+    assert!(matches!(c.is_ready(), Err(Error::Stopped)));
+    release.send(()).unwrap();
+    assert_eq!(w.retire().exit, Some(Exit::Panicked));
+    assert_eq!(gate.try_result(), Some(Ok(())));
 }
 
 #[test]
@@ -355,6 +417,55 @@ fn completed_ticket_clones_retain_slot_and_byte_quota() {
     assert_eq!(c.info().retained_requests, 0);
     assert_eq!(c.info().retained_bytes, 0);
     assert!(result(c.is_ready()).unwrap());
+}
+
+#[test]
+fn replacement_shares_quota_until_old_receipts_are_consumed() {
+    let capacity = Capacity::new(Config {
+        requests: 1,
+        ..Config::default()
+    })
+    .unwrap();
+    let old = Worker::spawn_with_capacity(keys(), capacity.clone()).unwrap();
+    let client = old.client();
+    let ticket = client.sign_binary(b"old generation", key(1)).unwrap();
+    let expected = ticket
+        .wait_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    let saved = ticket.clone();
+    assert!(old.retire().joined);
+    drop(client);
+    let next = Worker::spawn_with_capacity(keys(), capacity.clone()).unwrap();
+    assert!(matches!(next.client().is_ready(), Err(Error::Busy)));
+    let observed: Observed<_> = ticket.into();
+    assert_eq!(observed.try_result(), Some(Ok(expected)));
+    assert_eq!(capacity.usage().requests, 1);
+    assert!(matches!(next.client().is_ready(), Err(Error::Busy)));
+    drop(saved);
+    assert_eq!(capacity.usage(), Usage::default());
+    assert!(result(next.client().is_ready()).unwrap());
+    // Retaining the known observation no longer consumes worker capacity.
+    assert_eq!(observed.try_result(), Some(Ok(expected)));
+}
+
+#[test]
+fn staker_and_pinner_union_preserves_signing_without_inheriting_selection() {
+    let mut stakers = Keys::new([secret(1)]);
+    stakers.promote(key(1)).unwrap();
+    let mut pinners = Keys::new([secret(2)]);
+    pinners.set_candidate(key(2)).unwrap();
+    let combined = stakers.merged(&pinners);
+    assert_eq!(combined.public_keys().len(), 2);
+    assert_eq!(combined.active(), None);
+    assert_eq!(combined.candidate(), None);
+    let worker = Worker::spawn(combined, Config::default()).unwrap();
+    for key in [key(1), key(2)] {
+        let sig = result(worker.client().sign_binary(&[0, 1, 2], key)).unwrap();
+        assert!(verify_ed25519(&key, &[0, 1, 2], &sig));
+    }
+    assert_eq!(stakers.active(), Some(key(1)));
+    assert_eq!(pinners.candidate(), Some(key(2)));
 }
 
 #[test]

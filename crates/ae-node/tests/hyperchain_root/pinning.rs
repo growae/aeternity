@@ -164,7 +164,7 @@ async fn root_shutdown_and_child_failure_retain_an_uncertain_parent_broadcast_on
                 },
                 signing: Some(parent_pins::posting::Signing {
                     network: b"parent_network".to_vec(),
-                    keys: Keys::new([signer(99)]),
+                    keys: Keys::new([signer(99)]).into(),
                 }),
                 agent: Some(Default::default()),
             });

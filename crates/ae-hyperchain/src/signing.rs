@@ -17,29 +17,62 @@ pub enum Error {
 // key material while candidate and active-key selection remain staged locally.
 #[derive(Clone, Default)]
 pub struct Keys {
-    keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
+    keys: Arc<Material>,
     active: Option<AccountPublicKey>,
     candidate: Option<AccountPublicKey>,
+}
+#[derive(Default)]
+struct Material {
+    sources: Vec<Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>>,
+    index: BTreeMap<AccountPublicKey, usize>,
 }
 impl Keys {
     // A restarted preset-key process retains configured material but starts
     // without an active or candidate selection, as aec_preset_keys:init/1 does.
     pub fn fresh(&self) -> Self {
-        Self::from_shared(self.keys.clone())
+        Self {
+            keys: self.keys.clone(),
+            active: None,
+            candidate: None,
+        }
     }
     pub fn public_keys(&self) -> impl ExactSizeIterator<Item = AccountPublicKey> + '_ {
-        self.keys.keys().copied()
+        self.keys.index.keys().copied()
     }
-    pub(crate) fn from_shared(keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>) -> Self {
+    pub fn from_shared(keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>) -> Self {
         Self {
-            keys,
+            keys: Arc::new(Material {
+                index: keys.keys().map(|key| (*key, 0)).collect(),
+                sources: vec![keys],
+            }),
             active: None,
             candidate: None,
         }
     }
     pub fn new(keys: impl IntoIterator<Item = Ed25519SecretKey>) -> Self {
+        Self::from_shared(Arc::new(
+            keys.into_iter().map(|k| (k.public_key(), k)).collect(),
+        ))
+    }
+    // Combine independently configured staker/pinner material without copying
+    // private keys. Later mappings win, as in the native configured key map.
+    pub fn merged(&self, other: &Self) -> Self {
+        if Arc::ptr_eq(&self.keys, &other.keys) {
+            return self.fresh();
+        }
+        let mut sources = self.keys.sources.clone();
+        let offset = sources.len();
+        sources.extend(other.keys.sources.iter().cloned());
+        let mut index = self.keys.index.clone();
+        index.extend(
+            other
+                .keys
+                .index
+                .iter()
+                .map(|(key, source)| (*key, offset + source)),
+        );
         Self {
-            keys: Arc::new(keys.into_iter().map(|k| (k.public_key(), k)).collect()),
+            keys: Arc::new(Material { sources, index }),
             active: None,
             candidate: None,
         }
@@ -51,7 +84,7 @@ impl Keys {
         self.candidate
     }
     pub fn contains(&self, key: AccountPublicKey) -> bool {
-        self.keys.contains_key(&key)
+        self.keys.index.contains_key(&key)
     }
     pub fn set_candidate(&mut self, key: AccountPublicKey) -> Result<(), Error> {
         if !self.contains(key) {
@@ -67,8 +100,9 @@ impl Keys {
     }
     pub fn sign(&self, key: AccountPublicKey, message: &[u8]) -> Result<Signature, Error> {
         self.keys
+            .index
             .get(&key)
-            .map(|k| k.sign(message))
+            .map(|source| self.keys.sources[*source][&key].sign(message))
             .ok_or(Error::MissingKey)
     }
     pub fn sign_micro(
@@ -95,12 +129,15 @@ impl Keys {
             .signature_bytes()
             .map_err(Error::Encoding)?;
         let signature = self.sign(by, &bytes)?;
-        let mut seal = [0; 42];
-        for (word, bytes) in seal[..16].iter_mut().zip(signature.0.chunks_exact(4)) {
-            *word = u32::from_be_bytes(bytes.try_into().unwrap());
-        }
-        Ok(Seal::Found(seal))
+        Ok(Seal::Found(seal_signature(signature)))
     }
+}
+pub fn seal_signature(signature: Signature) -> [u32; 42] {
+    let mut seal = [0; 42];
+    for (word, bytes) in seal[..16].iter_mut().zip(signature.0.chunks_exact(4)) {
+        *word = u32::from_be_bytes(bytes.try_into().unwrap());
+    }
+    seal
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seal {

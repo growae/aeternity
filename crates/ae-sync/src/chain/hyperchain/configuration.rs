@@ -276,7 +276,7 @@ impl Configuration {
             signing: (self.chain == parent_pins::Chain::Aeternity).then_some(
                 parent_pins::posting::Signing {
                     network: self.network,
-                    keys: self.keys,
+                    keys: self.keys.into(),
                 },
             ),
             agent: self.default_pinning.then_some(services.agent),

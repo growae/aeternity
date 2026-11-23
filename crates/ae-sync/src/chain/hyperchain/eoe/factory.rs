@@ -61,14 +61,14 @@ pub(super) struct Recipe {
 impl Recipe {
     pub(super) fn new(
         config: Config,
-        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
         services: Services,
     ) -> Result<Self, Error> {
         let capacity =
             runtime::Capacity::new(config.runtime).map_err(|e| Error::Worker(e.to_string()))?;
         Ok(Self {
             config,
-            keys: Arc::new(keys),
+            keys,
             services,
             capacity,
         })
@@ -146,6 +146,15 @@ impl Source {
         self: &Arc<Self>,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        order: impl MapOrder + Clone + Send + 'static,
+        services: Services,
+    ) -> Result<Recoverable, Error> {
+        self.connect_recoverable_shared(config, Arc::new(keys), order, services)
+    }
+    pub(super) fn connect_recoverable_shared(
+        self: &Arc<Self>,
+        config: Config,
+        keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
         order: impl MapOrder + Clone + Send + 'static,
         services: Services,
     ) -> Result<Recoverable, Error> {

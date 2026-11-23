@@ -12,8 +12,8 @@ use std::{
 };
 
 mod receipt;
-pub use receipt::Ticket;
 use receipt::{Job, Pending, Reply};
+pub use receipt::{Observed, Ticket};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -27,8 +27,13 @@ pub enum Error {
     NoActive,
     NoCandidate,
     KeyNotFound,
-    Signing(signing::Error),
+    Signing(Box<signing::Error>),
     StaleSelection,
+}
+impl Error {
+    fn signing(error: signing::Error) -> Self {
+        Self::Signing(Box::new(error))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +51,32 @@ impl Default for Config {
             message_bytes: 1024 * 1024,
             keys: 65_536,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub requests: usize,
+    pub bytes: usize,
+}
+struct Quota {
+    config: Config,
+    used: Mutex<Usage>,
+}
+#[derive(Clone)]
+pub struct Capacity(Arc<Quota>);
+impl Capacity {
+    pub fn new(config: Config) -> Result<Self, Error> {
+        if config.requests == 0 || config.retained_bytes == 0 || config.message_bytes == 0 {
+            return Err(Error::InvalidSettings);
+        }
+        Ok(Self(Arc::new(Quota {
+            config,
+            used: Mutex::new(Usage::default()),
+        })))
+    }
+    pub fn usage(&self) -> Usage {
+        *lock(&self.0.used)
     }
 }
 
@@ -125,6 +156,7 @@ struct Shared {
     queue: Mutex<Queue>,
     wake: Condvar,
     config: Config,
+    capacity: Capacity,
 }
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -134,6 +166,30 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct Client(Arc<Shared>);
 impl Client {
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&self) -> (Ticket<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let ticket = self
+            .submit(0, || {
+                move |_| {
+                    let _ = entered.send(());
+                    let _ = blocked.recv();
+                    Ok(())
+                }
+            })
+            .unwrap();
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        (ticket, release)
+    }
+    #[cfg(test)]
+    pub(crate) fn panic_for_test(&self) -> Ticket<()> {
+        self.submit(0, || |_| panic!("controlled preset-key worker panic"))
+            .unwrap()
+    }
+    pub fn capacity(&self) -> Capacity {
+        self.0.capacity.clone()
+    }
     pub fn same_worker(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -159,6 +215,9 @@ impl Client {
             .and_then(|n| {
                 n.checked_add(std::mem::size_of::<Reply<T>>() + 2 * std::mem::size_of::<usize>())
             })
+            // A terminal signing error owns one boxed diagnostic. Reserve
+            // its maximum size even when the request ultimately succeeds.
+            .and_then(|n| n.checked_add(std::mem::size_of::<signing::Error>()))
             .ok_or(Error::ResourceLimit)?;
         let mut q = lock(&self.0.queue);
         if !q.accepting {
@@ -167,17 +226,25 @@ impl Client {
         if bytes > self.0.config.retained_bytes {
             return Err(Error::ResourceLimit);
         }
-        if q.requests >= self.0.config.requests
-            || bytes > self.0.config.retained_bytes.saturating_sub(q.bytes)
+        let mut used = lock(&self.0.capacity.0.used);
+        if used.requests >= self.0.config.requests
+            || bytes > self.0.config.retained_bytes.saturating_sub(used.bytes)
         {
             return Err(Error::Busy);
         }
         let work = build();
-        let reply = Arc::new(Reply::new(Arc::downgrade(&self.0), bytes));
+        let reply = Arc::new(Reply::new(
+            Arc::downgrade(&self.0),
+            self.0.capacity.clone(),
+            bytes,
+        ));
         q.requests += 1;
         q.bytes += bytes;
+        used.requests += 1;
+        used.bytes += bytes;
         q.jobs
             .push_back(Box::new(Pending::new(reply.clone(), work)));
+        drop(used);
         drop(q);
         self.0.wake.notify_one();
         Ok(Ticket(reply))
@@ -262,7 +329,7 @@ impl Client {
         }
         self.submit(message.len(), || {
             let message = message.to_vec();
-            move |s| s.keys.sign(by, &message).map_err(Error::Signing)
+            move |s| s.keys.sign(by, &message).map_err(Error::signing)
         })
     }
     pub fn sign_micro(
@@ -273,7 +340,7 @@ impl Client {
         self.submit(0, || {
             move |s| {
                 let by = by.or(s.keys.active()).ok_or(Error::NoActive)?;
-                s.keys.sign_micro(&header, Some(by)).map_err(Error::Signing)
+                s.keys.sign_micro(&header, Some(by)).map_err(Error::signing)
             }
         })
     }
@@ -286,8 +353,8 @@ impl Client {
             move |s| {
                 let bytes = Header::Key(header)
                     .signature_bytes()
-                    .map_err(|e| Error::Signing(signing::Error::Encoding(e)))?;
-                s.keys.sign(by, &bytes).map_err(Error::Signing)
+                    .map_err(|e| Error::signing(signing::Error::Encoding(e)))?;
+                s.keys.sign(by, &bytes).map_err(Error::signing)
             }
         })
     }
@@ -299,9 +366,10 @@ pub struct Worker {
 }
 impl Worker {
     pub fn spawn(keys: Keys, config: Config) -> Result<Self, Error> {
-        if config.requests == 0 || config.retained_bytes == 0 || config.message_bytes == 0 {
-            return Err(Error::InvalidSettings);
-        }
+        Self::spawn_with_capacity(keys, Capacity::new(config)?)
+    }
+    pub fn spawn_with_capacity(keys: Keys, capacity: Capacity) -> Result<Self, Error> {
+        let config = capacity.0.config;
         if keys.public_keys().len() > config.keys {
             return Err(Error::ResourceLimit);
         }
@@ -316,6 +384,7 @@ impl Worker {
             }),
             wake: Condvar::new(),
             config,
+            capacity,
         });
         let client = Client(shared.clone());
         let mut state = State {
