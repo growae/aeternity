@@ -54,6 +54,7 @@ pub struct Database {
     snapshot_owner: Mutex<std::sync::Weak<()>>,
     pow_generator_owner: Mutex<std::sync::Weak<()>>,
     pow_producer_owner: Mutex<std::sync::Weak<()>>,
+    pow_group_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
     gc_events: gc::events::Source,
     #[cfg(test)]
@@ -254,6 +255,7 @@ impl Database {
             snapshot_owner: Mutex::new(Default::default()),
             pow_generator_owner: Mutex::new(Default::default()),
             pow_producer_owner: Mutex::new(Default::default()),
+            pow_group_owner: Mutex::new(Default::default()),
             events: events::Source::new(event_status, notifications.chain),
             gc_events: gc::events::Source::new(gc_state, event_status, notifications.gc),
             #[cfg(test)]

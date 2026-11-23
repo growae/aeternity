@@ -1,14 +1,14 @@
 use super::*;
 use std::sync::{Condvar, Mutex};
 
-struct Gate {
+pub(super) struct Gate {
     state: Mutex<(usize, usize, bool)>,
     wake: Condvar,
     origin: Instant,
     elapsed_ms: AtomicU64,
 }
 impl Gate {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new((0, 0, false)),
             wake: Condvar::new(),
@@ -16,10 +16,10 @@ impl Gate {
             elapsed_ms: AtomicU64::new(0),
         })
     }
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.state.lock().unwrap().0
     }
-    fn allow(&self, n: usize) {
+    pub(super) fn allow(&self, n: usize) {
         self.state.lock().unwrap().1 = n;
         self.wake.notify_all();
     }
@@ -29,7 +29,11 @@ impl Gate {
         self.allow(call);
         until(|| self.calls() > call);
     }
-    fn reach(&self, client: &producer::Client, condition: impl Fn(&producer::Status) -> bool) {
+    pub(super) fn reach(
+        &self,
+        client: &producer::Client,
+        condition: impl Fn(&producer::Status) -> bool,
+    ) {
         let end = Instant::now() + Duration::from_secs(10);
         until(|| self.calls() > 0);
         while !condition(&client.status()) {
@@ -39,7 +43,7 @@ impl Gate {
         }
     }
 }
-struct GateClock(Arc<Gate>);
+pub(super) struct GateClock(pub(super) Arc<Gate>);
 impl producer::Clock for GateClock {
     fn now(&self) -> Result<(u64, Instant), producer::Error> {
         let mut s = self.0.state.lock().unwrap();
@@ -56,7 +60,7 @@ impl producer::Clock for GateClock {
         ))
     }
 }
-struct Release(Arc<Gate>);
+pub(super) struct Release(pub(super) Arc<Gate>);
 impl Drop for Release {
     fn drop(&mut self) {
         self.0.allow(usize::MAX);

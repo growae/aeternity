@@ -47,6 +47,23 @@ pub enum Error {
     Snapshot(snapshots::Error),
     Candidate(pow::Error<snapshots::Reader>),
 }
+
+// The composed supervisor keeps this lease across child retirement and restart.
+pub struct GroupLease(Arc<()>);
+impl GroupLease {
+    pub fn acquire(database: &crate::Database) -> Result<Self, snapshots::Error> {
+        let mut owner = database
+            .pow_group_owner
+            .lock()
+            .map_err(|_| snapshots::Error::Worker("poisoned PoW group ownership".into()))?;
+        if owner.upgrade().is_some() {
+            return Err(snapshots::Error::AlreadyRunning);
+        }
+        let lease = Self(Arc::new(()));
+        *owner = Arc::downgrade(&lease.0);
+        Ok(lease)
+    }
+}
 pub fn prepare_micro<O: MapOrder + Clone>(
     snapshots: &snapshots::Owner,
     config: &pow::Config<O>,
