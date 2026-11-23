@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "after_control": true,
+      "after_restart": false,
+      "before_control": false,
+      "configured_autostart": false,
+      "fresh_worker_count": 0
+    },
+    {
+      "after_control": false,
+      "after_restart": true,
+      "before_control": true,
+      "configured_autostart": true,
+      "fresh_worker_count": 0
+    }
+  ]
+}

@@ -81,7 +81,7 @@ fn staged_producer_selection_cannot_overwrite_a_later_worker_change() {
     );
     let mut failure = None;
     until(|| {
-        failure = c.owner.as_mut().unwrap().step().err();
+        failure = c.services.owner.as_mut().unwrap().step().err();
         failure.is_some()
     });
     assert_eq!(
@@ -112,39 +112,47 @@ fn key_constructor_failures_and_panics_obey_notice_capacity_and_shared_budget() 
             let old = c.preset_key_binding().current().unwrap();
             let binding = c.preset_key_binding();
             let eoe = c.eoe();
-            c.consensus.limit = 1;
+            c.services.consensus.limit = 1;
             c.request_key_restart(1).unwrap();
             let now = Instant::now();
             until(|| {
-                c.consensus
-                    .poll_keys(c.owner.as_mut().unwrap(), now)
+                c.services
+                    .consensus
+                    .poll_keys(c.services.owner.as_mut().unwrap(), now)
                     .unwrap();
                 old.info().joined
             });
             for _ in 0..10 {
-                c.consensus
-                    .poll_keys(c.owner.as_mut().unwrap(), now)
+                c.services
+                    .consensus
+                    .poll_keys(c.services.owner.as_mut().unwrap(), now)
                     .unwrap();
             }
-            assert_eq!(c.consensus.status().attempts, 0);
+            assert_eq!(c.services.consensus.status().attempts, 0);
             assert!(binding.current().is_none());
             assert!(matches!(
-                c.consensus.take_notice(),
+                c.services.consensus.take_notice(),
                 Some(Notice::KeysRetired { generation: 1, .. })
             ));
             for attempt in 1..=if exhausted { 3 } else { 1 } {
-                c.owner.as_mut().unwrap().fail_key_restart_for_test(panic);
-                c.consensus
-                    .poll_keys(c.owner.as_mut().unwrap(), now)
+                c.services
+                    .owner
+                    .as_mut()
+                    .unwrap()
+                    .fail_key_restart_for_test(panic);
+                c.services
+                    .consensus
+                    .poll_keys(c.services.owner.as_mut().unwrap(), now)
                     .unwrap();
                 assert!(binding.current().is_none());
                 for _ in 0..10 {
-                    c.consensus
-                        .poll_keys(c.owner.as_mut().unwrap(), now)
+                    c.services
+                        .consensus
+                        .poll_keys(c.services.owner.as_mut().unwrap(), now)
                         .unwrap();
                 }
-                assert_eq!(c.consensus.status().attempts, attempt);
-                match c.consensus.take_notice().unwrap() {
+                assert_eq!(c.services.consensus.status().attempts, attempt);
+                match c.services.consensus.take_notice().unwrap() {
                     Notice::KeysStartFailed {
                         attempt: actual,
                         error,
@@ -169,12 +177,13 @@ fn key_constructor_failures_and_panics_obey_notice_capacity_and_shared_budget() 
                 assert_eq!(c.status().consensus.attempts, 4);
                 assert!(binding.is_closed());
             } else {
-                c.consensus
-                    .poll_keys(c.owner.as_mut().unwrap(), now)
+                c.services
+                    .consensus
+                    .poll_keys(c.services.owner.as_mut().unwrap(), now)
                     .unwrap();
-                assert_eq!(c.consensus.status().attempts, 2);
+                assert_eq!(c.services.consensus.status().attempts, 2);
                 assert!(matches!(
-                    c.consensus.take_notice(),
+                    c.services.consensus.take_notice(),
                     Some(Notice::KeysRestarted { generation: 2 })
                 ));
                 assert!(binding.current().unwrap().info().accepting);

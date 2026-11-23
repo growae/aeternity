@@ -1,7 +1,12 @@
 use super::*;
 use ae_sync::chain::hyperchain::{delivery, eoe::owner::candidate as build, packing};
 
-fn until(c: &mut Conductor<Otp26>, wall: &mut u64, clock: &mut Instant, target: Progress) {
+pub(super) fn until(
+    c: &mut Conductor<Otp26>,
+    wall: &mut u64,
+    clock: &mut Instant,
+    target: Progress,
+) {
     let end = Instant::now() + Duration::from_secs(15);
     loop {
         assert!(

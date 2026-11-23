@@ -16,6 +16,8 @@ mod pinning;
 mod pins;
 #[path = "conductor/pool_supervision.rs"]
 mod pool_supervision;
+#[path = "conductor/session.rs"]
+mod session;
 #[path = "conductor/targets.rs"]
 mod targets;
 #[path = "conductor/vote_supervision.rs"]

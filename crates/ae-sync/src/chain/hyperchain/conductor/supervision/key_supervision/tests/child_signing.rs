@@ -151,7 +151,7 @@ async fn cancelled_child_signing_keeps_exact_nonce_and_old_receipt_without_admis
             .wait()
             .unwrap()
             .unwrap_or_else(|| 1.into());
-        let mut stopped = c.pinning.take().unwrap().shutdown().unwrap();
+        let mut stopped = c.services.pinning.take().unwrap().shutdown().unwrap();
         let reports: Vec<_> = stopped
             .outputs
             .iter()
@@ -201,15 +201,21 @@ async fn cancelled_child_signing_keeps_exact_nonce_and_old_receipt_without_admis
                 .unwrap()
                 .is_empty()
         );
-        c.owner.as_ref().unwrap().request_keys_restart().unwrap();
+        c.services
+            .owner
+            .as_ref()
+            .unwrap()
+            .request_keys_restart()
+            .unwrap();
         release.send(()).unwrap();
         let now = Instant::now();
         until(|| {
-            c.consensus
-                .poll_keys(c.owner.as_mut().unwrap(), now)
+            c.services
+                .consensus
+                .poll_keys(c.services.owner.as_mut().unwrap(), now)
                 .unwrap();
-            c.consensus.take_notice();
-            c.consensus.status().key_generation == 2
+            c.services.consensus.take_notice();
+            c.services.consensus.status().key_generation == 2
         });
         assert_eq!(gate.try_result(), Some(Ok(())));
         drop(gate);
