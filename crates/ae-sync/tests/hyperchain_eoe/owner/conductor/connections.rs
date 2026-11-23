@@ -212,7 +212,7 @@ async fn stop(r: Running) {
     assert!(r.pool.info().accepting && r.votes.info().accepting);
     let p = r.producer.shutdown().unwrap();
     assert!(p.status.failure.is_none(), "{:?}", p.status);
-    assert!(p.pool.is_ok() && p.parent.is_ok() && p.connector_joined);
+    assert!(p.pool.is_ok() && p.parent.as_ref().is_none_or(Result::is_ok) && p.connector_joined);
 }
 #[tokio::test]
 async fn managed_peers_share_live_producer_admission_and_sync_across_connection_restarts() {

@@ -290,7 +290,7 @@ fn dedicated_runtime_replaces_connector_and_preserves_cache_routing() {
     );
     assert_eq!(old.fetch(Query::Top), Err(connector::Error::Closed));
     let s = runtime.shutdown().unwrap();
-    assert!(s.connector_joined && s.parent.is_ok());
+    assert!(s.connector_joined && s.parent.as_ref().is_none_or(Result::is_ok));
     assert_eq!(s.consensus.status.attempts, 1);
     let mut notices = s.consensus.notices;
     for output in s.queued_outputs.into_iter().chain(s.output) {

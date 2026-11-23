@@ -334,7 +334,7 @@ fn runtime_controls_are_bounded_ordered_and_work_under_output_pressure() {
     assert_eq!(s.queued_outputs.len(), 1);
     assert!(matches!(s.output, Some(Output::Attempt(_))));
     assert_eq!(handle.stop_production(), Err(conductor::Error::Closed));
-    assert!(s.pool.is_ok() && s.parent.is_ok() && s.connector_joined);
+    assert!(s.pool.is_ok() && s.parent.as_ref().is_none_or(Result::is_ok) && s.connector_joined);
 }
 #[test]
 fn pending_stopped_output_survives_repeated_controls_and_blocks_a_fresh_attempt() {

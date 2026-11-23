@@ -574,3 +574,76 @@ async fn dedicated_runtime_replaces_only_pinning_and_continues_actual_proof_admi
     assert_eq!(wallet.requests.load(Ordering::Acquire), 3);
     assert!(handle.joined() && !old.status().running);
 }
+
+#[tokio::test]
+async fn cache_connector_and_pinning_replacements_share_the_inclusive_restart_budget() {
+    for last in [30, 31] {
+        let node = Node::new(0);
+        let wallet = Wallet::new();
+        let mut c = configured(&node, &wallet, |_| {});
+        let origin = Instant::now();
+        let mut notices = vec![];
+        tick(&mut c, origin, &mut notices, &mut vec![]).unwrap();
+        for (i, second) in [0, 10, 20, last].into_iter().enumerate() {
+            match i {
+                0 | 3 => c.parent().request_stop(),
+                1 => c.connector().request_stop(),
+                2 => c.pinning().unwrap().request_stop(),
+                _ => unreachable!(),
+            }
+            let end = Instant::now() + Duration::from_secs(5);
+            let now = origin + Duration::from_secs(second);
+            loop {
+                let result = tick(&mut c, now, &mut notices, &mut vec![]);
+                if last == 30 && i == 3 {
+                    if result == Err(conductor::Error::ConsensusRestartLimit) {
+                        break;
+                    }
+                    result.unwrap();
+                } else {
+                    result.unwrap();
+                    if c.status().consensus.attempts == i as u64 + 1
+                        && !c.status().consensus.restarting
+                    {
+                        break;
+                    }
+                }
+                assert!(Instant::now() < end, "{:?}", c.status());
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(c.status().consensus.attempts, 4);
+        assert_eq!(c.status().consensus.connector_generation, 2);
+        assert_eq!(c.status().consensus.pinning_generation, 2);
+        assert_eq!(
+            c.status().consensus.cache_generation,
+            if last == 30 { 2 } else { 3 }
+        );
+        assert_eq!(
+            c.status().failure,
+            (last == 30).then_some(conductor::Error::ConsensusRestartLimit)
+        );
+        if last == 30 {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../fixtures/erlang_cache_supervision.json"
+            ))
+            .unwrap();
+            let row = fixture["lifecycle"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["kind"] == "shared_limit")
+                .unwrap();
+            for (name, generations) in [
+                ("cache", c.status().consensus.cache_generation),
+                ("connector", c.status().consensus.connector_generation),
+                ("pinning", c.status().consensus.pinning_generation),
+            ] {
+                assert_eq!(row["starts"][name], generations);
+            }
+            assert_eq!(row["supervisor_shutdown"], true);
+        }
+        assert_eq!(wallet.requests.load(Ordering::Acquire), 0);
+        drop(shutdown(c));
+    }
+}

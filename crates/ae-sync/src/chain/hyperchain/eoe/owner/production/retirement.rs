@@ -24,6 +24,7 @@ pub struct Retiring<O> {
     report: Option<Stopped>,
     ready: bool,
     failure: Option<Error>,
+    cache_retired: bool,
 }
 impl<O> std::fmt::Debug for Retiring<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -70,10 +71,31 @@ impl Owner {
             report: Some(report),
             ready: false,
             failure: None,
+            cache_retired: false,
         })
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
+    pub(crate) fn retire_cache(
+        &mut self,
+        old: &ae_hyperchain::parent_cache::runtime::Client,
+    ) -> Result<(), Error> {
+        if !old.is_closed() {
+            return Err(Error::Binding);
+        }
+        if !self.attempt.parent_cache.same_runtime(old) {
+            return Ok(());
+        }
+        if let Some(producer) = &mut self.producer {
+            producer.retire_cache(old).map_err(Error::Effects)?;
+        }
+        if let Some(effects) = &mut self.attempt.effects {
+            self.report.as_mut().expect("report").key_effect_error =
+                effects.retire_cache(old).map_err(Error::Effects)?;
+        }
+        self.cache_retired = true;
+        Ok(())
+    }
     fn record_candidate(&mut self, result: Result<owned::Prepared<O>, chain::Error>) {
         let report = self.report.as_mut().expect("report");
         report.key_preparation = Some(result.map(|mut key| {
@@ -155,6 +177,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
                 Ok(false) => return Ok(false),
                 Ok(true) => (),
                 Err(e) if producer::retryable(&e) && !p.in_flight() => (),
+                Err(e) if self.cache_retired && cache_departure(&e) && !p.in_flight() => (),
                 Err(e) => return Err(Error::Effects(e)),
             }
             report.producer = Some(self.producer.take().expect("producer").discard());
@@ -189,6 +212,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
         }
         Ok(self.report.take().expect("report"))
     }
+}
+fn cache_departure(error: &delivery::Error) -> bool {
+    matches!(
+        error,
+        delivery::Error::Closed(delivery::Target::Cache)
+            | delivery::Error::ReceiptLost(delivery::Target::Cache)
+            | delivery::Error::Cache(ae_hyperchain::parent_cache::runtime::Error::Closed)
+    )
 }
 fn known_cancelled_admission(f: &chain::Failure) -> bool {
     if f.progress.is_none() {

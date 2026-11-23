@@ -614,7 +614,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                         .get_or_insert(Error::Producer(e.clone()));
                 }
                 if s.pool.is_err()
-                    || s.parent.is_err()
+                    || s.parent.as_ref().is_some_and(Result::is_err)
                     || !s.connector_joined
                     || !s.pins_joined
                     || !s.owner.errors.is_empty()

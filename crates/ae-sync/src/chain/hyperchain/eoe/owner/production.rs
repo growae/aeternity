@@ -156,6 +156,7 @@ pub struct Attempt<O> {
     _lease: Lease,
     source: scoped::Producer<O>,
     client: super::Client,
+    parent_cache: ae_hyperchain::parent_cache::runtime::Client,
     pool: worker::Client,
     config: Config,
     phase: Phase,
@@ -233,6 +234,7 @@ impl Owner {
             _lease: Lease(self.attempt.clone()),
             source,
             client: self.client(),
+            parent_cache: self.parent.clone().expect("checked parent"),
             pool,
             config,
             phase: Phase::Decide,
@@ -403,7 +405,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
         }
         owner.ready().map_err(Error::Owner)?;
         self.source.check().map_err(Error::Source)?;
-        if !self.pool.info().accepting || owner.parent.as_ref().is_none_or(|p| p.is_closed()) {
+        if !self.pool.info().accepting || self.parent_cache.is_closed() {
             return Err(Error::Closed);
         }
         if self.tick.is_some_and(|last| now < last) {
@@ -574,7 +576,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                 }
             }
             Phase::Key => {
-                let parent = owner.parent.as_ref().ok_or(Error::Binding)?;
+                let parent = &self.parent_cache;
                 let leader = self.leader.expect("leader");
                 let request = owned::Request {
                     binding: owner.producer_binding.clone(),
@@ -635,7 +637,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                 // Retryable acquisition failures restart from a fresh snapshot.
                 self.phase = Phase::Key;
                 let mut key = result.map_err(Error::Source)?;
-                let parent = owner.parent.as_ref().ok_or(Error::Binding)?;
+                let parent = &self.parent_cache;
                 self.effects = Some(effects::Pending::new(
                     &mut key.effects,
                     parent.clone(),

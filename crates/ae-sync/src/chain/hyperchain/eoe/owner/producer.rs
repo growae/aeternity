@@ -187,6 +187,32 @@ impl Pending {
         }
         Ok(!self.in_flight())
     }
+    pub(super) fn retire_cache(&mut self, old: &parent::Client) -> Result<(), Error> {
+        if !old.is_closed() || !self.cache.same_runtime(old) {
+            return Err(Error::Configuration);
+        }
+        if let Some(Receipt::Parent(call)) = &mut self.receipt {
+            match call.try_reply() {
+                Ok(None) => return Err(Error::Configuration),
+                Ok(Some(result)) => {
+                    self.receipt = None;
+                    match result {
+                        Ok(parent_cache::Reply::Block(_)) => {
+                            self.parents.pop_front().expect("accepted parent effect");
+                            self.acknowledged = self.acknowledged.saturating_add(1);
+                        }
+                        Ok(_) => self.failure = Some(Error::UnexpectedReply(Target::Cache)),
+                        Err(error) => self.failure = Some(Error::Cache(error)),
+                    }
+                }
+                Err(_) => {
+                    self.receipt = None;
+                    self.failure = Some(Error::ReceiptLost(Target::Cache));
+                }
+            }
+        }
+        Ok(())
+    }
     pub(super) fn discard(self) -> Cancelled {
         assert!(!self.in_flight());
         Cancelled {

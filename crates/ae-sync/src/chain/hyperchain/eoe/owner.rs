@@ -98,6 +98,24 @@ impl Owner {
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Send + 'static,
     ) -> Result<Self, Error> {
+        Self::start_inner(inputs, config, keys, order, None)
+    }
+    pub(crate) fn start_routed(
+        inputs: Inputs,
+        config: Config,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        order: impl MapOrder + Send + 'static,
+        route: parent::Route,
+    ) -> Result<Self, Error> {
+        Self::start_inner(inputs, config, keys, order, Some(route))
+    }
+    fn start_inner(
+        inputs: Inputs,
+        config: Config,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        order: impl MapOrder + Send + 'static,
+        route: Option<parent::Route>,
+    ) -> Result<Self, Error> {
         if !inputs
             .source
             .database
@@ -128,6 +146,7 @@ impl Owner {
                 order,
                 Some(Arc::new(inputs.gossip)),
                 inputs.parent.clone(),
+                route,
             )
             .map_err(Error::Source)?;
         let output = votes::eoe::Owner::new(runtime, inputs.publications)
@@ -164,6 +183,9 @@ impl Owner {
     }
     pub fn votes(&self) -> votes::Client {
         self.votes.as_ref().expect("live vote bridge").client()
+    }
+    pub(crate) fn replace_parent(&mut self, client: parent::Client) {
+        self.parent = Some(client);
     }
     pub fn epoch_cursor(&self) -> &events::Cursor {
         self.epochs.cursor()

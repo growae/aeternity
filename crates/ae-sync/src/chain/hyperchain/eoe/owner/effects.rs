@@ -40,6 +40,27 @@ impl Pending {
         }
         Ok(!self.in_flight())
     }
+    pub(super) fn retire_cache(&mut self, old: &parent::Client) -> Result<Option<Error>, Error> {
+        if !old.is_closed() || !self.cache.same_runtime(old) {
+            return Err(Error::Configuration);
+        }
+        let Some(Receipt::Cache(call)) = &mut self.receipt else {
+            return Ok(None);
+        };
+        let result = match call.try_reply() {
+            Ok(None) => return Err(Error::Configuration),
+            Ok(Some(Ok(parent_cache::Reply::Block(_)))) => {
+                self.pending.pop_front().expect("accepted key effect");
+                self.acknowledged = self.acknowledged.saturating_add(1);
+                None
+            }
+            Ok(Some(Ok(_))) => Some(Error::UnexpectedReply(Target::Cache)),
+            Ok(Some(Err(e))) => Some(Error::Cache(e)),
+            Err(_) => Some(Error::ReceiptLost(Target::Cache)),
+        };
+        self.receipt = None;
+        Ok(result)
+    }
     pub fn step(&mut self) -> Result<Progress, Error> {
         if let Some(receipt) = &mut self.receipt {
             let result = match receipt {

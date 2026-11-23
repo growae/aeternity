@@ -3,6 +3,8 @@ use ae_chain::repository::hyperchain::inputs;
 use ae_hyperchain::parent_cache::runtime as cache;
 use std::sync::Weak;
 mod entropy;
+mod routed;
+pub(crate) use routed::RoutedCached;
 
 // Capture may perform bounded service I/O; the returned host must contain
 // only immutable snapshots and isolated staged effects. Its child reads may
@@ -12,6 +14,14 @@ pub trait ParentInputs: Send + Sync + 'static {
     type Error: std::fmt::Debug;
     type HostError: std::fmt::Debug;
     type Host<'db>: Host<Error = Self::HostError>;
+    // Choose a service generation once, before preparing one insertion. The
+    // returned binding is retained for capture, acquisition and writer guards.
+    fn bind(&self) -> Result<Option<Self>, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(None)
+    }
     // Runs under the storage writer: only nonblocking lifetime checks, no I/O.
     fn check(&self) -> Result<(), Self::Error>;
     fn capture<'db>(
@@ -80,9 +90,11 @@ where
         scope: &ae_storage::policy::Scope,
         check: &mut dyn FnMut() -> Result<(), Error>,
     ) -> Result<Committed, Error> {
-        self.owner.insert_scoped(block, now_ms, origin, scope, Capture(&self.parents), || {
+        let bound = self.parents.bind().map_err(input_error)?;
+        let parents = bound.as_ref().unwrap_or(&self.parents);
+        self.owner.insert_scoped(block, now_ms, origin, scope, Capture(parents), || {
             check()?;
-            self.parents.check().map_err(input_error)
+            parents.check().map_err(input_error)
         }).map_err(|error| match error {
             storage::Error::Guard(error) => error,
             storage::Error::RecoveryRequired => Error::RecoveryRequired,
@@ -436,6 +448,7 @@ impl PinInputs for Arc<inputs::Pins> {
         Ok(self.clone())
     }
 }
+#[derive(Clone)]
 pub struct Cached<P> {
     pub cache: cache::Client,
     pub pins: P,

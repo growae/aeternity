@@ -38,6 +38,7 @@ impl Parent {
                     }
                     Err(e) => panic!("{e}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -47,7 +48,20 @@ impl Parent {
                 let mut raw = vec![];
                 let mut chunk = [0; 1024];
                 loop {
-                    let n = stream.read(&mut chunk).unwrap();
+                    let n = match stream.read(&mut chunk) {
+                        Ok(n) => n,
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::ConnectionReset
+                            ) =>
+                        {
+                            break;
+                        }
+                        Err(e) => panic!("{e}"),
+                    };
                     if n == 0 {
                         break;
                     }
@@ -57,7 +71,7 @@ impl Parent {
                         break;
                     }
                 }
-                if raw.is_empty() {
+                if !raw.windows(4).any(|p| p == b"\r\n\r\n") {
                     continue;
                 }
                 let head = std::str::from_utf8(&raw).unwrap();
@@ -105,7 +119,10 @@ impl Drop for Parent {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
+            let result = worker.join();
+            if !thread::panicking() {
+                result.unwrap();
+            }
         }
     }
 }

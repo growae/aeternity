@@ -63,7 +63,7 @@ fn failed_or_panicked_connector_construction_consumes_shared_budget_and_keeps_ol
             std::thread::yield_now();
         }
         let mut supervisor: Supervisor<ae_vm_fate::maps::order::Otp26> =
-            Supervisor::new(None, factory, 8);
+            Supervisor::new(None, factory, None, 8);
         let mut child = Some(service);
         let now = Instant::now();
         supervisor.poll(&mut None, &mut child, now).unwrap();

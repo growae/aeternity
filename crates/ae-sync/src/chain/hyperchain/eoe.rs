@@ -155,7 +155,7 @@ impl Source {
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Send + 'static,
     ) -> Result<Connected, Error> {
-        self.connect_with(config, keys, order, None, None)
+        self.connect_with(config, keys, order, None, None, None)
             .map(|(connected, _)| connected)
     }
     fn connect_with(
@@ -165,6 +165,7 @@ impl Source {
         order: impl MapOrder + Send + 'static,
         gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
         parent: Option<ae_hyperchain::parent_cache::runtime::Client>,
+        route: Option<ae_hyperchain::parent_cache::runtime::Route>,
     ) -> Result<(Connected, ae_hyperchain::signing::Keys), Error> {
         config.epochs.validate()?;
         if config.host.network != self.network {
@@ -202,6 +203,9 @@ impl Source {
             _lease: lease,
         }));
         host.set_parent_cache(parent);
+        if let Some(route) = route {
+            host.set_parent_route(route);
+        }
         let signer = host.signer();
         let mut coordinator =
             coordinator::Coordinator::new(host, config.block_time, config.coordinator);

@@ -128,6 +128,7 @@ pub struct LocalHost<A = MemoryStore, C = MemoryStore> {
     parents: BTreeMap<Unsigned, ParentBlock>,
     parent_bytes: usize,
     parent_cache: Option<cache::Client>,
+    parent_route: Option<cache::Route>,
     shutdown: Arc<AtomicBool>,
     outbox: Vec<Output>,
     outbox_bytes: usize,
@@ -148,6 +149,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
             parents: BTreeMap::new(),
             parent_bytes: 0,
             parent_cache: None,
+            parent_route: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             outbox: vec![],
             outbox_bytes: 0,
@@ -221,13 +223,25 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     // cache failures never fall back to manually supplied offline parents.
     pub fn set_parent_cache(&mut self, client: Option<cache::Client>) {
         self.parent_cache = client;
+        self.parent_route = None;
+    }
+    pub fn set_parent_route(&mut self, route: cache::Route) {
+        self.parent_route = Some(route);
     }
     pub(super) fn set_shutdown(&mut self, shutdown: Arc<AtomicBool>) {
         self.shutdown = shutdown;
     }
     pub fn entropy_hash(&mut self, child_epoch: &Unsigned) -> Result<Option<Vec<u8>>, Error> {
         let height = self.entropy_height(child_epoch);
-        let block = match &self.parent_cache {
+        let captured = match &self.parent_route {
+            Some(route) => Some(
+                route
+                    .current()
+                    .ok_or(Error::ParentCache(cache::Error::Closed))?,
+            ),
+            None => self.parent_cache.clone(),
+        };
+        let block = match &captured {
             Some(cache) => cache
                 .get_block_cancelled(super::big(&height), 1000.into(), &self.shutdown)
                 .map_err(Error::ParentCache)?

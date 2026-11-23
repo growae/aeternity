@@ -251,7 +251,12 @@ fn clean(exit: &root::Exit<Otp26>) {
         assert!(c.joined);
     }
     let p = exit.producer.as_ref().unwrap().as_ref().unwrap();
-    assert!(p.pool.is_ok() && p.parent.is_ok() && p.connector_joined && p.pins_joined);
+    assert!(
+        p.pool.is_ok()
+            && p.parent.as_ref().is_none_or(Result::is_ok)
+            && p.connector_joined
+            && p.pins_joined
+    );
 }
 async fn link(a: &root::Handle<Otp26>, b: &root::Handle<Otp26>, id: ae_types::PeerPublicKey) {
     let one = a.connections().unwrap().current().unwrap();
@@ -486,7 +491,7 @@ fn no_async_runtime_returns_the_original_inputs_without_losing_ownership() {
     };
     assert_eq!(e.error, root::Error::NoRuntime);
     let report = e.inputs.conductor.shutdown();
-    assert!(report.pool.is_ok() && report.parent.is_ok());
+    assert!(report.pool.is_ok() && report.parent.as_ref().is_none_or(Result::is_ok));
 }
 #[tokio::test]
 async fn output_pressure_retains_all_completed_production_results_through_shutdown() {

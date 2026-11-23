@@ -8,18 +8,35 @@ use crate::runtime::restart::Window;
 pub struct Status {
     pub pinning_generation: u64,
     pub connector_generation: u64,
+    pub cache_generation: u64,
     pub attempts: u64,
     pub restarting: bool,
     pub pinning_restarting: bool,
     pub connector_restarting: bool,
+    pub cache_restarting: bool,
     pub pending_notices: usize,
 }
 
+mod cache_supervision;
 #[cfg(test)]
 mod tests;
+pub use cache_supervision::{CacheExit, RetiredTop};
+pub(super) use cache_supervision::{CacheFactory, CacheInputs};
 
 #[derive(Debug)]
 pub enum Notice {
+    CacheRetired {
+        generation: u64,
+        child: Box<CacheExit>,
+    },
+    CacheRestarted {
+        generation: u64,
+        revision: u64,
+    },
+    CacheStartFailed {
+        attempt: u64,
+        error: Error,
+    },
     ConnectorRetired {
         generation: u64,
         child: connector::Retired,
@@ -96,7 +113,7 @@ impl ConnectorFactory {
         backend: Arc<impl Backend>,
         hosts: usize,
         seed: [u8; 16],
-        sink: cache::PostSink,
+        sink: impl connector::Sink + Clone + Sync,
         config: connector::Config,
     ) -> std::io::Result<(connector::Runtime, Self)> {
         let owner = BackendOwner::start(backend.clone())?;
@@ -122,6 +139,7 @@ impl ConnectorFactory {
 pub(super) struct Supervisor<O> {
     factory: Option<pinning::Factory<O>>,
     connector: ConnectorFactory,
+    cache: Option<CacheFactory>,
     budget: Window<3, 30>,
     origin: Option<Instant>,
     status: Status,
@@ -132,16 +150,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
     pub(super) fn new(
         factory: Option<pinning::Factory<O>>,
         connector: ConnectorFactory,
+        cache: Option<CacheFactory>,
         limit: usize,
     ) -> Self {
         Self {
             status: Status {
                 pinning_generation: u64::from(factory.is_some()),
                 connector_generation: 1,
+                cache_generation: u64::from(cache.is_some()),
                 ..Default::default()
             },
             factory,
             connector,
+            cache,
             budget: Default::default(),
             origin: None,
             notices: VecDeque::new(),
@@ -150,7 +171,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
     }
     pub(super) fn status(&self) -> Status {
         Status {
-            restarting: self.status.pinning_restarting || self.status.connector_restarting,
+            restarting: self.status.pinning_restarting
+                || self.status.connector_restarting
+                || self.status.cache_restarting,
             pending_notices: self.notices.len(),
             ..self.status.clone()
         }
@@ -305,6 +328,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
         }
         self.factory.take();
         self.connector.link.replace(None);
+        if let Some(cache) = &self.cache {
+            cache.route.replace(None);
+        }
         Shutdown { status, notices }
     }
 }

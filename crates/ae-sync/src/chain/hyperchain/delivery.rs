@@ -61,9 +61,16 @@ enum Receipt {
     Cache(cache::Call),
     Eoe(eoe::Call),
 }
+#[derive(Debug)]
+pub struct RetiredCacheCall {
+    pub effect: Effect,
+    // Closed means no result was observed from the joined old generation.
+    pub result: Result<parent_cache::Reply, cache::Error>,
+}
 pub struct Delivery<O, A, C> {
     source: Accepted<O, Effects>,
     cache: cache::Client,
+    route: Option<cache::Route>,
     eoe: eoe::Client<A, C>,
     config: Config,
     pending: VecDeque<Effect>,
@@ -77,6 +84,7 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
         Self {
             source,
             cache,
+            route: None,
             eoe,
             config: Config::default(),
             pending: VecDeque::new(),
@@ -85,6 +93,51 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
             halted: None,
             acknowledged: 0,
         }
+    }
+    pub(crate) fn set_route(&mut self, route: cache::Route) {
+        self.route = Some(route);
+    }
+    // The supervisor calls this only after joining this exact cache. Preserve
+    // its observed result; a lost read is reported and never submitted again.
+    pub(crate) fn retire_cache(
+        &mut self,
+        old: &cache::Client,
+    ) -> Result<Option<RetiredCacheCall>, Error> {
+        if !old.is_closed() || self.route.is_none() {
+            return Err(Error::Configuration);
+        }
+        if !self.cache.same_runtime(old) {
+            return Ok(None);
+        }
+        let retired = if let Some(Receipt::Cache(call)) = &mut self.receipt {
+            let result = match call.try_reply() {
+                Ok(None) => return Err(Error::Configuration),
+                Ok(Some(result)) => result,
+                Err(error) => Err(error),
+            };
+            self.receipt = None;
+            let effect = self.pending.pop_front().expect("accepted cache effect");
+            if matches!(result, Ok(parent_cache::Reply::Block(_))) {
+                self.acknowledged = self.acknowledged.saturating_add(1);
+            }
+            if self.pending.is_empty() {
+                self.retained_bytes = 0;
+            }
+            Some(RetiredCacheCall { effect, result })
+        } else {
+            None
+        };
+        if matches!(
+            self.halted,
+            Some(
+                Error::Closed(Target::Cache)
+                    | Error::ReceiptLost(Target::Cache)
+                    | Error::Cache(cache::Error::Closed)
+            )
+        ) {
+            self.halted = None;
+        }
+        Ok(retired)
     }
     pub(crate) fn take_source_after_join(&mut self) -> Result<Effects, chain::Error> {
         self.source.take()
@@ -167,6 +220,9 @@ impl<O: MapOrder + Clone, A, C> Delivery<O, A, C> {
                 self.retained_bytes = 0;
             }
             return Ok(Progress::Acknowledged);
+        }
+        if let Some(route) = &self.route {
+            self.cache = route.current().ok_or(Error::Closed(Target::Cache))?;
         }
         if self.cache.is_closed() {
             return Err(Error::Closed(Target::Cache));

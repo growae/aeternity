@@ -142,7 +142,7 @@ pub struct Shutdown<O> {
     pub queued_outputs: Vec<Output>,
     pub tops: Option<TopDelivery>,
     pub pool: Result<pool::worker::Info, pool::worker::Error>,
-    pub parent: Result<cache::Exit, String>,
+    pub parent: Option<Result<cache::Exit, String>>,
     pub connector_joined: bool,
     pub pins_joined: bool,
     pub pinning: Option<Result<pinning::Exit, pinning::Error>>,
@@ -153,6 +153,7 @@ pub struct TopDelivery {
     pub records: VecDeque<Arc<publication::Payload>>,
     pub after: events::Cursor,
     pub receipt: Option<cache::Call>,
+    cache: Option<cache::Client>,
 }
 // Public clients name fixed child generations. Only this owner can publish
 // replacement connector routes or construct a new pinning worker.
@@ -269,16 +270,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .map_err(Error::Resilience)?;
         let events = database.events();
         let cursor = events.cursor();
-        let child = {
+        let (child, child_revision) = {
             let view = database.view().map_err(|e| Error::Importer(e.into()))?;
             let hash = view.status().tip.ok_or(Error::Configuration)?;
             let block = view
                 .require_block(hash)
                 .map_err(|e| Error::Importer(e.into()))?;
-            parent_cache::ChildTop {
-                hash,
-                height: block.header().common().height.into(),
-            }
+            (
+                parent_cache::ChildTop {
+                    hash,
+                    height: block.header().common().height.into(),
+                },
+                view.status().revision,
+            )
         };
         let selected = eoe::Source::new(
             database.clone(),
@@ -320,25 +324,39 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .map_err(|e| Error::Parent(format!("pin service: {e:?}")))?;
         config.production.parent_pins = pins.as_ref().map(crate::parent_pins::Service::client);
         let mailbox = cache::Mailbox::new(
-            parent_cache::Cache::new(config.parent.cache, child),
+            parent_cache::Cache::new(config.parent.cache.clone(), child),
             config.parent.cache_runtime,
         )
         .map_err(|e| Error::Parent(e.to_string()))?;
+        let route = cache::Route::new(mailbox.client());
         let (connector, connector_factory) = supervision::ConnectorFactory::start(
             backend,
             config.parent.hosts,
             config.parent.seed,
-            mailbox.sink(),
+            route.clone(),
             config.parent.connector,
         )
         .map_err(|e| Error::Parent(e.to_string()))?;
         let parent = mailbox
             .spawn(
-                targets,
+                targets.clone(),
                 connector_factory.link(),
                 execution.profile.order.clone(),
             )
             .map_err(|e| Error::Parent(e.to_string()))?;
+        let cache_factory = supervision::CacheFactory::new(
+            supervision::CacheInputs {
+                database: database.clone(),
+                config: config.parent.cache,
+                runtime: config.parent.cache_runtime,
+                targets,
+                order: execution.profile.order.clone(),
+                connector: connector_factory.link(),
+                route: route.clone(),
+            },
+            parent.client(),
+            child_revision,
+        );
         let pool = pool::worker::Worker::spawn_with_cache(
             database.clone(),
             execution.profile.network.clone(),
@@ -361,7 +379,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let (importer, accepted) = chain::Importer::new_hyperchain_scoped(
             database.clone(),
             execution,
-            cached,
+            scoped::RoutedCached::new(cached, route.clone()),
             config.admission,
         )
         .map_err(Error::Importer)?;
@@ -383,7 +401,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .map_err(Error::Utilities)?;
         let publications =
             votes::Publications::new(&database, config.eoe.votes).map_err(Error::Votes)?;
-        let owner = owner::Owner::start(
+        let owner = owner::Owner::start_routed(
             owner::Inputs {
                 source: selected.clone(),
                 database: database.clone(),
@@ -394,9 +412,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             config.eoe,
             keys,
             order,
+            route.clone(),
         )
         .map_err(Error::Owner)?;
-        let delivery = owner.parent_delivery(accepted).map_err(Error::Owner)?;
+        let mut delivery = owner.parent_delivery(accepted).map_err(Error::Owner)?;
+        delivery.set_route(route);
         let notices = agent.as_ref().map_or(1, |c| c.outputs);
         let (pinning, factory) = agent
             .map(|config| {
@@ -418,7 +438,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .map_or((None, None), |(child, factory)| {
                 (Some(child), Some(factory))
             });
-        let consensus = supervision::Supervisor::new(factory, connector_factory, notices);
+        let consensus =
+            supervision::Supervisor::new(factory, connector_factory, Some(cache_factory), notices);
         let consensus_status = consensus.status();
         Ok(Self {
             owner: Some(owner),
@@ -491,7 +512,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         })
     }
     pub fn parent(&self) -> cache::Client {
-        self.parent.as_ref().expect("parent").client()
+        self.consensus.parent()
     }
     pub fn connector(&self) -> connector::Client {
         self.consensus.connector()
@@ -571,22 +592,87 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         self.tick = Some(now);
         self.producer.check().map_err(Error::Importer)?;
-        if !self.pool().info().accepting || self.parent().is_closed() {
+        if !self.pool().info().accepting {
             return Err(Error::Closed);
         }
         let health = self.parent().snapshot().health;
-        if health != cache::Health::Running {
+        if matches!(health, cache::Health::Failed(_))
+            && self
+                .parent
+                .as_ref()
+                .is_some_and(|p| !p.replacement_pending())
+        {
             return Err(Error::Parent(format!("cache: {health:?}")));
         }
         let health = self.connector().snapshot().health;
         if matches!(health, connector::Health::WorkStopped(_)) {
             return Err(Error::Parent(format!("connector: {health:?}")));
         }
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(cache::Runtime::replacement_pending)
+            && let Some(attempt) = self.attempt.take()
+        {
+            match self
+                .owner
+                .as_mut()
+                .expect("owner")
+                .retire_production(attempt)
+            {
+                Ok(retiring) => {
+                    self.retiring = Some(retiring);
+                    self.status.stopping = true;
+                    self.restart = self.status.producing;
+                    self.status.deadline = None;
+                }
+                Err(attempt) => {
+                    self.attempt = Some(*attempt);
+                    return Err(Error::Production(production::Error::Binding));
+                }
+            }
+        }
+        let old_cache_generation = self.status.consensus.cache_generation;
+        let delivery = self.delivery.as_mut().expect("delivery");
+        let tops = &mut self.tops;
+        let retiring = &mut self.retiring;
         let supervised = self
             .consensus
-            .poll(&mut self.pinning, &mut self.connector, now);
+            .poll_cache(&mut self.parent, now, |old, exit| {
+                exit.delivery = delivery.retire_cache(old).map_err(Error::Delivery)?;
+                if let Some(tops) = tops
+                    && tops.cache.as_ref().is_some_and(|c| c.same_runtime(old))
+                    && let Some(call) = &mut tops.receipt
+                {
+                    let result = match call.try_reply() {
+                        Ok(Some(result)) => result,
+                        Err(e) => Err(e),
+                        Ok(None) => return Err(Error::Configuration),
+                    };
+                    tops.receipt = None;
+                    tops.cache = None;
+                    exit.top = Some(supervision::RetiredTop {
+                        record: tops.records.front().expect("top receipt").clone(),
+                        result,
+                    });
+                }
+                if let Some(retiring) = retiring {
+                    retiring.retire_cache(old).map_err(Error::Production)?;
+                }
+                Ok(())
+            })
+            .and_then(|_| {
+                self.consensus
+                    .poll(&mut self.pinning, &mut self.connector, now)
+            });
         self.status.consensus = self.consensus.status();
         supervised?;
+        if self.status.consensus.cache_generation != old_cache_generation {
+            self.owner
+                .as_mut()
+                .expect("owner")
+                .replace_parent(self.consensus.parent());
+        }
         // Retained outputs apply backpressure to production, not ownership:
         // shutdown still joins every child and transfers this output intact.
         if self.pending.is_some() {
@@ -596,6 +682,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             self.status.consensus = self.consensus.status();
             self.pending = Some(Output::ConsensusSupervision(notice));
             return Ok(Progress::Output);
+        }
+        if self.status.consensus.cache_restarting {
+            return Ok(Progress::Advanced);
         }
         if let Some(agent) = &self.pinning {
             if let Some(report) = agent.try_output() {
@@ -747,6 +836,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 records: batch.records.into(),
                 after: batch.cursor,
                 receipt: None,
+                cache: None,
             });
         }
         let pending = self.tops.as_mut().expect("top batch");
@@ -757,22 +847,29 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         let changed = record.change().old_tip != Some(record.change().new_tip);
         let key = context.block.filter(|b| b.kind == publication::Kind::Key);
-        if changed && let Some(block) = key {
+        if changed
+            && let Some(block) = key
+            && (pending.receipt.is_some()
+                || record.change().revision > self.consensus.cache_revision())
+        {
             if let Some(call) = &mut pending.receipt {
                 match call.try_reply() {
                     Ok(None) => return Ok(false),
-                    Ok(Some(Ok(parent_cache::Reply::None))) => pending.receipt = None,
+                    Ok(Some(Ok(parent_cache::Reply::None))) => {
+                        pending.receipt = None;
+                        pending.cache = None;
+                    }
                     other => return Err(Error::Parent(format!("child top receipt: {other:?}"))),
                 }
             } else {
-                match self.parent.as_ref().expect("parent").client().call(
-                    parent_cache::Event::ChildTop(parent_cache::ChildTop {
-                        hash: block.hash,
-                        height: block.height.into(),
-                    }),
-                ) {
+                let cache = self.consensus.parent();
+                match cache.call(parent_cache::Event::ChildTop(parent_cache::ChildTop {
+                    hash: block.hash,
+                    height: block.height.into(),
+                })) {
                     Ok(call) => {
                         pending.receipt = Some(call);
+                        pending.cache = Some(cache);
                         return Ok(true);
                     }
                     Err(cache::Error::Full) => return Ok(false),
@@ -845,12 +942,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         let consensus = self.consensus.finish();
         self.status.consensus = consensus.status.clone();
-        let parent = self
-            .parent
-            .take()
-            .expect("parent")
-            .shutdown()
-            .map_err(|_| "parent cache panicked".to_string());
+        let parent = self.parent.take().map(|cache| {
+            cache
+                .shutdown()
+                .map_err(|_| "parent cache panicked".to_string())
+        });
         let connector_joined = self.connector.take().is_none_or(|c| c.shutdown().is_ok());
         let pins_joined = self.pins.take().is_none_or(|pins| pins.shutdown().is_ok());
         let resilience = self

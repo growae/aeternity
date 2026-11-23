@@ -581,3 +581,39 @@ fn runtime_shutdown_interrupts_polling_and_cache_link_can_be_replaced() {
     );
     rt.shutdown().unwrap();
 }
+
+#[test]
+fn routed_entropy_selects_a_generation_once_and_never_falls_back_during_a_gap() {
+    let mut old = Pair::start(true, 64);
+    let next = Pair::start(true, 64);
+    next.post(41, 141);
+    next.post(43, 43);
+    let route = cache::Route::new(old.client.clone());
+    let mut host = host(&[1, 2, 3], ServiceLimits::default());
+    add_parent(&mut host);
+    host.set_parent_route(route.clone());
+    let calling = thread::spawn(move || {
+        let result = host.entropy_hash(&9.into());
+        (result, host)
+    });
+    wait(|| old.client.snapshot().lookup_calls > 0);
+    route.replace(Some(next.client.clone()));
+    let before = old.client.snapshot().lookup_calls;
+    wait(|| old.client.snapshot().lookup_calls > before);
+    assert_eq!(next.client.snapshot().lookup_calls, 0);
+    old.cache.take().unwrap().shutdown().unwrap();
+    let (result, mut host) = calling.join().unwrap();
+    assert_eq!(
+        result,
+        Err(local_host::Error::ParentCache(cache::Error::Closed))
+    );
+    assert_eq!(
+        host.entropy_hash(&9.into()).unwrap(),
+        Some(key(141).to_vec())
+    );
+    route.replace(None);
+    assert_eq!(
+        host.entropy_hash(&9.into()),
+        Err(local_host::Error::ParentCache(cache::Error::Closed))
+    );
+}

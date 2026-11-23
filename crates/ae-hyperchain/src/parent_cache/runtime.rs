@@ -19,6 +19,8 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+mod route;
+pub use route::Route;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetError {
@@ -192,6 +194,12 @@ fn call_error(e: RecvTimeoutError) -> Error {
     }
 }
 impl Client {
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.control, &other.control)
+    }
+    pub fn request_stop(&self) {
+        self.control.stop.store(true, Ordering::Release);
+    }
     // A fixed client names one cache lifetime, even if another runtime is
     // started later. Suitable for nonblocking guards at the child writer.
     pub fn is_closed(&self) -> bool {
@@ -478,9 +486,45 @@ pub struct Runtime {
     outbox: Arc<Outbox>,
     pump: Option<JoinHandle<()>>,
 }
+#[derive(Debug)]
+pub struct Retired {
+    pub snapshot: Snapshot,
+    pub result: Result<Exit, String>,
+    pub failures: Vec<Failure>,
+}
 impl Runtime {
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub fn replacement_pending(&self) -> bool {
+        let eligible = matches!(
+            self.client.snapshot().health,
+            Health::Running
+                | Health::Stopped
+                | Health::Failed(
+                    Error::Core(super::Error::Native(_)) | Error::Targets(TargetError::Native)
+                )
+        );
+        eligible && (self.client.is_closed() || self.is_finished())
+    }
+    pub fn retire(self) -> Retired {
+        let client = self.client();
+        let result = self
+            .shutdown()
+            .map_err(|_| "parent cache worker panicked".to_string());
+        let snapshot = client.snapshot();
+        let mut failures = vec![];
+        while let Some(failure) = client.take_failure() {
+            failures.push(failure);
+        }
+        Retired {
+            snapshot,
+            result,
+            failures,
+        }
     }
     pub fn shutdown(mut self) -> thread::Result<Exit> {
         self.client.control.stop.store(true, Ordering::Release);

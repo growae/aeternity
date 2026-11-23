@@ -131,7 +131,7 @@ fn shutdown(c: Conductor<Otp26>) -> conductor::Shutdown<Otp26> {
     let votes = c.votes();
     let s = c.shutdown();
     assert!(s.pool.as_ref().is_ok_and(|i| !i.running && !i.accepting));
-    assert!(s.parent.is_ok() && s.connector_joined && s.pins_joined);
+    assert!(s.parent.as_ref().is_none_or(Result::is_ok) && s.connector_joined && s.pins_joined);
     assert!(s.accepted.is_ok());
     assert!(!pool.info().accepting && parent.is_closed() && !votes.info().accepting);
     assert!(matches!(
@@ -341,7 +341,7 @@ fn dedicated_runtime_retains_full_output_queue_and_joins_during_backpressure() {
     assert!(handle.joined());
     assert_eq!(s.queued_outputs.len(), 1);
     assert!(s.output.is_some());
-    assert!(s.pool.is_ok() && s.parent.is_ok() && s.connector_joined);
+    assert!(s.pool.is_ok() && s.parent.as_ref().is_none_or(Result::is_ok) && s.connector_joined);
     assert!(parent.is_closed() && !pool.info().accepting);
     assert_eq!(handle.start_production(), Err(conductor::Error::Closed));
     assert!(matches!(
@@ -510,3 +510,5 @@ fn known_native_rejection_starts_fresh_without_advancing_the_unadmitted_parent()
     assert!(c.status().failure.is_none());
     shutdown(c);
 }
+#[path = "conductor/cache_supervision.rs"]
+mod cache_supervision;
