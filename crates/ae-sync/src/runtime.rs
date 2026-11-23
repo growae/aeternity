@@ -1,3 +1,3 @@
 pub mod connection;
-mod restart;
+pub(crate) mod restart;
 pub mod workers;

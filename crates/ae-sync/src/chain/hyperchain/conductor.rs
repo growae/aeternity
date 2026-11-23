@@ -20,6 +20,7 @@ use std::{
 };
 
 pub mod runtime;
+pub mod supervision;
 
 pub struct ParentConfig {
     pub pins: Option<PinConfig>,
@@ -73,11 +74,13 @@ pub enum Error {
     Production(production::Error),
     Pinning(pinning::Error),
     Utilities(parent::Error),
+    ConsensusRestartLimit,
     Supervision(eoe_runtime::Output),
 }
 #[derive(Debug)]
 pub enum Output {
     Pinning(Box<pinning::Report>),
+    PinningSupervision(supervision::Notice),
     Attempt(production::Completed),
     Stopped(Box<production::Stopped>),
     Rejected {
@@ -88,6 +91,15 @@ pub enum Output {
     // This output is retained until consumed. It is never treated as proof
     // that a failed service was recovered or its accepted work was cancelled.
     Supervision(eoe_runtime::Output),
+}
+impl Output {
+    pub fn poll_pinning(&mut self) {
+        match self {
+            Self::Pinning(report) => report.poll_children(),
+            Self::PinningSupervision(notice) => notice.poll_children(),
+            _ => (),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
@@ -100,6 +112,7 @@ pub enum Progress {
 }
 #[derive(Debug, Clone)]
 pub struct Status {
+    pub consensus: supervision::Status,
     pub producing: bool,
     pub stopping: bool,
     pub stops: u64,
@@ -133,6 +146,7 @@ pub struct Shutdown<O> {
     pub connector_joined: bool,
     pub pins_joined: bool,
     pub pinning: Option<Result<pinning::Exit, pinning::Error>>,
+    pub consensus: supervision::Shutdown,
     pub resilience: Option<Result<(), resilience::Error>>,
 }
 pub struct TopDelivery {
@@ -153,6 +167,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     connector: Option<connector::Runtime>,
     pins: Option<crate::parent_pins::Service>,
     pinning: Option<pinning::Service>,
+    consensus: supervision::Supervisor<O>,
     parent_utilities: Option<parent::Client<O>>,
     resilience: Option<resilience::Owner>,
     resilience_worker: Option<resilience::Worker>,
@@ -382,9 +397,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         )
         .map_err(Error::Owner)?;
         let delivery = owner.parent_delivery(accepted).map_err(Error::Owner)?;
-        let pinning = agent
+        let notices = agent.as_ref().map_or(1, |c| c.outputs);
+        let (pinning, factory) = agent
             .map(|config| {
-                pinning::Service::spawn(
+                pinning::Factory::start(
                     pinning::Inputs {
                         database,
                         source: selected,
@@ -398,7 +414,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 )
             })
             .transpose()
-            .map_err(Error::Pinning)?;
+            .map_err(Error::Pinning)?
+            .map_or((None, None), |(child, factory)| {
+                (Some(child), Some(factory))
+            });
+        let consensus = supervision::Supervisor::new(factory, notices);
+        let consensus_status = consensus.status();
         Ok(Self {
             owner: Some(owner),
             importer: Arc::new(importer),
@@ -410,6 +431,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             connector: Some(connector),
             pins,
             pinning,
+            consensus,
             parent_utilities,
             resilience,
             resilience_worker,
@@ -423,6 +445,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             pending: None,
             tick: None,
             status: Status {
+                consensus: consensus_status,
                 producing: config.producing,
                 stopping: false,
                 stops: 0,
@@ -562,9 +585,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         ) {
             return Err(Error::Parent(format!("connector: {health:?}")));
         }
+        let supervised = self.consensus.poll(&mut self.pinning, now);
+        self.status.consensus = self.consensus.status();
+        supervised?;
         // Retained outputs apply backpressure to production, not ownership:
         // shutdown still joins every child and transfers this output intact.
         if self.pending.is_some() {
+            return Ok(Progress::Output);
+        }
+        if let Some(notice) = self.consensus.take_notice() {
+            self.status.consensus = self.consensus.status();
+            self.pending = Some(Output::PinningSupervision(notice));
             return Ok(Progress::Output);
         }
         if let Some(agent) = &self.pinning {
@@ -572,7 +603,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 self.pending = Some(Output::Pinning(Box::new(report)));
                 return Ok(Progress::Output);
             }
-            if let Some(error) = agent.handle().status().failure {
+            if let Some(error) = agent.handle().status().failure
+                && !agent.replacement_pending()
+            {
                 return Err(Error::Pinning(error));
             }
         }
@@ -808,9 +841,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if let Some(Ok(exit)) = &mut pinning {
             exit.poll_children();
         }
-        if let Some(Output::Pinning(report)) = &mut self.pending {
-            report.poll_children();
+        if let Some(output) = &mut self.pending {
+            output.poll_pinning();
         }
+        let consensus = self.consensus.finish();
+        self.status.consensus = consensus.status.clone();
         let parent = self
             .parent
             .take()
@@ -840,6 +875,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             connector_joined,
             pins_joined,
             pinning,
+            consensus,
             resilience,
         }
     }

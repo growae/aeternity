@@ -638,9 +638,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
             .drain(..)
             .collect();
         for out in &mut retained {
-            if let Output::Pinning(report) = out {
-                report.poll_children();
-            }
+            out.poll_pinning();
         }
         self.status.phase = Phase::Stopped;
         self.status.running = false;

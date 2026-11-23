@@ -258,6 +258,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<O> {
             .join()
             .map(|mut report| {
                 report.queued_outputs.extend(self.outputs.try_iter());
+                for output in &mut report.queued_outputs {
+                    output.poll_pinning();
+                }
                 report
             })
     }

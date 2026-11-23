@@ -168,6 +168,7 @@ impl Exit {
         }
     }
 }
+#[derive(Clone)]
 pub struct Inputs<O> {
     pub database: Arc<Database>,
     pub source: Arc<eoe::Source>,
@@ -183,10 +184,67 @@ pub struct Service {
     outputs: mpsc::Receiver<Report>,
     worker: Option<JoinHandle<Exit>>,
 }
+// A replacement factory retains the original producer lease across child
+// gaps. Only the owning conductor may reuse that lease after joining a child.
+pub(crate) struct Factory<O> {
+    input: Inputs<O>,
+    config: Config,
+    lease: Arc<()>,
+}
+impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
+    pub(crate) fn start(input: Inputs<O>, config: Config) -> Result<(Service, Self), Error> {
+        let service = Service::spawn(input.clone(), config.clone())?;
+        let factory = Self {
+            input,
+            config,
+            lease: service.lease.clone(),
+        };
+        Ok((service, factory))
+    }
+    pub(crate) fn spawn(&self) -> Result<Service, Error> {
+        Service::spawn_inner(
+            self.input.clone(),
+            self.config.clone(),
+            Some(self.lease.clone()),
+        )
+    }
+}
+pub struct Retired {
+    pub status: Status,
+    pub result: Result<Exit, Error>,
+    // A panicked thread cannot return Exit, but already queued reports survive.
+    pub outputs: Vec<Report>,
+}
+impl std::fmt::Debug for Retired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Retired")
+            .field("status", &self.status)
+            .field("joined", &self.result.is_ok())
+            .field("outputs", &self.outputs)
+            .finish()
+    }
+}
+impl Retired {
+    pub fn poll_children(&mut self) {
+        if let Ok(exit) = &mut self.result {
+            exit.poll_children();
+        }
+        for report in &mut self.outputs {
+            report.poll_children();
+        }
+    }
+}
 impl Service {
     pub fn spawn<O: MapOrder + Clone + Send + Sync + 'static>(
         input: Inputs<O>,
         config: Config,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(input, config, None)
+    }
+    fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
+        input: Inputs<O>,
+        config: Config,
+        lease: Option<Arc<()>>,
     ) -> Result<Self, Error> {
         if !(1..=4096).contains(&config.outputs)
             || !input.parent.bound_to(&input.producer, &input.source)
@@ -213,7 +271,10 @@ impl Service {
         }
         input.producer.check().map_err(Error::Source)?;
         input.parent.check().map_err(Error::Utilities)?;
-        let lease = input.producer.pinning_lease().map_err(Error::Source)?;
+        let lease = match lease {
+            Some(lease) => lease,
+            None => input.producer.pinning_lease().map_err(Error::Source)?,
+        };
         let children = children::Writer::start(input.database.clone(), config.children)
             .map_err(Error::Children)?;
         let source = input.database.events();
@@ -281,6 +342,36 @@ impl Service {
         exit.outputs.extend(self.outputs.try_iter());
         exit.poll_children();
         Ok(exit)
+    }
+    pub(crate) fn finished(&self) -> bool {
+        self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+    pub(crate) fn replacement_pending(&self) -> bool {
+        let status = self.handle.status();
+        matches!(
+            status.failure,
+            None | Some(Error::Worker | Error::Cancelled)
+        ) && (self.handle.0.stop.load(Ordering::Acquire) || !status.running || self.finished())
+    }
+    pub(crate) fn retire(mut self) -> Retired {
+        self.handle.request_stop();
+        let mut result = self
+            .worker
+            .take()
+            .expect("pinning worker")
+            .join()
+            .map_err(|_| Error::Worker);
+        let outputs: Vec<_> = self.outputs.try_iter().collect();
+        if let Ok(exit) = &mut result {
+            exit._lease = Some(self.lease.clone());
+        }
+        let mut retired = Retired {
+            status: self.handle.status(),
+            result,
+            outputs,
+        };
+        retired.poll_children();
+        retired
     }
 }
 impl Drop for Service {
@@ -434,5 +525,63 @@ fn run<O: MapOrder + Clone + Send + Sync + 'static>(
         pending,
         retained,
         outputs: vec![],
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    #[test]
+    fn panicked_child_join_preserves_already_queued_diagnostics() {
+        let node = crate::test_support::hyperchain::Node::new(0);
+        let status = Status {
+            state: Default::default(),
+            cursor: node.db.events().cursor(),
+            completed: 0,
+            running: false,
+            failure: Some(Error::Worker),
+        };
+        let shared = Arc::new(Shared {
+            stop: AtomicBool::new(false),
+            status: Mutex::new(status.clone()),
+        });
+        let (send, outputs) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            send.send(Report {
+                event: core::Event::Top { height: 1.into() },
+                state: Default::default(),
+                effects: vec![],
+                error: None,
+            })
+            .unwrap();
+            wait.recv().unwrap();
+            panic!("injected pinning thread panic after report publication");
+        });
+        let service = Service {
+            lease: Arc::new(()),
+            handle: Handle(shared),
+            outputs,
+            worker: Some(worker),
+        };
+        assert!(service.replacement_pending());
+        assert!(!service.finished());
+        service.handle.request_stop();
+        service.handle.0.status.lock().unwrap().failure = Some(Error::ResourceLimit);
+        assert!(
+            !service.replacement_pending(),
+            "a stop request must not override a work-stop"
+        );
+        service.handle.0.status.lock().unwrap().failure = Some(Error::Worker);
+        assert!(service.replacement_pending());
+        release.send(()).unwrap();
+        let retired = service.retire();
+        assert!(matches!(retired.result, Err(Error::Worker)));
+        assert_eq!(retired.outputs.len(), 1);
+        assert_eq!(
+            retired.outputs[0].event,
+            core::Event::Top { height: 1.into() }
+        );
+        assert_eq!(retired.status.failure, status.failure);
     }
 }
