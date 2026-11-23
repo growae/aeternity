@@ -74,9 +74,27 @@ async fn encrypted_connection_keeps_its_identity_and_gossips_through_admission_r
         }
     })
     .await;
+    // Observe the completed first operation, not only its durable write, so
+    // the following in-flight operation can only be the second packet.
+    within(async {
+        while generation.gossip.status().counts.ordinary_admitted != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
     let old = c.pool();
     c.request_pool_restart(1).unwrap();
     within(peer.send(&message(&txs[1])).unwrap()).await.unwrap();
+    // Force delivery during the withdrawn binding interval. A TCP send only
+    // acknowledges transport; it does not establish which pool sees admission.
+    within(async {
+        while generation.gossip.status().operations == 0 {
+            assert_eq!(generation.gossip.status().counts.rejected, 0);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(c.pool_binding().current().is_none());
     super::super::pool_supervision::replaced(&mut c, 2);
     within(async {
         while node

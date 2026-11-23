@@ -90,6 +90,62 @@ async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
 }
 
 #[tokio::test]
+async fn strictly_follow_top_rechecks_parent_after_real_commit_conflict() {
+    let (_temp, mut importer) = setup(Default::default());
+    let block = fixtures::blocks(&NetworkProfile::mainnet()).remove(0);
+    let parent = Hash256(block.header().common().previous_hash);
+    let hash = block.hash().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let count = calls.clone();
+    let competing = block.clone();
+    Arc::get_mut(&mut importer.context).unwrap().commit_hook = Some(Arc::new(move |db, update| {
+        if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            let view = db.view()?;
+            let mut rules = fixtures::rules(view.identity().genesis);
+            rules.admission.now_ms = NOW;
+            let concurrent =
+                fixtures::execution(&NetworkProfile::mainnet()).with_config(|config| {
+                    ledger::prepare(&view, &competing, config, &rules, Default::default()).unwrap()
+                });
+            db.commit(concurrent)?;
+        }
+        db.commit(update)
+    }));
+    let result = within(
+        importer
+            .import_created_block_at(block.encode().unwrap(), NOW, parent)
+            .unwrap()
+            .wait(),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(Failure {
+                error: Error::Stale,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(importer.context.db.view().unwrap().status().tip, Some(hash));
+    // Ordinary created-block admission still returns its existing duplicate
+    // outcome; the selected-parent guard is opt-in, not a consensus change.
+    let report = within(
+        importer
+            .import_created_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.accepted.len(), 1);
+    importer.stop();
+    importer.join().await;
+}
+
+#[tokio::test]
 async fn concurrent_policy_conflict_reprepares_against_new_view_before_committing() {
     let (_temp, mut importer) = setup(Default::default());
     let calls = Arc::new(AtomicU64::new(0));
@@ -456,4 +512,68 @@ async fn borrowed_importer_drop_preserves_owner_but_owner_drop_retires_borrowers
     drop(importer);
     assert_eq!(child.check_open(), Err(Error::Closed));
     child.jobs.join().await;
+}
+
+#[tokio::test]
+async fn strictly_follow_top_keeps_full_public_proof_of_work_validation() {
+    let (_temp, importer) = setup(Default::default());
+    let block = fixtures::blocks(&NetworkProfile::mainnet()).remove(0);
+    let parent = Hash256(block.header().common().previous_hash);
+    let Block::Key(mut bad) = block.clone() else {
+        panic!()
+    };
+    bad.seal = [0; 42];
+    let result = within(
+        importer
+            .import_created_block_at(Block::Key(bad).encode().unwrap(), NOW, parent)
+            .unwrap()
+            .wait(),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(Failure {
+                error: Error::Validation {
+                    operational: false,
+                    ..
+                },
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(importer.context.db.view().unwrap().status().revision, 1);
+    let result = within(
+        importer
+            .import_created_block_at(block.encode().unwrap(), NOW, Hash256([42; 32]))
+            .unwrap()
+            .wait(),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(Failure {
+                error: Error::Stale,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    let report = within(
+        importer
+            .import_created_block_at(block.encode().unwrap(), NOW, parent)
+            .unwrap()
+            .wait(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.accepted.len(), 1);
+    assert_eq!(
+        importer.context.db.view().unwrap().status().tip,
+        Some(block.hash().unwrap())
+    );
+    importer.stop();
+    importer.join().await;
 }

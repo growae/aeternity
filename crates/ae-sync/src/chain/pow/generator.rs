@@ -129,6 +129,8 @@ struct State<O> {
     publications: VecDeque<Arc<Publication<O>>>,
 }
 struct Shared<O> {
+    source_id: u64,
+    micro_cycle_ms: u64,
     state: Mutex<State<O>>,
     wake: Condvar,
     controls: Arc<Mutex<usize>>,
@@ -146,6 +148,12 @@ impl<O> Clone for Client<O> {
     }
 }
 impl<O> Client<O> {
+    pub fn uses_source(&self, source_id: u64) -> bool {
+        self.0.source_id == source_id
+    }
+    pub fn micro_cycle_ms(&self) -> u64 {
+        self.0.micro_cycle_ms
+    }
     pub fn status(&self) -> Status {
         lock(&self.0.state).status.clone()
     }
@@ -240,8 +248,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         }
         let lease = owned::GeneratorLease::acquire(&database).map_err(Error::Ownership)?;
         let tip = view.status().tip;
+        let source_id = repo::Read::source_id(view.source());
         drop(view);
         let shared = Arc::new(Shared {
+            source_id,
+            micro_cycle_ms: config.preparation.micro_cycle_ms,
             state: Mutex::new(State {
                 status: Status {
                     running: true,

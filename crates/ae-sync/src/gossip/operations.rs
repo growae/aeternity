@@ -89,6 +89,7 @@ async fn vote(
 pub(super) async fn incoming(
     context: Context,
     jobs: blocking::Pool,
+    binding: crate::bindings::Admission,
     forwarded: pool::Forwarded,
 ) -> Result<Input, Error> {
     let pool::Forwarded { event, client, .. } = forwarded;
@@ -158,7 +159,7 @@ pub(super) async fn incoming(
                 Err(_) => counts.rejected += 1,
             }
         } else {
-            let admission = context.admission.clone();
+            let admission = available_admission(binding.clone()).await?;
             let submitted = jobs
                 .submit_wait(bytes.max(1), move |cancel| {
                     if cancel.cancelled() {
@@ -188,6 +189,23 @@ pub(super) async fn incoming(
     }
     drop(held);
     Ok(counts)
+}
+async fn available_admission(
+    mut binding: crate::bindings::Admission,
+) -> Result<worker::Client, Error> {
+    loop {
+        if binding.is_closed() {
+            return Err(Error::Closed);
+        }
+        if let Some(bound) = binding.current() {
+            return Ok(bound.client);
+        }
+        // A withdrawn worker is not a target for a new incoming transaction.
+        // Wait inside the existing bounded operation, retaining transport byte
+        // ownership. After receive is attempted, never retry: even a rejected
+        // submission may already have changed the first-level gossip cache.
+        binding.changed().await;
+    }
 }
 pub(super) async fn command(
     context: Context,

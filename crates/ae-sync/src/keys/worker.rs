@@ -11,6 +11,14 @@ use tokio::sync::oneshot;
 
 pub struct Ticket<T>(oneshot::Receiver<Result<T, Error>>);
 impl<T> Ticket<T> {
+    // Poll exactly once to completion; Empty retains the accepted request.
+    pub fn try_result(&mut self) -> Option<Result<T, Error>> {
+        match self.0.try_recv() {
+            Ok(value) => Some(value),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => Some(Err(Error::Disconnected)),
+        }
+    }
     // Waiting or dropping a reply never cancels accepted work. A lost reply
     // is not permission to replay promotion or signing against a new worker.
     pub fn blocking_wait(self) -> Result<T, Error> {

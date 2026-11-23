@@ -424,6 +424,31 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     pub fn import_created_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
         self.import_block_with_origin(bytes, now_ms, ledger::Origin::Created)
     }
+    // PoW strictly-follow-top production still uses ordinary validation and
+    // execution. The selected parent is checked on every conflict retry; the
+    // repository's expected revision makes that check atomic with commit.
+    pub fn import_created_block_at(
+        &self,
+        bytes: Vec<u8>,
+        now_ms: u64,
+        parent: Hash256,
+    ) -> Result<Ticket, Error> {
+        self.check_open()?;
+        if self.consensus() != ConsensusType::Pow {
+            return Err(Error::WrongConsensus);
+        }
+        if bytes.len() > self.context.config.messages.body_bytes {
+            return Err(Error::Busy);
+        }
+        let context = self.context.clone();
+        self.reserve()?
+            .submit(move |cancel| context.apply_created_block_at(bytes, now_ms, cancel, parent))
+            .map(|pending| Ticket {
+                pending,
+                timeout: self.context.config.timeout,
+            })
+            .map_err(Into::into)
+    }
     fn import_block_with_origin(
         &self,
         bytes: Vec<u8>,

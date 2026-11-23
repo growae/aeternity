@@ -35,6 +35,7 @@ tokio-rustls.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
+rocksdb.workspace = true
 ae-trie.workspace = true
 ae-vm-aevm.workspace = true
 ae-state.workspace = true

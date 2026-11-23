@@ -150,8 +150,9 @@ impl Service {
         let Some(bound) = snapshot.value else {
             return;
         };
-        // New operations bind immediately. Already running operations retain
-        // their captured client; their accepted tickets are never resubmitted.
+        // Refresh feed/local-vote context. Incoming ordinary transactions
+        // resolve an available binding before their single receive attempt;
+        // accepted tickets are never redirected or resubmitted.
         self.context.admission = bound.client.clone();
         if self.feeding || self.sending || !self.pending.is_empty() {
             return;
@@ -268,10 +269,11 @@ impl Service {
         if matches!(&event.event,net::Event::Message(m)if m.message().kind()==Kind::Transactions) {
             let ctx = self.context.clone();
             let jobs = self.jobs.clone();
+            let binding = self.binding.clone();
             let timeout = ctx.config.work_timeout;
             self.operation(operations::bounded(
                 timeout,
-                operations::incoming(ctx, jobs, event),
+                operations::incoming(ctx, jobs, binding, event),
             ));
         } else {
             let client = event.client.clone();

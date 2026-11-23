@@ -26,6 +26,22 @@ pub struct Prepared<O> {
     pub value: pow::Prepared<snapshots::Reader, O>,
     pub metadata: snapshots::Metadata,
 }
+
+pub struct ProducerLease(Arc<()>);
+impl ProducerLease {
+    pub fn acquire(database: &crate::Database) -> Result<Self, snapshots::Error> {
+        let mut owner = database
+            .pow_producer_owner
+            .lock()
+            .map_err(|_| snapshots::Error::Worker("poisoned PoW producer ownership".into()))?;
+        if owner.upgrade().is_some() {
+            return Err(snapshots::Error::AlreadyRunning);
+        }
+        let lease = Self(Arc::new(()));
+        *owner = Arc::downgrade(&lease.0);
+        Ok(lease)
+    }
+}
 #[derive(Debug)]
 pub enum Error {
     Snapshot(snapshots::Error),

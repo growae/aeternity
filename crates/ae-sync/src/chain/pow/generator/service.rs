@@ -342,6 +342,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             .published
             .checked_add(1)
             .ok_or(Error::Sequence)?;
+        // Candidate notification consumers fetch the current candidate. Make
+        // it visible in the same critical section as the notification; waiting
+        // for sync() lets a fast consumer acknowledge the only event while
+        // still seeing None or the previous candidate.
+        state.candidate = Some(candidate.clone());
         state.publications.push_back(Arc::new(Publication {
             sequence: self.status.published,
             epoch: self.status.epoch,

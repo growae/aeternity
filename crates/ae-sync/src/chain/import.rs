@@ -12,6 +12,32 @@ impl Drop for Poison<'_> {
     }
 }
 impl<O: MapOrder> Context<O> {
+    pub(super) fn apply_created_block_at(
+        &self,
+        bytes: Vec<u8>,
+        now_ms: u64,
+        cancel: blocking::Cancellation,
+        parent: Hash256,
+    ) -> Result<Report, Failure> {
+        let _poison = Poison(&self.recovery);
+        let result = (|| {
+            self.check(&cancel, None)?;
+            let view = self.db.view()?;
+            let block = Block::decode(&bytes, view.config().block()).map_err(Error::Block)?;
+            if block.header().common().previous_hash != parent.0 {
+                return Err(Error::Stale);
+            }
+            self.insert_expected(
+                &block,
+                now_ms,
+                &cancel,
+                None,
+                ledger::Origin::Created,
+                Some(parent),
+            )
+        })();
+        Self::block_report(result)
+    }
     pub(super) fn apply_policy(
         &self,
         event: ae_chain::resilience::Event,
@@ -225,10 +251,24 @@ impl<O: MapOrder> Context<O> {
         client: Option<&net::Client>,
         origin: ledger::Origin,
     ) -> Result<Accepted, Error> {
+        self.insert_expected(block, now_ms, cancel, client, origin, None)
+    }
+    fn insert_expected(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        cancel: &blocking::Cancellation,
+        client: Option<&net::Client>,
+        origin: ledger::Origin,
+        expected: Option<Hash256>,
+    ) -> Result<Accepted, Error> {
         let hash = block.hash().map_err(|_| Error::Hash)?;
         for attempt in 0..=self.config.conflicts {
             self.check(cancel, client)?;
             let view = self.db.view()?;
+            if expected.is_some() && view.status().tip != expected {
+                return Err(Error::Stale);
+            }
             let height = block.header().common().height;
             let network =
                 view.protocol_profile(self.strategy.network(), height, self.config.ledger.history)?;
