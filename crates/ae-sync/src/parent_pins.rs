@@ -161,6 +161,7 @@ pub enum Error {
     Worker,
     NoParents,
     Redirect,
+    Journal,
 }
 struct Lookup {
     hash: Vec<u8>,
@@ -186,6 +187,7 @@ pub struct Client {
     chain: Chain,
     has_nodes: bool,
     signing_network: Option<Arc<[u8]>>,
+    durable_posts: bool,
 }
 // One bounded lookup. Dropping the receipt cancels queued or active work.
 // Polling never waits for the parent service or its transport.
@@ -226,6 +228,9 @@ impl Request {
     }
 }
 impl Client {
+    pub fn durable_posts(&self) -> bool {
+        self.durable_posts
+    }
     pub fn chain(&self) -> Result<Chain, Error> {
         self.check()?;
         Ok(self.chain)
@@ -309,6 +314,34 @@ impl Service {
         config: Config,
         signing: Option<posting::Signing>,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(chain, nodes, config, signing, None)
+    }
+    // The service owns the exclusive journal writer until its thread joins.
+    // Closed clients/receipts retain no writer lease and cannot bypass recovery.
+    pub fn spawn_journalled(
+        chain: Chain,
+        nodes: Vec<Node>,
+        config: Config,
+        signing: Option<posting::Signing>,
+        journal: posting::Journal,
+    ) -> Result<Self, Error> {
+        if journal.network.len() > 4096
+            || (chain == Chain::Aeternity
+                && signing
+                    .as_ref()
+                    .is_some_and(|s| s.network != journal.network))
+        {
+            return Err(Error::Configuration);
+        }
+        Self::spawn_inner(chain, nodes, config, signing, Some(journal))
+    }
+    fn spawn_inner(
+        chain: Chain,
+        nodes: Vec<Node>,
+        config: Config,
+        signing: Option<posting::Signing>,
+        journal: Option<posting::Journal>,
+    ) -> Result<Self, Error> {
         if signing.as_ref().is_some_and(|s| s.network.len() > 4096) {
             return Err(Error::Configuration);
         }
@@ -334,6 +367,11 @@ impl Service {
         let node = nodes.into_iter().next();
         let has_nodes = node.is_some();
         let signing_network = signing.as_ref().map(|s| Arc::from(s.network.clone()));
+        let durable_posts = journal.is_some();
+        let mut journal = journal
+            .map(posting::journal::Owner::start)
+            .transpose()
+            .map_err(|_| Error::Journal)?;
         let config = Arc::new(config);
         let transport = transport::Transport::new(config.clone())?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -365,7 +403,7 @@ impl Service {
                 let _ = job.reply.try_send(value);
                 }
                 Job::Post(job) => match &node {
-                    Some(node) => posting::run(&runtime, &transport, node, signing.as_ref(), &stop, job),
+                    Some(node) => posting::run(&runtime, &transport, node, signing.as_ref(), &stop, job, journal.as_mut()),
                     None => posting::unavailable(job),
                 },
                 }
@@ -379,6 +417,7 @@ impl Service {
                 chain,
                 has_nodes,
                 signing_network,
+                durable_posts,
             },
             worker: Some(worker),
         })

@@ -95,17 +95,25 @@ async fn rpc(t: &Transport, n: &Node, method: &str, params: Vec<Value>) -> Resul
 async fn publish(
     t: &Transport,
     n: &Node,
-    path: &str,
+    response: (&str, &str),
     value: Value,
     transaction: Vec<u8>,
     progress: &Progress,
-    field: &str,
+    mut journal: Option<&mut super::journal::Call<'_>>,
 ) -> Result<Vec<u8>, Failure> {
+    let (path, field) = response;
     let body = json_body(&value, t)?;
-    progress.begin(Submission {
+    let submission = Submission {
         chain: n.chain,
         transaction: Arc::from(transaction),
-    });
+    };
+    if let Some(call) = &mut journal
+        && let Some(record) = call.begin(&submission)?
+    {
+        progress.begin(super::journal::submission(&record));
+        return record.response.ok_or(Failure::Recovered);
+    }
+    progress.begin(submission);
     // Mark conservatively before the transport is polled, including connect/TLS.
     // A cancellation can never be reported as definitely unsubmitted afterwards.
     let reply = t
@@ -121,7 +129,11 @@ async fn publish(
     if hash.len() > t.config.maximum_hash_bytes {
         return Err(Failure::Local(super::Error::ResourceLimit));
     }
-    Ok(hash.to_vec())
+    let hash = hash.to_vec();
+    if let Some(call) = journal {
+        call.response(hash.clone())?;
+    }
+    Ok(hash)
 }
 pub(super) async fn post(
     t: &Transport,
@@ -130,6 +142,7 @@ pub(super) async fn post(
     post: &Post,
     payload: &[u8],
     progress: &Progress,
+    journal: Option<&mut super::journal::Call<'_>>,
 ) -> Result<Vec<u8>, Failure> {
     match n.chain {
         Chain::Bitcoin => Err(Failure::Unsupported),
@@ -161,7 +174,16 @@ pub(super) async fn post(
                 .map_err(|_| Failure::MissingKey)?;
             let bytes = SignedTransaction::new(tx, vec![signature]).encode();
             let value = json!({"tx":api::encode(ApiType::Transaction, &bytes)});
-            publish(t, n, "/v3/transactions", value, bytes, progress, "tx_hash").await
+            publish(
+                t,
+                n,
+                ("/v3/transactions", "tx_hash"),
+                value,
+                bytes,
+                progress,
+                journal,
+            )
+            .await
         }
         Chain::Dogecoin => {
             let unspent = rpc(t, n, "listunspent", vec![json!(0), json!(9999999)]).await?;
@@ -227,11 +249,11 @@ pub(super) async fn post(
             publish(
                 t,
                 n,
-                "/",
+                ("/", "result"),
                 rpc_body("sendrawtransaction", vec![json!(hex)]),
                 hex.as_bytes().to_vec(),
                 progress,
-                "result",
+                journal,
             )
             .await
         }

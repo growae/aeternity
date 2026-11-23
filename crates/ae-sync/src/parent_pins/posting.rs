@@ -15,6 +15,8 @@ use std::{
     time::Instant,
 };
 mod callbacks;
+pub(crate) mod journal;
+pub use journal::Config as Journal;
 
 #[derive(Clone)]
 pub struct Signing {
@@ -35,6 +37,8 @@ pub enum Failure {
     MissingKey,
     ParentResponse,
     NoSuitableUtxo,
+    Journal(ae_storage::parent_posts::Failure),
+    Recovered,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
@@ -160,12 +164,21 @@ pub(super) fn run(
     signing: Option<&Signing>,
     stop: &AtomicBool,
     job: Job,
+    journal: Option<&mut journal::Owner>,
 ) {
+    let mut journal = journal.map(|j| j.call(node, &job.post, &job.payload));
     let result = runtime.block_on(async {
         tokio::select! {
             biased;
             error = transport::cancelled(stop, &job.cancel, job.deadline) => Err(Failure::Local(error)),
-            result = callbacks::post(transport, node, signing, &job.post, &job.payload, &job.progress) => result,
+            result = async {
+                if let Some(call) = &journal
+                    && let Some(record) = call.existing()? {
+                    job.progress.begin(journal::submission(&record));
+                    return record.response.ok_or(Failure::Recovered);
+                }
+                callbacks::post(transport, node, signing, &job.post, &job.payload, &job.progress, journal.as_mut()).await
+            } => result,
         }
     });
     let result = match result {

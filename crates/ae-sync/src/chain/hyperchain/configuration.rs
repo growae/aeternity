@@ -26,6 +26,7 @@ pub enum Error {
 pub struct Services {
     pub blocks: parent_blocks::Config,
     pub pins: parent_pins::Config,
+    pub journal: ae_storage::parent_posts::Limits,
     pub agent: pinning::Config,
 }
 // No Debug/serialization: the parser owns secret signing material, and accepts
@@ -281,6 +282,7 @@ impl Configuration {
             agent: self.default_pinning.then_some(services.agent),
             nodes: self.nodes,
             service: services.pins,
+            journal: services.journal,
         });
         Ok(Prepared {
             execution,

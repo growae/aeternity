@@ -156,6 +156,7 @@ fn configured(
 fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        journal: Default::default(),
         chain: parent_pins::Chain::Aeternity,
         network: b"parent_network".to_vec(),
         accounts: [12, 13, 14]

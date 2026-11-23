@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 fn configured(node: &Node, parent: &pinned::Parent) -> Conductor<Otp26> {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        journal: Default::default(),
         chain: ae_sync::parent_pins::Chain::Aeternity,
         network: b"parent_network".to_vec(),
         accounts: Default::default(),
@@ -222,6 +223,7 @@ fn failed_pin_service_start_releases_all_constructor_leases() {
     let node = Node::new(0);
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        journal: Default::default(),
         chain: ae_sync::parent_pins::Chain::Aeternity,
         network: b"parent_network".to_vec(),
         accounts: Default::default(),
@@ -236,6 +238,7 @@ fn failed_pin_service_start_releases_all_constructor_leases() {
     assert!(matches!(new(&node, cfg), Err(conductor::Error::Parent(_))));
     let mut cfg = config(&node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
+        journal: Default::default(),
         chain: ae_sync::parent_pins::Chain::Aeternity,
         network: b"parent_network".to_vec(),
         accounts: Default::default(),

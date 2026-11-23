@@ -11,6 +11,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[path = "parent_posting/durable.rs"]
+mod durable;
 fn bytes(j: &J) -> Vec<u8> {
     hex::decode(j.as_str().unwrap()).unwrap()
 }
@@ -158,6 +160,11 @@ fn reply(s: &mut impl Write, status: u16, value: &J) {
 }
 #[test]
 fn original_posting_callbacks_and_canonical_signatures() {
+    original_callbacks(|nodes, config, signing| {
+        Service::spawn_with_signing(nodes, config, signing).unwrap()
+    });
+}
+fn original_callbacks(mut spawn: impl FnMut(Vec<Node>, Config, Option<Signing>) -> Service) {
     let data: J = serde_json::from_str(include_str!("fixtures/hc_post.json")).unwrap();
     assert_eq!(data["rows"].as_array().unwrap().len(), 20);
     assert_eq!(
@@ -173,12 +180,11 @@ fn original_posting_callbacks_and_canonical_signatures() {
         };
         let l = listener();
         let fallback = listener();
-        let service = Service::spawn_with_signing(
+        let service = spawn(
             vec![node(&l, chain), node(&fallback, chain)],
             config(),
             Some(signing()),
-        )
-        .unwrap();
+        );
         let requests = row["requests"].as_array().unwrap().clone();
         let replies = row["replies"].as_array().unwrap().clone();
         let server = thread::spawn(move || {

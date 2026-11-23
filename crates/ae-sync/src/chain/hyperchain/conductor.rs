@@ -37,6 +37,7 @@ pub struct PinConfig {
     pub agent: Option<pinning::Config>,
     pub nodes: Vec<crate::parent_pins::Node>,
     pub service: crate::parent_pins::Config,
+    pub journal: ae_storage::parent_posts::Limits,
 }
 pub struct Config {
     pub eoe: owner::Config,
@@ -232,6 +233,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         {
             return Err(Error::Configuration);
         }
+        if config.parent.pins.as_ref().is_some_and(|p| {
+            p.chain == crate::parent_pins::Chain::Aeternity
+                && p.signing.as_ref().is_some_and(|s| s.network != p.network)
+        }) {
+            return Err(Error::Utilities(parent::Error::Configuration));
+        }
         // Install the policy parent before capturing the importer's scope.
         // Its child may later move to optional-worker supervision; the policy
         // parent remains with this producer generation throughout child gaps.
@@ -281,11 +288,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .pins
             .take()
             .map(|pins| {
-                crate::parent_pins::Service::spawn_configured(
+                let journal = crate::parent_pins::posting::Journal {
+                    database: database.clone(),
+                    network: pins.network.clone(),
+                    limits: pins.journal,
+                };
+                crate::parent_pins::Service::spawn_journalled(
                     pins.chain,
                     pins.nodes,
                     pins.service,
                     pins.signing,
+                    journal,
                 )
             })
             .transpose()

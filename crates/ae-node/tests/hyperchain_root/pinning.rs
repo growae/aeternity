@@ -149,6 +149,7 @@ async fn root_shutdown_and_child_failure_retain_an_uncertain_parent_broadcast_on
         let wallet = Wallet::new();
         let input = inputs(&node, fixed(121), |cfg| {
             cfg.parent.pins = Some(conductor::PinConfig {
+                journal: Default::default(),
                 chain: parent_pins::Chain::Aeternity,
                 network: b"parent_network".to_vec(),
                 accounts: [12, 13, 14]
@@ -169,6 +170,7 @@ async fn root_shutdown_and_child_failure_retain_an_uncertain_parent_broadcast_on
             });
         });
         let importer = input.conductor.importer();
+        assert!(input.conductor.parent_pins().unwrap().durable_posts());
         let agent = input.conductor.pinning().unwrap();
         let running = launch(input, config(), Clock::new());
         let mut h = running.handle();
@@ -244,6 +246,18 @@ async fn root_shutdown_and_child_failure_retain_an_uncertain_parent_broadcast_on
         );
         assert_eq!(wallet.posted.lock().unwrap().len(), 1);
         assert_eq!(wallet.requests.load(Ordering::Acquire), 2);
+        let journal = node
+            .db
+            .parent_posts()
+            .unwrap()
+            .records(Default::default())
+            .unwrap();
+        assert_eq!(journal.len(), 1);
+        assert!(journal[0].response.is_none());
+        assert_eq!(
+            journal[0].transaction,
+            wallet.posted.lock().unwrap()[0].encode()
+        );
         assert!(!agent.status().running);
     }
 }

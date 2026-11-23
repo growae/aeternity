@@ -47,7 +47,7 @@ pub const PROOFS: u8 = 12;
 pub const SIGNALS: u8 = 13;
 pub const GC_MARKS: u8 = 14;
 pub const GC_PENDING: u8 = 15;
-// 16..=18 belong to the storage pool and peer repositories.
+// 16..=18 belong to the storage pool and peer repositories; 20 to parent posts.
 pub const HC_EVENTS: u8 = 19;
 pub const HC_STATE: &[u8] = b"\0hc-state";
 pub const GC_STATE: &[u8] = b"\0gc";
@@ -148,7 +148,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(11)
+        self.encode_version(12)
     }
     // Archive ownership was introduced with version 7. Bind the identity
     // fields using that stable layout, independently of writer capabilities.
@@ -184,7 +184,7 @@ impl Identity {
         let v = decode(bytes)?;
         let all = items(&v)?;
         let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
-        if !matches!(version, 1..=11) {
+        if !matches!(version, 1..=12) {
             return Err(Error::Corrupt("schema version"));
         }
         let a = fields(&v, if version >= 10 { 6 } else { 5 })?;

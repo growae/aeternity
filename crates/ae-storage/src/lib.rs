@@ -16,6 +16,7 @@ static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub mod events;
 pub mod gc;
 pub mod hyperchain;
+pub mod parent_posts;
 pub mod peers;
 pub mod policy;
 pub mod pool;
@@ -43,6 +44,7 @@ pub struct Database {
     pool_owner: Mutex<std::sync::Weak<()>>,
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
+    parent_posts_owner: Mutex<std::sync::Weak<()>>,
     hyperchain_owner: Mutex<std::sync::Weak<()>>,
     snapshot_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
@@ -238,6 +240,7 @@ impl Database {
             pool_owner: Mutex::new(Default::default()),
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
+            parent_posts_owner: Mutex::new(Default::default()),
             hyperchain_owner: Mutex::new(Default::default()),
             snapshot_owner: Mutex::new(Default::default()),
             events: events::Source::new(event_status, notifications.chain),
@@ -252,6 +255,7 @@ impl Database {
         result.validate_replay(importing)?;
         result.validate_pool()?;
         result.validate_peers()?;
+        result.validate_parent_posts()?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;
