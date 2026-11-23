@@ -3,7 +3,7 @@ use super::{eoe, parent, scoped};
 use crate::{chain, parent_pins};
 use ae_chain::{publication, repository as repo};
 use ae_hyperchain::{pinning as core, signing::Keys};
-use ae_storage::{Database, events, pinning_children as children, pool};
+use ae_storage::{Database, events, pinning_agent as durable, pinning_children as children, pool};
 use ae_types::AccountPublicKey;
 use ae_vm_fate::maps::MapOrder;
 use std::{
@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 mod host;
+mod journal;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -25,6 +26,8 @@ pub struct Config {
     pub maximum_events: usize,
     pub transaction: core::Limits,
     pub children: children::Limits,
+    pub maximum_recovery_records: usize,
+    pub checkpoint_bytes: usize,
     pub poll: Duration,
 }
 impl Default for Config {
@@ -35,6 +38,8 @@ impl Default for Config {
             maximum_events: 1024,
             transaction: Default::default(),
             children: Default::default(),
+            maximum_recovery_records: 65_536,
+            checkpoint_bytes: 16 << 20,
             poll: Duration::from_millis(10),
         }
     }
@@ -58,6 +63,10 @@ pub enum Error {
     Transaction(core::Error),
     Children(children::Failure),
     ChildUnresolved(ae_types::Hash256),
+    Journal(durable::Failure),
+    RecoveryGap(u64),
+    RecoveryReorganization(u64),
+    StaleEpoch,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
@@ -83,6 +92,7 @@ impl std::fmt::Debug for ChildResult {
 #[derive(Debug)]
 pub enum Effect {
     Parent(parent_pins::posting::Outcome),
+    RecoveredParent(durable::ParentResult),
     Child {
         kind: ChildKind,
         transaction: Arc<ae_mempool::pool::Signed>,
@@ -137,7 +147,7 @@ impl Handle {
     }
 }
 pub struct Pending {
-    pub payload: Arc<publication::Payload>,
+    pub payload: Option<Arc<publication::Payload>>,
     pub after: events::Cursor,
     pub events: VecDeque<core::Event>,
 }
@@ -196,19 +206,32 @@ impl Service {
         {
             return Err(Error::Configuration);
         }
+        if !(1..=1_000_000).contains(&config.maximum_recovery_records)
+            || !input.parent.service().durable_posts()
+        {
+            return Err(Error::Configuration);
+        }
         input.producer.check().map_err(Error::Source)?;
         input.parent.check().map_err(Error::Utilities)?;
         let lease = input.producer.pinning_lease().map_err(Error::Source)?;
         let children = children::Writer::start(input.database.clone(), config.children)
             .map_err(Error::Children)?;
         let source = input.database.events();
-        let cursor = source.cursor();
+        let binding = input.parent.pinning_binding().map_err(Error::Utilities)?;
+        let agent =
+            durable::Writer::start(input.database.clone(), binding, journal::limits(&config))
+                .map_err(Error::Journal)?;
+        let checkpoint = agent.checkpoint().map_err(Error::Journal)?.clone();
+        journal::preflight(&input.database, &checkpoint, &config)?;
+        let cursor = source
+            .at_revision(checkpoint.consumed.revision)
+            .map_err(Error::Events)?;
         let handle = Handle(Arc::new(Shared {
             stop: AtomicBool::new(false),
             status: Mutex::new(Status {
-                state: core::State::default(),
+                state: checkpoint.state,
                 cursor,
-                completed: 0,
+                completed: checkpoint.completed,
                 running: true,
                 failure: None,
             }),
@@ -226,6 +249,8 @@ impl Service {
             shared: shared.clone(),
             effects: vec![],
             children,
+            agent,
+            database: input.database,
         };
         let worker = thread::Builder::new()
             .name("ae-hc-pinning".into())
@@ -266,65 +291,48 @@ impl Drop for Service {
         }
     }
 }
-fn load(
+fn load<O: MapOrder + Clone + Send + Sync + 'static>(
+    host: &mut host::Host<O>,
     source: &events::Reader,
     cursor: &events::Cursor,
-    config: &Config,
 ) -> Result<Option<Pending>, Error> {
-    let batch = source.after(cursor, 1).map_err(Error::Events)?;
-    if batch.closed {
-        return Err(Error::Closed);
+    if let Some(p) = &host.agent.checkpoint().map_err(Error::Journal)?.pending {
+        return journal::pending(p, source, None).map(Some);
     }
-    let Some(payload) = batch.records.into_iter().next() else {
-        return Ok(None);
-    };
-    if payload.retained_bytes() > config.maximum_event_bytes {
-        return Err(Error::ResourceLimit);
-    }
-    if payload.context().origin == publication::Origin::Rollback {
-        return Err(Error::Rollback(payload.change().revision));
-    }
-    let mut events = VecDeque::new();
-    for effect in payload.effects() {
-        let event = match effect {
-            publication::Effect::Consensus {
-                event: ae_hyperchain::block::Event::NewEpoch(info),
-                ..
-            } => {
-                let ae_vm_fate::value::Value::Integer(epoch) = &info.epoch else {
-                    return Err(Error::State("epoch integer"));
-                };
-                Some(core::Event::Epoch {
-                    epoch: epoch.clone(),
-                    first: info.first.clone(),
-                    last: info.last.clone(),
-                })
+    let payload = match source.after(cursor, 1) {
+        Ok(batch) => {
+            if batch.closed {
+                return Err(Error::Closed);
             }
-            publication::Effect::TopChanged(block) => Some(core::Event::Top {
-                height: block.height.into(),
-            }),
-            _ => None,
-        };
-        if let Some(event) = event {
-            let valid = match &event {
-                core::Event::Epoch { epoch, first, last } => [epoch, first, last]
-                    .iter()
-                    .all(|n| n.bits().div_ceil(8) <= config.transaction.integer_bytes as u64),
-                core::Event::Top { height } => {
-                    height.bits().div_ceil(8) <= config.transaction.integer_bytes as u64
-                }
+            let Some(payload) = batch.records.into_iter().next() else {
+                return Ok(None);
             };
-            if !valid || events.len() >= config.maximum_events {
+            if payload.retained_bytes() > host.config.maximum_event_bytes {
                 return Err(Error::ResourceLimit);
             }
-            events.push_back(event);
+            Some(payload)
         }
-    }
-    Ok(Some(Pending {
-        payload,
-        after: batch.cursor,
-        events,
-    }))
+        Err(events::Error::Gap { .. }) => {
+            journal::preflight(
+                &host.database,
+                host.agent.checkpoint().map_err(Error::Journal)?,
+                &host.config,
+            )?;
+            None
+        }
+        Err(e) => return Err(Error::Events(e)),
+    };
+    let batch = journal::batch(
+        &host.database,
+        cursor
+            .revision()
+            .checked_add(1)
+            .ok_or(Error::ResourceLimit)?,
+        &host.config,
+    )?;
+    let pending = journal::pending(&batch, source, payload)?;
+    host.agent.begin(batch).map_err(Error::Journal)?;
+    Ok(Some(pending))
 }
 fn run<O: MapOrder + Clone + Send + Sync + 'static>(
     mut host: host::Host<O>,
@@ -373,7 +381,7 @@ fn run<O: MapOrder + Clone + Send + Sync + 'static>(
             break;
         }
         if pending.is_none() {
-            match load(&source, &status.cursor, &host.config) {
+            match load(&mut host, &source, &status.cursor) {
                 Ok(Some(p)) => pending = Some(p),
                 Ok(None) => {
                     thread::sleep(host.config.poll);
@@ -387,12 +395,19 @@ fn run<O: MapOrder + Clone + Send + Sync + 'static>(
         }
         let p = pending.as_mut().expect("event batch");
         let Some(event) = p.events.front().cloned() else {
+            if let Err(error) = host.agent.advance().map_err(Error::Journal) {
+                status.failure = Some(error);
+                break;
+            }
             status.cursor = p.after.clone();
             pending = None;
             continue;
         };
         let observed = status.state.enabled || matches!(event, core::Event::Epoch { .. });
-        let result = status.state.apply(&event, &mut host);
+        let result = status
+            .state
+            .apply(&event, &mut host)
+            .and_then(|()| host.agent.finish(&status.state).map_err(Error::Journal));
         let error = result.err();
         retained = (observed || error.is_some() || !host.effects.is_empty()).then(|| Report {
             event,
@@ -404,7 +419,11 @@ fn run<O: MapOrder + Clone + Send + Sync + 'static>(
             status.failure = Some(error);
         } else {
             p.events.pop_front();
-            status.completed = status.completed.saturating_add(1);
+            status.completed = host
+                .agent
+                .checkpoint()
+                .expect("acknowledged checkpoint")
+                .completed;
         }
     }
     status.running = false;

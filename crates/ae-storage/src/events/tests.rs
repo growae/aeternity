@@ -98,3 +98,22 @@ fn waiters_wake_after_commit_or_database_close_without_owning_database() {
     });
     crate::Database::open(&dir.0, identity()).unwrap();
 }
+
+#[test]
+fn persisted_revision_binding_preserves_gap_and_foreign_cursor_checks() {
+    let t = Temp::new();
+    let db = crate::Database::open(&t.0, identity()).unwrap();
+    let old = db.events();
+    let before = old.cursor();
+    db.commit(plan(&db)).unwrap();
+    assert_eq!(old.at_revision(0).unwrap(), before);
+    assert_eq!(old.at_revision(2), Err(Error::Ahead));
+    drop(db);
+    let db = crate::Database::open(&t.0, identity()).unwrap();
+    let new = db.events();
+    let restored = new.at_revision(0).unwrap();
+    assert_ne!(restored, before);
+    assert!(matches!(new.after(&restored, 1), Err(Error::Gap { .. })));
+    assert_eq!(new.after(&before, 1).unwrap_err(), Error::WrongSource);
+    assert_eq!(new.at_revision(1).unwrap(), new.cursor());
+}

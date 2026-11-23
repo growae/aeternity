@@ -18,6 +18,7 @@ pub mod gc;
 pub mod hyperchain;
 pub mod parent_posts;
 pub mod peers;
+pub mod pinning_agent;
 pub mod pinning_children;
 pub mod policy;
 pub mod pool;
@@ -47,6 +48,7 @@ pub struct Database {
     peer_owner: Mutex<std::sync::Weak<()>>,
     parent_posts_owner: Mutex<std::sync::Weak<()>>,
     pinning_children_owner: Mutex<std::sync::Weak<()>>,
+    pinning_agent_owner: Mutex<std::sync::Weak<()>>,
     hyperchain_owner: Mutex<std::sync::Weak<()>>,
     snapshot_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
@@ -244,6 +246,7 @@ impl Database {
             peer_owner: Mutex::new(Default::default()),
             parent_posts_owner: Mutex::new(Default::default()),
             pinning_children_owner: Mutex::new(Default::default()),
+            pinning_agent_owner: Mutex::new(Default::default()),
             hyperchain_owner: Mutex::new(Default::default()),
             snapshot_owner: Mutex::new(Default::default()),
             events: events::Source::new(event_status, notifications.chain),
@@ -260,6 +263,7 @@ impl Database {
         result.validate_peers()?;
         result.validate_parent_posts()?;
         result.validate_pinning_children()?;
+        result.validate_pinning_agent()?;
         if upgrade {
             // Current readers retain legacy block and transaction formats.
             // Mark the new writer capability atomically only after validation;

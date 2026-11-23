@@ -123,6 +123,29 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Client<O> {
         self.check()?;
         Ok(self.0.accounts.contains_key(&who))
     }
+    pub(crate) fn pinning_binding(&self) -> Result<Hash256, Error> {
+        self.check()?;
+        let mut bytes = b"ae-pinning-agent-v1".to_vec();
+        fn append(bytes: &mut Vec<u8>, value: &[u8]) {
+            bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(value);
+        }
+        append(&mut bytes, &self.0.execution.identity.binding());
+        append(&mut bytes, &self.0.metadata.network);
+        bytes.push(match self.0.metadata.chain {
+            parent_pins::Chain::Aeternity => 0,
+            parent_pins::Chain::Dogecoin => 1,
+            parent_pins::Chain::Bitcoin => 2,
+        });
+        bytes.push(u8::from(self.0.metadata.signer == Signer::PresetKeys));
+        bytes.extend_from_slice(&self.0.execution.profile.contracts.election);
+        bytes.extend_from_slice(&(self.0.accounts.len() as u64).to_be_bytes());
+        for (child, parent) in &self.0.accounts {
+            bytes.extend_from_slice(&child.0);
+            bytes.extend_from_slice(&parent.0);
+        }
+        Ok(ae_crypto::blake2b_256(&bytes))
+    }
     pub(crate) fn mapped(&self, who: AccountPublicKey) -> bool {
         self.0.accounts.contains_key(&who)
     }

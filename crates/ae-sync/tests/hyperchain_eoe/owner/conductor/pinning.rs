@@ -154,6 +154,9 @@ fn configured(
     c
 }
 fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
+    configuration_at(node, &wallet.node)
+}
+fn configuration_at(node: &Node, endpoint: &parent_pins::Node) -> conductor::Config {
     let mut cfg = config(node, false);
     cfg.parent.pins = Some(conductor::PinConfig {
         journal: Default::default(),
@@ -163,7 +166,7 @@ fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
             .into_iter()
             .map(|n| (signer(n).public_key(), signer(99).public_key()))
             .collect(),
-        nodes: vec![wallet.node.clone()],
+        nodes: vec![endpoint.clone()],
         service: parent_pins::Config {
             request_timeout: Duration::from_secs(2),
             lookup_timeout: Duration::from_secs(3),
@@ -178,13 +181,19 @@ fn configuration(node: &Node, wallet: &Wallet) -> conductor::Config {
     cfg
 }
 fn drain(c: &mut Conductor<Otp26>, reports: &mut Vec<pinning::Report>) {
-    c.step(1_000_000, Instant::now()).unwrap();
-    while let Some(output) = c.take_output() {
-        if let Output::Pinning(report) = output {
-            assert!(report.error.is_none(), "{report:?}");
-            reports.push(*report);
+    for _ in 0..1024 {
+        let progress = c.step(1_000_000, Instant::now()).unwrap();
+        while let Some(output) = c.take_output() {
+            if let Output::Pinning(report) = output {
+                assert!(report.error.is_none(), "{report:?}");
+                reports.push(*report);
+            }
+        }
+        if progress != conductor::Progress::Output {
+            return;
         }
     }
+    panic!("diagnostic output did not quiesce");
 }
 fn settled(c: &mut Conductor<Otp26>, reports: &mut Vec<pinning::Report>, revision: u64) {
     let end = Instant::now() + Duration::from_secs(10);
@@ -575,7 +584,7 @@ async fn event_quota_and_rollback_fail_closed_without_replaying_external_effects
 }
 
 #[tokio::test]
-async fn event_gap_while_parent_post_is_pending_retains_receipt_and_stops_replay() {
+async fn event_gap_while_parent_post_is_pending_recovers_durable_events_without_reposting() {
     let node = Node::with_events(ae_storage::events::Config {
         records: 1,
         bytes: 16 << 20,
@@ -584,6 +593,7 @@ async fn event_gap_while_parent_post_is_pending_retains_receipt_and_stops_replay
     let mut c = configured(&node, &wallet, |_| {});
     let mut reports = vec![];
     prefix(&node, &mut c, &mut reports, 5).await;
+    let before = c.pinning().unwrap().status().cursor;
     wallet.mode.store(3, Ordering::Release);
     for (i, block) in node.blocks().into_iter().enumerate().skip(5).take(3) {
         within(
@@ -598,24 +608,27 @@ async fn event_gap_while_parent_post_is_pending_retains_receipt_and_stops_replay
             wait(|| wallet.posted.lock().unwrap().len() == 1);
         }
     }
-    wallet.mode.store(0, Ordering::Release);
-    let handle = c.pinning().unwrap();
-    wait(|| !handle.status().running);
     assert!(matches!(
-        handle.status().failure,
-        Some(pinning::Error::Events(
-            ae_storage::events::Error::Gap { .. }
-        ))
+        node.db.events().after(&before, 1),
+        Err(ae_storage::events::Error::Gap { .. })
     ));
+    wallet.mode.store(0, Ordering::Release);
+    // Observe the independently owned pinning worker directly. The conductor
+    // keeps its separate gap-failure policy and is shut down without stepping.
+    let head = node.db.view().unwrap().status().revision;
+    let handle = c.pinning().unwrap();
+    wait(|| handle.status().cursor.revision() == head || handle.status().failure.is_some());
+    assert!(c.pinning().unwrap().status().running);
+    assert!(c.pinning().unwrap().status().failure.is_none());
     assert_eq!(wallet.posted.lock().unwrap().len(), 1);
-    let mut stopped = shutdown(c);
-    let exit = stopped.pinning.take().unwrap().unwrap();
-    let reports: Vec<_> = exit.outputs.into_iter().chain(exit.retained).collect();
+    let exit = shutdown(c).pinning.take().unwrap().unwrap();
+    reports.extend(exit.outputs.into_iter().chain(exit.retained));
     assert!(reports.iter().flat_map(|r| &r.effects).any(|e| matches!(
         e,
         pinning::Effect::Parent(parent_pins::posting::Outcome::Submitted { .. })
     )));
     assert_eq!(children(&reports).len(), 1);
+    assert_eq!(wallet.requests.load(Ordering::Acquire), 3);
 }
 
 #[path = "pinning/utilities.rs"]
@@ -623,3 +636,6 @@ mod utilities;
 
 #[path = "pinning/children.rs"]
 mod durable_children;
+
+#[path = "pinning/checkpoint.rs"]
+mod checkpoint;

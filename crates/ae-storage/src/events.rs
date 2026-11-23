@@ -252,6 +252,18 @@ impl Reader {
     pub fn cursor(&self) -> Cursor {
         self.shared.cursor(self.shared.lock().info.status.revision)
     }
+    // Bind an explicitly persisted revision to this opened source. Reading it
+    // still reports retained-feed gaps; foreign Cursor values stay invalid.
+    pub fn at_revision(&self, revision: u64) -> Result<Cursor, Error> {
+        let state = self.shared.lock();
+        if let Some(failure) = state.info.failure {
+            return Err(Error::Failed(failure));
+        }
+        if revision > state.info.status.revision {
+            return Err(Error::Ahead);
+        }
+        Ok(self.shared.cursor(revision))
+    }
     pub fn oldest(&self) -> Cursor {
         self.shared.oldest(&self.shared.lock())
     }

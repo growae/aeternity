@@ -12,6 +12,8 @@ pub(super) struct Host<O> {
     pub shared: Arc<Shared>,
     pub effects: Vec<Effect>,
     pub children: children::Writer,
+    pub agent: durable::Writer,
+    pub database: Arc<Database>,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
     fn check(&self) -> Result<(), Error> {
@@ -67,15 +69,23 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
         }
         Ok(miner.max(protocol.minimum_gas_price().into()))
     }
-    fn child(
-        &mut self,
+    fn operation(&self) -> Result<durable::Operation, Error> {
+        self.agent
+            .checkpoint()
+            .map_err(Error::Journal)?
+            .pending
+            .as_ref()
+            .map(|p| p.operation.clone())
+            .ok_or(Error::State("missing pending event"))
+    }
+    fn child_intent(
+        &self,
         kind: ChildKind,
         leader: AccountPublicKey,
         hash: &[u8],
-    ) -> Result<(), Error> {
-        self.check()?;
+    ) -> Result<children::Intent, Error> {
         let metadata = self.parent.metadata().map_err(Error::Utilities)?;
-        let intent = children::Intent {
+        Ok(children::Intent {
             network: self.execution.profile.network.network_id().to_vec(),
             parent_chain: match metadata.chain {
                 parent_pins::Chain::Aeternity => children::Chain::Aeternity,
@@ -91,7 +101,67 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
                 }
             },
             parent_hash: hash.to_vec(),
+        })
+    }
+    fn child_decision(
+        &mut self,
+        kind: ChildKind,
+        leader: AccountPublicKey,
+        hash: &[u8],
+    ) -> Result<(), Error> {
+        let mut operation = self.operation()?;
+        let decision = match kind {
+            ChildKind::Note => &operation.note,
+            ChildKind::Proof => &operation.proof,
         };
+        if let Some(durable::ChildResult::Skipped(error)) = decision {
+            return Err(Error::Transaction(*error));
+        }
+        let id = self
+            .child_intent(kind, leader, hash)?
+            .id()
+            .map_err(|e| Error::Children(e.into()))?;
+        if let Some(durable::ChildResult::Completed(expected)) = decision
+            && *expected != id
+        {
+            return Err(Error::State("child intent changed"));
+        }
+        if matches!(decision, Some(durable::ChildResult::Completed(_)))
+            && self
+                .children
+                .get(&self.child_intent(kind, leader, hash)?)
+                .map_err(Error::Children)?
+                .is_none()
+        {
+            return Err(Error::State("missing completed child record"));
+        }
+        let result = self.child(kind, leader, hash);
+        let stored = match &result {
+            Ok(()) => Some(durable::ChildResult::Completed(id)),
+            Err(Error::Transaction(error @ (core::Error::Signing | core::Error::Encoding)))
+                if kind == ChildKind::Note =>
+            {
+                Some(durable::ChildResult::Skipped(*error))
+            }
+            _ => None,
+        };
+        if let Some(stored) = stored {
+            match kind {
+                ChildKind::Note => operation.note = Some(stored),
+                ChildKind::Proof => operation.proof = Some(stored),
+            }
+            self.agent.observe(operation).map_err(Error::Journal)?;
+        }
+        result
+    }
+    fn child(
+        &mut self,
+        kind: ChildKind,
+        leader: AccountPublicKey,
+        hash: &[u8],
+    ) -> Result<(), Error> {
+        self.check()?;
+        let intent = self.child_intent(kind, leader, hash)?;
         if let Some(record) = self.children.get(&intent).map_err(Error::Children)? {
             return self.recover_child(kind, record);
         }
@@ -227,20 +297,103 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
     }
     fn leader(&mut self, height: &BigInt) -> Result<AccountPublicKey, Error> {
         self.check()?;
-        self.producer
+        let mut operation = self.operation()?;
+        if let Some((leader, _)) = operation.leader {
+            return Ok(leader);
+        }
+        let leader = self
+            .producer
             .cached_leader(height)
             .map_err(Error::Source)?
-            .ok_or(Error::LeaderUnavailable)
+            .ok_or(Error::LeaderUnavailable)?;
+        operation.leader = Some((leader, self.parent.mapped(leader)));
+        self.agent.observe(operation).map_err(Error::Journal)?;
+        Ok(leader)
     }
     fn mapped(&self, leader: AccountPublicKey) -> bool {
-        self.parent.mapped(leader)
+        self.operation()
+            .ok()
+            .and_then(|o| o.leader)
+            .is_some_and(|(l, m)| l == leader && m)
     }
     fn post(&mut self, leader: AccountPublicKey) -> Result<Option<Vec<u8>>, Error> {
-        let fee = self.minimum_gas_price()?.mul_u64(1_000_000);
-        let post = self
-            .parent
-            .prepare_post(leader, 1.into(), fee)
-            .map_err(Error::Utilities)?;
+        self.check()?;
+        let mut operation = self.operation()?;
+        if let Some(result) = &operation.parent {
+            if let durable::ParentResult::Submitted { intent, .. }
+            | durable::ParentResult::Unknown { intent, .. } = result
+            {
+                let prepared = operation
+                    .post
+                    .as_ref()
+                    .ok_or(Error::State("missing parent request"))?;
+                if *intent
+                    != journal::parent_intent(
+                        &self.parent.metadata().map_err(Error::Utilities)?,
+                        prepared,
+                        65536,
+                    )?
+                {
+                    return Err(Error::State("parent intent changed"));
+                }
+                let record = self
+                    .database
+                    .parent_posts()
+                    .map_err(|e| Error::Journal(e.into()))?
+                    .get(*intent, 4 << 20)
+                    .map_err(|e| Error::Journal(e.into()))?
+                    .ok_or(Error::State("missing completed parent record"))?;
+                if let durable::ParentResult::Submitted { hash, .. } = result
+                    && record.response.as_ref() != Some(hash)
+                {
+                    return Err(Error::State("parent response changed"));
+                }
+            }
+            let hash = result.hash();
+            self.effects.push(Effect::RecoveredParent(result.clone()));
+            return Ok(hash);
+        }
+        let prepared = if let Some(post) = &operation.post {
+            post.clone()
+        } else {
+            let fee = self.minimum_gas_price()?.mul_u64(1_000_000);
+            let post = self
+                .parent
+                .prepare_post(leader, 1.into(), fee)
+                .map_err(Error::Utilities)?;
+            let checkpoint = self.agent.checkpoint().map_err(Error::Journal)?;
+            let pending = checkpoint
+                .pending
+                .as_ref()
+                .ok_or(Error::State("missing epoch"))?;
+            match pending.events.get(pending.next) {
+                Some(core::Event::Epoch { epoch, first, .. })
+                    if &post.pin.epoch + 1 == *epoch && &post.pin.height + 1 == *first => {}
+                _ => return Err(Error::StaleEpoch),
+            }
+            let post = durable::Post {
+                pin: post.pin,
+                account: post.account,
+                amount: post.amount,
+                fee: post.fee,
+            };
+            operation.post = Some(post.clone());
+            self.agent
+                .observe(operation.clone())
+                .map_err(Error::Journal)?;
+            post
+        };
+        let intent = journal::parent_intent(
+            &self.parent.metadata().map_err(Error::Utilities)?,
+            &prepared,
+            65536,
+        )?;
+        let post = parent_pins::posting::Post {
+            pin: prepared.pin,
+            account: prepared.account,
+            amount: prepared.amount,
+            fee: prepared.fee,
+        };
         let mut request = loop {
             self.check()?;
             match self.parent.service().post(post.clone()) {
@@ -260,7 +413,26 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
                     parent_pins::posting::Outcome::Submitted { hash, .. } => Some(hash.clone()),
                     _ => None,
                 };
+                operation.parent = Some(match &outcome {
+                    parent_pins::posting::Outcome::Submitted { hash, .. } => {
+                        durable::ParentResult::Submitted {
+                            hash: hash.clone(),
+                            intent,
+                        }
+                    }
+                    parent_pins::posting::Outcome::Unknown { reason, .. } => {
+                        durable::ParentResult::Unknown {
+                            intent,
+                            reason: format!("{reason:?}"),
+                        }
+                    }
+                    parent_pins::posting::Outcome::NotSubmitted(reason) => {
+                        durable::ParentResult::NotSubmitted(format!("{reason:?}"))
+                    }
+                });
+                let persisted = self.agent.observe(operation).map_err(Error::Journal);
                 self.effects.push(Effect::Parent(outcome));
+                persisted?;
                 return interrupted.map_or(Ok(hash), Err);
             }
             thread::sleep(self.config.poll);
@@ -269,6 +441,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
     fn included(&mut self, hash: Option<&[u8]>) -> Result<bool, Error> {
         self.check()?;
         let Some(hash) = hash else { return Ok(false) };
+        let mut operation = self.operation()?;
+        if let Some(included) = operation.included {
+            return Ok(included);
+        }
         let mut request = loop {
             self.check()?;
             match self.parent.service().request(hash) {
@@ -280,17 +456,20 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> core::Host for Host<O> {
         loop {
             self.check()?;
             if let Some(result) = request.try_result() {
-                return result
+                let included = result
                     .map(|p| p.is_some_and(|p| p.parent_height != (-1).into()))
-                    .map_err(Error::Parent);
+                    .map_err(Error::Parent)?;
+                operation.included = Some(included);
+                self.agent.observe(operation).map_err(Error::Journal)?;
+                return Ok(included);
             }
             thread::sleep(self.config.poll);
         }
     }
     fn note(&mut self, leader: AccountPublicKey, hash: &[u8]) -> Result<(), Error> {
-        self.child(ChildKind::Note, leader, hash)
+        self.child_decision(ChildKind::Note, leader, hash)
     }
     fn proof(&mut self, leader: AccountPublicKey, hash: &[u8]) -> Result<(), Error> {
-        self.child(ChildKind::Proof, leader, hash)
+        self.child_decision(ChildKind::Proof, leader, hash)
     }
 }

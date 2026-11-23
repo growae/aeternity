@@ -22,7 +22,7 @@ fn records(node: &Node) -> Vec<journal::Record> {
         .records(Default::default())
         .unwrap()
 }
-async fn import_until_failure(node: &Node, c: &mut Conductor<Otp26>) -> pinning::Error {
+pub(super) async fn import_until_failure(node: &Node, c: &mut Conductor<Otp26>) -> pinning::Error {
     for block in node.blocks().into_iter().skip(5).take(4) {
         within(
             c.importer()
