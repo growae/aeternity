@@ -1,0 +1,33 @@
+[package]
+name = "ae-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ae-sync.workspace = true
+ae-storage.workspace = true
+ae-p2p.workspace = true
+ae-vm-fate.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ae-chain.workspace = true
+ae-codec.workspace = true
+ae-crypto.workspace = true
+ae-execution.workspace = true
+ae-hyperchain.workspace = true
+ae-mempool.workspace = true
+ae-protocol.workspace = true
+ae-state.workspace = true
+ae-trie.workspace = true
+ae-tx.workspace = true
+ae-types.workspace = true
+ae-vm-aevm.workspace = true
+hex.workspace = true
+num-bigint.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

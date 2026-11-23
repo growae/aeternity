@@ -241,6 +241,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<O> {
             thread: Some(thread),
         })
     }
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
     pub fn handle(&self) -> Handle {
         self.handle.clone()
     }

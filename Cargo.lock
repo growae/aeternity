@@ -124,6 +124,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-node"
+version = "0.1.0"
+dependencies = [
+ "ae-chain",
+ "ae-codec",
+ "ae-crypto",
+ "ae-execution",
+ "ae-hyperchain",
+ "ae-mempool",
+ "ae-p2p",
+ "ae-protocol",
+ "ae-state",
+ "ae-storage",
+ "ae-sync",
+ "ae-trie",
+ "ae-tx",
+ "ae-types",
+ "ae-vm-aevm",
+ "ae-vm-fate",
+ "hex",
+ "num-bigint",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ae-p2p"
 version = "0.1.0"
 dependencies = [

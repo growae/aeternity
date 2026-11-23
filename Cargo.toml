@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie", "crates/ae-state", "crates/ae-tx", "crates/ae-consensus", "crates/ae-execution", "crates/ae-vm-aevm", "crates/ae-vm-fate", "crates/ae-mempool", "crates/ae-hyperchain", "crates/ae-chain", "crates/ae-storage", "crates/ae-p2p", "crates/ae-sync"]
+members = ["crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie", "crates/ae-state", "crates/ae-tx", "crates/ae-consensus", "crates/ae-execution", "crates/ae-vm-aevm", "crates/ae-vm-fate", "crates/ae-mempool", "crates/ae-hyperchain", "crates/ae-chain", "crates/ae-storage", "crates/ae-p2p", "crates/ae-sync", "crates/ae-node"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
+ae-sync = { path = "crates/ae-sync" }
 aes = { version = "=0.8.4", features = ["zeroize"] }
 tokio = { version = "=1.49.0", default-features = false, features = ["rt", "net", "sync", "time", "macros"] }
 snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-getrandom", "use-curve25519", "use-chacha20poly1305", "use-blake2"] }
