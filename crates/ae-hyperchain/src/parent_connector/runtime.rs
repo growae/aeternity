@@ -178,6 +178,11 @@ impl Client {
             self.control.retry.store(true, Ordering::Release);
         }
     }
+    // This handle always names one worker generation. Accepted fetches are
+    // cancelled with that worker; they are never forwarded to its replacement.
+    pub fn request_stop(&self) {
+        self.control.stop.store(true, Ordering::Release);
+    }
     pub fn snapshot(&self) -> Snapshot {
         let mut snapshot = self
             .control
@@ -185,7 +190,9 @@ impl Client {
             .lock()
             .expect("parent connector state")
             .clone();
-        if self.control.stop.load(Ordering::Acquire) {
+        if self.control.stop.load(Ordering::Acquire)
+            && !matches!(snapshot.health, Health::WorkStopped(_))
+        {
             snapshot.health = Health::Stopped;
         }
         snapshot
@@ -194,6 +201,11 @@ impl Client {
 pub struct Runtime {
     client: Client,
     worker: Option<JoinHandle<()>>,
+}
+#[derive(Debug, Clone)]
+pub struct Retired {
+    pub snapshot: Snapshot,
+    pub panicked: bool,
 }
 impl Runtime {
     pub fn spawn(
@@ -246,6 +258,21 @@ impl Runtime {
     }
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub fn replacement_pending(&self) -> bool {
+        !matches!(self.client.snapshot().health, Health::WorkStopped(_))
+            && (self.client.control.stop.load(Ordering::Acquire) || self.is_finished())
+    }
+    pub fn retire(self) -> Retired {
+        let client = self.client();
+        let panicked = self.shutdown().is_err();
+        Retired {
+            snapshot: client.snapshot(),
+            panicked,
+        }
     }
     pub fn shutdown(mut self) -> thread::Result<()> {
         self.client.control.stop.store(true, Ordering::Release);
@@ -324,6 +351,9 @@ fn status(control: &Control, health: Health) {
     control.state.lock().expect("parent connector state").health = health;
 }
 fn wait_retry(control: &Control, error: Error) -> bool {
+    if error == Error::Fetch(fetch::Error::Stopped) && control.stop.load(Ordering::Acquire) {
+        return false;
+    }
     status(control, Health::WorkStopped(error));
     while !control.stop.load(Ordering::Acquire) {
         let mut state = control.state.lock().expect("parent connector state");
@@ -430,5 +460,10 @@ fn run(
         }
     }
     control.stop.store(true, Ordering::Release);
-    status(&control, Health::Stopped);
+    // Retain an explicit work-stop even after cancellation, so stopping a
+    // failed worker cannot turn its unresolved condition into a normal exit.
+    let mut state = control.state.lock().expect("parent connector state");
+    if !matches!(state.health, Health::WorkStopped(_)) {
+        state.health = Health::Stopped;
+    }
 }

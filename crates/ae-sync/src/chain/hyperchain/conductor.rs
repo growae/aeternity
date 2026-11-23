@@ -80,7 +80,7 @@ pub enum Error {
 #[derive(Debug)]
 pub enum Output {
     Pinning(Box<pinning::Report>),
-    PinningSupervision(supervision::Notice),
+    ConsensusSupervision(supervision::Notice),
     Attempt(production::Completed),
     Stopped(Box<production::Stopped>),
     Rejected {
@@ -96,7 +96,7 @@ impl Output {
     pub fn poll_pinning(&mut self) {
         match self {
             Self::Pinning(report) => report.poll_children(),
-            Self::PinningSupervision(notice) => notice.poll_children(),
+            Self::ConsensusSupervision(notice) => notice.poll_children(),
             _ => (),
         }
     }
@@ -154,8 +154,8 @@ pub struct TopDelivery {
     pub after: events::Cursor,
     pub receipt: Option<cache::Call>,
 }
-// These children belong to one generation. Public clients can share admission
-// and gossip, but cannot replace individual producer dependencies in this owner.
+// Public clients name fixed child generations. Only this owner can publish
+// replacement connector routes or construct a new pinning worker.
 pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     owner: Option<owner::Owner>,
     importer: Arc<chain::Importer<O>>,
@@ -288,7 +288,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         )
         .map_err(Error::Source)?;
         let targets = targets(selected.clone(), &execution)?;
-        // Build both directions together. No replaceable connector link escapes.
+        // Build both directions together. Only supervision owns the connector link.
         let agent = config.parent.pins.as_ref().and_then(|p| p.agent.clone());
         let pin_execution = config.parent.pins.as_ref().map(|_| execution.clone());
         let metadata = config.parent.pins.as_ref().map(|p| {
@@ -324,7 +324,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             config.parent.cache_runtime,
         )
         .map_err(|e| Error::Parent(e.to_string()))?;
-        let connector = connector::Runtime::spawn(
+        let (connector, connector_factory) = supervision::ConnectorFactory::start(
             backend,
             config.parent.hosts,
             config.parent.seed,
@@ -335,7 +335,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let parent = mailbox
             .spawn(
                 targets,
-                cache::ConnectorLink::new(connector.client()),
+                connector_factory.link(),
                 execution.profile.order.clone(),
             )
             .map_err(|e| Error::Parent(e.to_string()))?;
@@ -418,7 +418,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .map_or((None, None), |(child, factory)| {
                 (Some(child), Some(factory))
             });
-        let consensus = supervision::Supervisor::new(factory, notices);
+        let consensus = supervision::Supervisor::new(factory, connector_factory, notices);
         let consensus_status = consensus.status();
         Ok(Self {
             owner: Some(owner),
@@ -494,7 +494,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         self.parent.as_ref().expect("parent").client()
     }
     pub fn connector(&self) -> connector::Client {
-        self.connector.as_ref().expect("connector").client()
+        self.consensus.connector()
     }
     pub fn parent_pins(&self) -> Option<crate::parent_pins::Client> {
         self.pins.as_ref().map(crate::parent_pins::Service::client)
@@ -579,13 +579,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             return Err(Error::Parent(format!("cache: {health:?}")));
         }
         let health = self.connector().snapshot().health;
-        if matches!(
-            health,
-            connector::Health::Stopped | connector::Health::WorkStopped(_)
-        ) {
+        if matches!(health, connector::Health::WorkStopped(_)) {
             return Err(Error::Parent(format!("connector: {health:?}")));
         }
-        let supervised = self.consensus.poll(&mut self.pinning, now);
+        let supervised = self
+            .consensus
+            .poll(&mut self.pinning, &mut self.connector, now);
         self.status.consensus = self.consensus.status();
         supervised?;
         // Retained outputs apply backpressure to production, not ownership:
@@ -595,7 +594,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         if let Some(notice) = self.consensus.take_notice() {
             self.status.consensus = self.consensus.status();
-            self.pending = Some(Output::PinningSupervision(notice));
+            self.pending = Some(Output::ConsensusSupervision(notice));
             return Ok(Progress::Output);
         }
         if let Some(agent) = &self.pinning {
@@ -852,7 +851,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             .expect("parent")
             .shutdown()
             .map_err(|_| "parent cache panicked".to_string());
-        let connector_joined = self.connector.take().expect("connector").shutdown().is_ok();
+        let connector_joined = self.connector.take().is_none_or(|c| c.shutdown().is_ok());
         let pins_joined = self.pins.take().is_none_or(|pins| pins.shutdown().is_ok());
         let resilience = self
             .resilience_worker

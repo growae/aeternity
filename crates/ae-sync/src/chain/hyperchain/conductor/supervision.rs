@@ -7,12 +7,30 @@ use crate::runtime::restart::Window;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
     pub pinning_generation: u64,
+    pub connector_generation: u64,
     pub attempts: u64,
     pub restarting: bool,
+    pub pinning_restarting: bool,
+    pub connector_restarting: bool,
     pub pending_notices: usize,
 }
+
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug)]
 pub enum Notice {
+    ConnectorRetired {
+        generation: u64,
+        child: connector::Retired,
+    },
+    ConnectorRestarted {
+        generation: u64,
+    },
+    ConnectorStartFailed {
+        attempt: u64,
+        error: String,
+    },
     Retired {
         generation: u64,
         child: Box<pinning::Retired>,
@@ -36,8 +54,74 @@ pub struct Shutdown {
     pub status: Status,
     pub notices: Vec<Notice>,
 }
+pub(super) struct ConnectorFactory {
+    // Fields drop in order: discard the callable's backend reference before
+    // releasing its final owned reference on the joined resource-owner thread.
+    spawn: Box<dyn Fn() -> std::io::Result<connector::Runtime> + Send + Sync>,
+    link: cache::ConnectorLink,
+    client: connector::Client,
+    _backend: BackendOwner,
+}
+struct BackendOwner {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl BackendOwner {
+    fn start(backend: Arc<impl Backend>) -> std::io::Result<Self> {
+        let (release, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("ae-parent-backend-owner".into())
+            .spawn(move || {
+                let _ = wait.recv();
+                // HTTP backends own Tokio runtimes. Their final destructor
+                // must run outside an async context, including worker gaps.
+                drop(backend);
+            })?;
+        Ok(Self {
+            release: Some(release),
+            thread: Some(thread),
+        })
+    }
+}
+impl Drop for BackendOwner {
+    fn drop(&mut self) {
+        self.release.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+impl ConnectorFactory {
+    pub(super) fn start(
+        backend: Arc<impl Backend>,
+        hosts: usize,
+        seed: [u8; 16],
+        sink: cache::PostSink,
+        config: connector::Config,
+    ) -> std::io::Result<(connector::Runtime, Self)> {
+        let owner = BackendOwner::start(backend.clone())?;
+        let spawn = Box::new(move || {
+            connector::Runtime::spawn(backend.clone(), hosts, seed, sink.clone(), config)
+        });
+        let child = spawn()?;
+        let client = child.client();
+        Ok((
+            child,
+            Self {
+                spawn,
+                link: cache::ConnectorLink::new(client.clone()),
+                client,
+                _backend: owner,
+            },
+        ))
+    }
+    pub(super) fn link(&self) -> cache::ConnectorLink {
+        self.link.clone()
+    }
+}
 pub(super) struct Supervisor<O> {
     factory: Option<pinning::Factory<O>>,
+    connector: ConnectorFactory,
     budget: Window<3, 30>,
     origin: Option<Instant>,
     status: Status,
@@ -45,13 +129,19 @@ pub(super) struct Supervisor<O> {
     limit: usize,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
-    pub(super) fn new(factory: Option<pinning::Factory<O>>, limit: usize) -> Self {
+    pub(super) fn new(
+        factory: Option<pinning::Factory<O>>,
+        connector: ConnectorFactory,
+        limit: usize,
+    ) -> Self {
         Self {
             status: Status {
                 pinning_generation: u64::from(factory.is_some()),
+                connector_generation: 1,
                 ..Default::default()
             },
             factory,
+            connector,
             budget: Default::default(),
             origin: None,
             notices: VecDeque::new(),
@@ -60,21 +150,107 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
     }
     pub(super) fn status(&self) -> Status {
         Status {
+            restarting: self.status.pinning_restarting || self.status.connector_restarting,
             pending_notices: self.notices.len(),
             ..self.status.clone()
         }
     }
+    // During a replacement gap, callers receive the closed old generation.
+    // Once published, new callers receive the new one; old clones never move.
+    pub(super) fn connector(&self) -> connector::Client {
+        self.connector.client.clone()
+    }
     pub(super) fn poll(
         &mut self,
         child: &mut Option<pinning::Service>,
+        connector: &mut Option<connector::Runtime>,
         now: Instant,
     ) -> Result<(), Error> {
-        let Some(factory) = &self.factory else {
-            return Ok(());
-        };
         let origin = *self.origin.get_or_insert(now);
+        let second = now.saturating_duration_since(origin).as_secs();
+        self.poll_connector(connector, second)?;
+        self.poll_pinning(child, second)
+    }
+    fn record(&mut self, second: u64) -> Result<(), Error> {
+        self.status.attempts = self
+            .status
+            .attempts
+            .checked_add(1)
+            .ok_or(Error::Configuration)?;
+        if self.budget.record(second) {
+            Ok(())
+        } else {
+            Err(Error::ConsensusRestartLimit)
+        }
+    }
+    fn poll_connector(
+        &mut self,
+        child: &mut Option<connector::Runtime>,
+        second: u64,
+    ) -> Result<(), Error> {
         if let Some(service) = child.as_ref() {
-            self.status.restarting = service.replacement_pending();
+            self.status.connector_restarting = service.replacement_pending();
+        }
+        if self.notices.len() >= self.limit {
+            return Ok(());
+        }
+        if let Some(service) = child
+            && service.is_finished()
+            && service.replacement_pending()
+        {
+            // Detach routing before joining. Requests accepted by the old
+            // mailbox are completed/closed there and are not submitted again.
+            self.connector.link.replace(None);
+            let retired = child.take().expect("finished connector").retire();
+            self.notices.push_back(Notice::ConnectorRetired {
+                generation: self.status.connector_generation,
+                child: retired,
+            });
+            self.status.connector_restarting = true;
+        }
+        if child.is_some() || !self.status.connector_restarting || self.notices.len() >= self.limit
+        {
+            return Ok(());
+        }
+        self.record(second)?;
+        let replacement =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.connector.spawn)()))
+                .map_err(|_| "parent connector constructor panicked".to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+        match replacement {
+            Ok(service) => {
+                self.status.connector_generation = self
+                    .status
+                    .connector_generation
+                    .checked_add(1)
+                    .ok_or(Error::Configuration)?;
+                self.connector.client = service.client();
+                self.connector
+                    .link
+                    .replace(Some(self.connector.client.clone()));
+                *child = Some(service);
+                self.status.connector_restarting = false;
+                self.notices.push_back(Notice::ConnectorRestarted {
+                    generation: self.status.connector_generation,
+                });
+            }
+            Err(error) => self.notices.push_back(Notice::ConnectorStartFailed {
+                attempt: self.status.attempts,
+                error,
+            }),
+        }
+        Ok(())
+    }
+    fn poll_pinning(
+        &mut self,
+        child: &mut Option<pinning::Service>,
+        second: u64,
+    ) -> Result<(), Error> {
+        if self.factory.is_none() {
+            return Ok(());
+        }
+        if let Some(service) = child.as_ref() {
+            self.status.pinning_restarting = service.replacement_pending();
         }
         if self.notices.len() >= self.limit {
             return Ok(());
@@ -88,22 +264,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
                 generation: self.status.pinning_generation,
                 child: Box::new(retired),
             });
-            self.status.restarting = true;
+            self.status.pinning_restarting = true;
         }
-        if child.is_some() || !self.status.restarting || self.notices.len() >= self.limit {
+        if child.is_some() || !self.status.pinning_restarting || self.notices.len() >= self.limit {
             return Ok(());
         }
-        self.status.attempts = self
-            .status
-            .attempts
-            .checked_add(1)
-            .ok_or(Error::Configuration)?;
-        if !self
-            .budget
-            .record(now.saturating_duration_since(origin).as_secs())
-        {
-            return Err(Error::ConsensusRestartLimit);
-        }
+        self.record(second)?;
+        let factory = self.factory.as_ref().expect("pinning factory");
         let replacement =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory.spawn()))
                 .unwrap_or(Err(pinning::Error::Worker));
@@ -115,7 +282,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
                     .checked_add(1)
                     .ok_or(Error::Configuration)?;
                 *child = Some(service);
-                self.status.restarting = false;
+                self.status.pinning_restarting = false;
                 self.notices.push_back(Notice::Restarted {
                     generation: self.status.pinning_generation,
                 });
@@ -137,6 +304,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Supervisor<O> {
             notice.poll_children();
         }
         self.factory.take();
+        self.connector.link.replace(None);
         Shutdown { status, notices }
     }
 }

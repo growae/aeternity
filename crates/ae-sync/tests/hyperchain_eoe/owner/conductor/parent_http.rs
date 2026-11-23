@@ -171,6 +171,44 @@ async fn live_http_parent_drives_production_and_cold_passive_imports_across_epoc
             k.common.state_hash
         );
     }
+    // Restart the real HTTP connector after production, then use its retained
+    // backend runtimes for a new network read before cold passive root checks.
+    let old = c.connector();
+    let importer = c.importer();
+    old.request_stop();
+    let mut notices = vec![];
+    while c.status().consensus.connector_generation < 2 || c.status().consensus.pending_notices > 0
+    {
+        c.step(wall, clock).unwrap();
+        if let Some(Output::ConsensusSupervision(n)) = c.take_output() {
+            notices.push(n);
+        }
+        assert!(Instant::now() < end, "{:?}", c.status());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(
+        notices.as_slice(),
+        [
+            conductor::supervision::Notice::ConnectorRetired { generation: 1, .. },
+            conductor::supervision::Notice::ConnectorRestarted { generation: 2 }
+        ]
+    ));
+    assert!(Arc::ptr_eq(&importer, &c.importer()));
+    assert_eq!(old.check_top(), Err(connector::Error::Closed));
+    assert!(matches!(
+        c.connector().fetch(ae_hyperchain::parent_connector::fetch::Query::Height(42.into())).unwrap(),
+        ae_hyperchain::parent_connector::Consensus::Block { block, .. } if block.height == 42.into()
+    ));
+    assert_eq!(
+        parent
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| **h == 42)
+            .count(),
+        1
+    );
     let report = shutdown(c);
     assert!(report.owner.errors.is_empty());
     let view = node.db.view().unwrap();

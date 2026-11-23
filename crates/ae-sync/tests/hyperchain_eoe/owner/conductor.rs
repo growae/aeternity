@@ -1,5 +1,7 @@
 #[path = "conductor/connections.rs"]
 mod connections;
+#[path = "conductor/connector_supervision.rs"]
+mod connector_supervision;
 #[path = "conductor/controls.rs"]
 mod controls;
 #[path = "conductor/parent_http.rs"]

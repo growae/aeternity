@@ -604,3 +604,49 @@ fn shutdown_cancels_and_joins_every_fetch_worker() {
     assert_eq!(c.snapshot().seed, [0; 16]);
     assert_eq!(c.snapshot().health, Health::Stopped);
 }
+
+#[test]
+fn retirement_preserves_operational_failure_after_stop_and_does_not_allow_restart() {
+    let backend = Script::new(plans(&sample_block(), 0));
+    let sink = Collector::new();
+    sink.fault.store(true, Ordering::SeqCst);
+    let runtime = Runtime::spawn(backend.clone(), 3, [7; 16], sink, config()).unwrap();
+    let client = runtime.client();
+    client.check_top().unwrap();
+    let failure = Health::WorkStopped(Error::Sink(SinkError::ResourceLimit));
+    wait(|| client.snapshot().health == failure);
+    assert!(!runtime.replacement_pending());
+    client.request_stop();
+    wait(|| runtime.is_finished());
+    client.retry();
+    assert!(!runtime.replacement_pending());
+    let retired = runtime.retire();
+    assert!(!retired.panicked);
+    assert_eq!(retired.snapshot.health, failure);
+    assert_eq!(retired.snapshot.seed, [7; 16]);
+    assert_eq!(backend.calls.lock().unwrap().len(), 3);
+    assert_eq!(client.check_top(), Err(Error::Closed));
+}
+
+#[test]
+fn panicked_connector_is_joined_and_its_old_client_stays_closed() {
+    struct PanickingSink;
+    impl Sink for PanickingSink {
+        fn post(&mut self, _: &ParentBlock) -> Result<(), SinkError> {
+            panic!("controlled connector worker panic")
+        }
+    }
+    let backend = Script::new(plans(&sample_block(), 0));
+    let runtime = Runtime::spawn(backend.clone(), 3, [5; 16], PanickingSink, config()).unwrap();
+    let client = runtime.client();
+    client.check_top().unwrap();
+    wait(|| runtime.is_finished());
+    assert!(runtime.replacement_pending());
+    let retired = runtime.retire();
+    assert!(retired.panicked);
+    assert_eq!(retired.snapshot.health, Health::Stopped);
+    assert_eq!(retired.snapshot.seed, [5; 16]);
+    assert!(retired.snapshot.top.is_none());
+    assert_eq!(backend.active.load(Ordering::SeqCst), 0);
+    assert_eq!(client.check_top(), Err(Error::Closed));
+}

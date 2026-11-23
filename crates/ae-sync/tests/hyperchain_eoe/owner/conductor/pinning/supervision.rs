@@ -33,7 +33,7 @@ fn tick(
     let progress = c.step(1_000_000, now)?;
     while let Some(output) = c.take_output() {
         match output {
-            Output::PinningSupervision(n) => notices.push(n),
+            Output::ConsensusSupervision(n) => notices.push(n),
             Output::Pinning(r) => {
                 assert!(
                     r.error.is_none() || r.error == Some(pinning::Error::Cancelled),
@@ -210,6 +210,84 @@ fn counters_from_native_limit() -> u64 {
     native_generations(&native("pinning_limit"), "started").len() as u64
 }
 #[tokio::test]
+async fn connector_and_pinning_replacements_share_one_consensus_restart_budget() {
+    for last in [30, 31] {
+        let node = Node::new(0);
+        let wallet = Wallet::new();
+        let mut c = configured(&node, &wallet, |_| {});
+        let origin = Instant::now();
+        let mut notices = vec![];
+        tick(&mut c, origin, &mut notices, &mut vec![]).unwrap();
+        for (i, second) in [0, 10, 20, last].into_iter().enumerate() {
+            let connector = i % 2 == 0;
+            if connector {
+                c.connector().request_stop();
+            } else {
+                c.pinning().unwrap().request_stop();
+            }
+            let end = Instant::now() + Duration::from_secs(5);
+            let now = origin + Duration::from_secs(second);
+            loop {
+                let result = tick(&mut c, now, &mut notices, &mut vec![]);
+                if last == 30 && i == 3 {
+                    if result == Err(conductor::Error::ConsensusRestartLimit) {
+                        break;
+                    }
+                    result.unwrap();
+                } else {
+                    result.unwrap();
+                    if c.status().consensus.attempts == i as u64 + 1
+                        && !c.status().consensus.restarting
+                    {
+                        break;
+                    }
+                }
+                assert!(Instant::now() < end, "{:?}", c.status());
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(c.status().consensus.attempts, 4);
+        assert_eq!(c.status().consensus.connector_generation, 3);
+        assert_eq!(
+            c.status().consensus.pinning_generation,
+            if last == 30 { 2 } else { 3 }
+        );
+        assert_eq!(
+            c.status().failure,
+            (last == 30).then_some(conductor::Error::ConsensusRestartLimit)
+        );
+        if last == 30 {
+            let native: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../fixtures/erlang_connector_supervision.json"
+            ))
+            .unwrap();
+            let row = native["lifecycle"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["kind"] == "shared_limit")
+                .unwrap();
+            for (child, count) in [
+                ("connector", c.status().consensus.connector_generation),
+                ("pinning", c.status().consensus.pinning_generation),
+                ("cache", 1),
+            ] {
+                assert_eq!(
+                    row["trace"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|e| e["event"] == "started" && e["child"] == child)
+                        .count() as u64,
+                    count
+                );
+            }
+        }
+        assert_eq!(wallet.requests.load(Ordering::Acquire), 0);
+        drop(shutdown(c));
+    }
+}
+#[tokio::test]
 async fn failed_replacement_is_reported_counts_against_budget_and_can_retry_after_release() {
     let node = Node::new(0);
     let wallet = Wallet::new();
@@ -356,7 +434,7 @@ async fn bounded_retirement_notices_delay_replacement_without_losing_owners_or_r
     }
     assert!(matches!(
         c.output(),
-        Some(Output::PinningSupervision(Notice::Retired {
+        Some(Output::ConsensusSupervision(Notice::Retired {
             generation: 1,
             ..
         }))
@@ -459,7 +537,7 @@ async fn dedicated_runtime_replaces_only_pinning_and_continues_actual_proof_admi
         exit.consensus
             .notices
             .into_iter()
-            .map(Output::PinningSupervision),
+            .map(Output::ConsensusSupervision),
     );
     let child = exit.pinning.take().unwrap().unwrap();
     outputs.extend(
@@ -471,7 +549,7 @@ async fn dedicated_runtime_replaces_only_pinning_and_continues_actual_proof_admi
     );
     assert!(outputs.iter().any(|o| matches!(
         o,
-        Output::PinningSupervision(Notice::Restarted { generation: 2 })
+        Output::ConsensusSupervision(Notice::Restarted { generation: 2 })
     )));
     assert_eq!(
         outputs
