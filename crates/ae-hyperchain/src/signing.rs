@@ -22,6 +22,14 @@ pub struct Keys {
     candidate: Option<AccountPublicKey>,
 }
 impl Keys {
+    // A restarted preset-key process retains configured material but starts
+    // without an active or candidate selection, as aec_preset_keys:init/1 does.
+    pub fn fresh(&self) -> Self {
+        Self::from_shared(self.keys.clone())
+    }
+    pub fn public_keys(&self) -> impl ExactSizeIterator<Item = AccountPublicKey> + '_ {
+        self.keys.keys().copied()
+    }
     pub(crate) fn from_shared(keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>) -> Self {
         Self {
             keys,

@@ -24,6 +24,7 @@ pub mod parent_pins;
 pub mod peer;
 pub mod pool;
 pub mod pool_gc;
+pub mod preset_keys;
 pub mod registry;
 pub mod resolver;
 pub mod routing;

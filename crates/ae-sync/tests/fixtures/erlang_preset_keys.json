@@ -1,0 +1,549 @@
+[
+  {
+    "owned_seeds": [],
+    "steps": [
+      {
+        "name": "ready",
+        "result": {
+          "atom": "true"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "missing",
+        "result": {
+          "atom": "false"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "random_empty",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "key_not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "unknown_promote",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "key_not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "missing_sign",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      }
+    ]
+  },
+  {
+    "owned_seeds": [
+      1
+    ],
+    "steps": [
+      {
+        "name": "random_single",
+        "result": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "promote_single",
+        "result": {
+          "atom": "ok"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      }
+    ]
+  },
+  {
+    "owned_seeds": [
+      1,
+      2
+    ],
+    "steps": [
+      {
+        "name": "known",
+        "result": {
+          "atom": "true"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "explicit_without_active",
+        "result": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "09870b9f74358ad089f9912b020cd05ff019367b97461aa9adb14da73c26c2fc756ad1871fce4d039721e1d11b61adac824e518d3ed3cbc0936111dec4064403"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "set_first",
+        "result": {
+          "atom": "ok"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "unknown_set_preserves",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "key_not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "promote_other",
+        "result": {
+          "atom": "ok"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "explicit_not_active",
+        "result": {
+          "tuple": [
+            {
+              "atom": "ok"
+            },
+            {
+              "bytes": "b37e0ff9f884985e47566f6a74da6da668ca6a891cf76e851b5acecd7eb2ef55034e365063aa041e833e7fd7894013020294119cd1532d410f0f12edae82e001"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "new_candidate_preserves_active",
+        "result": {
+          "atom": "ok"
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "ok"
+              },
+              {
+                "bytes": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "unknown_promotion_clears",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "key_not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      },
+      {
+        "name": "unknown_sign",
+        "result": {
+          "tuple": [
+            {
+              "atom": "error"
+            },
+            {
+              "atom": "not_found"
+            }
+          ]
+        },
+        "state": {
+          "active": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_active"
+              }
+            ]
+          },
+          "candidate": {
+            "tuple": [
+              {
+                "atom": "error"
+              },
+              {
+                "atom": "no_candidate"
+              }
+            ]
+          },
+          "ready": true
+        }
+      }
+    ]
+  }
+]
