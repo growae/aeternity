@@ -59,7 +59,10 @@ fn retirement_preserves_channel_pending_send_outbox_and_unsubmitted_receipts_in_
         .chain(retired.outputs)
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    assert_ne!(retired.state.unwrap().pool_epoch, 99.into());
+    assert_ne!(
+        retired.state.unwrap().pool.as_ref().unwrap().epoch,
+        99.into()
+    );
     assert_eq!(call.try_reply(), Err(runtime::CallError::Closed));
     assert!(call.replacement_pending());
     assert_eq!(client.outstanding(), 1);
@@ -136,8 +139,8 @@ fn panic_retains_committed_effects_known_unread_reply_and_unknown_accepted_calls
     assert_eq!(known.wait(Duration::ZERO), Ok(Ok(runtime::Applied::Unit)));
     assert_eq!(queued.try_reply(), Err(runtime::CallError::Closed));
     let state = retired.state.unwrap();
-    assert_eq!(state.pool_epoch, 7.into());
-    assert_eq!(state.pool_entries, 1);
+    assert_eq!(state.pool.as_ref().unwrap().epoch, 7.into());
+    assert_eq!(state.pool.as_ref().unwrap().entries, 1);
     assert_eq!(retired.outputs.len(), 1);
     assert!(matches!(
         &retired.outputs[0],

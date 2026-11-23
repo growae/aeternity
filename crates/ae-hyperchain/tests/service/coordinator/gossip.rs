@@ -16,7 +16,7 @@ fn publications(c: &mut Coordinator, events: &mut Vec<Vec<u8>>) {
 }
 fn snapshot(c: &Coordinator, cache: &GossipCache, events: &[Vec<u8>], row: &J) {
     assert_eq!(
-        c.host().pool().len(),
+        c.host().pool().unwrap().len(),
         row["size"].as_u64().unwrap() as usize
     );
     let mut events = events.to_vec();
@@ -155,7 +155,7 @@ fn operational_pool_outbox_and_late_routing_failures_do_not_cache_failed_admissi
         let tx = vote(Mode::Fork, VoteType::Vote, 2, false);
         assert!(c.admit(tx.clone(), hc_votes::Event::Received).is_err());
         assert_eq!(cache.stats().unwrap(), Default::default());
-        assert!(c.host().pool().is_empty());
+        assert!(c.host().pool().unwrap().is_empty());
         assert_eq!(c.queued_events(), 0);
         assert!(c.pop_output().is_none());
         // Restore the failed local capacity. A fresh coordinator is needed for
@@ -176,7 +176,7 @@ fn operational_pool_outbox_and_late_routing_failures_do_not_cache_failed_admissi
         ));
         assert_eq!(cache.stats().unwrap().miss, 1.into());
         assert_eq!(cache.stats().unwrap().hit, 0.into());
-        assert_eq!(c.host().pool().len(), 1);
+        assert_eq!(c.host().pool().unwrap().len(), 1);
     }
 }
 #[test]
@@ -194,7 +194,7 @@ fn generated_callback_retry_keeps_cache_pool_and_publications_atomic() {
     c.negotiate(negotiation(7)).unwrap();
     assert!(c.step(&otp_order::profile(&LIVE["profile"])).is_err());
     assert_eq!(cache.stats().unwrap(), Default::default());
-    assert!(c.host().pool().is_empty());
+    assert!(c.host().pool().unwrap().is_empty());
     assert_eq!(c.queued_events(), 2);
     assert_eq!(c.machine(Mode::Length).state(), State::AwaitEpoch);
     c.set_config(Default::default());
@@ -232,7 +232,7 @@ fn native_child_restart_keeps_the_admitted_vote_in_the_shared_cache() {
     }
     assert!(restarted);
     assert_eq!(publications, 1);
-    assert_eq!(c.host().pool().len(), 1);
+    assert_eq!(c.host().pool().unwrap().len(), 1);
     assert_eq!(
         c.admit(tx, hc_votes::Event::Created).unwrap(),
         PushOutcome::Cached

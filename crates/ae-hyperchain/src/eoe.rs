@@ -12,6 +12,7 @@ pub mod finalization;
 pub mod local_host;
 mod machine;
 pub mod payload;
+pub mod pool;
 pub mod runtime;
 pub use callbacks::{ClientState, FinalizeInput, calculate_delta, finalize_calldata};
 pub use machine::{

@@ -61,6 +61,7 @@ pub struct Owner<A, C> {
 pub struct Retirement {
     pub info: runtime::Info,
     pub state: Option<coordinator::Snapshot>,
+    pub inputs: Option<ae_hyperchain::eoe::pool::RetiredInbox>,
     pub result: Result<(), String>,
     pub queued: Vec<runtime::Submission>,
     pub interrupted: Option<runtime::Submission>,
@@ -122,6 +123,7 @@ impl<A, C> Owner<A, C> {
         let runtime::Retired {
             info,
             state,
+            inputs,
             result,
             outputs,
             queued,
@@ -131,6 +133,7 @@ impl<A, C> Owner<A, C> {
         self.retired = Some(Retirement {
             info,
             state,
+            inputs,
             result,
             queued,
             interrupted,

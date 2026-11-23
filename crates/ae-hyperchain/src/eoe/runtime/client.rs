@@ -4,6 +4,7 @@ use std::sync::{atomic::AtomicUsize, mpsc::TryRecvError};
 pub(super) struct Control {
     pub admission: std::sync::Mutex<()>,
     pub health: std::sync::Mutex<Health>,
+    pub wake: pool::Wake,
     pub alive: AtomicBool,
     pub stop: Arc<AtomicBool>,
     calls: AtomicUsize,
@@ -20,6 +21,7 @@ impl Control {
     ) -> Self {
         Self {
             admission: std::sync::Mutex::new(()),
+            wake: pool::Wake::default(),
             health: std::sync::Mutex::new(Health::Running),
             alive: AtomicBool::new(true),
             stop,
@@ -71,6 +73,7 @@ impl<A, C> Client<A, C> {
     pub fn request_stop(&self) {
         let _gate = self.control.admission.lock().expect("EOE admission");
         self.control.stop.store(true, Ordering::Release);
+        self.control.wake.notify();
     }
     pub fn outstanding(&self) -> usize {
         self.control.calls.load(Ordering::Acquire)
@@ -107,6 +110,7 @@ impl<A, C> Client<A, C> {
                 TrySendError::Full(r) => SubmitError::Full(Box::new(r.command)),
                 TrySendError::Disconnected(r) => SubmitError::Disconnected(Box::new(r.command)),
             })?;
+        self.control.wake.notify();
         Ok(Call {
             receiver,
             _credit: credit,

@@ -77,12 +77,22 @@ async fn admission_live(node: &Node, importer: &ae_sync::chain::Importer<Otp26>)
         .unwrap()
         .require_block(node.config.identity.genesis)
         .unwrap();
-    importer
-        .import_block(block.encode().unwrap(), 1_000_000)
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    let bytes = block.encode().unwrap();
+    // A live producer and peer synchronization share this bounded importer.
+    // Busy means no job was accepted; once accepted, wait on that exact ticket.
+    let ticket = within(async {
+        loop {
+            match importer.import_block(bytes.clone(), 1_000_000) {
+                Ok(ticket) => break ticket,
+                Err(ae_sync::chain::Error::Busy) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => panic!("live importer rejected probe: {error:?}"),
+            }
+        }
+    })
+    .await;
+    ticket.wait().await.unwrap();
 }
 fn generation(s: &supervisor::Status, child: Child) -> u64 {
     match child {

@@ -1,7 +1,8 @@
+mod shared;
 // Local service boundary for aec_eoe_gen_vote, aeternity fa2a6d7.
 // Publication is an outbox operation. The caller drains it after a successful
 // FSM step (including retained effects of a modeled native exception).
-// A cloned host never shares mutable publication or pool state.
+// Shared pool admissions are staged until the complete EOE callback commits.
 // Live cache reads are service I/O: they may request blocks even if a later
 // local step rolls back. Only notifications and signing effects are staged.
 use super::{Failure, Host, Limits, Payload, finalization, payload};
@@ -27,6 +28,8 @@ pub enum Error {
     MissingKey(AccountPublicKey),
     ParentCache(cache::Error),
     SelectedState(SelectedError),
+    IndependentPool(super::pool::Error),
+    PoolCommit(super::pool::Error),
 }
 impl Error {
     pub fn is_operational(&self) -> bool {
@@ -37,7 +40,9 @@ impl Error {
                 | cache::Error::Core(crate::parent_cache::Error::Native(_))
                 | cache::Error::Targets(cache::TargetError::Native),
             ) => false,
-            Self::MissingKey(_) | Self::Payload(Failure::Native(_)) => false,
+            Self::MissingKey(_)
+            | Self::Payload(Failure::Native(_))
+            | Self::IndependentPool(super::pool::Error::Closed) => false,
             Self::Finalization(
                 finalization::Error::MissingContract(_)
                 | finalization::Error::MissingAccount(_)
@@ -124,6 +129,8 @@ pub struct LocalHost<A = MemoryStore, C = MemoryStore> {
     selected_source: Option<Arc<dyn SelectedSource<A, C>>>,
     keys: Arc<BTreeMap<AccountPublicKey, Ed25519SecretKey>>,
     pool: VotePool,
+    independent: Option<super::pool::Hub>,
+    staged: Option<shared::Staged>,
     gossip: BTreeSet<Hash256>,
     parents: BTreeMap<Unsigned, ParentBlock>,
     parent_bytes: usize,
@@ -145,6 +152,8 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
             selected_source: None,
             keys: Arc::new(keys),
             pool: VotePool::default(),
+            independent: None,
+            staged: None,
             gossip: BTreeSet::new(),
             parents: BTreeMap::new(),
             parent_bytes: 0,
@@ -162,8 +171,8 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         self.selected_source = Some(source);
         self
     }
-    pub fn pool(&self) -> &VotePool {
-        &self.pool
+    pub fn pool(&self) -> Result<VotePool, Error> {
+        self.inspect_pool(Clone::clone)
     }
     pub fn network(&self) -> &NetworkProfile {
         &self.config.network
@@ -179,8 +188,13 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
     pub fn signer(&self) -> crate::signing::Keys {
         crate::signing::Keys::from_shared(self.keys.clone())
     }
-    pub fn update_epoch(&mut self, epoch: Unsigned) {
-        self.pool.update_epoch(epoch);
+    pub fn update_epoch(&mut self, epoch: Unsigned) -> Result<(), Error> {
+        if let Some(hub) = &self.independent {
+            hub.new_epoch(epoch).map_err(Error::IndependentPool)
+        } else {
+            self.pool.update_epoch(epoch);
+            Ok(())
+        }
     }
     pub fn outbox(&self) -> &[Output] {
         &self.outbox
@@ -267,8 +281,13 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
             .outbox_bytes
             .checked_add(bytes)
             .ok_or(Error::ResourceLimit)?;
-        if self.outbox.len() >= self.config.limits.maximum_outbox_entries
-            || bytes > self.config.limits.maximum_outbox_bytes
+        if self
+            .outbox
+            .len()
+            .saturating_add(self.staged.as_ref().map_or(0, |s| s.admissions.len()))
+            >= self.config.limits.maximum_outbox_entries
+            || bytes.saturating_add(self.staged.as_ref().map_or(0, |s| s.bytes))
+                > self.config.limits.maximum_outbox_bytes
         {
             return Err(Error::ResourceLimit);
         }
@@ -284,7 +303,11 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
         signed: SignedTransaction<Transaction>,
         event: hc_votes::Event,
     ) -> Result<PushOutcome, Error> {
-        self.admit_using(signed, event, None)
+        let mut next = self.clone();
+        let outcome = next.admit_using(signed, event, None)?;
+        let committed = next.commit_pool(None)?;
+        *self = next;
+        Ok(committed.into_iter().next().unwrap_or(outcome))
     }
     pub(super) fn admit_using(
         &mut self,
@@ -305,6 +328,14 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> LocalHost<A, C> {
             .map(|s| s.capture().map_err(Error::SelectedState))
             .transpose()?;
         let tip = selected.as_ref().unwrap_or(&self.tip);
+        if self.independent.is_some() {
+            return self.stage_vote(super::pool::Admission {
+                signed,
+                event,
+                protocol: tip.protocol,
+                consensus: tip.consensus,
+            });
+        }
         let mut pool = self.pool.clone();
         let outcome = pool
             .push(
@@ -360,6 +391,9 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Host for LocalHost<A, C> {
     type Finalized = Finalized;
     fn is_operational(error: &Error) -> bool {
         error.is_operational()
+    }
+    fn commit(&mut self) -> Result<(), Error> {
+        self.commit_pool(None).map(|_| ())
     }
     fn create_vote(
         &mut self,

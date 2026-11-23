@@ -30,6 +30,7 @@ impl ReplyTo {
 pub struct Retired {
     pub info: Info,
     pub state: Option<coordinator::Snapshot>,
+    pub inputs: Option<pool::RetiredInbox>,
     pub result: Result<(), String>,
     // Channel output precedes the interrupted send and coordinator outbox.
     pub outputs: Vec<Output>,
@@ -39,6 +40,7 @@ pub struct Retired {
 }
 pub(super) struct WorkerExit {
     pub(super) state: coordinator::Snapshot,
+    pub(super) inputs: Option<pool::RetiredInbox>,
     pub(super) outputs: Vec<Output>,
     pub(super) queued: Vec<Submission>,
     pub(super) interrupted: Option<Submission>,
@@ -112,6 +114,7 @@ impl<A, C> Runtime<A, C> {
                 Retired {
                     info: client.info(),
                     state: Some(exit.state),
+                    inputs: exit.inputs,
                     result: if exit.panic.is_some() {
                         Err("EOE worker panicked".into())
                     } else {
@@ -125,6 +128,7 @@ impl<A, C> Runtime<A, C> {
             Err(_) => Retired {
                 info: client.info(),
                 state: None,
+                inputs: None,
                 result: Err("EOE worker cleanup panicked".into()),
                 outputs,
                 queued: vec![],

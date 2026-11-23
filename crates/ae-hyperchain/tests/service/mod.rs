@@ -95,8 +95,8 @@ fn output_json(outputs: &[Output]) -> J {
 }
 fn pool_json(h: &LocalHost) -> J {
     named(vec![
-        ("epoch", num(h.pool().epoch())),
-        ("size", int(h.pool().len())),
+        ("epoch", num(h.pool().unwrap().epoch())),
+        ("size", int(h.pool().unwrap().len())),
         (
             "votes",
             list(
@@ -109,6 +109,7 @@ fn pool_json(h: &LocalHost) -> J {
                             int(t),
                             list(
                                 h.pool()
+                                    .unwrap()
                                     .peek(&e.into(), Some(&t.into()))
                                     .map(|v| bin(v.encode()))
                                     .collect(),
@@ -364,7 +365,7 @@ fn publication_budget_rolls_back_pool_and_machine_then_retries() {
         )
         .unwrap();
     let before = machine.clone();
-    let pool = host.pool().clone();
+    let pool = host.pool().unwrap().clone();
     let outbox = host.outbox().to_vec();
     let proposal = view_event(event(&row["steps"][1]["input"]));
     assert_eq!(
@@ -372,7 +373,7 @@ fn publication_budget_rolls_back_pool_and_machine_then_retries() {
         Err(StepError::Host(local_host::Error::ResourceLimit))
     );
     assert_eq!(machine, before);
-    assert_eq!(host.pool(), &pool);
+    assert_eq!(host.pool().unwrap(), pool);
     assert_eq!(host.outbox(), outbox);
     host.drain_outbox();
     machine
@@ -380,7 +381,7 @@ fn publication_budget_rolls_back_pool_and_machine_then_retries() {
         .unwrap();
     assert_eq!(machine.state(), State::Vote);
     assert_eq!(host.outbox().len(), 2);
-    assert_eq!(host.pool().len(), 3);
+    assert_eq!(host.pool().unwrap().len(), 3);
 }
 
 #[test]
@@ -610,7 +611,7 @@ fn finalization_read_failures_preserve_outbox_and_retry_at_every_prefix() {
         assert!(error.is_operational());
         assert_eq!(&*log.lock().unwrap(), &reads[..=prefix]);
         assert!(trial.outbox().is_empty());
-        assert!(trial.pool().is_empty());
+        assert!(trial.pool().unwrap().is_empty());
         remaining.store(usize::MAX, Ordering::Relaxed);
         log.lock().unwrap().clear();
         assert_eq!(

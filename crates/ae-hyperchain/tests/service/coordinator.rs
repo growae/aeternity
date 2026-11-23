@@ -2,6 +2,7 @@ use super::*;
 use ae_hyperchain::eoe::{coordinator as api, runtime};
 use api::{CallFailure, Coordinator, ServiceOutput};
 use std::time::Duration;
+mod independent;
 mod lifecycle;
 static COORDINATOR: LazyLock<J> =
     LazyLock::new(|| unpack(include_str!("../fixtures/erlang_hc_coordinator.json")));
@@ -404,13 +405,13 @@ fn queue_output_and_request_limits_leave_admission_and_callbacks_retryable() {
         c.admit(signed.clone(), hc_votes::Event::Received),
         Err(api::Error::ResourceLimit)
     );
-    assert!(c.host().pool().is_empty());
+    assert!(c.host().pool().unwrap().is_empty());
     assert_eq!(c.queued_events(), 0);
     assert!(c.pop_output().is_none());
     c.set_config(api::Config::default());
     c.admit(signed, hc_votes::Event::Received).unwrap();
     run(&mut c);
-    assert_eq!(c.host().pool().len(), 1);
+    assert_eq!(c.host().pool().unwrap().len(), 1);
     let mut c = Coordinator::new(
         host(&[1], ServiceLimits::default()),
         1000.into(),
@@ -424,14 +425,14 @@ fn queue_output_and_request_limits_leave_admission_and_callbacks_retryable() {
     assert_eq!(c.step(&order), Err(api::Error::ResourceLimit));
     assert_eq!(c.machine(Mode::Length), &before);
     assert_eq!(c.queued_events(), 2);
-    assert!(c.host().pool().is_empty());
+    assert!(c.host().pool().unwrap().is_empty());
     assert!(c.pop_output().is_none());
     c.set_config(api::Config {
         maximum_requests: 1,
         ..Default::default()
     });
     run(&mut c);
-    assert_eq!(c.host().pool().len(), 2);
+    assert_eq!(c.host().pool().unwrap().len(), 2);
     start_request(&mut c, 7);
     let queued = c.queued_events();
     assert_eq!(
@@ -472,7 +473,7 @@ fn restart_window_is_shared_inclusive_and_preserves_sibling_and_pool() {
             run(&mut c);
         }
         assert_eq!(c.is_stopped(), stopped);
-        assert_eq!(c.host().pool().len(), 2);
+        assert_eq!(c.host().pool().unwrap().len(), 2);
         let mut restarts = 0;
         let mut stop_events = 0;
         while let Some(o) = c.pop_output() {

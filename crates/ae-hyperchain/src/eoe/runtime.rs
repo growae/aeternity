@@ -15,7 +15,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -150,6 +150,9 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
             config,
             coordinator.host().network().clone(),
         ));
+        let mut inbox = coordinator
+            .subscribe(control.wake.clone())
+            .map_err(|e| io::Error::other(format!("EOE subscription: {e:?}")))?;
         let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name("ae-hc-eoe".into())
@@ -175,6 +178,7 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
                             replies,
                             control: &worker_control,
                             pending: &mut pending,
+                            inbox: &mut inbox,
                         },
                     )
                 }))
@@ -193,6 +197,7 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
                 }
                 WorkerExit {
                     state: coordinator.snapshot(),
+                    inputs: inbox.take().map(pool::Inbox::retire),
                     outputs: retained,
                     queued,
                     interrupted: pending.command,
@@ -240,7 +245,9 @@ impl<A, C> Runtime<A, C> {
             .map_err(|e| match e {
                 TrySendError::Full(r) => SubmitError::Full(Box::new(r.command)),
                 TrySendError::Disconnected(r) => SubmitError::Disconnected(Box::new(r.command)),
-            })
+            })?;
+        self.control.wake.notify();
+        Ok(())
     }
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Output, RecvTimeoutError> {
         self.receiver
@@ -264,6 +271,7 @@ impl<A, C> Runtime<A, C> {
 impl<A, C> Drop for Runtime<A, C> {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.control.wake.notify();
         self.receiver.take();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
@@ -314,6 +322,7 @@ struct Driver<'a, A, C> {
     replies: Arc<votes::Budget>,
     control: &'a client::Control,
     pending: &'a mut Pending,
+    inbox: &'a mut Option<pool::Inbox>,
 }
 fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
     service: &mut Coordinator<A, C>,
@@ -328,6 +337,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
         replies,
         control,
         pending,
+        inbox,
     } = driver;
     let started = Instant::now();
     let start_ms = service.now();
@@ -369,7 +379,7 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                     .map_or(1000, |due| due.saturating_sub(now).min(1000)),
             )
         };
-        match commands.recv_timeout(wait) {
+        match commands.try_recv() {
             Ok(Request { reply, command }) => {
                 pending.command = Some(reply.submission());
                 let now = start_ms.saturating_add(
@@ -409,8 +419,32 @@ fn run<A: NodeReader + Clone, C: NodeReader + Clone>(
                     return;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(TryRecvError::Disconnected) => return,
+            Err(TryRecvError::Empty) => {
+                let input_ready = !blocked && inbox.as_ref().is_some_and(|i| i.peek().is_some());
+                if !input_ready && !wait.is_zero() {
+                    control.wake.wait(wait);
+                    continue;
+                }
+            }
+        }
+        if !blocked
+            && let Some(inbox) = inbox.as_mut()
+            && let Some(input) = inbox.peek()
+        {
+            match service.receive(&input) {
+                Ok(()) => {
+                    inbox.acknowledge();
+                }
+                Err(error) => {
+                    blocked = true;
+                    *control.health.lock().expect("EOE health") =
+                        Health::WorkStopped(error.clone());
+                    if !pending.send(Output::WorkStopped(error), &outputs, &stop) {
+                        return;
+                    }
+                }
+            }
         }
         if !blocked {
             for _ in 0..config.batch_steps {
@@ -461,8 +495,10 @@ fn apply<A: NodeReader + Clone, C: NodeReader + Clone>(
         }
         Command::NewEpoch(epoch) => service.new_epoch(epoch)?,
         Command::Votes(query) => {
-            return replies
-                .capture(service.host().pool(), query)
+            return service
+                .host()
+                .inspect_pool(|pool| replies.capture(pool, query))
+                .map_err(coordinator::Error::Host)?
                 .map(Applied::Votes);
         }
         Command::SelectTip(tip) => service.select_tip(tip),

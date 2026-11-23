@@ -22,9 +22,14 @@ pub struct Snapshot {
     pub generations: [u64; 2],
     pub pending_requests: Vec<u64>,
     pub queued_events: usize,
-    pub pool_epoch: Unsigned,
-    pub pool_entries: usize,
+    pub pool: Result<PoolSnapshot, local_host::Error>,
     pub stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub epoch: Unsigned,
+    pub entries: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +133,7 @@ pub struct Coordinator<A = MemoryStore, C = MemoryStore> {
     now: u64,
     stopped: bool,
     gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
+    delivery: Option<pool::Delivery>,
 }
 fn index(mode: Mode) -> usize {
     match mode {
@@ -141,8 +147,10 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
             generations: self.generations,
             pending_requests: self.pending.keys().copied().collect(),
             queued_events: self.queue.len(),
-            pool_epoch: self.host.pool().epoch().clone(),
-            pool_entries: self.host.pool().len(),
+            pool: self.host.inspect_pool(|pool| PoolSnapshot {
+                epoch: pool.epoch().clone(),
+                entries: pool.len(),
+            }),
             stopped: self.stopped,
         }
     }
@@ -169,6 +177,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
             now: 0,
             stopped: false,
             gossip: None,
+            delivery: None,
         }
     }
     pub fn machine(&self, mode: Mode) -> &Machine {
@@ -239,28 +248,45 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
     pub fn peek_output(&self) -> Option<&ServiceOutput> {
         self.outputs.front().map(|(o, _)| o)
     }
-    fn transact<T>(
+    fn transact_committed<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<(T, Vec<PushOutcome>), Error> {
         if self.stopped {
             return Err(Error::Stopped);
         }
         let mut next = self.clone();
         let value = operation(&mut next)?;
+        let outcomes = next
+            .host
+            .commit_pool(next.delivery.as_ref().map(|d| (d, next.generations)))
+            .map_err(Error::Host)?;
         *self = next;
-        Ok(value)
+        Ok((value, outcomes))
+    }
+    fn transact<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.transact_committed(operation).map(|(value, _)| value)
     }
     fn transact_cached<T>(
         &mut self,
         operation: impl FnOnce(&mut Self, Option<&mut dyn FnMut(Hash256) -> bool>) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.transact_cached_committed(operation)
+            .map(|(value, _)| value)
+    }
+    fn transact_cached_committed<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, Option<&mut dyn FnMut(Hash256) -> bool>) -> Result<T, Error>,
+    ) -> Result<(T, Vec<PushOutcome>), Error> {
         let Some(cache) = self.gossip.clone() else {
-            return self.transact(|next| operation(next, None));
+            return self.transact_committed(|next| operation(next, None));
         };
         let mut result = None;
         cache.transact(Box::new(|checker| {
-            let value = self.transact(|next| operation(next, Some(checker)));
+            let value = self.transact_committed(|next| operation(next, Some(checker)));
             // Native rejection still records the first-level cache miss.
             // Operational failure rolls back the complete callback, including
             // a late queue/outbox failure after admission already succeeded.
@@ -282,6 +308,49 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
             Ok(())
         }
     }
+    // The caller owns the mailbox lease; only this coordinator generation
+    // accepts its inputs. Dropping it unsubscribes without altering the pool.
+    pub fn subscribe(&mut self, wake: pool::Wake) -> Result<Option<pool::Inbox>, Error> {
+        let Some(hub) = self.host.independent_pool() else {
+            return Ok(None);
+        };
+        if self.delivery.is_some() {
+            return Err(Error::Host(local_host::Error::IndependentPool(
+                pool::Error::Busy,
+            )));
+        }
+        let inbox = hub
+            .subscribe(wake)
+            .map_err(|e| Error::Host(local_host::Error::IndependentPool(e)))?;
+        let delivery = inbox.delivery();
+        self.host
+            .commit_pool(Some((&delivery, self.generations)))
+            .map_err(Error::Host)?;
+        self.delivery = Some(delivery);
+        Ok(Some(inbox))
+    }
+    pub fn receive(&mut self, input: &pool::Input) -> Result<(), Error> {
+        if self.delivery.as_ref().is_none_or(|d| !d.accepts(input)) {
+            return Err(Error::Host(local_host::Error::IndependentPool(
+                pool::Error::Closed,
+            )));
+        }
+        self.transact(|next| {
+            let event = match input.event() {
+                pool::Event::Vote(p) => Event::Transaction {
+                    received: p.event() == hc_votes::Event::Received,
+                    signed: Box::new(p.signed().clone()),
+                },
+                pool::Event::NewEpoch(_) => Event::NewEpoch,
+            };
+            for mode in [Mode::Length, Mode::Fork] {
+                if input.generations()[index(mode)] == next.generations[index(mode)] {
+                    next.enqueue(mode, event.clone())?;
+                }
+            }
+            Ok(())
+        })
+    }
     pub fn negotiate(&mut self, n: Negotiation) -> Result<(), Error> {
         self.transact(|next| next.broadcast(Event::Negotiate(n)))
     }
@@ -292,8 +361,13 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
         self.transact(|next| next.broadcast(Event::ParentBlock { epoch, block }))
     }
     pub fn new_epoch(&mut self, epoch: Unsigned) -> Result<(), Error> {
+        if let Some(hub) = self.host.independent_pool() {
+            return hub
+                .new_epoch(epoch)
+                .map_err(|e| Error::Host(local_host::Error::IndependentPool(e)));
+        }
         self.transact(|next| {
-            next.host.update_epoch(epoch);
+            next.host.update_epoch(epoch).map_err(Error::Host)?;
             next.broadcast(Event::NewEpoch)
         })
     }
@@ -302,15 +376,17 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Coordinator<A, C> {
         signed: SignedTransaction<Transaction>,
         event: hc_votes::Event,
     ) -> Result<PushOutcome, Error> {
-        self.transact_cached(|next, checker| {
+        let (result, committed) = self.transact_cached_committed(|next, checker| {
             let result = next
                 .host
                 .admit_using(signed, event, checker)
                 .map_err(Error::Host)?;
             next.route_outputs()?;
             Ok(result)
-        })
+        })?;
+        Ok(committed.into_iter().next().unwrap_or(result))
     }
+
     // Fork is requested first. Its successful signed result reserves nonce 1;
     // only then is length called with offset 2 (otherwise offset 1). The view
     // passed to both public calls stays the original caller's selected view.

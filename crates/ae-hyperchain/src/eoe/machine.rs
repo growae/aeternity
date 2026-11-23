@@ -98,6 +98,9 @@ pub trait Host {
     type Finalized;
     // False identifies a modeled reference native exception, not a local fault.
     fn is_operational(error: &Self::Error) -> bool;
+    fn commit(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn create_vote(
         &mut self,
         voter: AccountPublicKey,
@@ -237,7 +240,8 @@ impl Machine {
         self.check_limits(limits)?;
         Self::check_event(&event, limits)?;
         let mut staged = host.clone();
-        let result = self.apply_staged(event, &mut staged, order, limits);
+        let mut machine = self.clone();
+        let result = machine.apply_staged(event, &mut staged, order, limits);
         let retain = match &result {
             Ok(_) => true,
             Err(StepError::Core(Failure::Native(_))) => true,
@@ -245,6 +249,8 @@ impl Machine {
             _ => false,
         };
         if retain {
+            staged.commit().map_err(StepError::Host)?;
+            *self = machine;
             *host = staged;
         }
         result
