@@ -11,6 +11,8 @@ use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
 use std::{convert::Infallible, sync::Arc};
 
+pub mod key;
+
 #[derive(Clone)]
 pub struct Config<O> {
     pub identity: Identity,

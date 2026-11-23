@@ -4,6 +4,8 @@ use ae_chain::repository::pow;
 use ae_vm_fate::maps::MapOrder;
 use std::sync::Arc;
 
+pub mod key;
+
 // The volatile generator is exclusive for this opened database. A joined
 // exit may retain this lease while an accepted pool receipt is quarantined.
 pub struct GeneratorLease(Arc<()>);

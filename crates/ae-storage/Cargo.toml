@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 num-bigint.workspace = true
 ae-chain.workspace = true
+ae-execution.workspace = true
 ae-hyperchain.workspace = true
 ae-vm-fate.workspace = true
 ae-types.workspace = true
@@ -21,7 +22,6 @@ ae-protocol.workspace = true
 rocksdb.workspace = true
 
 [dev-dependencies]
-ae-execution.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 num-traits.workspace = true

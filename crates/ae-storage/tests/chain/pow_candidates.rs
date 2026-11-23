@@ -383,3 +383,6 @@ fn pow_candidate_failures_release_snapshot_capacity_and_keep_consensus_guards() 
     let held = storage::prepare_micro(&owner, &cfg, input(parent, 0)).unwrap();
     assert_eq!(held.metadata.status, before);
 }
+
+#[path = "pow_key_candidates.rs"]
+mod key_candidates;

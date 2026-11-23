@@ -686,3 +686,6 @@ mod key;
 
 #[path = "pow_candidates.rs"]
 mod pow_candidates;
+
+#[path = "pow_key_candidates.rs"]
+mod pow_key_candidates;

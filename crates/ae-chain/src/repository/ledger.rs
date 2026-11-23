@@ -434,11 +434,46 @@ fn store_block(w: &mut Writes, b: &Block, r: &Record, config: &ReadConfig) -> Re
     }
     Ok(())
 }
-fn require_key<S: Read>(v: &View<S>, h: Hash256) -> Result<KeyHeader, Error> {
+pub(super) fn require_key<S: Read>(v: &View<S>, h: Hash256) -> Result<KeyHeader, Error> {
     match v.require_block(h)? {
         Block::Key(k) => Ok(k),
         _ => Err(Error::Corrupt("expected key ancestor")),
     }
+}
+pub(super) fn reward_history<S: Read>(
+    view: &View<S>,
+    key_hash: Hash256,
+    height: u64,
+    delay: u64,
+    limit: usize,
+) -> Result<rewards::History, Error> {
+    let mut history = rewards::History::new();
+    if height > delay {
+        let count = delay.checked_add(1).ok_or(Error::ResourceLimit)?;
+        if count > limit as u64 {
+            return Err(Error::ResourceLimit);
+        }
+        let mut next = key_hash;
+        for _ in 0..count {
+            let header = require_key(view, next)?;
+            let r = view.require_record(next)?;
+            let prev = Hash256(header.common.previous_key_hash);
+            let genesis = next == view.identity.genesis;
+            history.insert(
+                next,
+                rewards::Record {
+                    header,
+                    fees: Some(r.fees),
+                    reported_fraud: Some(r.fraud),
+                },
+            );
+            if genesis {
+                break;
+            }
+            next = prev;
+        }
+    }
+    Ok(history)
 }
 fn keep_pow_tip(old: &Unsigned, new: &Unsigned) -> bool {
     old >= new
@@ -728,35 +763,13 @@ pub fn prepare<S: Read, O: MapOrder>(
                     )
                 }
                 Block::Key(k) => {
-                    let mut history = rewards::History::new();
-                    if k.common.height > rules.reward_delay {
-                        let count = rules
-                            .reward_delay
-                            .checked_add(1)
-                            .ok_or(Error::ResourceLimit)?;
-                        if count > limits.history as u64 {
-                            return Err(Error::ResourceLimit.into());
-                        }
-                        let mut next = previous_key_hash;
-                        for _ in 0..count {
-                            let header = require_key(view, next)?;
-                            let r = view.require_record(next)?;
-                            let prev = Hash256(header.common.previous_key_hash);
-                            let genesis = next == view.identity.genesis;
-                            history.insert(
-                                next,
-                                rewards::Record {
-                                    header,
-                                    fees: Some(r.fees),
-                                    reported_fraud: Some(r.fraud),
-                                },
-                            );
-                            if genesis {
-                                break;
-                            }
-                            next = prev;
-                        }
-                    }
+                    let history = reward_history(
+                        view,
+                        previous_key_hash,
+                        k.common.height,
+                        rules.reward_delay,
+                        limits.history,
+                    )?;
                     let r = key_execution::pow_key(k, &mut state, &parent, &history, config, rules)
                         .map_err(|e| InsertError::Key(Box::new(e)))?;
                     (

@@ -20,6 +20,8 @@ use ae_types::{Hash256, Unsigned};
 use ae_vm_fate::maps::MapOrder;
 use num_bigint::Sign;
 
+pub mod candidate;
+
 #[derive(Debug, Clone)]
 pub struct Rules {
     pub admission: admission::PowRules,
