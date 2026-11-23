@@ -24,6 +24,7 @@ pub mod serving;
 mod signaling;
 use codec::*;
 pub use decoding::ReadConfig;
+pub use execution::Reader as ExecutionReader;
 pub use history::vm_history;
 pub mod ledger;
 pub use ledger::{

@@ -29,7 +29,9 @@ pub use download::Download;
 pub mod generation;
 pub mod hyperchain;
 mod import;
+pub mod packing;
 mod policy;
+pub mod pow;
 mod strategy;
 pub mod sync;
 #[cfg(test)]

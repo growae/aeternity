@@ -210,6 +210,7 @@ impl Drop for Inner {
 }
 #[derive(Clone)]
 pub struct Reader(Arc<Inner>);
+pub type Store = ae_trie::Overlay<Reader>;
 impl std::fmt::Debug for Reader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PinnedNodeReader").finish_non_exhaustive()
