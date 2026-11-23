@@ -17,6 +17,8 @@ use ae_state::{
 };
 use ae_storage::Database;
 use ae_types::Hash256;
+#[path = "chain/pow_candidates.rs"]
+mod pow_candidates;
 use serde_json::Value as J;
 use std::{
     path::PathBuf,

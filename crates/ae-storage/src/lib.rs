@@ -22,6 +22,7 @@ pub mod pinning_agent;
 pub mod pinning_children;
 pub mod policy;
 pub mod pool;
+pub mod pow;
 pub mod replay;
 pub mod snapshots;
 
