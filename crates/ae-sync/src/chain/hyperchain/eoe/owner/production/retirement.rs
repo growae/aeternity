@@ -80,6 +80,21 @@ impl Owner {
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Retiring<O> {
+    pub(crate) fn retire_pool(&mut self, old: &worker::Client) -> Result<(), Error> {
+        if !old.info().joined {
+            return Err(Error::Binding);
+        }
+        if self.attempt.pool.same_worker(old)
+            && let Some(micro) = &mut self.micro
+            && micro.retire_pool(old).map_err(Error::Build)?
+            && self.failure.as_ref().is_some_and(
+                |e| matches!(e, Error::Build(error) if candidate::pool_departure(error)),
+            )
+        {
+            self.failure = None;
+        }
+        Ok(())
+    }
     pub(crate) fn retire_eoe(&mut self, old: &super::super::Client) -> Result<(), Error> {
         if !old.is_closed() {
             return Err(Error::Binding);

@@ -70,6 +70,9 @@ fn policy_bytes(
     Ok(bytes)
 }
 impl Client {
+    pub fn same_worker(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
     pub fn origins_interval(&self) -> Option<Duration> {
         self.shared.settings.origins_interval
     }

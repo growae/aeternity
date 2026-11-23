@@ -5,7 +5,7 @@ pub(super) struct Host<O> {
     pub source: Weak<eoe::Source>,
     pub execution: repo::HyperchainConfig<O>,
     pub producer: scoped::Producer<O>,
-    pub pool: pool::worker::Client,
+    pub pool: crate::bindings::Admission,
     pub parent: parent::Client<O>,
     pub keys: Keys,
     pub config: Config,
@@ -21,20 +21,32 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             return Err(Error::Cancelled);
         }
         self.producer.check().map_err(Error::Source)?;
-        if !self.pool.info().accepting {
+        if self.pool.is_closed()
+            || (!self.pool.managed()
+                && self
+                    .pool
+                    .current()
+                    .is_none_or(|p| !p.client.info().accepting))
+        {
             return Err(Error::Closed);
         }
         self.parent.check().map_err(Error::Utilities)
     }
     fn read<T>(
         &self,
-        mut submit: impl FnMut() -> Result<pool::worker::Ticket<T>, pool::worker::Error>,
+        mut submit: impl FnMut(
+            &pool::worker::Client,
+        ) -> Result<pool::worker::Ticket<T>, pool::worker::Error>,
     ) -> Result<T, Error> {
         let ticket = loop {
             self.check()?;
-            match submit() {
+            let client = self.pool_client()?;
+            match submit(&client) {
                 Ok(t) => break t,
                 Err(pool::worker::Error::Saturated) => thread::sleep(self.config.poll),
+                Err(pool::worker::Error::Stopped) if self.pool.managed() => {
+                    thread::sleep(self.config.poll)
+                }
                 Err(e) => return Err(Error::Pool(e)),
             }
         };
@@ -44,6 +56,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
                 Err(pool::worker::Error::Timeout) => (),
                 r => return r.map_err(Error::Pool),
             }
+        }
+    }
+    fn pool_client(&self) -> Result<pool::worker::Client, Error> {
+        loop {
+            self.check()?;
+            if let Some(pool) = self.pool.current()
+                && pool.client.info().accepting
+            {
+                return Ok(pool.client);
+            }
+            thread::sleep(self.config.poll);
         }
     }
     fn minimum_gas_price(&self) -> Result<Unsigned, Error> {
@@ -63,7 +86,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             .map_err(|_| Error::State("height-one protocol"))?
             .protocol_at(1)
             .map_err(|_| Error::Configuration)?;
-        let miner = self.read(|| self.pool.minimum_miner_gas_price())?;
+        let miner = self.read(|pool| pool.minimum_miner_gas_price())?;
         if miner.as_bytes().len() > self.config.transaction.integer_bytes {
             return Err(Error::ResourceLimit);
         }
@@ -166,7 +189,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             return self.recover_child(kind, record);
         }
         let nonce = self
-            .read(|| self.pool.next_nonce(leader))?
+            .read(|pool| pool.next_nonce(leader))?
             .unwrap_or_else(|| 1.into());
         let minimum_gas_price = self.minimum_gas_price()?;
         let input = core::TransactionInput {
@@ -232,12 +255,23 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
                 });
                 return Err(error);
             }
-            match self
-                .pool
-                .push(tx.clone(), ae_mempool::pool::Event::Received, false)
-            {
+            let client = match self.pool_client() {
+                Ok(client) => client,
+                Err(error) => {
+                    self.effects.push(Effect::Child {
+                        kind,
+                        transaction: tx,
+                        result: ChildResult::Unresolved,
+                    });
+                    return Err(error);
+                }
+            };
+            match client.push(tx.clone(), ae_mempool::pool::Event::Received, false) {
                 Ok(t) => break t,
                 Err(pool::worker::Error::Saturated) => thread::sleep(self.config.poll),
+                Err(pool::worker::Error::Stopped) if self.pool.managed() => {
+                    thread::sleep(self.config.poll)
+                }
                 Err(e) => {
                     self.effects.push(Effect::Child {
                         kind,

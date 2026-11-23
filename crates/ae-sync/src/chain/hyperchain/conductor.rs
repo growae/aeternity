@@ -19,6 +19,7 @@ use std::{
     time::Instant,
 };
 
+pub mod pool_supervision;
 pub mod runtime;
 pub mod supervision;
 
@@ -75,6 +76,7 @@ pub enum Error {
     Pinning(pinning::Error),
     Utilities(parent::Error),
     ConsensusRestartLimit,
+    PoolRestartLimit,
     Supervision(eoe_runtime::Output),
 }
 fn eoe_departure(error: &Error) -> bool {
@@ -103,6 +105,7 @@ pub enum Output {
     Pinning(Box<pinning::Report>),
     ConsensusSupervision(supervision::Notice),
     VoteSupervision(owner::vote_pool::Notice),
+    PoolSupervision(pool_supervision::Notice),
     Attempt(production::Completed),
     Stopped(Box<production::Stopped>),
     Rejected {
@@ -136,6 +139,7 @@ pub enum Progress {
 pub struct Status {
     pub consensus: supervision::Status,
     pub votes: owner::vote_pool::Status,
+    pub pool: pool_supervision::Status,
     pub producing: bool,
     pub stopping: bool,
     pub stops: u64,
@@ -165,6 +169,7 @@ pub struct Shutdown<O> {
     pub queued_outputs: Vec<Output>,
     pub tops: Option<TopDelivery>,
     pub pool: Result<pool::worker::Info, pool::worker::Error>,
+    pub pool_notices: Vec<pool_supervision::Notice>,
     pub parent: Option<Result<cache::Exit, String>>,
     pub connector_joined: bool,
     pub pins_joined: bool,
@@ -186,7 +191,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     tops: Option<TopDelivery>,
     producer: scoped::Producer<O>,
     delivery: Option<delivery::Delivery<O, eoe::StateReader, eoe::StateReader>>,
-    pool: Option<pool::worker::Worker>,
+    pool: pool_supervision::Pool,
     parent: Option<cache::Runtime>,
     connector: Option<connector::Runtime>,
     pins: Option<crate::parent_pins::Service>,
@@ -380,12 +385,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             parent.client(),
             child_revision,
         );
-        let pool = pool::worker::Worker::spawn_with_cache(
+        if config.eoe.calls.requests == 0 {
+            return Err(Error::Owner(owner::Error::Configuration));
+        }
+        let mut pool = pool_supervision::Pool::start(
             database.clone(),
             execution.profile.network.clone(),
             config.pool,
             config.pool_worker,
             config.gossip.clone(),
+            config.eoe.calls.requests,
         )
         .map_err(Error::Pool)?;
         let order = execution.profile.order.clone();
@@ -438,12 +447,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             route.clone(),
         )
         .map_err(Error::Owner)?;
+        pool.set_group(owner.worker_group());
         let mut delivery = owner.parent_delivery(accepted).map_err(Error::Owner)?;
         delivery.set_route(route);
         let notices = agent.as_ref().map_or(1, |c| c.outputs);
         let (pinning, factory) = agent
             .map(|config| {
-                pinning::Factory::start(
+                pinning::Factory::start_managed(
                     pinning::Inputs {
                         database,
                         source: selected,
@@ -454,6 +464,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                         keys: owner.signing().clone(),
                     },
                     config,
+                    pool.binding(),
                 )
             })
             .transpose()
@@ -465,13 +476,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             supervision::Supervisor::new(factory, connector_factory, Some(cache_factory), notices);
         let consensus_status = consensus.status();
         let votes_status = owner.vote_status();
+        let pool_status = pool.status();
         Ok(Self {
             owner: Some(owner),
             importer: Arc::new(importer),
             tops: None,
             producer,
             delivery: Some(delivery),
-            pool: Some(pool),
+            pool,
             parent: Some(parent),
             connector: Some(connector),
             pins,
@@ -492,6 +504,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             status: Status {
                 consensus: consensus_status,
                 votes: votes_status,
+                pool: pool_status,
                 producing: config.producing,
                 stopping: false,
                 stops: 0,
@@ -511,6 +524,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
     }
     pub fn status(&self) -> Status {
         let mut status = self.status.clone();
+        status.pool = self.pool.status();
         if let Some(owner) = &self.owner {
             status.votes = owner.vote_status();
         }
@@ -520,7 +534,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         self.importer.clone()
     }
     pub fn pool(&self) -> pool::worker::Client {
-        self.pool.as_ref().expect("pool").client()
+        self.pool.client()
+    }
+    pub fn pool_binding(&self) -> crate::bindings::Admission {
+        self.pool.binding()
+    }
+    pub fn request_pool_restart(
+        &self,
+        generation: u64,
+    ) -> Result<(), pool_supervision::ControlError> {
+        self.pool.request_restart(generation)
     }
     pub fn votes(&self) -> votes::Client {
         self.owner.as_ref().expect("owner").votes()
@@ -629,6 +652,24 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         let result = self.advance(wall_ms, now);
         if let Err(e) = &result {
+            if self.pool.replacement_pending()
+                && matches!(
+                    e,
+                    Error::Production(production::Error::Closed)
+                        | Error::Production(production::Error::Build(
+                            owner::candidate::Error::Closed
+                        ))
+                        | Error::Production(production::Error::Build(
+                            owner::candidate::Error::Packing(super::packing::Error::Pool {
+                                error: pool::worker::Error::Stopped
+                                    | pool::worker::Error::Disconnected,
+                                ..
+                            })
+                        ))
+                )
+            {
+                return Ok(Progress::Advanced);
+            }
             if self
                 .owner
                 .as_ref()
@@ -638,10 +679,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 return Ok(Progress::Advanced);
             }
             self.status.failure = Some(e.clone());
+            self.pool.close();
             self.owner.as_ref().expect("owner").close_vote_binding();
-            if matches!(e, Error::Owner(owner::Error::VoteRestartLimit)) {
+            if matches!(
+                e,
+                Error::Owner(owner::Error::VoteRestartLimit) | Error::PoolRestartLimit
+            ) {
                 self.owner.as_ref().expect("owner").stop_votes();
-                self.pool.as_ref().expect("pool").request_shutdown();
+                self.pool.request_shutdown();
                 if let Some(worker) = &self.resilience_worker {
                     worker.request_shutdown();
                 }
@@ -655,9 +700,6 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         self.tick = Some(now);
         self.producer.check().map_err(Error::Importer)?;
-        if !self.pool().info().accepting {
-            return Err(Error::Closed);
-        }
         self.owner
             .as_mut()
             .expect("owner")
@@ -676,10 +718,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if matches!(health, connector::Health::WorkStopped(_)) {
             return Err(Error::Parent(format!("connector: {health:?}")));
         }
-        if (self
-            .parent
-            .as_ref()
-            .is_some_and(cache::Runtime::replacement_pending)
+        if (self.pool.replacement_pending()
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(cache::Runtime::replacement_pending)
             || self
                 .owner
                 .as_ref()
@@ -704,6 +747,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
                 }
             }
         }
+        let retiring = &mut self.retiring;
+        self.pool.poll(|old| {
+            if let Some(retiring) = retiring {
+                retiring.retire_pool(old).map_err(Error::Production)?;
+            }
+            Ok(())
+        })?;
         let old_cache_generation = self.status.consensus.cache_generation;
         let delivery = self.delivery.as_mut().expect("delivery");
         let tops = &mut self.tops;
@@ -758,6 +808,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // Retained outputs apply backpressure to production, not ownership:
         // shutdown still joins every child and transfers this output intact.
         if self.pending.is_some() {
+            return Ok(Progress::Output);
+        }
+        if let Some(notice) = self.pool.take_notice() {
+            self.pending = Some(Output::PoolSupervision(notice));
             return Ok(Progress::Output);
         }
         if let Some(notice) = self.owner.as_mut().expect("owner").take_vote_notice() {
@@ -830,6 +884,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             | delivery::Progress::SourceBusy => (),
             _ => advanced = true,
         }
+        if self.pool.replacement_pending() && !self.pool.client().info().joined {
+            return Ok(Progress::Advanced);
+        }
         if let Some(retiring) = &mut self.retiring {
             if retiring
                 .step(owner, &self.importer)
@@ -897,12 +954,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // an old locally-created event could incorrectly restart a later attempt.
         let caught_up = self.status.cursor.revision() == self.source.info().status.revision
             && self.status.epoch_revision >= self.status.cursor.revision();
-        if self.status.producing && self.restart && caught_up {
+        if self.status.producing && self.restart && caught_up && !self.pool.replacement_pending() {
             self.attempt = Some(
                 owner
                     .begin_production(
                         self.producer.clone(),
-                        self.pool.as_ref().expect("pool").client(),
+                        self.pool.client(),
                         self.production.clone(),
                     )
                     .map_err(Error::Production)?,
@@ -999,6 +1056,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if let Some(agent) = &self.pinning {
             agent.handle().request_stop();
         }
+        self.pool.close();
         self.importer.stop();
         if let Some(pins) = &self.pins {
             pins.stop();
@@ -1032,7 +1090,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         let mut pinning = self.pinning.take().map(pinning::Service::shutdown);
         self.status.votes = self.owner.as_ref().expect("owner").vote_status();
         let owner = self.owner.take().expect("owner").shutdown();
-        let pool = self.pool.take().expect("pool").shutdown();
+        self.status.pool = self.pool.status();
+        let pool = self.pool.shutdown();
+        let pool_notices = self.pool.take_notices();
         if let Some(Ok(exit)) = &mut pinning {
             exit.poll_children();
         }
@@ -1065,6 +1125,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             queued_outputs: vec![],
             tops: self.tops.take(),
             pool,
+            pool_notices,
             parent,
             connector_joined,
             pins_joined,

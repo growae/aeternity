@@ -261,7 +261,7 @@ fn create_inner(
     let (pool_binding, admission) = bindings::Owner::new(&database);
     if let Some(external) = &external {
         external.healthy()?;
-        pool_binding.install(bindings::Pool::new(external.pool.clone()), 1);
+        pool_binding.mirror(external.pool.snapshot());
         votes_binding
             .as_ref()
             .expect("borrowed PoS votes")
@@ -314,7 +314,9 @@ fn create_inner(
     let current = Status {
         running: true,
         borrowed_producer: external.is_some(),
-        admission_generation: u64::from(external.is_some()),
+        admission_generation: external
+            .as_ref()
+            .map_or(0, |e| e.pool.snapshot().generation),
         votes_generation: external
             .as_ref()
             .map_or(0, |e| e.votes.snapshot().generation),
@@ -442,7 +444,11 @@ impl Service {
         self.current.keys = self.keys.as_ref().map(|w| w.info());
         self.current.admission = self.admission.as_ref().map(|w| w.info());
         if let Some(external) = &self.external {
-            self.current.admission = Some(external.pool.info());
+            let mut admission = external.pool.snapshot();
+            self.current.admission = admission.value.as_ref().map(|p| p.client.info());
+            self.current.admission_generation = admission.generation;
+            admission.available &= self.current.admission.as_ref().is_some_and(|p| p.accepting);
+            self.pool_binding.mirror(admission);
             let mut snapshot = external.votes.snapshot();
             self.current.votes = snapshot.value.as_ref().map(votes::Client::info);
             self.current.votes_generation = snapshot.generation;
@@ -455,10 +461,10 @@ impl Service {
         self.current.restart_attempts = self.group.attempts();
         self.current.ready = self.children_ready
             && !self.group.exhausted()
-            && self
-                .external
-                .as_ref()
-                .is_none_or(|e| e.votes.current().is_some_and(|v| v.info().accepting));
+            && self.external.as_ref().is_none_or(|e| {
+                e.votes.current().is_some_and(|v| v.info().accepting)
+                    && e.pool.current().is_some_and(|p| p.client.info().accepting)
+            });
         self.current.gc = self.gc.as_ref().map(|w| w.info());
         self.published.send_replace(self.current.clone());
     }

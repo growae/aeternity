@@ -470,6 +470,19 @@ pub(super) struct Retiring {
     eoe_retired: bool,
 }
 impl Retiring {
+    pub(super) fn retire_pool(&mut self, old: &worker::Client) -> Result<bool, Error> {
+        let matched = self
+            .packing
+            .as_mut()
+            .map(|p| p.retire_pool(old))
+            .transpose()
+            .map_err(Error::Packing)?
+            .unwrap_or(false);
+        if matched && self.failure.as_ref().is_some_and(pool_departure) {
+            self.failure = None;
+        }
+        Ok(matched)
+    }
     pub(super) fn retire_eoe(&mut self, old: &super::Client) -> Result<(), Error> {
         if let Some(effects) = &mut self.effects
             && let Some(error) = effects.retire_eoe(old).map_err(Error::Effects)?
@@ -542,4 +555,14 @@ impl Retiring {
         );
         self.report
     }
+}
+
+pub(super) fn pool_departure(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Packing(packing::Error::Pool {
+            error: worker::Error::Stopped | worker::Error::Disconnected,
+            ..
+        })
+    )
 }

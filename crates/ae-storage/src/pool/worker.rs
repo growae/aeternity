@@ -75,6 +75,7 @@ pub struct Info {
     pub version: u64,
     pub running: bool,
     pub accepting: bool,
+    pub joined: bool,
     pub queued: usize,
     pub in_flight: bool,
     pub retained_request_bytes: usize,
@@ -159,6 +160,11 @@ pub struct Worker {
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
 }
+#[derive(Debug)]
+pub struct Retired {
+    pub info: Info,
+    pub result: Result<(), Error>,
+}
 impl Worker {
     pub fn spawn(
         db: Arc<Database>,
@@ -192,6 +198,7 @@ impl Worker {
                     version: 0,
                     running: true,
                     accepting: true,
+                    joined: false,
                     queued: 0,
                     in_flight: false,
                     retained_request_bytes: 0,
@@ -245,6 +252,16 @@ impl Worker {
         self.stop()?;
         Ok(self.info())
     }
+    pub fn is_finished(&self) -> bool {
+        self.join.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub fn retire(mut self) -> Retired {
+        let result = self.stop();
+        Retired {
+            info: self.info(),
+            result,
+        }
+    }
     // Owned shutdown may be requested without blocking the async supervisor.
     // The owner must still call shutdown/drop to join the thread.
     pub fn request_shutdown(&self) {
@@ -256,7 +273,11 @@ impl Worker {
     fn stop(&mut self) -> Result<(), Error> {
         self.request_shutdown();
         if let Some(join) = self.join.take() {
-            join.join().map_err(|_| Error::Panicked)?;
+            let result = join.join().map_err(|_| Error::Panicked);
+            let mut c = self.shared.lock();
+            c.info.joined = true;
+            self.shared.signal(&mut c);
+            result?;
         }
         Ok(())
     }

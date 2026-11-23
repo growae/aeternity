@@ -249,7 +249,7 @@ where
         pool_gc: None,
         capabilities: None,
         resilience: None,
-        admission: crate::bindings::Admission::fixed(&inputs.database, inputs.admission.clone()),
+        admission: producer.pool_binding(),
         gc: None,
     };
     create_inner(inputs, config, outputs, dependencies, Some(cache))

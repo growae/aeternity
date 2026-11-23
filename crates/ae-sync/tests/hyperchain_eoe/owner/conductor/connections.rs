@@ -7,6 +7,8 @@ use common::within;
 use std::net::Ipv4Addr;
 use tokio::task::JoinHandle;
 
+#[path = "connections/pool_recovery.rs"]
+mod pool_recovery;
 #[path = "connections/workers.rs"]
 mod workers;
 

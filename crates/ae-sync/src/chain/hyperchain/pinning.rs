@@ -190,14 +190,21 @@ pub(crate) struct Factory<O> {
     input: Inputs<O>,
     config: Config,
     lease: Arc<()>,
+    pool: Option<crate::bindings::Admission>,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
-    pub(crate) fn start(input: Inputs<O>, config: Config) -> Result<(Service, Self), Error> {
-        let service = Service::spawn(input.clone(), config.clone())?;
+    pub(crate) fn start_managed(
+        input: Inputs<O>,
+        config: Config,
+        pool: crate::bindings::Admission,
+    ) -> Result<(Service, Self), Error> {
+        let service =
+            Service::spawn_inner(input.clone(), config.clone(), None, Some(pool.clone()))?;
         let factory = Self {
             input,
             config,
             lease: service.lease.clone(),
+            pool: Some(pool),
         };
         Ok((service, factory))
     }
@@ -206,6 +213,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
             self.input.clone(),
             self.config.clone(),
             Some(self.lease.clone()),
+            self.pool.clone(),
         )
     }
 }
@@ -239,12 +247,13 @@ impl Service {
         input: Inputs<O>,
         config: Config,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(input, config, None)
+        Self::spawn_inner(input, config, None, None)
     }
     fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
         input: Inputs<O>,
         config: Config,
         lease: Option<Arc<()>>,
+        managed_pool: Option<crate::bindings::Admission>,
     ) -> Result<Self, Error> {
         if !(1..=4096).contains(&config.outputs)
             || !input.parent.bound_to(&input.producer, &input.source)
@@ -261,6 +270,9 @@ impl Service {
             || !input.source.uses_database(&input.database)
             || !input.producer.uses_database(&input.database)
             || !input.pool.uses_database(&input.database)
+            || managed_pool
+                .as_ref()
+                .is_some_and(|p| !p.uses_database(&input.database))
         {
             return Err(Error::Configuration);
         }
@@ -303,7 +315,8 @@ impl Service {
             source: Arc::downgrade(&input.source),
             execution: input.execution,
             producer: input.producer,
-            pool: input.pool,
+            pool: managed_pool
+                .unwrap_or_else(|| crate::bindings::Admission::fixed(&input.database, input.pool)),
             parent: input.parent,
             keys: input.keys,
             config: config.clone(),

@@ -6,6 +6,8 @@ use ae_sync::{
 use std::{path::PathBuf, sync::atomic::AtomicU64};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "workers/pool_recovery.rs"]
+mod pool_recovery;
 #[path = "workers/vote_recovery.rs"]
 mod vote_recovery;
 struct Resources {

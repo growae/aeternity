@@ -640,5 +640,7 @@ mod durable_children;
 #[path = "pinning/checkpoint.rs"]
 mod checkpoint;
 
+#[path = "pinning/pool_recovery.rs"]
+mod pool_recovery;
 #[path = "pinning/supervision.rs"]
 mod supervision;

@@ -12,6 +12,8 @@ mod parent_http;
 mod pinning;
 #[path = "conductor/pins.rs"]
 mod pins;
+#[path = "conductor/pool_supervision.rs"]
+mod pool_supervision;
 #[path = "conductor/targets.rs"]
 mod targets;
 #[path = "conductor/vote_supervision.rs"]

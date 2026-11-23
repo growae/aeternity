@@ -5,6 +5,7 @@ use ae_mempool::pool::{self as policy, Event, Location, PushOutcome};
 use std::collections::BTreeSet;
 use std::sync::mpsc;
 mod gossip;
+mod retirement;
 
 fn settings() -> Settings {
     Settings {

@@ -47,7 +47,11 @@ fn cached(c: &Conductor<Otp26>, height: u64) -> bool {
 #[test]
 fn ordinary_startup_fetches_contract_targets_and_produces_across_epoch_changes() {
     for index in [1, 3, 5] {
-        let node = Node::new(index);
+        let mut node = Node::new(index);
+        // Production uses the controlled clock, but EOE negotiation has real
+        // timers. This live-thread integration must not require every voting
+        // round to finish inside the byte-fixture profile's four milliseconds.
+        node.config.rules.consensus.child_block_time = 1000.into();
         let mut c = automatic(&node, true);
         wait(|| cached(&c, 16));
         let mut wall = 1000;
@@ -68,7 +72,25 @@ fn ordinary_startup_fetches_contract_targets_and_produces_across_epoch_changes()
                 }
             }
         }
-        assert!(eoe >= 2);
+        assert!(
+            eoe >= 2,
+            "profile {index}, epochs {eoe}, wall {wall}, produced {:?}, status {:?}",
+            keys.iter()
+                .map(|hash| {
+                    let Block::Key(header) = node.db.view().unwrap().require_block(*hash).unwrap()
+                    else {
+                        panic!()
+                    };
+                    (
+                        header.common.height,
+                        header.time,
+                        header.hole,
+                        header.end_of_epoch,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            c.status()
+        );
         // Committed top delivery must drive new queries and real connector
         // requests; there are no injected target heights or parent posts.
         while !cached(&c, 26) {

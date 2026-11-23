@@ -64,7 +64,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Handle<O> {
     }
 }
 pub(super) struct External {
-    pub pool: pool::worker::Client,
+    pub pool: bindings::Admission,
     pub votes: votes::Binding,
     pub group: super::super::restart::workers::Group,
     pub resilience: Option<resilience::Source>,
@@ -74,7 +74,7 @@ pub(super) struct External {
 impl External {
     pub fn healthy(&self) -> Result<(), Error> {
         (self.check)()?;
-        if !self.pool.info().accepting {
+        if self.pool.is_closed() {
             return Err(Error::Dependency(Child::Admission));
         }
         if self.votes.is_closed() {
@@ -105,7 +105,7 @@ pub fn create<O: MapOrder + Clone + Send + Sync + 'static>(
         None => (None, None, None),
     };
     let external = External {
-        pool,
+        pool: producer.pool_binding(),
         votes: producer.vote_binding(),
         group: producer.worker_group(),
         resilience,

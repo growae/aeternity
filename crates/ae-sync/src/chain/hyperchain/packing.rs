@@ -352,6 +352,9 @@ impl<O: MapOrder + Clone> Packing<O> {
             _ => (None, 0),
         };
         Cancelled {
+            pool: self.pool,
+            retired: false,
+            observed: None,
             pending,
             report: CancelReport {
                 discarded_failures,
@@ -423,34 +426,59 @@ enum CancelReceipt {
     },
 }
 pub(crate) struct Cancelled {
+    pool: worker::Client,
+    retired: bool,
+    observed: Option<(Stage, worker::Error)>,
     pending: Option<CancelReceipt>,
     report: CancelReport,
 }
 impl Cancelled {
+    pub fn retire_pool(&mut self, old: &worker::Client) -> Result<bool, Error> {
+        if !old.info().joined {
+            return Err(Error::Binding);
+        }
+        let matches = self.pool.same_worker(old);
+        self.retired |= matches;
+        Ok(matches)
+    }
     pub fn step(&mut self) -> Result<bool, Error> {
-        let Some(pending) = &self.pending else {
+        let (stage, result) = if let Some((stage, error)) = &self.observed {
+            (*stage, Err(error.clone()))
+        } else if let Some(pending) = &self.pending {
+            match pending {
+                CancelReceipt::Selection(call) => (
+                    Stage::Selection,
+                    call.wait_timeout(Duration::ZERO)
+                        .map(|selected| CancelResult::Selection(selected.transactions.len())),
+                ),
+                CancelReceipt::Failures { reports, call } => (
+                    Stage::Failures,
+                    call.wait_timeout(Duration::ZERO).map(|removed| {
+                        if removed.len() == reports.len() {
+                            CancelResult::Failures(removed)
+                        } else {
+                            CancelResult::Unexpected
+                        }
+                    }),
+                ),
+            }
+        } else {
             return Ok(true);
-        };
-        let (stage, result) = match pending {
-            CancelReceipt::Selection(call) => (
-                Stage::Selection,
-                call.wait_timeout(Duration::ZERO)
-                    .map(|selected| CancelResult::Selection(selected.transactions.len())),
-            ),
-            CancelReceipt::Failures { reports, call } => (
-                Stage::Failures,
-                call.wait_timeout(Duration::ZERO).map(|removed| {
-                    if removed.len() == reports.len() {
-                        CancelResult::Failures(removed)
-                    } else {
-                        CancelResult::Unexpected
-                    }
-                }),
-            ),
         };
         match result {
             Err(worker::Error::Timeout) => return Ok(false),
-            Err(e) if !known_pool_rejection(&e) => return Err(pool_error(stage, e)),
+            Err(e)
+                if !known_pool_rejection(&e)
+                    && !(self.retired
+                        && matches!(e, worker::Error::Stopped | worker::Error::Disconnected)) =>
+            {
+                // The ticket has been consumed. Keep its first terminal result
+                // so a later joined-owner notification cannot turn Stopped into
+                // Disconnected by polling the empty ticket again.
+                self.pending = None;
+                self.observed = Some((stage, e.clone()));
+                return Err(pool_error(stage, e));
+            }
             Err(e) => match stage {
                 Stage::Selection => self.report.selection = Some(Err(e)),
                 Stage::Failures => self.report.failure_reports = Some(Err(e)),
@@ -460,10 +488,11 @@ impl Cancelled {
             Ok(CancelResult::Unexpected) => return Err(Error::Sequence),
         }
         self.pending = None;
+        self.observed = None;
         Ok(true)
     }
     pub fn finish(self) -> CancelReport {
-        assert!(self.pending.is_none());
+        assert!(self.pending.is_none() && self.observed.is_none());
         self.report
     }
 }
@@ -480,3 +509,6 @@ fn known_pool_rejection(error: &worker::Error) -> bool {
         ))
     ) || matches!(error, worker::Error::Service(pool::Failure::Policy(e)) if !e.is_operational())
 }
+
+#[cfg(test)]
+mod tests;
