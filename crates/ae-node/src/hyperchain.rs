@@ -524,28 +524,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         self.phase(Phase::Stopping);
         self.shared.stop.send_replace(true);
         if let Some(control) = self.producer.as_ref().map(|p| p.handle()) {
-            // Root admission is closed. Apply every already accepted command
-            // and a final Stop before draining peers; a full control queue must
-            // not silently leave production enabled during that drain.
-            while !self.producer.as_ref().expect("producer").is_finished() {
-                match control.stop_production() {
-                    Ok(()) => {
-                        let submitted = control.controls().submitted;
-                        while control.controls().applied < submitted
-                            && !self.producer.as_ref().expect("producer").is_finished()
-                        {
-                            tokio::time::sleep(self.config.poll).await;
-                        }
-                        break;
-                    }
-                    Err(conductor::Error::Backpressured) => {
-                        tokio::time::sleep(self.config.poll).await;
-                    }
-                    Err(e) => {
-                        self.status.failure.get_or_insert(Error::Producer(e));
-                        break;
-                    }
-                }
+            // The fence has independent capacity, so unread control receipts
+            // and a blocked producer clock cannot prevent service quiescence.
+            control.quiesce();
+            while !control.quiesced()
+                && !self
+                    .producer
+                    .as_ref()
+                    .expect("producer")
+                    .service_is_finished()
+            {
+                tokio::time::sleep(self.config.poll).await;
             }
         }
         // Peers drain accepted shared writes while the producer/pool authority
@@ -612,6 +601,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                     self.status
                         .failure
                         .get_or_insert(Error::Producer(e.clone()));
+                }
+                if s.production_driver
+                    .as_ref()
+                    .is_some_and(|d| d.exit.is_err())
+                {
+                    joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::Producer));
                 }
                 if s.pool.is_err()
                     || s.parent.as_ref().is_some_and(Result::is_err)

@@ -680,7 +680,7 @@ async fn managed_keys_and_connection_replacement_keep_the_same_producer() {
 }
 
 #[tokio::test]
-async fn shutdown_quiesces_production_after_a_full_control_queue() {
+async fn shutdown_quiesces_production_with_a_blocked_driver_clock() {
     struct Gate {
         entered: Arc<AtomicBool>,
         released: Arc<AtomicBool>,
@@ -730,10 +730,6 @@ async fn shutdown_quiesces_production_after_a_full_control_queue() {
         h.stop_production().unwrap();
         h.start_production().unwrap();
     }
-    assert_eq!(
-        h.stop_production(),
-        Err(root::Error::Producer(conductor::Error::Backpressured))
-    );
     h.request_shutdown();
     within(async {
         while h.status().phase != root::Phase::Stopping {
@@ -750,7 +746,7 @@ async fn shutdown_quiesces_production_after_a_full_control_queue() {
 }
 
 #[tokio::test]
-async fn producer_thread_panic_terminates_root_and_does_not_claim_a_receipt() {
+async fn driver_panic_retains_service_shutdown_and_does_not_claim_a_receipt() {
     struct PanicClock(Arc<AtomicBool>, Clock);
     impl producer::Clock for PanicClock {
         fn now(&self) -> Result<(u64, Instant), conductor::Error> {
@@ -776,10 +772,12 @@ async fn producer_thread_panic_terminates_root_and_does_not_claim_a_receipt() {
     panic.store(true, Ordering::Release);
     let exit = within(running.wait()).await.unwrap();
     assert!(!exit.status.joined && !exit.status.running && exit.status.failure.is_some());
-    assert!(matches!(
-        exit.producer,
-        Some(Err(root::Error::ChildTask(root::Child::Producer)))
-    ));
+    let report = exit.producer.unwrap().unwrap();
+    let driver = report.production_driver.unwrap();
+    assert!(driver.exit.is_err());
+    assert_eq!(driver.failure, Some(conductor::Error::DriverPanicked));
+    assert!(driver.pending.is_none());
+    assert!(report.pool.is_ok() && report.connector_joined && report.owner.errors.is_empty());
     assert!(exit.status.workers.unwrap().joined && exit.status.connections.unwrap().joined);
     assert!(!pool.info().accepting);
 }

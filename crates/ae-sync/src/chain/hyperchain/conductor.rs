@@ -78,6 +78,7 @@ pub enum Error {
     Utilities(parent::Error),
     StaleSession { requested: u64, current: u64 },
     SessionGenerationLimit,
+    DriverPanicked,
     ConsensusRestartLimit,
     PoolRestartLimit,
     Supervision(eoe_runtime::Output),
@@ -197,6 +198,7 @@ pub struct Shutdown<O> {
     pub attempt: Option<production::Attempt<O>>,
     pub retiring: Option<production::Retiring<O>>,
     pub session_retirement: Option<session::Status>,
+    pub production_driver: Option<runtime::DriverReport>,
     pub admission: Option<Result<chain::Report, chain::Failure>>,
     pub owner: owner::Shutdown,
     pub delivery: delivery::Delivery<O, eoe::StateReader, eoe::StateReader>,
@@ -230,6 +232,7 @@ pub struct Conductor<O: MapOrder + Clone + Send + Sync + 'static> {
     pending: Option<Output>,
     status: Observations,
     tick: Option<Instant>,
+    production_tick: Option<Instant>,
 }
 
 struct Services<O: MapOrder + Clone + Send + Sync + 'static> {
@@ -569,6 +572,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             retiring: None,
             pending: None,
             tick: None,
+            production_tick: None,
             status: Observations {
                 consensus: consensus_status,
                 votes: votes_status,
@@ -760,7 +764,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         if let Some(e) = &self.status.failure {
             return Err(e.clone());
         }
-        let result = self.advance(wall_ms, now);
+        self.driven_step(Some((wall_ms, now)), now)
+    }
+    fn driven_step(
+        &mut self,
+        production: Option<(u64, Instant)>,
+        now: Instant,
+    ) -> Result<Progress, Error> {
+        if let Some(error) = &self.status.failure {
+            return Err(error.clone());
+        }
+        let result = self.advance(production, now);
         if let Err(e) = &result {
             if self.services.pool.replacement_pending()
                 && matches!(
@@ -830,7 +844,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         }
         result
     }
-    fn advance(&mut self, wall_ms: u64, now: Instant) -> Result<Progress, Error> {
+    fn advance(
+        &mut self,
+        production: Option<(u64, Instant)>,
+        now: Instant,
+    ) -> Result<Progress, Error> {
         if self.tick.is_some_and(|last| now < last) {
             return Err(Error::Time);
         }
@@ -1079,6 +1097,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             self.install_session();
             return Ok(Progress::Output);
         }
+        let Some((wall_ms, now)) = production else {
+            return Ok(if advanced {
+                Progress::Advanced
+            } else {
+                Progress::Idle
+            });
+        };
+        if self.production_tick.is_some_and(|last| now < last) {
+            return Err(Error::Time);
+        }
+        self.production_tick = Some(now);
         if let Some(attempt) = &mut self.session.attempt {
             let p = match attempt.step(owner, &self.services.importer, wall_ms, now) {
                 Ok(p) => p,
@@ -1309,6 +1338,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             attempt: self.session.attempt.take(),
             retiring: self.retiring.take(),
             session_retirement: self.session_retirement.take(),
+            production_driver: None,
             admission,
             owner,
             delivery,

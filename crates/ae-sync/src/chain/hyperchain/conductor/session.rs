@@ -83,6 +83,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         // Native init(Options) restores configured autostart. A previous
         // interactive start/stop command must not change those options.
         self.session = Live::new(self.session_config, generation);
+        self.production_tick = None;
         self.pending = Some(Output::SessionReplaced {
             retired,
             generation,

@@ -300,23 +300,37 @@ fn runtime_controls_are_bounded_ordered_and_work_under_output_pressure() {
     };
     let handle = runtime.handle();
     wait(|| gate.0.lock().unwrap().0);
+    let client = handle.session();
+    let mut tickets = Vec::new();
     for _ in 0..32 {
-        handle.start_production().unwrap();
-        handle.stop_production().unwrap();
+        tickets.push(client.start_production().unwrap());
+        tickets.push(client.stop_production().unwrap());
+    }
+    // Services apply controls while the production clock is blocked, but
+    // retained receipts continue to charge the fixed control capacity.
+    let end = Instant::now() + Duration::from_secs(5);
+    while handle.controls().applied < 64 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(1));
     }
     let controls = handle.controls();
-    assert_eq!(
-        (controls.submitted, controls.applied, controls.pending),
-        (64, 0, 64)
-    );
     let saturated = handle.start_production();
-    // Always release the clock before any assertion can unwind the runtime.
     gate.0.lock().unwrap().1 = true;
     gate.1.notify_all();
+    assert_eq!(
+        (controls.submitted, controls.applied, controls.pending),
+        (64, 64, 0)
+    );
     assert_eq!(saturated, Err(conductor::Error::Backpressured));
-    wait(|| handle.controls().applied == 64);
+    assert_eq!(handle.usage().controls, 64);
+    for ticket in &tickets {
+        assert_eq!(
+            ticket.try_result(),
+            Some(Ok(conductor::runtime::Reply::Applied))
+        );
+    }
     assert!(!handle.status().producing);
     assert_eq!(handle.status().attempts, 0);
+    drop(tickets);
     handle.start_production().unwrap();
     let end = Instant::now() + Duration::from_secs(15);
     while handle.status().completed < 2 {
