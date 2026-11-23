@@ -4,6 +4,8 @@ use ae_tx::{CanonicalTransaction, Transaction, TransactionLeaf};
 use ed25519_dalek::{Signer, SigningKey};
 use std::time::Duration;
 
+mod retirement;
+
 fn fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
         "../../../ae-mempool/tests/fixtures/erlang_hc_vote.json"

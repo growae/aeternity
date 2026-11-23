@@ -353,6 +353,11 @@ pub struct Worker {
     inner: owned::Worker<State>,
     client: Client,
 }
+#[derive(Debug)]
+pub struct Retired {
+    pub info: Info,
+    pub result: Result<(), Error>,
+}
 impl Worker {
     pub fn spawn(
         database: Arc<Database>,
@@ -405,6 +410,21 @@ impl Worker {
     }
     pub fn info(&self) -> Info {
         self.inner.info()
+    }
+    // Closed admission may still have an executing callback and queued work.
+    // Supervisors poll the actual thread before performing a nonblocking join.
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+    // Receipts remain attached to the old worker. Joining neither redirects
+    // them nor consumes completed replies or independently owned publications.
+    pub fn retire(self) -> Retired {
+        let client = self.client();
+        let result = self.shutdown();
+        Retired {
+            info: client.info(),
+            result,
+        }
     }
     pub fn request_shutdown(&self) {
         if let Some(stop) = &self.eoe_stop {

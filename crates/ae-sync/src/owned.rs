@@ -292,6 +292,9 @@ impl<A: Actor> Worker<A> {
     pub fn info(&self) -> Info<A::Error> {
         self.client.info()
     }
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
     pub fn request_shutdown(&self) {
         self.client.shared.stop();
     }
