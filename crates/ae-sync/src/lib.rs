@@ -25,6 +25,7 @@ pub mod peer;
 pub mod pool;
 pub mod pool_gc;
 pub mod preset_keys;
+pub mod production_group;
 pub mod registry;
 pub mod resolver;
 pub mod routing;

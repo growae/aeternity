@@ -1,0 +1,2236 @@
+{
+  "policy": {
+    "children": [
+      {
+        "id": "aec_block_generator",
+        "restart": "permanent",
+        "shutdown": 5000,
+        "type": "worker"
+      },
+      {
+        "id": "aec_conductor",
+        "restart": "permanent",
+        "shutdown": 5000,
+        "type": "worker"
+      }
+    ],
+    "intensity": 5,
+    "period": 50,
+    "strategy": "one_for_all"
+  },
+  "lifecycle": [
+    {
+      "kind": "shutdown",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_block_generator",
+      "kind": "normal",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_conductor",
+      "kind": "normal",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_block_generator",
+      "kind": "boom",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "boom"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "boom"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_conductor",
+      "kind": "boom",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "boom"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "boom"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_block_generator",
+      "kind": "killed",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "both_replaced": true,
+      "child": "aec_conductor",
+      "kind": "killed",
+      "old_client": "noproc",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "child": "aec_block_generator",
+      "kind": "startup_failure",
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "failed",
+          "generation": 1,
+          "mode": "stop"
+        }
+      ]
+    },
+    {
+      "child": "aec_conductor",
+      "kind": "startup_failure",
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "failed",
+          "generation": 1,
+          "mode": "stop"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        }
+      ]
+    },
+    {
+      "child": "aec_block_generator",
+      "kind": "failed_restart",
+      "mode": "stop",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "failed",
+          "generation": 2,
+          "mode": "stop"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "child": "aec_block_generator",
+      "kind": "failed_restart",
+      "mode": "error",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "failed",
+          "generation": 2,
+          "mode": "error"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        }
+      ]
+    },
+    {
+      "child": "aec_conductor",
+      "kind": "failed_restart",
+      "mode": "stop",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "failed",
+          "generation": 2,
+          "mode": "stop"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 3
+        }
+      ]
+    },
+    {
+      "child": "aec_conductor",
+      "kind": "failed_restart",
+      "mode": "error",
+      "shutdown_trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        }
+      ],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "failed",
+          "generation": 2,
+          "mode": "error"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 3
+        }
+      ]
+    },
+    {
+      "allowed_replacements": 5,
+      "kind": "shared_exhaustion",
+      "shutdown_trace": [],
+      "sibling_unchanged": true,
+      "sixth_stops_group": true,
+      "trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 2
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 2,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 3
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 3
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 3,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 4
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 4
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 4
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 4
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 4,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 4,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 4,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 4,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 5
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 5
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 5
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 5
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 5,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 5,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 5,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 5,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 6
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 6
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 6
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 6
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 6,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_conductor",
+          "event": "stopped",
+          "generation": 6,
+          "reason": "normal"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 6,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 6,
+          "reason": "shutdown"
+        }
+      ]
+    },
+    {
+      "child": "aec_conductor",
+      "elapsed_ms": 5012,
+      "initial_trace": [
+        {
+          "child": "stable_consensus",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "stable_consensus",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "started",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "attempt",
+          "generation": 1
+        },
+        {
+          "child": "aec_conductor",
+          "event": "started",
+          "generation": 1
+        }
+      ],
+      "kind": "forced_shutdown",
+      "reason": "killed",
+      "shutdown_trace": [],
+      "sibling_unchanged": true,
+      "trace": [
+        {
+          "child": "aec_conductor",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopping",
+          "generation": 1,
+          "reason": "shutdown"
+        },
+        {
+          "child": "aec_block_generator",
+          "event": "stopped",
+          "generation": 1,
+          "reason": "shutdown"
+        }
+      ]
+    }
+  ],
+  "budgets": [
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0,
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "allowed": false,
+        "now": 0,
+        "retained": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 1,
+        "retained": [
+          0,
+          1
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 2,
+        "retained": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 3,
+        "retained": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 4,
+        "retained": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "allowed": false,
+        "now": 50,
+        "retained": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          50
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 1,
+        "retained": [
+          0,
+          1
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 2,
+        "retained": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 3,
+        "retained": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 4,
+        "retained": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 51,
+        "retained": [
+          1,
+          2,
+          3,
+          4,
+          51
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 10,
+        "retained": [
+          0,
+          10
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 20,
+        "retained": [
+          0,
+          10,
+          20
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 30,
+        "retained": [
+          0,
+          10,
+          20,
+          30
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 40,
+        "retained": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      },
+      {
+        "allowed": false,
+        "now": 50,
+        "retained": [
+          0,
+          10,
+          20,
+          30,
+          40,
+          50
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 10,
+        "retained": [
+          0,
+          10
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 20,
+        "retained": [
+          0,
+          10,
+          20
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 30,
+        "retained": [
+          0,
+          10,
+          20,
+          30
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 40,
+        "retained": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 51,
+        "retained": [
+          10,
+          20,
+          30,
+          40,
+          51
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 100,
+        "retained": [
+          100
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 110,
+        "retained": [
+          100,
+          110
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 120,
+        "retained": [
+          100,
+          110,
+          120
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 130,
+        "retained": [
+          100,
+          110,
+          120,
+          130
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 140,
+        "retained": [
+          100,
+          110,
+          120,
+          130,
+          140
+        ]
+      },
+      {
+        "allowed": false,
+        "now": 150,
+        "retained": [
+          100,
+          110,
+          120,
+          130,
+          140,
+          150
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 100,
+        "retained": [
+          100
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 110,
+        "retained": [
+          100,
+          110
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 120,
+        "retained": [
+          100,
+          110,
+          120
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 130,
+        "retained": [
+          100,
+          110,
+          120,
+          130
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 140,
+        "retained": [
+          100,
+          110,
+          120,
+          130,
+          140
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 151,
+        "retained": [
+          110,
+          120,
+          130,
+          140,
+          151
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 51,
+        "retained": [
+          51
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 102,
+        "retained": [
+          102
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 153,
+        "retained": [
+          153
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 204,
+        "retained": [
+          204
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 255,
+        "retained": [
+          255
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 1,
+        "retained": [
+          0,
+          1
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 2,
+        "retained": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 3,
+        "retained": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 4,
+        "retained": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 51,
+        "retained": [
+          1,
+          2,
+          3,
+          4,
+          51
+        ]
+      },
+      {
+        "allowed": false,
+        "now": 51,
+        "retained": [
+          1,
+          2,
+          3,
+          4,
+          51,
+          51
+        ]
+      }
+    ],
+    [
+      {
+        "allowed": true,
+        "now": 0,
+        "retained": [
+          0
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 1,
+        "retained": [
+          0,
+          1
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 2,
+        "retained": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 3,
+        "retained": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 4,
+        "retained": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "allowed": true,
+        "now": 100,
+        "retained": [
+          100
+        ]
+      }
+    ]
+  ]
+}
