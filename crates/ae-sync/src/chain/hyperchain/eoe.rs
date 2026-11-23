@@ -2,7 +2,7 @@
 // separate inputs: a side-branch new_epoch need not change the selected tip.
 use ae_chain::{publication, repository as repo};
 use ae_crypto::Ed25519SecretKey;
-use ae_hyperchain::eoe::{coordinator, local_host, runtime};
+use ae_hyperchain::eoe::{coordinator, local_host, pool, runtime};
 use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_storage::{Database, events, snapshots};
 use ae_types::{AccountPublicKey, Unsigned};
@@ -27,6 +27,7 @@ pub struct Source {
     network: NetworkProfile,
     genesis_protocol: Protocol,
     live: Mutex<Weak<()>>,
+    epochs_live: Mutex<Weak<()>>,
 }
 pub struct State {
     pub tip: Tip,
@@ -38,6 +39,7 @@ pub enum Error {
     Identity,
     AlreadyRunning,
     State(local_host::SelectedError),
+    StateHost(local_host::Error),
     Worker(String),
     Source(events::Error),
     SourceClosed,
@@ -47,6 +49,7 @@ pub enum Error {
     Closed,
     ReceiptLost,
     UnexpectedReply,
+    Pool(pool::Error),
     Rejected(coordinator::Error),
 }
 fn state_error(e: snapshots::Error) -> local_host::SelectedError {
@@ -94,6 +97,7 @@ impl Source {
             network,
             genesis_protocol,
             live: Mutex::new(Weak::new()),
+            epochs_live: Mutex::new(Weak::new()),
         }))
     }
     pub fn snapshots(&self) -> &snapshots::Owner {
@@ -147,32 +151,63 @@ impl Source {
         })
     }
     // Create one EOE authority and its fixed epoch-feed consumer together. The
-    // caller transfers Runtime to the existing vote/output owner, then runs
-    // Epochs (or service::Service). No second pool or event replay is created.
+    // caller transfers Runtime to the vote/output owner, then runs Epochs.
+    // This compatibility entry point keeps its original runtime-owned pool.
     pub fn connect(
         self: &Arc<Self>,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Send + 'static,
     ) -> Result<Connected, Error> {
-        self.connect_with(config, keys, order, None, None, None)
+        self.connect_with(config, keys, order, Services::default())
             .map(|(connected, _)| connected)
+    }
+    pub fn connect_independent(
+        self: &Arc<Self>,
+        config: Config,
+        keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
+        order: impl MapOrder + Send + 'static,
+        hub: pool::Hub,
+    ) -> Result<Connected, Error> {
+        self.connect_with(
+            config,
+            keys,
+            order,
+            Services {
+                pool: Some(hub),
+                ..Default::default()
+            },
+        )
+        .map(|(connected, _)| connected)
     }
     fn connect_with(
         self: &Arc<Self>,
         config: Config,
         keys: BTreeMap<AccountPublicKey, Ed25519SecretKey>,
         order: impl MapOrder + Send + 'static,
-        gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
-        parent: Option<ae_hyperchain::parent_cache::runtime::Client>,
-        route: Option<ae_hyperchain::parent_cache::runtime::Route>,
+        services: Services,
     ) -> Result<(Connected, ae_hyperchain::signing::Keys), Error> {
         config.epochs.validate()?;
+        let Services {
+            gossip,
+            parent,
+            route,
+            pool,
+        } = services;
         if config.host.network != self.network {
             return Err(Error::Identity);
         }
-        let lease = Arc::new(());
-        {
+        // Both entry points reserve runtime ownership under the epoch gate.
+        // A legacy connection must not create a second feed during an
+        // independent runtime gap, when only the epoch lease remains alive.
+        let (epoch_lease, lease) = {
+            let mut epochs_live = self
+                .epochs_live
+                .lock()
+                .map_err(|_| Error::Worker("poisoned epoch owner".into()))?;
+            if epochs_live.upgrade().is_some() {
+                return Err(Error::AlreadyRunning);
+            }
             let mut live = self
                 .live
                 .lock()
@@ -180,8 +215,15 @@ impl Source {
             if live.upgrade().is_some() {
                 return Err(Error::AlreadyRunning);
             }
+            let lease = Arc::new(());
             *live = Arc::downgrade(&lease);
-        }
+            let epoch_lease = pool.as_ref().map(|_| {
+                let lease = Arc::new(());
+                *epochs_live = Arc::downgrade(&lease);
+                lease
+            });
+            (epoch_lease, lease)
+        };
         let initial = self.capture().map_err(Error::State)?;
         let cursor = initial.metadata.cursor.clone();
         let protocol = initial.tip.protocol;
@@ -202,6 +244,11 @@ impl Source {
             source: self.clone(),
             _lease: lease,
         }));
+        if let Some(hub) = &pool {
+            host = host
+                .with_independent_pool(hub.clone())
+                .map_err(Error::StateHost)?;
+        }
         host.set_parent_cache(parent);
         if let Some(route) = route {
             host.set_parent_route(route);
@@ -215,7 +262,13 @@ impl Source {
         let epochs = Epochs {
             source: self.clone(),
             cursor,
-            client: runtime.client(),
+            target: match pool {
+                Some(hub) => Target::Independent {
+                    hub,
+                    _lease: epoch_lease.expect("epoch lease"),
+                },
+                None => Target::Legacy(runtime.client()),
+            },
             config: config.epochs,
             pending: None,
             receipt: None,
@@ -224,6 +277,13 @@ impl Source {
         };
         Ok((Connected { runtime, epochs }, signer))
     }
+}
+#[derive(Default)]
+pub(super) struct Services {
+    pub gossip: Option<Arc<dyn ae_mempool::gossip::Transactional>>,
+    pub parent: Option<ae_hyperchain::parent_cache::runtime::Client>,
+    pub route: Option<ae_hyperchain::parent_cache::runtime::Route>,
+    pub pool: Option<pool::Hub>,
 }
 struct Live {
     source: Arc<Source>,
@@ -282,10 +342,28 @@ pub enum Progress {
     Backpressured,
     Acknowledged,
 }
+enum Target {
+    Legacy(Client),
+    Independent { hub: pool::Hub, _lease: Arc<()> },
+}
+impl Target {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Legacy(client) => client.is_closed(),
+            Self::Independent { hub, .. } => hub.is_closed(),
+        }
+    }
+    fn stop(&self) {
+        match self {
+            Self::Legacy(client) => client.request_stop(),
+            Self::Independent { hub, .. } => hub.close(),
+        }
+    }
+}
 pub struct Epochs {
     source: Arc<Source>,
     cursor: events::Cursor,
-    client: Client,
+    target: Target,
     config: Limits,
     pending: Option<Pending>,
     receipt: Option<runtime::Call>,
@@ -294,7 +372,7 @@ pub struct Epochs {
 }
 impl Drop for Epochs {
     fn drop(&mut self) {
-        self.client.request_stop();
+        self.target.stop();
     }
 }
 impl Epochs {
@@ -334,8 +412,9 @@ impl Epochs {
     }
     // Nonblocking downstream submission/receipt polling. Only definitely
     // rejected commands may retry. Gaps, rollback, failed/reopened sources and
-    // unknown receipts close EOE input; the owner must join and start a fresh
-    // connected runtime from a new coherent snapshot/cursor, never skip ahead.
+    // unknown receipts close the affected authority. Independent epoch feeds
+    // survive EOE absence with the same cursor; a terminal source failure
+    // closes the Hub instead of skipping retained events.
     pub fn step(&mut self) -> Result<Progress, Error> {
         if let Some(e) = &self.failure {
             return Err(e.clone());
@@ -343,11 +422,21 @@ impl Epochs {
         let result = self.advance();
         if let Err(e) = &result {
             if !matches!(e, Error::ResourceLimit | Error::Rejected(_)) {
-                self.client.request_stop();
+                self.target.stop();
             }
             self.failure = Some(e.clone());
         }
         result
+    }
+    fn acknowledge(&mut self) -> Progress {
+        let pending = self.pending.as_mut().expect("acknowledged epoch event");
+        pending.epochs.pop_front().expect("submitted epoch");
+        self.acknowledged = self.acknowledged.saturating_add(1);
+        if pending.epochs.is_empty() {
+            self.cursor = pending.cursor.clone();
+            self.pending = None;
+        }
+        Progress::Acknowledged
     }
     fn advance(&mut self) -> Result<Progress, Error> {
         let info = self.source.events.info();
@@ -359,7 +448,7 @@ impl Epochs {
         }
         if let Some(call) = &mut self.receipt {
             let Some(reply) = call.try_reply().map_err(|_| Error::ReceiptLost)? else {
-                if self.client.is_closed() {
+                if self.target.is_closed() {
                     return Err(Error::ReceiptLost);
                 }
                 return Ok(Progress::Waiting);
@@ -371,16 +460,9 @@ impl Epochs {
                 Err(coordinator::Error::Stopped) => return Err(Error::Closed),
                 Err(e) => return Err(Error::Rejected(e)),
             }
-            let pending = self.pending.as_mut().expect("epoch receipt has an event");
-            pending.epochs.pop_front().expect("submitted epoch");
-            self.acknowledged = self.acknowledged.saturating_add(1);
-            if pending.epochs.is_empty() {
-                self.cursor = pending.cursor.clone();
-                self.pending = None;
-            }
-            return Ok(Progress::Acknowledged);
+            return Ok(self.acknowledge());
         }
-        if self.client.is_closed() {
+        if self.target.is_closed() {
             return Err(Error::Closed);
         }
         if self.pending.is_none() {
@@ -441,7 +523,21 @@ impl Epochs {
             .front()
             .expect("nonempty event")
             .clone();
-        match self.client.call(runtime::Command::NewEpoch(epoch)) {
+        let client = match &self.target {
+            Target::Independent { hub, .. } => {
+                if epoch.as_bytes().len().saturating_add(128) > hub.config().maximum_input_bytes {
+                    return Err(Error::ResourceLimit);
+                }
+                return match hub.new_epoch(epoch) {
+                    Ok(()) => Ok(self.acknowledge()),
+                    Err(pool::Error::ResourceLimit) => Ok(Progress::Backpressured),
+                    Err(pool::Error::Closed) => Err(Error::Closed),
+                    Err(error) => Err(Error::Pool(error)),
+                };
+            }
+            Target::Legacy(client) => client,
+        };
+        match client.call(runtime::Command::NewEpoch(epoch)) {
             Ok(call) => self.receipt = Some(call),
             Err(runtime::SubmitError::Full(_)) => return Ok(Progress::Backpressured),
             Err(runtime::SubmitError::Disconnected(_)) => return Err(Error::Closed),

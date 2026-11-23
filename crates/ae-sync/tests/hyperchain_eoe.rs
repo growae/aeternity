@@ -758,3 +758,6 @@ async fn joined_epoch_worker_drives_the_existing_shared_vote_authority() {
     owner.shutdown().unwrap();
     assert_eq!(source.snapshots().live_snapshots(), 0);
 }
+
+#[path = "hyperchain_eoe/independent.rs"]
+mod independent;

@@ -75,7 +75,7 @@ fn configuration(node: &Node, cache: pool::worker::GossipCache) -> conductor::Co
                 epochs: Default::default(),
             },
             votes: Default::default(),
-            bridge: Default::default(),
+            pool: Default::default(),
             calls: Default::default(),
         },
         production: production::Config {

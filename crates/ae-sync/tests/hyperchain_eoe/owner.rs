@@ -14,7 +14,7 @@ fn cfg(node: &Node) -> managed::Config {
     managed::Config {
         eoe: config(node),
         votes: Default::default(),
-        bridge: Default::default(),
+        pool: Default::default(),
         calls: Default::default(),
     }
 }
@@ -484,7 +484,7 @@ fn startup_failure_releases_exclusive_runtime_and_snapshot_leases() {
         Err(managed::Error::Configuration)
     ));
     let mut config = cfg(&node);
-    config.bridge.receipt_timeout = Duration::ZERO;
+    config.pool.maximum_inputs = 0;
     assert!(matches!(
         managed::Owner::start(
             inputs(&node, &source, &config),
@@ -597,6 +597,9 @@ fn operational_eoe_stop_is_forwarded_and_requires_explicit_runtime_recovery() {
     config.eoe.coordinator.maximum_outputs = 0;
     let mut owner = start(&node, &source, config, &[12, 13, 14]);
     prepare(&owner);
+    // Votes use the independent publication queue. Fill the EOE output
+    // boundary with a finalization result, retaining this exact request.
+    let mut request = owner.finalize().unwrap();
     let started = Instant::now();
     loop {
         match owner.step().unwrap() {
@@ -609,7 +612,6 @@ fn operational_eoe_stop_is_forwarded_and_requires_explicit_runtime_recovery() {
     }
     assert!(owner.failure().is_none());
     unit(owner.configure_runtime(Default::default()).unwrap());
-    let mut request = owner.finalize().unwrap();
     let result = complete(&mut owner, &mut request);
     assert!(matches!(
         &result.replies()[0],
@@ -693,6 +695,21 @@ fn candidate_finalization_uses_staged_nonce_and_retains_exact_snapshot() {
         (p.candidate.trees().clone(), nonce)
     };
     prepare(&owner);
+    // Independent votes arrive asynchronously. Complete both negotiations
+    // before exercising the ready-path candidate view. A pending native call
+    // deliberately uses the selected state instead of its caller's overlay.
+    let mut settled = owner.finalize().unwrap();
+    let selected = complete(&mut owner, &mut settled);
+    for (i, reply) in selected.replies().iter().enumerate() {
+        let eoe::Reply::Finalized(local_host::Finalized::Signed(signed)) = reply else {
+            panic!("{reply:?}")
+        };
+        let TransactionLeaf::Contract(tx) = signed.transaction().leaf() else {
+            panic!()
+        };
+        assert_eq!(tx.nonce(), &old_nonce.add(&(i as u64 + 1).into()));
+    }
+    drop((settled, selected));
     let mut request = owner.finalize_candidate(&candidate).unwrap();
     assert_eq!(request.captured().source_id, candidate.metadata.source_id);
     assert_eq!(request.captured().status, candidate.metadata.status);

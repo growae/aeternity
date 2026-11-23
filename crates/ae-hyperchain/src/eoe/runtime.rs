@@ -149,10 +149,14 @@ impl<A: NodeReader + Clone + Send + Sync + 'static, C: NodeReader + Clone + Send
             stop.clone(),
             config,
             coordinator.host().network().clone(),
+            coordinator.host().independent_pool().cloned(),
         ));
         let mut inbox = coordinator
             .subscribe(control.wake.clone())
             .map_err(|e| io::Error::other(format!("EOE subscription: {e:?}")))?;
+        if let Some(inbox) = &inbox {
+            inbox.shutdown_with(stop.clone());
+        }
         let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name("ae-hc-eoe".into())

@@ -140,7 +140,7 @@ impl Service {
         self.control.changed.notify_all();
     }
     // Joined handoff retains the exact pending event/receipt for retry or
-    // reconciliation. Dropping the returned Epochs closes its EOE client.
+    // reconciliation. Dropping Epochs closes its runtime or independent Hub.
     pub fn shutdown(mut self) -> thread::Result<Epochs> {
         self.stop();
         self.worker.take().expect("live epoch worker").join()

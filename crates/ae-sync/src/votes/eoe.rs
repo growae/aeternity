@@ -52,7 +52,9 @@ pub struct Owner<A, C> {
     retained: std::collections::VecDeque<runtime::Output>,
     retired: Option<Retirement>,
     publications: Publications,
-    _claim: publications::Claim,
+    _claim: Option<publications::Claim>,
+    relay: Option<independent::Relay>,
+    pool_first: bool,
     attached: Arc<AtomicBool>,
     routed: AtomicBool,
     pending: Option<runtime::Output>,
@@ -84,11 +86,18 @@ impl<A, C> Owner<A, C> {
         runtime: runtime::Runtime<A, C>,
         publications: Publications,
     ) -> Result<Self, Box<StartError<A, C>>> {
-        let claim = match publications.claim() {
-            Ok(claim) => claim,
-            Err(error) => return Err(Box::new(StartError { error, runtime })),
-        };
         let client = runtime.client();
+        let (claim, relay) = if let Some(hub) = client.independent_pool() {
+            match independent::Relay::new(hub.clone(), publications.clone()) {
+                Ok(relay) => (None, Some(relay)),
+                Err(error) => return Err(Box::new(StartError { error, runtime })),
+            }
+        } else {
+            match publications.claim() {
+                Ok(claim) => (Some(claim), None),
+                Err(error) => return Err(Box::new(StartError { error, runtime })),
+            }
+        };
         Ok(Self {
             runtime: Some(runtime),
             route: runtime::Route::new(client.clone()),
@@ -97,10 +106,23 @@ impl<A, C> Owner<A, C> {
             retired: None,
             publications,
             _claim: claim,
+            relay,
+            pool_first: true,
             attached: Arc::new(AtomicBool::new(false)),
             routed: AtomicBool::new(false),
             pending: None,
         })
+    }
+    pub fn relay(&self) -> Option<&independent::Relay> {
+        self.relay.as_ref()
+    }
+    pub fn pending_publication(&self) -> Option<ae_hyperchain::eoe::pool::Publication> {
+        self.relay.as_ref().and_then(independent::Relay::pending)
+    }
+    pub fn take_pending_publication(&mut self) -> Option<ae_hyperchain::eoe::pool::Publication> {
+        self.relay
+            .as_mut()
+            .and_then(independent::Relay::take_pending)
     }
     pub fn client(&self) -> runtime::Client<A, C> {
         self.client.clone()
@@ -158,7 +180,13 @@ impl<A, C> Owner<A, C> {
         &mut self,
         runtime: runtime::Runtime<A, C>,
     ) -> Result<(), Box<StartError<A, C>>> {
-        let error = if self.client.network() != runtime.client().network() {
+        let next = runtime.client();
+        let same_pool = match (self.client.independent_pool(), next.independent_pool()) {
+            (Some(a), Some(b)) => a.same_hub(b),
+            (None, None) => true,
+            _ => false,
+        };
+        let error = if self.client.network() != next.network() || !same_pool {
             Some(Fault::Configuration.into())
         } else if self.runtime.is_some()
             || self.retired.is_some()
@@ -188,6 +216,37 @@ impl<A, C> Owner<A, C> {
     // Call from the composing service's output loop. Pressure retains the
     // exact output at the head and propagates through the bounded runtime.
     pub fn route(&mut self) -> Result<Routed, Error> {
+        if self.relay.is_none() {
+            return self.route_runtime();
+        }
+        let pool_first = self.pool_first;
+        self.pool_first = !self.pool_first;
+        let mut pressure = false;
+        if pool_first {
+            match self.relay.as_mut().expect("independent relay").step()? {
+                independent::Progress::Published => return Ok(Routed::Published),
+                independent::Progress::Backpressured => pressure = true,
+                independent::Progress::Idle => (),
+            }
+        }
+        match self.route_runtime()? {
+            Routed::Idle => (),
+            other => return Ok(other),
+        }
+        if !pool_first {
+            match self.relay.as_mut().expect("independent relay").step()? {
+                independent::Progress::Published => return Ok(Routed::Published),
+                independent::Progress::Backpressured => pressure = true,
+                independent::Progress::Idle => (),
+            }
+        }
+        Ok(if pressure {
+            Routed::Backpressured
+        } else {
+            Routed::Idle
+        })
+    }
+    fn route_runtime(&mut self) -> Result<Routed, Error> {
         if self.pending.is_none() {
             self.pending = if let Some(runtime) = &self.runtime {
                 match runtime.recv_timeout(Duration::ZERO) {
@@ -401,6 +460,10 @@ impl Worker {
             return Err(Fault::Configuration.into());
         }
         let endpoint = owner.client();
+        // Independent pools have their own actor and admission receipts.
+        if endpoint.independent_pool().is_some() {
+            return Err(Fault::Configuration.into());
+        }
         let publications = owner.publications.clone();
         if !publications.uses_database(&database) {
             return Err(Fault::Configuration.into());

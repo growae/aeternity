@@ -117,6 +117,29 @@ fn key_worker_promotes_only_current_candidate_and_keeps_peer_identity_across_res
 }
 
 #[test]
+fn key_lease_releases_ownership_with_a_duplicated_descriptor() {
+    let temp = Temp::new();
+    let config = temp.config();
+    let lease = files::lease(&config.directory).unwrap();
+    // Model a descriptor inherited by a concurrently spawning child. Its
+    // lifetime must not extend the already-joined key owner's lease.
+    let inherited = lease.try_clone().unwrap();
+    assert!(matches!(
+        files::lease(&config.directory),
+        Err(Error::AlreadyRunning)
+    ));
+    drop(lease);
+    let replacement = files::lease(&config.directory).unwrap();
+    drop(inherited);
+    assert!(matches!(
+        files::lease(&config.directory),
+        Err(Error::AlreadyRunning)
+    ));
+    drop(replacement);
+    drop(files::lease(&config.directory).unwrap());
+}
+
+#[test]
 fn key_worker_bounds_pending_requests_and_drains_accepted_work_before_join() {
     let temp = Temp::new();
     let mut config = temp.config();

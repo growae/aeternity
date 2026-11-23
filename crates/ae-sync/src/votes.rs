@@ -8,6 +8,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 pub mod eoe;
+pub mod independent;
 mod publications;
 pub use publications::{Consumer, Publication, Publications};
 
@@ -130,6 +131,7 @@ pub(crate) fn snapshot(
 enum Pool {
     Local(policy::VotePool),
     Shared(eoe::Authority),
+    Independent(independent::Independent),
 }
 struct State {
     database: Arc<Database>,
@@ -142,8 +144,32 @@ struct State {
     _claim: Option<publications::Claim>,
     _eoe_claim: Option<eoe::Lease>,
 }
+impl State {
+    fn selected_protocol(&self) -> Result<Protocol, Error> {
+        let view = self.database.view().map_err(|_| Error::Storage)?;
+        match view.status().tip {
+            Some(tip) => Protocol::try_from(
+                view.require_block(tip)
+                    .map_err(|_| Error::Storage)?
+                    .header()
+                    .common()
+                    .version,
+            )
+            .map_err(|_| Error::Storage),
+            None => self.network.protocol_at(0).map_err(|_| Error::Storage),
+        }
+    }
+}
 impl owned::Actor for State {
     type Error = Error;
+    fn before(&mut self) -> Result<(), Error> {
+        if let Pool::Independent(pool) = &self.pool
+            && pool.client().is_closed()
+        {
+            return Err(Error::AuthorityClosed);
+        }
+        Ok(())
+    }
     fn fatal(&self, error: &Error) -> bool {
         matches!(error, Error::AuthorityClosed | Error::UnknownReceipt(_))
     }
@@ -190,24 +216,18 @@ impl Client {
                     .map_err(|_| Error::Protocol)?,
             );
             let hash = policy::admission_hash(&tx, s.config.pool)?;
-            let pool = match &mut s.pool {
-                Pool::Shared(authority) => return authority.admit(tx, event),
-                Pool::Local(pool) => pool,
-            };
+            if let Pool::Shared(authority) = &s.pool {
+                return authority.admit(tx, event);
+            }
+            if matches!(s.pool, Pool::Independent(_)) {
+                return s.independent_admit(tx, hash, event);
+            }
             if s.cache.as_ref().expect("local cache").check(hash) {
                 return Ok(policy::PushOutcome::Cached);
             }
-            let view = s.database.view().map_err(|_| Error::Storage)?;
-            let protocol = match view.status().tip {
-                Some(tip) => Protocol::try_from(
-                    view.require_block(tip)
-                        .map_err(|_| Error::Storage)?
-                        .header()
-                        .common()
-                        .version,
-                )
-                .map_err(|_| Error::Storage)?,
-                None => s.network.protocol_at(0).map_err(|_| Error::Storage)?,
+            let protocol = s.selected_protocol()?;
+            let Pool::Local(pool) = &mut s.pool else {
+                unreachable!("local pool")
             };
             let result = pool.push(
                 &tx,
@@ -234,6 +254,7 @@ impl Client {
             match &mut s.pool {
                 Pool::Local(pool) => pool.update_epoch(epoch),
                 Pool::Shared(authority) => authority.advance_epoch(epoch)?,
+                Pool::Independent(pool) => pool.new_epoch(epoch)?,
             }
             Ok(())
         })
@@ -254,6 +275,10 @@ impl Client {
             .saturating_add(128);
         self.inner.submit(weight, move |s| match &s.pool {
             Pool::Local(pool) => snapshot(pool, &epoch, kind.as_ref(), maximum, &s.replies),
+            Pool::Independent(pool) => pool
+                .client()
+                .inspect(|pool| snapshot(pool, &epoch, kind.as_ref(), maximum, &s.replies))
+                .map_err(independent::map_error)?,
             Pool::Shared(authority) => {
                 let snapshot = authority.query(epoch, kind, maximum)?;
                 let weight = snapshot
@@ -279,8 +304,17 @@ impl Client {
     pub fn stats(&self) -> Result<Ticket<Stats>, Error> {
         self.inner.submit(128, |s| {
             let snapshot;
+            let independent_epoch;
             let (epoch, entries, retained_wire_bytes) = match &s.pool {
                 Pool::Local(pool) => (pool.epoch(), pool.len(), pool.retained_wire_bytes()),
+                Pool::Independent(pool) => {
+                    let (epoch, entries, bytes) = pool
+                        .client()
+                        .inspect(|p| (p.epoch().clone(), p.len(), p.retained_wire_bytes()))
+                        .map_err(independent::map_error)?;
+                    independent_epoch = epoch;
+                    (&independent_epoch, entries, bytes)
+                }
                 Pool::Shared(authority) => {
                     snapshot = authority.query(0.into(), None, 0)?;
                     (

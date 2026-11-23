@@ -8,7 +8,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -126,9 +126,11 @@ struct Subscriber {
     queue: VecDeque<Input>,
     budget: Arc<Budget>,
     wake: Wake,
+    shutdown: Option<Arc<AtomicBool>>,
 }
 #[derive(Default)]
 struct State {
+    closed: bool,
     sequence: u64,
     pool: Option<Pool>,
     subscriber: Option<Subscriber>,
@@ -165,6 +167,28 @@ impl Hub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+    pub fn config(&self) -> Config {
+        self.0.config
+    }
+    pub fn is_closed(&self) -> bool {
+        self.state().closed
+    }
+    // Terminal loss of the authoritative epoch source closes admission and
+    // wakes the currently subscribed runtime. Accepted outputs remain owned.
+    pub fn close(&self) {
+        let mut state = self.state();
+        state.closed = true;
+        let wake = state.subscriber.as_ref().map(|subscriber| {
+            if let Some(stop) = &subscriber.shutdown {
+                stop.store(true, Ordering::Release);
+            }
+            subscriber.wake.clone()
+        });
+        drop(state);
+        if let Some(wake) = wake {
+            wake.notify();
+        }
+    }
     pub fn network(&self) -> &NetworkProfile {
         &self.0.network
     }
@@ -173,6 +197,9 @@ impl Hub {
     }
     pub fn start_pool(&self, limits: hc_votes::Limits) -> Result<Owner, Error> {
         let mut state = self.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         if state.pool.is_some() {
             return Err(Error::Busy);
         }
@@ -191,13 +218,20 @@ impl Hub {
         })
     }
     pub fn client(&self) -> Option<Client> {
-        self.state().pool.as_ref().map(|pool| Client {
+        let state = self.state();
+        if state.closed {
+            return None;
+        }
+        state.pool.as_ref().map(|pool| Client {
             hub: self.clone(),
             generation: pool.generation,
         })
     }
     pub fn subscribe(&self, wake: Wake) -> Result<Inbox, Error> {
         let mut state = self.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         if state.subscriber.is_some() {
             return Err(Error::Busy);
         }
@@ -209,6 +243,7 @@ impl Hub {
             queue: VecDeque::new(),
             budget: Budget::new(self.0.config.maximum_input_bytes),
             wake,
+            shutdown: None,
         });
         Ok(Inbox {
             hub: self.clone(),
@@ -242,6 +277,9 @@ impl Hub {
             return Err(Error::ResourceLimit);
         }
         let mut state = self.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         let input = if let Some(subscriber) = &state.subscriber {
             if subscriber.queue.len() >= self.0.config.maximum_inputs {
                 return Err(Error::ResourceLimit);
@@ -326,16 +364,20 @@ impl Client {
         self.generation == other.generation && self.hub.same_hub(&other.hub)
     }
     pub fn is_closed(&self) -> bool {
-        self.hub
-            .state()
-            .pool
-            .as_ref()
-            .is_none_or(|p| p.generation != self.generation)
+        let state = self.hub.state();
+        state.closed
+            || state
+                .pool
+                .as_ref()
+                .is_none_or(|p| p.generation != self.generation)
     }
     // The inspector only borrows immutable state. Node callers use it for
     // bounded reply capture and do not reenter the hub or perform I/O.
     pub fn inspect<T>(&self, inspect: impl FnOnce(&VotePool) -> T) -> Result<T, Error> {
         let state = self.hub.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         let pool = state
             .pool
             .as_ref()
@@ -357,6 +399,9 @@ impl Client {
     }
     pub(super) fn snapshot(&self) -> Result<(VotePool, hc_votes::Limits), Error> {
         let state = self.hub.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         let pool = state
             .pool
             .as_ref()
@@ -387,6 +432,9 @@ impl Hub {
         delivery: Option<(&Delivery, [u64; 2])>,
     ) -> Result<Vec<PushOutcome>, Error> {
         let mut state = self.state();
+        if state.closed {
+            return Err(Error::Closed);
+        }
         if let Some((delivery, _)) = delivery
             && (!self.same_hub(&delivery.hub)
                 || state
@@ -495,6 +543,19 @@ pub struct RetiredInbox {
     pub pending: Vec<Input>,
 }
 impl Inbox {
+    pub(super) fn shutdown_with(&self, shutdown: Arc<AtomicBool>) {
+        let mut state = self.hub.state();
+        if state.closed {
+            shutdown.store(true, Ordering::Release);
+        }
+        if let Some(subscriber) = state
+            .subscriber
+            .as_mut()
+            .filter(|s| s.generation == self.generation)
+        {
+            subscriber.shutdown = Some(shutdown);
+        }
+    }
     pub(super) fn delivery(&self) -> Delivery {
         Delivery {
             hub: self.hub.clone(),

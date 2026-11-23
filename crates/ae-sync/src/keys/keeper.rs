@@ -31,7 +31,7 @@ pub(super) fn peer_secret(seed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     scalar
 }
 pub(super) struct State {
-    _lease: std::fs::File,
+    _lease: files::Lease,
     signing: Ed25519SecretKey,
     candidate: Ed25519SecretKey,
     identity: Arc<noise::Identity>,

@@ -29,7 +29,7 @@ impl Default for Limits {
 pub struct Config {
     pub eoe: super::Config,
     pub votes: votes::Config,
-    pub bridge: votes::eoe::Limits,
+    pub pool: eoe::pool::Config,
     pub calls: Limits,
 }
 pub struct Inputs {
@@ -73,6 +73,7 @@ pub struct Shutdown {
     pub abandoned_requests: Vec<u64>,
     pub retained_output: Option<runtime::Output>,
     pub retained_vote: Option<runtime::Output>,
+    pub retained_publication: Option<eoe::pool::Publication>,
     pub epoch_cursor: events::Cursor,
     pub errors: Vec<Error>,
     pub producer: Option<producer::Pending>,
@@ -129,6 +130,9 @@ impl Owner {
             return Err(Error::Configuration);
         }
         let requests = Requests::new(config.calls)?;
+        let hub = eoe::pool::Hub::new(config.eoe.host.network.clone(), config.pool)
+            .map_err(|e| Error::Votes(votes::independent::map_error(e)))?;
+        let pool_limits = config.eoe.host.limits.pool;
         let producer_binding = repo::hyperchain::producer::Binding {
             network: config.eoe.host.network.clone(),
             election: config.eoe.host.election_contract,
@@ -144,16 +148,24 @@ impl Owner {
                 config.eoe,
                 keys,
                 order,
-                Some(Arc::new(inputs.gossip)),
-                inputs.parent.clone(),
-                route,
+                Services {
+                    gossip: Some(Arc::new(inputs.gossip.clone())),
+                    parent: inputs.parent.clone(),
+                    route,
+                    pool: Some(hub),
+                },
             )
             .map_err(Error::Source)?;
         let output = votes::eoe::Owner::new(runtime, inputs.publications)
             .map_err(|e| Error::Votes(e.error.clone()))?;
-        let votes =
-            votes::Worker::attach_eoe(inputs.database, config.votes, &output, config.bridge)
-                .map_err(Error::Votes)?;
+        let votes = votes::Worker::spawn_independent(
+            inputs.database,
+            inputs.gossip,
+            config.votes,
+            output.relay().expect("independent pool relay"),
+            pool_limits,
+        )
+        .map_err(Error::Votes)?;
         Ok(Self {
             source: inputs.source,
             parent: inputs.parent,
@@ -182,7 +194,7 @@ impl Owner {
         Ok(())
     }
     pub fn votes(&self) -> votes::Client {
-        self.votes.as_ref().expect("live vote bridge").client()
+        self.votes.as_ref().expect("live vote pool").client()
     }
     pub(crate) fn replace_parent(&mut self, client: parent::Client) {
         self.parent = Some(client);
@@ -406,13 +418,16 @@ impl Owner {
             ) && !matches!(e,Error::Producer(error) if producer::retryable(error))
             {
                 self.client().request_stop();
+                if let Some(relay) = self.output.as_ref().and_then(votes::eoe::Owner::relay) {
+                    relay.hub().close();
+                }
             }
             self.failure = Some(e.clone());
         }
         result
     }
     fn advance(&mut self) -> Result<Progress, Error> {
-        let votes = self.votes.as_ref().expect("live vote bridge").info();
+        let votes = self.votes.as_ref().expect("live vote pool").info();
         if let Some(error) = votes.failure {
             return Err(Error::Votes(error));
         }
@@ -489,6 +504,10 @@ impl Owner {
             .output
             .as_mut()
             .and_then(votes::eoe::Owner::take_pending);
+        let retained_publication = self
+            .output
+            .as_mut()
+            .and_then(votes::eoe::Owner::take_pending_publication);
         if let Some(output) = self.output.take()
             && output.shutdown().is_err()
         {
@@ -498,6 +517,7 @@ impl Owner {
             abandoned_requests: self.requests.abandon(),
             retained_output: self.pending.take(),
             retained_vote,
+            retained_publication,
             epoch_cursor: self.epochs.cursor().clone(),
             errors,
             producer: self.production.take(),

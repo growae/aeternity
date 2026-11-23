@@ -40,6 +40,14 @@ impl Publications {
     pub fn uses_database(&self, db: &Arc<Database>) -> bool {
         self.0.database.ptr_eq(&Arc::downgrade(db))
     }
+    pub(super) fn validate_independent(&self, network: &NetworkProfile) -> Result<(), Error> {
+        let database = self.0.database.upgrade().ok_or(Fault::Stopped)?;
+        let view = database.view().map_err(|_| Error::Storage)?;
+        if !view.identity().matches(network) || view.identity().consensus != ConsensusType::Pos {
+            return Err(Fault::Configuration.into());
+        }
+        Ok(())
+    }
     pub(super) fn maximum_event_bytes(&self) -> usize {
         self.0.config.event_bytes
     }

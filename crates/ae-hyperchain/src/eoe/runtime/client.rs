@@ -12,12 +12,14 @@ pub(super) struct Control {
     maximum_command_bytes: usize,
     pub vote_replies: Arc<votes::Budget>,
     network: ae_protocol::NetworkProfile,
+    pool: Option<pool::Hub>,
 }
 impl Control {
     pub fn new(
         stop: Arc<AtomicBool>,
         config: Config,
         network: ae_protocol::NetworkProfile,
+        pool: Option<pool::Hub>,
     ) -> Self {
         Self {
             admission: std::sync::Mutex::new(()),
@@ -30,6 +32,7 @@ impl Control {
             maximum_command_bytes: config.maximum_command_bytes,
             vote_replies: Arc::new(votes::Budget::new(config.maximum_vote_reply_bytes)),
             network,
+            pool,
         }
     }
 }
@@ -57,6 +60,9 @@ impl<A, C> Clone for Client<A, C> {
 impl<A, C> Client<A, C> {
     pub fn same_runtime(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.control, &other.control)
+    }
+    pub fn independent_pool(&self) -> Option<&pool::Hub> {
+        self.control.pool.as_ref()
     }
     pub fn network(&self) -> &ae_protocol::NetworkProfile {
         &self.control.network

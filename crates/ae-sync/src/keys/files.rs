@@ -37,7 +37,22 @@ fn ordinary(path: &Path, operation: FileOperation) -> Result<Option<fs::Metadata
         Err(e) => Err(io(operation, e)),
     }
 }
-pub(super) fn lease(directory: &Path) -> Result<File, Error> {
+pub(super) struct Lease(File);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // Close alone can leave ownership alive in a descriptor inherited by
+        // a concurrently spawning child. Release the lock before closing this
+        // owner's descriptor so joined shutdown permits immediate replacement.
+        let _ = self.0.unlock();
+    }
+}
+#[cfg(test)]
+impl Lease {
+    pub(super) fn try_clone(&self) -> std::io::Result<File> {
+        self.0.try_clone()
+    }
+}
+pub(super) fn lease(directory: &Path) -> Result<Lease, Error> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -64,7 +79,7 @@ pub(super) fn lease(directory: &Path) -> Result<File, Error> {
         std::fs::TryLockError::WouldBlock => Error::AlreadyRunning,
         std::fs::TryLockError::Error(e) => io(FileOperation::Lease, e),
     })?;
-    Ok(file)
+    Ok(Lease(file))
 }
 fn read(path: &Path, operation: FileOperation) -> Result<Option<Zeroizing<[u8; 32]>>, Error> {
     let Some(metadata) = ordinary(path, operation)? else {
