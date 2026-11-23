@@ -258,6 +258,19 @@ impl Node {
             temporary,
         }
     }
+    // Explicit compact-store path for process-kill/reopen integration tests.
+    pub fn at_path(path: std::path::PathBuf, index: usize) -> Self {
+        let temporary = super::Temporary(path);
+        let (db, config) = setup(&temporary, &DATA, index, "profile");
+        Self {
+            db,
+            config,
+            index,
+            corpus: &DATA,
+            profile_name: "profile",
+            temporary,
+        }
+    }
     pub fn new(index: usize) -> Self {
         Self::from_corpus(&DATA, index)
     }

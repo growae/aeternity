@@ -3,7 +3,7 @@ use super::{eoe, parent, scoped};
 use crate::{chain, parent_pins};
 use ae_chain::{publication, repository as repo};
 use ae_hyperchain::{pinning as core, signing::Keys};
-use ae_storage::{Database, events, pool};
+use ae_storage::{Database, events, pinning_children as children, pool};
 use ae_types::AccountPublicKey;
 use ae_vm_fate::maps::MapOrder;
 use std::{
@@ -24,6 +24,7 @@ pub struct Config {
     pub maximum_event_bytes: usize,
     pub maximum_events: usize,
     pub transaction: core::Limits,
+    pub children: children::Limits,
     pub poll: Duration,
 }
 impl Default for Config {
@@ -33,6 +34,7 @@ impl Default for Config {
             maximum_event_bytes: 16 << 20,
             maximum_events: 1024,
             transaction: Default::default(),
+            children: Default::default(),
             poll: Duration::from_millis(10),
         }
     }
@@ -54,6 +56,8 @@ pub enum Error {
     Utilities(parent::Error),
     Pool(pool::worker::Error),
     Transaction(core::Error),
+    Children(children::Failure),
+    ChildUnresolved(ae_types::Hash256),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
@@ -63,12 +67,16 @@ pub enum ChildKind {
 pub enum ChildResult {
     Known(Result<pool::Submission, pool::worker::Error>),
     Pending(pool::worker::Ticket<pool::Submission>),
+    Recovered(children::Receipt),
+    Unresolved,
 }
 impl std::fmt::Debug for ChildResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Known(r) => f.debug_tuple("Known").field(r).finish(),
             Self::Pending(_) => f.write_str("Pending"),
+            Self::Recovered(r) => f.debug_tuple("Recovered").field(r).finish(),
+            Self::Unresolved => f.write_str("Unresolved"),
         }
     }
 }
@@ -191,6 +199,8 @@ impl Service {
         input.producer.check().map_err(Error::Source)?;
         input.parent.check().map_err(Error::Utilities)?;
         let lease = input.producer.pinning_lease().map_err(Error::Source)?;
+        let children = children::Writer::start(input.database.clone(), config.children)
+            .map_err(Error::Children)?;
         let source = input.database.events();
         let cursor = source.cursor();
         let handle = Handle(Arc::new(Shared {
@@ -215,6 +225,7 @@ impl Service {
             config: config.clone(),
             shared: shared.clone(),
             effects: vec![],
+            children,
         };
         let worker = thread::Builder::new()
             .name("ae-hc-pinning".into())

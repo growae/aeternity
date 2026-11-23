@@ -89,7 +89,7 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    fn validate(self) -> Result<(), Error> {
+    pub(super) fn validate(self) -> Result<(), Error> {
         if !(1..=MAX_RECORDS).contains(&self.records)
             || !(1..=MAX_BYTES).contains(&self.bytes)
             || !(1..=MAX_TRANSACTION).contains(&self.transaction_bytes)

@@ -11,6 +11,7 @@ pub(super) struct Host<O> {
     pub config: Config,
     pub shared: Arc<Shared>,
     pub effects: Vec<Effect>,
+    pub children: children::Writer,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
     fn check(&self) -> Result<(), Error> {
@@ -73,6 +74,27 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
         hash: &[u8],
     ) -> Result<(), Error> {
         self.check()?;
+        let metadata = self.parent.metadata().map_err(Error::Utilities)?;
+        let intent = children::Intent {
+            network: self.execution.profile.network.network_id().to_vec(),
+            parent_chain: match metadata.chain {
+                parent_pins::Chain::Aeternity => children::Chain::Aeternity,
+                parent_pins::Chain::Dogecoin => children::Chain::Dogecoin,
+                parent_pins::Chain::Bitcoin => children::Chain::Bitcoin,
+            },
+            parent_network: metadata.network.to_vec(),
+            leader,
+            kind: match kind {
+                ChildKind::Note => children::Kind::Note,
+                ChildKind::Proof => {
+                    children::Kind::Proof(self.execution.profile.contracts.election)
+                }
+            },
+            parent_hash: hash.to_vec(),
+        };
+        if let Some(record) = self.children.get(&intent).map_err(Error::Children)? {
+            return self.recover_child(kind, record);
+        }
         let nonce = self
             .read(|| self.pool.next_nonce(leader))?
             .unwrap_or_else(|| 1.into());
@@ -94,21 +116,69 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
             ChildKind::Proof => core::proof(self.execution.profile.contracts.election, input),
         }
         .map_err(Error::Transaction)?;
-        let tx = Arc::new(tx);
+        let record = children::Record {
+            intent,
+            transaction: tx.encode(),
+            receipt: None,
+        };
+        let record = match self.children.reserve(record).map_err(Error::Children)? {
+            children::Reservation::New(r) => r,
+            children::Reservation::Existing(r) => return self.recover_child(kind, r),
+        };
+        self.admit_child(kind, record, Arc::new(tx))
+    }
+    fn recover_child(&mut self, kind: ChildKind, record: children::Record) -> Result<(), Error> {
+        let transaction = Arc::new(record.signed().map_err(|e| Error::Children(e.into()))?);
+        let observed = self.children.observe(&record).map_err(Error::Children)?;
+        let (result, outcome) = if let Some(receipt) = observed.and_then(|r| r.receipt) {
+            (ChildResult::Recovered(receipt), Ok(()))
+        } else {
+            (
+                ChildResult::Unresolved,
+                Err(Error::ChildUnresolved(
+                    record.intent.id().map_err(|e| Error::Children(e.into()))?,
+                )),
+            )
+        };
+        self.effects.push(Effect::Child {
+            kind,
+            transaction,
+            result,
+        });
+        outcome
+    }
+    fn admit_child(
+        &mut self,
+        kind: ChildKind,
+        record: children::Record,
+        tx: Arc<ae_mempool::pool::Signed>,
+    ) -> Result<(), Error> {
         let ticket = loop {
-            self.check()?;
+            if let Err(error) = self.check() {
+                self.effects.push(Effect::Child {
+                    kind,
+                    transaction: tx,
+                    result: ChildResult::Unresolved,
+                });
+                return Err(error);
+            }
             match self
                 .pool
                 .push(tx.clone(), ae_mempool::pool::Event::Received, false)
             {
                 Ok(t) => break t,
                 Err(pool::worker::Error::Saturated) => thread::sleep(self.config.poll),
-                Err(e) => return Err(Error::Pool(e)),
+                Err(e) => {
+                    self.effects.push(Effect::Child {
+                        kind,
+                        transaction: tx,
+                        result: ChildResult::Unresolved,
+                    });
+                    return Err(Error::Pool(e));
+                }
             }
         };
         loop {
-            // Once accepted, retain the ticket on interruption. Dropping the
-            // receiver would not cancel a durable ordinary-pool operation.
             if let Err(error) = self.check() {
                 self.effects.push(Effect::Child {
                     kind,
@@ -125,13 +195,22 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host<O> {
                         .err()
                         .filter(|e| e.is_operational())
                         .cloned();
+                    let receipt = match &result {
+                        Ok(r) => Some(children::Receipt::Submitted(r.clone())),
+                        Err(e) if !e.is_operational() => {
+                            Some(children::Receipt::Rejected(format!("{e:?}")))
+                        }
+                        _ => None,
+                    };
+                    let persisted = receipt
+                        .map(|r| self.children.record_receipt(&record, r))
+                        .transpose();
                     self.effects.push(Effect::Child {
                         kind,
                         transaction: tx,
                         result: ChildResult::Known(result),
                     });
-                    // Native push rejection is a returned value ignored by both
-                    // wrappers. Local failure remains explicit and stops replay.
+                    persisted.map_err(Error::Children)?;
                     return failure.map_or(Ok(()), |e| Err(Error::Pool(e)));
                 }
             }

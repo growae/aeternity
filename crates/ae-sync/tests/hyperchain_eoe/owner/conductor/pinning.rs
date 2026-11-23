@@ -259,6 +259,20 @@ async fn conductor_agent_posts_parent_and_admits_note_and_exact_height_proof() {
         assert_eq!(child.len(), 2);
         assert_eq!(child[0].0, pinning::ChildKind::Note);
         assert_eq!(child[1].0, pinning::ChildKind::Proof);
+        let stored = node
+            .db
+            .pinning_children()
+            .unwrap()
+            .records(Default::default())
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        for (_, tx) in &child {
+            assert!(stored.iter().any(|r| r.transaction == tx.encode()
+                && matches!(
+                    r.receipt,
+                    Some(ae_storage::pinning_children::Receipt::Submitted(_))
+                )));
+        }
         let parent_hash = api::encode(ApiType::TxHash, &parent.hash().0);
         drop(posted);
         let TransactionLeaf::Spend(note) = child[0].1.transaction().leaf() else {
@@ -606,3 +620,6 @@ async fn event_gap_while_parent_post_is_pending_retains_receipt_and_stops_replay
 
 #[path = "pinning/utilities.rs"]
 mod utilities;
+
+#[path = "pinning/children.rs"]
+mod durable_children;
