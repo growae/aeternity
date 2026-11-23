@@ -459,3 +459,5 @@ fn primitive_transactions_produce_consecutive_microblocks_across_protocols_one_t
 mod group;
 #[path = "pow_producer/lifecycle.rs"]
 mod lifecycle;
+#[path = "pow_producer/mining.rs"]
+mod mining;

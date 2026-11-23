@@ -23,6 +23,7 @@ pub(super) struct Service<O> {
     pending: Option<Pending>,
     signed: Option<Signed>,
     completion: Option<Completion>,
+    mining: Option<mining::Mining<O>>,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
     #[allow(clippy::too_many_arguments)]
@@ -37,6 +38,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         selected: Selected,
         status: Status,
         lease: ProducerLease,
+        mining: Option<mining::Mining<O>>,
     ) -> Self {
         Self {
             importer,
@@ -59,6 +61,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             pending: None,
             signed: None,
             completion: None,
+            mining,
         }
     }
     pub fn run(mut self) -> Report {
@@ -92,6 +95,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             completions.push(signed.discard());
         }
         self.sync(false);
+        let mining = self.mining.take().map(mining::Mining::retire);
         let outputs = lock(&self.shared.state).outputs.drain(..).collect();
         let mut report = Report {
             status: self.status,
@@ -101,6 +105,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             generator_stop_rejected: stop_rejected,
             pending: self.pending,
             generator: controls,
+            mining,
             _lease: self.lease.take().expect("producer lease"),
         };
         report.poll();
@@ -129,14 +134,27 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 self.selected.miner,
                 keys.keys.signing,
             );
-            self.poll_pending()?;
-            if self
-                .signed
-                .as_ref()
-                .is_some_and(|s| !self.current(s.parent, s.epoch, s.signer))
+            if self.completion.is_none() {
+                self.poll_pending()?;
+            }
+            if self.completion.is_none()
+                && self
+                    .signed
+                    .as_ref()
+                    .is_some_and(|s| !self.current(s.parent, s.epoch, s.signer))
             {
                 self.completion = self.signed.take().map(Signed::discard);
                 self.status.discarded = self.status.discarded.saturating_add(1);
+            }
+            if let Some(mining) = &mut self.mining {
+                mining
+                    .poll(self.selected.top, keys.keys.candidate, now)
+                    .map_err(Error::Mining)?;
+                if self.completion.is_none() {
+                    self.completion = mining
+                        .take_output()
+                        .map(|c| Completion::Mining(Box::new(c)));
+                }
             }
             self.generation()?;
             if caught_up {
@@ -149,6 +167,36 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 && *lock(&self.shared.credits) < self.shared.limit
             {
                 self.act(wall, now, keys.keys)?;
+            }
+            if caught_up
+                && self.completion.is_none()
+                && *lock(&self.shared.credits) < self.shared.limit
+                && self.promote.is_none()
+                && !matches!(self.pending, Some(Pending::Promote { .. }))
+                && let Some(mining) = &mut self.mining
+            {
+                let shared = self.shared.clone();
+                let s = lock(&shared.state);
+                if !s.shutdown && s.status.request_revision == self.status.applied_revision {
+                    // Promotion can finish during this step. Sample the key
+                    // owner again before capturing a fresh candidate identity.
+                    let keys = self.keys.info();
+                    if keys.running && keys.accepting {
+                        mining
+                            .act(
+                                &self.importer,
+                                mining::Context {
+                                    top: self.selected.top,
+                                    miner: keys.keys.candidate,
+                                    enabled: self.status.enabled && s.status.requested_enabled,
+                                    strict: self.config.strictly_follow_top,
+                                    wall,
+                                    now,
+                                },
+                            )
+                            .map_err(Error::Mining)?;
+                    }
+                }
             }
             self.sync(true);
             let s = lock(&self.shared.state);
@@ -178,7 +226,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             self.ready = None;
             self.sleep = None;
             self.generation_wanted = enabled && self.config.resume_current;
-            self.promote = (enabled && self.config.resume_current).then_some(self.selected.miner);
+            if let Some(mining) = &mut self.mining {
+                if enabled {
+                    mining.enable();
+                } else {
+                    mining.invalidate().map_err(Error::Mining)?;
+                }
+                if enabled && self.config.resume_current && self.promote.is_none() {
+                    self.promote = Some(self.selected.miner);
+                }
+            } else {
+                self.promote =
+                    (enabled && self.config.resume_current).then_some(self.selected.miner);
+            }
         }
         Ok(())
     }
@@ -193,6 +253,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         self.status.miner = self.selected.miner;
         self.status.pending = self.pending.is_some();
         self.status.generator_pending = self.generator_pending.is_some();
+        self.status.mining = self.mining.as_ref().map(mining::Mining::status);
         self.status.sleeping = self
             .sleep
             .is_some_and(|at| self.last_time.is_some_and(|now| now < at));
@@ -216,6 +277,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 &self.importer.database().view().map_err(Error::Repository)?,
                 change.new_tip,
             )?;
+            if (next.key != self.selected.key
+                || event.context().origin == publication::Origin::Rollback)
+                && let Some(mining) = &mut self.mining
+            {
+                mining.invalidate().map_err(Error::Mining)?;
+            }
             if next.key != self.selected.key {
                 self.sleep = None;
             }
@@ -400,14 +467,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             && self.status.enabled
     }
     fn act(&mut self, wall: u64, now: Instant, keys: keys::PublicKeys) -> Result<(), Error> {
-        if !self.status.enabled {
+        if !self.status.enabled && self.mining.is_none() {
             return Ok(());
         }
         if let Some(expected) = self.promote {
             if expected == self.selected.miner && keys.candidate == expected {
                 let shared = self.shared.clone();
                 let s = lock(&shared.state);
-                if !self.authorized(&s) {
+                // Native key promotion precedes preparation even while PoW
+                // production is stopped. It remains owned by this producer.
+                let stopped_promotion = self.mining.is_some()
+                    && !s.shutdown
+                    && s.status.request_revision == self.status.applied_revision;
+                if !self.authorized(&s) && !stopped_promotion {
                     return Ok(());
                 }
                 match self.keys.promote_candidate(expected) {
@@ -422,11 +494,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             }
             self.promote = None;
         }
-        if !self.status.leader || self.generator_pending.is_some() {
+        if !self.status.enabled || !self.status.leader || self.generator_pending.is_some() {
             return Ok(());
         }
         let sleeping = self.sleep.is_some_and(|at| now < at);
         if let Some(signed) = &self.signed {
+            if !self.current(signed.parent, signed.epoch, signed.signer) {
+                return Ok(());
+            }
             if sleeping {
                 return Ok(());
             }

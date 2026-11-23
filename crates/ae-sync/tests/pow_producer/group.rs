@@ -11,6 +11,7 @@ fn config(node: &Node) -> production::Config<Otp26> {
     production::Config {
         generator: configuration(&node.db, &node.network, node.cycle),
         producer: node.config(),
+        mining: None,
         poll: Duration::from_millis(2),
         outputs: 8,
     }
@@ -695,4 +696,136 @@ fn drop_fences_and_joins_instead_of_detaching_a_blocked_child() {
     node.push(1);
     admitted(&next.client());
     assert!(finish(next).status.failure.is_none());
+}
+
+struct MiningClocks(Arc<mining::PreparationGate>);
+impl production::Clocks for MiningClocks {
+    fn generator(&self, _: u64) -> Arc<dyn generator::Clock> {
+        Arc::new(generator::SystemClock)
+    }
+    fn preparation(&self, generation: u64) -> Arc<dyn generator::Clock> {
+        if generation == 1 {
+            self.0.clone()
+        } else {
+            Arc::new(generator::SystemClock)
+        }
+    }
+    fn producer(&self, _: u64) -> Box<dyn producer::Clock> {
+        Box::new(producer::SystemClock)
+    }
+    fn second(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn mining_preparation_must_join_before_group_replacement_and_keeps_disabled_state() {
+    let node = node();
+    let gate = mining::PreparationGate::new();
+    let mut cfg = config(&node);
+    cfg.producer.enabled = false;
+    cfg.producer.resume_current = false;
+    cfg.mining = Some(mining::config(1));
+    let worker = spawn(&node, cfg, Arc::new(MiningClocks(gate.clone()))).unwrap();
+    let _release = mining::ReleasePreparation(gate.clone());
+    let client = worker.client();
+    let first = generation(&client, 1);
+    until(|| {
+        gate.entered()
+            && first
+                .producer
+                .status()
+                .mining
+                .as_ref()
+                .unwrap()
+                .preparing
+                .is_some()
+    });
+    let prepared = first.producer.status().mining.unwrap().preparing.unwrap();
+    first.producer.request_shutdown();
+    until(|| client.current().is_none() && client.status().retiring);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(client.status().supervisor.conductor_generation, 1);
+    assert!(node.keys().info().accepting);
+    gate.release();
+    let retired = output(&client, |e| matches!(e, production::Event::Retired(_)));
+    let production::Event::Retired(retired) = &retired.event else {
+        unreachable!()
+    };
+    let (_, exit) = retired.producer.as_ref().unwrap();
+    assert!(exit.completions.iter().any(|c| matches!(c,
+        producer::Completion::Mining(c) if matches!(c.as_ref(), producer::mining::Completion::Prepared { id, used: false, .. } if *id == prepared))));
+    assert!(exit.completions.iter().any(|c| matches!(c,
+        producer::Completion::Mining(c) if matches!(c.as_ref(), producer::mining::Completion::Joined(status) if !status.running))));
+    let second = generation(&client, 2);
+    until(|| {
+        second
+            .producer
+            .status()
+            .mining
+            .as_ref()
+            .unwrap()
+            .candidate
+            .is_some()
+    });
+    let status = second.producer.status();
+    assert!(!status.enabled);
+    assert_eq!(status.mining.unwrap().workers[0].submitted, 0);
+    assert_eq!(node.db.view().unwrap().status().revision, 2);
+    assert!(finish(worker).status.failure.is_none());
+}
+
+struct PollBoundaryClocks {
+    armed: std::sync::atomic::AtomicBool,
+    gate: Arc<Gate>,
+}
+impl production::Clocks for PollBoundaryClocks {
+    fn generator(&self, _: u64) -> Arc<dyn generator::Clock> {
+        Arc::new(generator::SystemClock)
+    }
+    fn producer(&self, _: u64) -> Box<dyn producer::Clock> {
+        Box::new(producer::SystemClock)
+    }
+    fn second(&self) -> u64 {
+        if self.armed.load(Ordering::SeqCst) {
+            producer::Clock::now(&GateClock(self.gate.clone())).unwrap();
+        }
+        0
+    }
+}
+
+#[test]
+fn child_exit_during_supervisor_clock_read_withdraws_current_pair() {
+    let node = node();
+    let gate = Gate::new();
+    let clocks = Arc::new(PollBoundaryClocks {
+        armed: false.into(),
+        gate: gate.clone(),
+    });
+    let mut cfg = config(&node);
+    cfg.outputs = 1;
+    let worker = spawn(&node, cfg, clocks.clone()).unwrap();
+    let _release = Release(gate.clone());
+    let client = worker.client();
+    until(|| client.current().is_some() && client.front().is_some());
+    let first = client.current().unwrap();
+    let ready = client.front().unwrap();
+    assert!(matches!(ready.event, production::Event::Ready(_)));
+    assert!(client.acknowledge(&ready));
+    // Pause after the preliminary liveness check but before Owner::poll.
+    clocks.armed.store(true, Ordering::SeqCst);
+    until(|| gate.calls() > 0);
+    first.producer.request_shutdown();
+    until(|| !first.producer.status().running);
+    // Let the idle producer finish returning its retirement report while the
+    // supervisor remains held at the exact check/poll boundary.
+    std::thread::sleep(Duration::from_millis(20));
+    gate.allow(usize::MAX);
+    until(|| client.status().retiring);
+    assert!(client.current().is_none());
+    assert!(!first.generator.status().running);
+    assert_eq!(client.status().supervisor.generator_generation, 1);
+    drop(ready);
+    generation(&client, 2);
+    assert!(finish(worker).status.failure.is_none());
 }

@@ -18,6 +18,9 @@ pub use retirement::{GeneratorExit, ProducerExit, Report, Retired, Retirement};
 pub trait Clocks: Send + Sync + 'static {
     fn generator(&self, generation: u64) -> Arc<dyn generator::Clock>;
     fn producer(&self, generation: u64) -> Box<dyn producer::Clock>;
+    fn preparation(&self, generation: u64) -> Arc<dyn generator::Clock> {
+        self.generator(generation)
+    }
     fn second(&self) -> u64;
 }
 pub struct SystemClocks(Instant);
@@ -41,6 +44,7 @@ impl Clocks for SystemClocks {
 pub struct Config<O> {
     pub generator: generator::Config<O>,
     pub producer: producer::Config,
+    pub mining: Option<producer::mining::Config>,
     pub poll: Duration,
     pub outputs: usize,
 }

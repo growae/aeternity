@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub mod mining;
 mod policy;
 mod retirement;
 mod service;
@@ -84,6 +85,7 @@ pub enum Error {
     KeyReply,
     Admission(chain::Error),
     Block(ae_chain::block::Error),
+    Mining(mining::Error),
 }
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -106,6 +108,7 @@ pub struct Status {
     pub published: u64,
     pub discarded: u64,
     pub failure: Option<Error>,
+    pub mining: Option<mining::Status>,
 }
 pub struct Output {
     pub sequence: u64,
@@ -212,6 +215,26 @@ impl Worker {
         config: Config,
         clock: impl Clock,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(importer, generator, keys, config, clock, None)
+    }
+    pub fn spawn_with_mining<O: MapOrder + Clone + Send + Sync + 'static>(
+        importer: &chain::Importer<O>,
+        generator: generator::Client<O>,
+        keys: keys::Client,
+        config: Config,
+        clock: impl Clock,
+        mining: mining::Inputs,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(importer, generator, keys, config, clock, Some(mining))
+    }
+    fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
+        importer: &chain::Importer<O>,
+        generator: generator::Client<O>,
+        keys: keys::Client,
+        config: Config,
+        clock: impl Clock,
+        mining: Option<mining::Inputs>,
+    ) -> Result<Self, Error> {
         if config.poll.is_zero()
             || config.poll > Duration::from_secs(1)
             || !(1..=1024).contains(&config.events_per_step)
@@ -232,6 +255,10 @@ impl Worker {
         let selected = selected(&view, view.status().tip.ok_or(Error::Binding)?)?;
         let lease = ProducerLease::acquire(&db).map_err(Error::Ownership)?;
         drop(view);
+        let mining = mining
+            .map(|inputs| mining::Mining::new(importer, inputs))
+            .transpose()
+            .map_err(Error::Mining)?;
         let status = Status {
             running: true,
             accepting: true,
@@ -252,6 +279,7 @@ impl Worker {
             published: 0,
             discarded: 0,
             failure: None,
+            mining: mining.as_ref().map(mining::Mining::status),
         };
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -274,6 +302,7 @@ impl Worker {
             selected,
             status,
             lease,
+            mining,
         );
         let thread = thread::Builder::new()
             .name("ae-pow-micro-producer".into())

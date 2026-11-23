@@ -196,7 +196,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         owner.poll(second).map_err(Error::Supervision)?;
         if let Some(notice) = owner.take_notice() {
             match notice {
-                supervisor::Notice::Retired(r) => self.retiring = Some(Retirement::new(r)),
+                supervisor::Notice::Retired(r) => {
+                    // A child can exit after the preliminary liveness check.
+                    // The owner has joined the pair; withdraw its clients even
+                    // when output pressure will retain this retirement.
+                    self.withdraw();
+                    self.retiring = Some(Retirement::new(r));
+                }
                 supervisor::Notice::StartFailed(f) => self.outbox.push_back(Event::StartFailed(f)),
                 supervisor::Notice::Restarted {
                     generator_generation,

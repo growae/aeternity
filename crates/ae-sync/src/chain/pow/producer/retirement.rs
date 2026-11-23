@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug)]
 pub enum Completion {
+    Mining(Box<mining::Completion>),
     Promoted {
         expected: AccountPublicKey,
         result: Result<keys::PublicKeys, keys::Error>,
@@ -92,12 +93,22 @@ pub struct Report {
     pub generator_stop_rejected: Option<generator::RequestError>,
     pub(super) pending: Option<Pending>,
     pub(super) generator: Vec<generator::Ticket>,
+    pub mining: Option<mining::Retirement>,
     pub(super) _lease: ProducerLease,
 }
 impl Report {
     // Poll only the original accepted requests. This method never signs,
     // promotes, inserts, cancels or redirects work to replacement services.
     pub fn poll(&mut self) -> bool {
+        if let Some(mining) = &mut self.mining {
+            let mut completed = Vec::new();
+            mining.poll(&mut completed);
+            self.completions.extend(
+                completed
+                    .into_iter()
+                    .map(|c| Completion::Mining(Box::new(c))),
+            );
+        }
         if let Some(pending) = &mut self.pending
             && let Some(result) = pending.poll_retired()
         {
@@ -116,6 +127,11 @@ impl Report {
         self.is_settled()
     }
     pub fn is_settled(&self) -> bool {
-        self.pending.is_none() && self.generator.is_empty()
+        self.pending.is_none()
+            && self.generator.is_empty()
+            && self
+                .mining
+                .as_ref()
+                .is_none_or(mining::Retirement::is_settled)
     }
 }

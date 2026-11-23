@@ -6,6 +6,7 @@ struct Inputs<O> {
     keys: keys::Client,
     generator: generator::Config<O>,
     producer: producer::Config,
+    mining: Option<producer::mining::Config>,
     clocks: Arc<dyn Clocks>,
 }
 pub(super) struct Factory<O>(Mutex<Inputs<O>>);
@@ -25,6 +26,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
             keys,
             generator: config.generator.clone(),
             producer: config.producer,
+            mining: config.mining.clone(),
             clocks,
         }))
     }
@@ -58,25 +60,41 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
         generation: u64,
         generator: &Self::Generator,
     ) -> Result<Self::Conductor, StartError> {
-        let (importer, keys, mut config, clocks) = {
+        let (importer, keys, mut config, mining, snapshots, clocks) = {
             let i = lock(&self.0);
             (
                 i.importer.borrowed(),
                 i.keys.clone(),
                 i.producer,
+                i.mining.clone(),
+                i.snapshots.clone(),
                 i.clocks.clone(),
             )
         };
         // Activation happens only after a complete pair is published, under
         // the same lock as group desired-state changes and shutdown admission.
         config.enabled = false;
-        producer::Worker::spawn(
-            &importer,
-            generator.client(),
-            keys,
-            config,
-            ProducerClock(clocks.producer(generation)),
-        )
+        match mining {
+            Some(mining) => producer::Worker::spawn_with_mining(
+                &importer,
+                generator.client(),
+                keys,
+                config,
+                ProducerClock(clocks.producer(generation)),
+                producer::mining::Inputs {
+                    snapshots,
+                    config: mining,
+                    clock: clocks.preparation(generation),
+                },
+            ),
+            None => producer::Worker::spawn(
+                &importer,
+                generator.client(),
+                keys,
+                config,
+                ProducerClock(clocks.producer(generation)),
+            ),
+        }
         .map_err(StartError::Producer)
     }
 }

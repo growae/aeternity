@@ -238,6 +238,35 @@ impl Ticket {
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
+    fn pow_preparation(
+        &self,
+        snapshots: ae_storage::snapshots::Owner,
+        limits: repository::pow::key::Limits,
+    ) -> Result<pow::preparation::Builder<O>, pow::producer::mining::Error>
+    where
+        O: Clone,
+    {
+        use pow::producer::mining::Error;
+        let strategy::Strategy::Pow(profile) = &self.context.strategy else {
+            return Err(Error::Binding);
+        };
+        let identity = self
+            .database()
+            .view()
+            .map_err(Error::Repository)?
+            .identity()
+            .clone();
+        pow::preparation::Builder::new(
+            snapshots,
+            pow::preparation::Config {
+                identity,
+                execution: Arc::new(profile.execution.clone()),
+                rules: Arc::new(profile.rules.clone()),
+                limits,
+            },
+        )
+        .map_err(|_| Error::Configuration)
+    }
     // The runtime owner retains the same importer lifetime through service
     // shutdown so a late uncertain commit cannot be hidden by task teardown.
     pub(crate) fn shared(&self) -> Self {
