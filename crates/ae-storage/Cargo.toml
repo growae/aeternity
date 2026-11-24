@@ -9,6 +9,7 @@ publish.workspace = true
 ae-stratum.workspace = true
 num-bigint.workspace = true
 ae-chain.workspace = true
+ae-consensus.workspace = true
 ae-execution.workspace = true
 ae-hyperchain.workspace = true
 ae-vm-fate.workspace = true

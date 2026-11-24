@@ -347,6 +347,6 @@ fn pending_solution_pages_and_old_schema_upgrade_preserve_identity_and_snapshot_
     else {
         panic!()
     };
-    assert_eq!(fields[0], number(17));
+    assert_eq!(fields[0], number(18));
 }
 mod recovery;

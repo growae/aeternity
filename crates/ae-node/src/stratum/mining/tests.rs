@@ -99,6 +99,7 @@ fn inputs(importer: &chain::Importer) -> Inputs {
         strictly_follow_top: true,
         clock: Arc::new(ClockValue(WALL.into())),
         production: None,
+        rounds: None,
     }
 }
 fn start(db: &Arc<Database>, importer: &chain::Importer) -> Accounting {
@@ -610,3 +611,4 @@ mod tcp;
 
 mod production;
 mod recovery;
+mod rounds;

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub mod ingress;
 pub mod mining;
+pub mod rounds;
 const RECORDS: u8 = 22;
 const METADATA: &[u8] = b"\0stratum";
 const MAX_RECORDS: usize = 1_000_000;
@@ -392,6 +393,7 @@ impl Stored<'_> {
         }
         self.ingress(ingress::Limits::maximum())?.verify()?;
         self.mining(mining::Limits::maximum())?.verify()?;
+        self.rounds(rounds::Limits::maximum())?;
         Ok(())
     }
 }

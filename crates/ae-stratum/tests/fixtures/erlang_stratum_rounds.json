@@ -1,0 +1,795 @@
+{
+  "rewards": [
+    {
+      "name": "reward_h1_fee23",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        },
+        {
+          "atom": "fees"
+        }
+      ],
+      "result": {
+        "atom": "ok"
+      },
+      "payments": [
+        {
+          "tuple": [
+            {
+              "atom": "aestratum_payment"
+            },
+            {
+              "tuple": [
+                {
+                  "integer": "1"
+                },
+                {
+                  "integer": "0"
+                }
+              ]
+            },
+            {
+              "integer": "15000000000000000"
+            },
+            {
+              "map": [
+                [
+                  {
+                    "binary": "706f6f6c"
+                  },
+                  {
+                    "float": "3ff0000000000000"
+                  }
+                ]
+              ]
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            }
+          ]
+        },
+        {
+          "tuple": [
+            {
+              "atom": "aestratum_payment"
+            },
+            {
+              "tuple": [
+                {
+                  "integer": "1"
+                },
+                {
+                  "integer": "1"
+                }
+              ]
+            },
+            {
+              "integer": "985000000000000000"
+            },
+            {
+              "map": [
+                [
+                  {
+                    "binary": "6d696e65722d61"
+                  },
+                  {
+                    "float": "3fd5555555555555"
+                  }
+                ],
+                [
+                  {
+                    "binary": "6d696e65722d62"
+                  },
+                  {
+                    "float": "3fe5555555555555"
+                  }
+                ]
+              ]
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            }
+          ]
+        }
+      ],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "ok"
+          },
+          {
+            "tuple": [
+              {
+                "atom": "aestratum_reward"
+              },
+              {
+                "integer": "1"
+              },
+              {
+                "binary": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "integer": "1000000000000000023"
+              },
+              {
+                "integer": "999997"
+              }
+            ]
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "reward_h4_fee0",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "4"
+            }
+          ]
+        },
+        {
+          "atom": "fees"
+        }
+      ],
+      "result": {
+        "atom": "ok"
+      },
+      "payments": [
+        {
+          "tuple": [
+            {
+              "atom": "aestratum_payment"
+            },
+            {
+              "tuple": [
+                {
+                  "integer": "4"
+                },
+                {
+                  "integer": "0"
+                }
+              ]
+            },
+            {
+              "integer": "30000000000000000"
+            },
+            {
+              "map": [
+                [
+                  {
+                    "binary": "706f6f6c"
+                  },
+                  {
+                    "float": "3ff0000000000000"
+                  }
+                ]
+              ]
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            }
+          ]
+        },
+        {
+          "tuple": [
+            {
+              "atom": "aestratum_payment"
+            },
+            {
+              "tuple": [
+                {
+                  "integer": "4"
+                },
+                {
+                  "integer": "1"
+                }
+              ]
+            },
+            {
+              "integer": "1970000000000000000"
+            },
+            {
+              "map": [
+                [
+                  {
+                    "binary": "6d696e65722d61"
+                  },
+                  {
+                    "float": "3fd5555555555555"
+                  }
+                ],
+                [
+                  {
+                    "binary": "6d696e65722d62"
+                  },
+                  {
+                    "float": "3fe5555555555555"
+                  }
+                ]
+              ]
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            }
+          ]
+        }
+      ],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "ok"
+          },
+          {
+            "tuple": [
+              {
+                "atom": "aestratum_reward"
+              },
+              {
+                "integer": "4"
+              },
+              {
+                "binary": "ba3dbd8f839a45600ebb005da8972ef397876012b63a2c44c161c3a4d311bb3e"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "integer": "2000000000000000000"
+              },
+              {
+                "integer": "999997"
+              }
+            ]
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "not_our_share",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "atom": "ok"
+      },
+      "payments": [],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "not_found"
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "already_rewarded",
+      "trace": [],
+      "result": {
+        "atom": "ok"
+      },
+      "payments": [],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "ok"
+          },
+          {
+            "tuple": [
+              {
+                "atom": "aestratum_reward"
+              },
+              {
+                "integer": "1"
+              },
+              {
+                "binary": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "integer": "77"
+              },
+              {
+                "integer": "1000000"
+              }
+            ]
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "missing_header",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "exit"
+          },
+          {
+            "atom": "not_found"
+          }
+        ]
+      },
+      "payments": [],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "not_found"
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "missing_fees",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        },
+        {
+          "atom": "fees"
+        }
+      ],
+      "result": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "exit"
+          },
+          {
+            "atom": "badmatch"
+          }
+        ]
+      },
+      "payments": [],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "not_found"
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "empty_groups",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        },
+        {
+          "atom": "fees"
+        }
+      ],
+      "result": {
+        "atom": "ok"
+      },
+      "payments": [
+        {
+          "tuple": [
+            {
+              "atom": "aestratum_payment"
+            },
+            {
+              "tuple": [
+                {
+                  "integer": "1"
+                },
+                {
+                  "integer": "0"
+                }
+              ]
+            },
+            {
+              "integer": "15000000000000000"
+            },
+            {
+              "map": [
+                [
+                  {
+                    "binary": "706f6f6c"
+                  },
+                  {
+                    "float": "3ff0000000000000"
+                  }
+                ]
+              ]
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            },
+            {
+              "atom": "undefined"
+            }
+          ]
+        }
+      ],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "ok"
+          },
+          {
+            "tuple": [
+              {
+                "atom": "aestratum_reward"
+              },
+              {
+                "integer": "1"
+              },
+              {
+                "binary": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "atom": "transformed"
+              },
+              {
+                "integer": "1000000000000000000"
+              },
+              {
+                "integer": "999997"
+              }
+            ]
+          }
+        ]
+      },
+      "rounds": 2
+    },
+    {
+      "name": "zero_targets",
+      "trace": [
+        {
+          "tuple": [
+            {
+              "atom": "header"
+            },
+            {
+              "integer": "1"
+            }
+          ]
+        },
+        {
+          "atom": "fees"
+        }
+      ],
+      "result": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "exit"
+          },
+          {
+            "atom": "badarith"
+          }
+        ]
+      },
+      "payments": [],
+      "reward": {
+        "tuple": [
+          {
+            "atom": "error"
+          },
+          {
+            "atom": "not_found"
+          }
+        ]
+      },
+      "rounds": 2
+    }
+  ],
+  "inputs": [
+    {
+      "name": "reward_h1_fee23",
+      "height": 1,
+      "fees": "23",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "normal"
+    },
+    {
+      "name": "reward_h4_fee0",
+      "height": 4,
+      "fees": "0",
+      "hash": "ba3dbd8f839a45600ebb005da8972ef397876012b63a2c44c161c3a4d311bb3e",
+      "target": 522133279,
+      "mode": "normal"
+    },
+    {
+      "name": "not_our_share",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "no_index"
+    },
+    {
+      "name": "already_rewarded",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "existing"
+    },
+    {
+      "name": "missing_header",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "no_header"
+    },
+    {
+      "name": "missing_fees",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "no_fees"
+    },
+    {
+      "name": "empty_groups",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "empty"
+    },
+    {
+      "name": "zero_targets",
+      "height": 1,
+      "fees": "0",
+      "hash": "967a8193ce7fad72e7c2350c93160d289c8cb282176be5912f5bfc4bec849249",
+      "target": 522133279,
+      "mode": "zero"
+    }
+  ],
+  "queue": [
+    {
+      "name": "sequential",
+      "protocol": 5,
+      "existing_reward": false,
+      "height": 182,
+      "reward_lookups": [
+        1,
+        2
+      ],
+      "rounds": 2,
+      "source_heights": [
+        181,
+        182
+      ]
+    },
+    {
+      "name": "burst",
+      "protocol": 5,
+      "existing_reward": false,
+      "height": 182,
+      "reward_lookups": [
+        2,
+        2
+      ],
+      "rounds": 2,
+      "source_heights": [
+        181,
+        182
+      ]
+    },
+    {
+      "name": "duplicate",
+      "protocol": 5,
+      "existing_reward": false,
+      "height": 182,
+      "reward_lookups": [
+        2,
+        2
+      ],
+      "rounds": 2,
+      "source_heights": [
+        182,
+        182
+      ]
+    },
+    {
+      "name": "delay_boundary",
+      "protocol": 5,
+      "existing_reward": false,
+      "height": 180,
+      "reward_lookups": [],
+      "rounds": 1,
+      "source_heights": [
+        180
+      ]
+    },
+    {
+      "name": "micro_only",
+      "protocol": 5,
+      "existing_reward": false,
+      "height": 0,
+      "reward_lookups": [],
+      "rounds": 0,
+      "source_heights": []
+    },
+    {
+      "name": "existing_reward",
+      "protocol": 5,
+      "existing_reward": true,
+      "height": 182,
+      "reward_lookups": [],
+      "rounds": 2,
+      "source_heights": [
+        181,
+        182
+      ]
+    }
+  ]
+}

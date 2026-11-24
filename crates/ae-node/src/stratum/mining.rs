@@ -2,6 +2,7 @@
 // ordinary chain admissions. A miner acknowledgement confirms accounting only.
 use super::*;
 pub mod production;
+pub mod rounds;
 use ae_storage::stratum::mining as journal;
 use ae_stratum::{accounting::Date, candidate::Candidate};
 use ae_sync::chain::{
@@ -23,6 +24,7 @@ pub struct Inputs {
     pub strictly_follow_top: bool,
     pub clock: Arc<dyn Clock>,
     pub production: Option<production::Inputs>,
+    pub rounds: Option<rounds::Inputs>,
 }
 #[derive(Clone)]
 pub(super) struct Read {
@@ -31,6 +33,7 @@ pub(super) struct Read {
     limits: journal::Limits,
     epoch: u64,
     production: Option<Arc<production::Shared>>,
+    rounds: Option<storage::rounds::Limits>,
 }
 #[derive(Clone)]
 pub struct Client(pub(super) super::Client);
@@ -74,6 +77,20 @@ impl Job {
     }
 }
 impl Client {
+    pub fn rounds(&self) -> Result<Option<storage::rounds::Info>, Error> {
+        self.read()
+            .rounds
+            .map(|limits| {
+                self.read()
+                    .db
+                    .stratum(self.read().accounting)?
+                    .rounds(limits)
+                    .map_err(Error::from)
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
     pub fn production_status(&self) -> Option<production::Status> {
         self.read().production.as_ref().map(|p| p.status())
     }
@@ -216,6 +233,7 @@ pub(super) struct Worker {
     inputs: Inputs,
     epoch: journal::Epoch,
     production: Option<production::Worker>,
+    rounds: Option<storage::rounds::Limits>,
     inflight: Option<Inflight>,
     retry_at: Instant,
 }
@@ -232,6 +250,11 @@ impl Worker {
             .take()
             .map(|config| production::Worker::new(&inputs.admitter, config, inputs.clock.clone()))
             .transpose()?;
+        let rounds = inputs
+            .rounds
+            .take()
+            .map(|config| rounds::start(writer, config))
+            .transpose()?;
         let epoch = writer.begin_mining(inputs.limits)?;
         let mut worker = Self {
             read: Read {
@@ -240,8 +263,10 @@ impl Worker {
                 limits: inputs.limits,
                 epoch: epoch.value(),
                 production: production.as_ref().map(|p| p.shared.clone()),
+                rounds,
             },
             production,
+            rounds,
             inputs,
             epoch,
             inflight: None,
@@ -350,6 +375,9 @@ impl Worker {
         writer: &mut storage::Writer,
         dispatch: bool,
     ) -> Result<(), Error> {
+        if dispatch && let Some(limits) = self.rounds {
+            rounds::tick(writer, limits)?;
+        }
         let frame = retry(writer, |w| w.refresh_work(&self.epoch, self.inputs.limits))?;
         if let Some(production) = self.production.as_mut() {
             production.tick(writer, &self.epoch, self.inputs.limits, frame, dispatch)?;
