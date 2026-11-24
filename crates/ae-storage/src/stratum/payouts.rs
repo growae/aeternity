@@ -12,6 +12,7 @@ pub use execution::{
     ExecutionFailure, FailureReason, Inclusion, ReceiptUnavailable, UnavailableReason,
 };
 mod record;
+pub(crate) mod retention;
 pub use record::{Completion, Context, Dispatch, Info, Outcome, Record, Request, Signed};
 const META: &[u8] = b"\0stratum-payouts";
 const MAX_META: usize = 64 << 20;
@@ -198,6 +199,7 @@ impl Stored<'_> {
                 return Err(Error::Corrupt("Stratum payout source binding").into());
             }
         }
+        retention::verify(self, info.as_ref(), limits)?;
         Ok(info)
     }
 }
@@ -871,7 +873,7 @@ impl Writer {
         } else {
             Command::DeletePayment(expected.payment.id)
         }];
-        let changes = vec![extra(&s, &info, limits)?];
+        let changes = vec![extra(&s, &info, limits)?, retention::release(&s)?];
         let checks = vec![status(&s)?];
         drop(v);
         drop(s);

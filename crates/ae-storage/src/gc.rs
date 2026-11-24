@@ -172,6 +172,7 @@ impl Database {
             .checked_add(1)
             .ok_or(Error::ResourceLimit)?;
         let mut batch = WriteBatch::default();
+        stratum::payouts::retention::before_gc(self, &view, height, &mut batch)?;
         batch.delete_range([repo::GC_MARKS], [repo::GC_MARKS + 1]);
         batch.delete_range([repo::GC_PENDING], [repo::GC_PENDING + 1]);
         let roots: std::collections::BTreeSet<_> = view
@@ -426,6 +427,7 @@ impl Database {
         &self,
         update: &Update,
         batch: &mut WriteBatch,
+        reserved_bytes: usize,
     ) -> Result<Option<(State, State)>, Error> {
         let mut state = self
             .db
@@ -458,7 +460,7 @@ impl Database {
                 }
             }
         }
-        let mut total = 0usize;
+        let mut total = reserved_bytes;
         writes.insert(repo::GC_STATE.to_vec(), Some(state.encode()));
         for (key, value) in update.writes().iter().chain(writes.iter()) {
             total = total

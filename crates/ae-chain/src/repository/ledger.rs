@@ -166,6 +166,46 @@ impl Update {
     pub fn writes(&self) -> &Writes {
         &self.writes
     }
+    // Resolve the admitted insertion with its staged transaction records,
+    // before durable publication. The supplied view must be this plan's base.
+    pub fn inserted_block<S: Read>(&self, view: &View<S>) -> Result<Option<Block>, Error> {
+        if self.identity != *view.identity()
+            || self.source_id != view.source().source_id()
+            || self.expected != view.status()
+            || self.policy_generation != view.resilience().generation
+        {
+            return Err(Error::Conflict);
+        }
+        let Some(hash) = self.change.inserted else {
+            return Ok(None);
+        };
+        let raw = self
+            .writes
+            .get(&key(BLOCKS, hash.0))
+            .and_then(Option::as_ref)
+            .ok_or(Error::Corrupt("missing staged block"))?;
+        let block = blocks::decode_with_transactions(view, raw, |h| {
+            match self.writes.get(&key(TRANSACTIONS, h.0)) {
+                Some(Some(raw)) => {
+                    let tx = ae_tx::storage::decode(raw, view.config().transaction_record())?;
+                    if tx.hash() != h {
+                        return Err(Error::Corrupt("staged transaction hash"));
+                    }
+                    Ok(Some(tx))
+                }
+                Some(None) => Ok(None),
+                None => view.transaction(h),
+            }
+        })?;
+        if block
+            .hash()
+            .map_err(|_| Error::Corrupt("staged block hash"))?
+            != hash
+        {
+            return Err(Error::Corrupt("staged block identity"));
+        }
+        Ok(Some(block))
+    }
     pub fn events(&self) -> &[batch::Event] {
         &self.events
     }

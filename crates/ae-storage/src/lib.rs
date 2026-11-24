@@ -515,12 +515,23 @@ impl Database {
             return Err(Error::Conflict);
         }
         let pool_writes = self.pool_chain_writes(update.change(), update.writes())?;
+        let receipt =
+            stratum::payouts::retention::on_insert(self, &self.view_locked(&guard)?, &update)?;
         let extra_bytes = extra
             .map_or(Some(0), |(k, v)| k.len().checked_add(v.len()))
+            .and_then(|n| {
+                n.checked_add(
+                    receipt
+                        .as_ref()
+                        .map_or(0, |raw| stratum::payouts::retention::KEY.len() + raw.len()),
+                )
+            })
+            .ok_or(Error::ResourceLimit)?;
+        let reserved_bytes = pool::write_bytes(&pool_writes)?
+            .checked_add(extra_bytes)
             .ok_or(Error::ResourceLimit)?;
         let total = pool::write_bytes(update.writes())?
-            .checked_add(pool::write_bytes(&pool_writes)?)
-            .and_then(|n| n.checked_add(extra_bytes))
+            .checked_add(reserved_bytes)
             .ok_or(Error::ResourceLimit)?;
         if total > update.commit_bytes_limit() {
             return Err(Error::ResourceLimit);
@@ -533,7 +544,10 @@ impl Database {
                 None => batch.delete(k),
             }
         }
-        let gc_progress = self.gc_barrier(&update, &mut batch)?;
+        let gc_progress = self.gc_barrier(&update, &mut batch, reserved_bytes)?;
+        if let Some(raw) = receipt {
+            batch.put(stratum::payouts::retention::KEY, raw);
+        }
         if let Some((key, value)) = extra {
             batch.put(key, value);
         }

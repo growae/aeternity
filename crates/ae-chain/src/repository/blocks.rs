@@ -69,6 +69,16 @@ pub(super) fn encode(block: &Block, config: &ReadConfig) -> Result<Vec<u8>, Erro
     Ok(out)
 }
 pub(super) fn decode<S: Read>(view: &View<S>, bytes: &[u8]) -> Result<Block, Error> {
+    decode_with_transactions(view, bytes, |hash| view.transaction(hash))
+}
+pub(super) fn decode_with_transactions<S: Read>(
+    view: &View<S>,
+    bytes: &[u8],
+    mut transaction: impl FnMut(
+        Hash256,
+    )
+        -> Result<Option<ae_tx::SignedTransaction<ae_tx::Transaction>>, Error>,
+) -> Result<Block, Error> {
     let config = view.config();
     if bytes.len() > config.max_block_bytes {
         return Err(Error::ResourceLimit);
@@ -84,9 +94,8 @@ pub(super) fn decode<S: Read>(view: &View<S>, bytes: &[u8]) -> Result<Block, Err
         }
         if let Block::Micro(m) = &mut block {
             for tx in &mut m.transactions {
-                let latest = view
-                    .transaction(tx.hash())?
-                    .ok_or(Error::Corrupt("missing transaction"))?;
+                let latest =
+                    transaction(tx.hash())?.ok_or(Error::Corrupt("missing transaction"))?;
                 if latest.encode() != tx.encode() {
                     return Err(Error::Corrupt("legacy transaction binding"));
                 }
@@ -125,9 +134,7 @@ pub(super) fn decode<S: Read>(view: &View<S>, bytes: &[u8]) -> Result<Block, Err
             let mut transactions = Vec::new();
             let mut used = 0usize;
             for h in hashes {
-                let tx = view
-                    .transaction(hash(h)?)?
-                    .ok_or(Error::Corrupt("missing transaction"))?;
+                let tx = transaction(hash(h)?)?.ok_or(Error::Corrupt("missing transaction"))?;
                 used = used
                     .checked_add(tx.encode().len())
                     .ok_or(Error::ResourceLimit)?;
