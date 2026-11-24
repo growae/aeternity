@@ -9,6 +9,8 @@ rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
+yaml-rust2 = { version = "=0.13.2", default-features = false }
+jsonschema = { version = "=0.46.6", default-features = false, features = ["arbitrary-precision"] }
 ae-stratum = { path = "crates/ae-stratum" }
 rustix = { version = "=1.1.6", features = ["fs", "process"] }
 # Pin the upstream Windows fix that waits for zero active job processes.
