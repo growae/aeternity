@@ -62,6 +62,130 @@ fn healthy(client: &producer::Client) {
 }
 
 #[test]
+fn held_output_cannot_block_timeout_and_backwards_clock_retires_without_mislabeling() {
+    use super::lifecycle::{Gate, GateClock, Release};
+    use ae_consensus::cuckoo::solver;
+    for backwards in [false, true] {
+        let node = Node::new(1, false);
+        let gate = Gate::new();
+        gate.set_elapsed_ms(1);
+        let mut mining = config(2);
+        mining.attempt_timeout = Some(Duration::from_millis(10));
+        // Instance zero fails its memory budget. Instance one begins a real
+        // canonical graph, then is cancelled; no full search or node runs.
+        mining.instances[1].worker.solver = Default::default();
+        let worker = producer::Worker::spawn_with_mining(
+            &node.importer,
+            node.generator(),
+            node.keys(),
+            producer::Config {
+                outputs: 1,
+                resume_current: false,
+                ..node.config()
+            },
+            GateClock(gate.clone()),
+            mine::Inputs {
+                snapshots: node._snapshots.clone(),
+                config: mining,
+                clock: Arc::new(generator::SystemClock),
+            },
+        )
+        .unwrap();
+        let _release = Release(gate.clone());
+        let client = worker.client();
+        gate.reach(&client, |s| s.published == 1);
+        let prepared = client.front().unwrap();
+        assert!(
+            matches!(&prepared.completion, producer::Completion::Mining(c) if matches!(c.as_ref(), mine::Completion::Prepared { used: true, .. }))
+        );
+        assert!(client.acknowledge(&prepared));
+        drop(prepared);
+        gate.reach(&client, |s| s.published == 2);
+        let held = client.front().unwrap();
+        assert!(
+            matches!(&held.completion, producer::Completion::Mining(c) if matches!(c.as_ref(), mine::Completion::Searched { result, timed_out: false, selected: false, .. } if matches!(result.result, Err(miner::Error::Solve { failure, .. }) if matches!(failure.error, solver::Error::Memory { .. }))))
+        );
+        assert!(client.acknowledge(&held));
+        assert!(
+            client
+                .status()
+                .mining
+                .unwrap()
+                .workers
+                .iter()
+                .all(|w| w.submitted == 1)
+        );
+        gate.set_elapsed_ms(if backwards { 0 } else { 11 });
+        if backwards {
+            gate.allow(usize::MAX);
+            until(|| worker.is_finished());
+        } else {
+            gate.reach(&client, |s| s.mining.as_ref().unwrap().timeouts == 1);
+            assert_eq!(client.status().published, 2);
+            assert!(client.front().is_none());
+            assert!(
+                client
+                    .status()
+                    .mining
+                    .unwrap()
+                    .workers
+                    .iter()
+                    .all(|w| w.submitted == 1)
+            );
+            client.request_shutdown();
+            gate.allow(usize::MAX);
+        }
+        let mut report = finish(worker);
+        assert_eq!(
+            report.status.failure,
+            backwards.then_some(producer::Error::Time)
+        );
+        assert_eq!(
+            report.status.mining.as_ref().unwrap().timeouts,
+            u64::from(!backwards)
+        );
+        assert!(report.mining.as_ref().unwrap().is_settled());
+        let searched: Vec<_> = report
+            .completions
+            .iter()
+            .filter_map(|c| match c {
+                producer::Completion::Mining(c) => match c.as_ref() {
+                    mine::Completion::Searched {
+                        result,
+                        timed_out,
+                        selected,
+                        ..
+                    } => Some((result, timed_out, selected)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(searched.len(), 1);
+        let (result, timed_out, selected) = searched[0];
+        assert_eq!(*timed_out, !backwards);
+        assert!(!selected);
+        assert!(matches!(
+            result.result,
+            Err(miner::Error::Cancelled)
+                | Err(miner::Error::Solve {
+                    failure: solver::Failure {
+                        error: solver::Error::Cancelled,
+                        ..
+                    },
+                    ..
+                })
+        ));
+        assert_eq!(node.db.view().unwrap().status().revision, 2);
+        assert_eq!(node._snapshots.live_snapshots(), 0);
+        let count = report.completions.len();
+        assert!(report.poll());
+        assert_eq!(report.completions.len(), count);
+        drop(held);
+    }
+}
+
+#[test]
 fn stopped_prebuild_dispatches_both_instances_and_stop_rebuilds_without_solving() {
     let node = Node::new(1, false);
     let worker = spawn(
@@ -96,10 +220,12 @@ fn stopped_prebuild_dispatches_both_instances_and_stop_rebuilds_without_solving(
                     candidate: c,
                     result,
                     selected,
+                    timed_out,
                 } = c.as_ref()
             {
                 assert_eq!(c.id, candidate.id);
                 assert!(!selected);
+                assert!(!timed_out);
                 assert_eq!(result.work.edge_bits, 29);
                 assert!(matches!(result.result, Err(miner::Error::Solve { .. })));
                 results.push((result.id, result.work));

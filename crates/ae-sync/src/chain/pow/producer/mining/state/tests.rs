@@ -36,14 +36,18 @@ fn context(header: &KeyHeader, enabled: bool, strict: bool) -> Context {
         now: Instant::now(),
     }
 }
-fn prepare(
-    importer: &chain::Importer<Otp26>,
-    snapshots: snapshots::Owner,
-    header: &KeyHeader,
-) -> Mining<Otp26> {
+fn configuration(header: &KeyHeader) -> Config {
     let mut config = Config::new(AccountPublicKey(header.beneficiary));
     config.instances[0].worker.solver.memory_bytes = 1;
     config.release_info = header.info.map(u32::from_be_bytes).unwrap_or(0);
+    config
+}
+fn ready(
+    importer: &chain::Importer<Otp26>,
+    snapshots: snapshots::Owner,
+    header: &KeyHeader,
+    config: Config,
+) -> Mining<Otp26> {
     let mut mining = Mining::new(
         importer,
         Inputs {
@@ -80,6 +84,14 @@ fn prepare(
     assert_eq!(candidate.header, expected);
     assert_eq!(snapshots.live_snapshots(), 0);
     mining.candidates[0].nonce = header.nonce.into();
+    mining
+}
+fn prepare(
+    importer: &chain::Importer<Otp26>,
+    snapshots: snapshots::Owner,
+    header: &KeyHeader,
+) -> Mining<Otp26> {
+    let mut mining = ready(importer, snapshots, header, configuration(header));
     mining.act(importer, context(header, true, false)).unwrap();
     assert_eq!(mining.status().active, 1);
     mining
@@ -273,3 +285,5 @@ async fn strict_stale_replay_is_rejected_and_ordinary_duplicate_keeps_its_receip
         assert_eq!(node.db.view().unwrap().status(), before);
     }
 }
+
+mod timeouts;

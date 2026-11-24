@@ -118,6 +118,13 @@ impl Ticket {
     pub fn request_cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
     }
+    // Linearize a first cancellation request with result publication. A false
+    // return means completion or another cancellation request already won.
+    // The eventual receipt remains authoritative and is never rewritten.
+    pub fn cancel_if_pending(&self) -> bool {
+        let result = lock(&self.0.result);
+        result.is_none() && !self.0.cancelled.swap(true, Ordering::AcqRel)
+    }
     pub fn try_result(&self) -> Option<Arc<Completion>> {
         lock(&self.0.result).clone()
     }
@@ -262,6 +269,10 @@ impl Worker {
     }
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn on_progress(&self, hook: impl FnMut(Progress) + Send + 'static) {
+        *lock(&self.client.0.hook) = Some(Box::new(hook));
     }
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)

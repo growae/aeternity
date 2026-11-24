@@ -16,6 +16,9 @@ impl Gate {
             elapsed_ms: AtomicU64::new(0),
         })
     }
+    pub(super) fn set_elapsed_ms(&self, milliseconds: u64) {
+        self.elapsed_ms.store(milliseconds, Ordering::SeqCst);
+    }
     pub(super) fn calls(&self) -> usize {
         self.state.lock().unwrap().0
     }
@@ -23,7 +26,7 @@ impl Gate {
         self.state.lock().unwrap().1 = n;
         self.wake.notify_all();
     }
-    fn step(&self) {
+    pub(super) fn step(&self) {
         until(|| self.calls() > 0);
         let call = self.calls();
         self.allow(call);

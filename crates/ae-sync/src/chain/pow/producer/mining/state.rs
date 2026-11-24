@@ -11,6 +11,7 @@ pub(in crate::chain::pow::producer) struct Mining<O> {
     preparing: Option<Preparing>,
     cpus: Vec<Cpu>,
     next_cpu: usize,
+    timeouts: u64,
     solution: Option<Solution>,
     admission: Option<Admission>,
     output: Option<Completion>,
@@ -25,6 +26,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
         if !snapshots.uses_database(importer.database())
             || config.instances.len() > 64
             || config.retry > Duration::from_secs(60)
+            || config
+                .attempt_timeout
+                .is_some_and(|timeout| timeout.is_zero())
             || config
                 .instances
                 .iter()
@@ -48,6 +52,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             clock,
             cpus,
             next_cpu: 0,
+            timeouts: 0,
             epoch: 0,
             wanted: true,
             retry_at: None,
@@ -64,6 +69,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             candidate: self.candidates.first().map(|c| c.value.clone()),
             candidates: self.candidates.len(),
             active: self.cpus.iter().filter(|c| c.job.is_some()).count(),
+            timeouts: self.timeouts,
+            timeouts_pending: self
+                .cpus
+                .iter()
+                .filter(|c| c.job.as_ref().is_some_and(|j| j.timed_out))
+                .count(),
             pending_admission: self.admission.is_some(),
             workers: self
                 .cpus
@@ -81,8 +92,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
         if let Some(p) = &self.preparing {
             p.task.request_cancel();
         }
-        for cpu in &self.cpus {
-            if let Some(job) = &cpu.job {
+        for cpu in &mut self.cpus {
+            if let Some(job) = &mut cpu.job {
+                job.deadline = None;
                 job.ticket.request_cancel();
             }
         }
@@ -116,6 +128,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
         miner: AccountPublicKey,
         now: Instant,
     ) -> Result<(), Error> {
+        // Deadline observation is independent of publication capacity. Every
+        // expired job keeps its original receipt and instance until observed.
+        for cpu in &mut self.cpus {
+            if let Some(job) = &mut cpu.job
+                && job.deadline.is_some_and(|at| now >= at)
+            {
+                job.deadline = None;
+                if job.ticket.cancel_if_pending() {
+                    job.timed_out = true;
+                    self.timeouts = self.timeouts.saturating_add(1);
+                }
+            }
+        }
         if self.output.is_some() {
             return Ok(());
         }
@@ -206,6 +231,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             .iter()
             .any(|c| c.value.id == job.candidate.id);
         let selected = valid
+            && !job.timed_out
             && matches!(sealed, Ok(Some(_)))
             && self.solution.is_none()
             && self.admission.is_none();
@@ -215,6 +241,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             candidate: job.candidate.clone(),
             result: result.clone(),
             selected,
+            timed_out: job.timed_out,
         });
         if let Some(header) = sealed?
             && selected
@@ -227,7 +254,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             });
         }
         self.wanted = true;
-        if result.result.is_err() && valid {
+        if (result.result.is_err() || job.timed_out) && valid {
             self.retry_at = Some(now + self.config.retry);
         }
         self.collect();
@@ -305,6 +332,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             self.wanted = false;
             return Ok(());
         }
+        // Compute before accepting any job, so an unrepresentable deadline
+        // cannot leave a partly submitted batch without deadline ownership.
+        let deadline = self
+            .config
+            .attempt_timeout
+            .map(|timeout| now.checked_add(timeout).ok_or(Error::Time))
+            .transpose()?;
         let candidate = self.candidates.first_mut().expect("current candidate");
         let mut retry = false;
         for cpu in &mut self.cpus {
@@ -325,6 +359,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
                     cpu.job = Some(Job {
                         candidate: candidate.value.clone(),
                         ticket,
+                        deadline,
+                        timed_out: false,
                     });
                     candidate.nonce = nonces.next().into();
                 }

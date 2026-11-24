@@ -24,14 +24,14 @@ fn pause(worker: &Worker, phase: Phase, panic: bool) -> (mpsc::Receiver<()>, mps
     let (entered, wait) = mpsc::channel();
     let (release, resumed) = mpsc::channel();
     let mut used = false;
-    *lock(&worker.client.0.hook) = Some(Box::new(move |p| {
+    worker.on_progress(move |p| {
         if !used && p.phase == phase {
             used = true;
             entered.send(()).unwrap();
             resumed.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(!panic, "controlled miner panic");
         }
-    }));
+    });
     (wait, release)
 }
 fn received(wait: &mpsc::Receiver<()>) {
@@ -68,7 +68,9 @@ fn cpu_worker_searches_reserved_nonces_and_retains_exact_verified_result() {
     assert_eq!(result.work, request);
     assert_eq!(result.attempts, Some(3));
     assert!(result.work_units.unwrap() > 0);
+    assert!(!ticket.cancel_if_pending());
     ticket.request_cancel();
+    assert!(!ticket.cancel_if_pending());
     assert!(Arc::ptr_eq(&result, &ticket.try_result().unwrap()));
     let status = worker.shutdown();
     assert!(!status.running && !status.accepting);
@@ -283,4 +285,30 @@ fn whole_job_work_limit_and_key_mode_guards_preserve_operational_errors() {
         }),
         Err(Error::Configuration)
     ));
+}
+
+#[test]
+fn first_pending_cancellation_wins_once_and_preserves_active_and_queued_receipts() {
+    let worker = Worker::spawn(Config::default()).unwrap();
+    let (wait, release) = pause(&worker, Phase::Allocate, false);
+    let active = worker.client().submit(work(38, 1)).unwrap();
+    received(&wait);
+    let queued = worker.client().submit(work(38, 1)).unwrap();
+    assert!(active.cancel_if_pending());
+    assert!(!active.cancel_if_pending());
+    queued.request_cancel();
+    assert!(!queued.cancel_if_pending());
+    assert!(active.try_result().is_none());
+    assert!(queued.try_result().is_none());
+    release.send(()).unwrap();
+    let result = active.blocking_wait();
+    assert!(
+        matches!(result.result, Err(Error::Solve { failure, .. }) if failure.error == solver::Error::Cancelled)
+    );
+    assert_eq!(result.id, active.id());
+    assert_eq!(result.work, active.work());
+    assert!(Arc::ptr_eq(&result, &active.blocking_wait()));
+    assert!(!active.cancel_if_pending());
+    assert_eq!(queued.blocking_wait().result, Err(Error::Cancelled));
+    assert_eq!(worker.shutdown().completed, 2);
 }

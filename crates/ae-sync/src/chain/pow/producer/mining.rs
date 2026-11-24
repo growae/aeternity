@@ -28,6 +28,9 @@ pub struct Config {
     pub preparation: repo::pow::key::Limits,
     // Operational failures back off without being reported as no solution.
     pub retry: Duration,
+    // Native mining_attempt_timeout defaults to one hour; None is infinity.
+    // Expiry requests cooperative cancellation and retains the original job.
+    pub attempt_timeout: Option<Duration>,
 }
 impl Config {
     pub fn new(beneficiary: AccountPublicKey) -> Self {
@@ -37,6 +40,7 @@ impl Config {
             instances: vec![Instance::default()],
             preparation: Default::default(),
             retry: Duration::from_millis(100),
+            attempt_timeout: Some(Duration::from_secs(3600)),
         }
     }
 }
@@ -58,6 +62,7 @@ pub enum Error {
     Configuration,
     Binding,
     Sequence,
+    Time,
     Repository(repo::Error),
     Worker(miner::Error),
     Admission(chain::Error),
@@ -89,6 +94,9 @@ pub enum Completion {
         candidate: Arc<Candidate>,
         result: Arc<miner::Completion>,
         selected: bool,
+        // Timeout won before result publication. The exact worker receipt is
+        // still retained, including a result which finished after cancellation.
+        timed_out: bool,
     },
     Discarded {
         candidate: Arc<Candidate>,
@@ -107,6 +115,8 @@ pub struct Status {
     pub candidate: Option<Arc<Candidate>>,
     pub candidates: usize,
     pub active: usize,
+    pub timeouts: u64,
+    pub timeouts_pending: usize,
     pub pending_admission: bool,
     pub workers: Vec<miner::Status>,
 }
@@ -117,6 +127,8 @@ struct Preparing {
 struct Job {
     candidate: Arc<Candidate>,
     ticket: miner::Ticket,
+    deadline: Option<Instant>,
+    timed_out: bool,
 }
 struct Cpu {
     config: Instance,
@@ -246,6 +258,7 @@ impl Retirement {
                     candidate: job.candidate,
                     result,
                     selected: false,
+                    timed_out: job.timed_out,
                 });
             }
             if cpu.worker.as_ref().is_some_and(miner::Worker::is_finished) {
