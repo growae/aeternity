@@ -820,3 +820,5 @@ fn close_during_signature_completion_joins_and_prevents_a_late_pool_dispatch() {
     p.shutdown().unwrap();
     s.retire();
 }
+
+mod execution;
