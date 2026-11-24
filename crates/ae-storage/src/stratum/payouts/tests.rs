@@ -976,4 +976,5 @@ mod gas;
 
 mod batches;
 mod batches_recovery;
+mod history;
 mod retention;

@@ -281,6 +281,7 @@ impl Database {
             // old binaries then refuse to open instead of losing metadata.
             let mut batch = WriteBatch::default();
             batch.put(repo::IDENTITY, result.identity.encode());
+            stratum::payouts::history::upgrade(&result, &mut batch)?;
             if result.identity.consensus == ae_protocol::ConsensusType::Pos
                 && result.db.get(repo::HC_STATE).map_err(backend)?.is_none()
             {

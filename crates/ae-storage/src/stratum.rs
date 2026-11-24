@@ -402,6 +402,7 @@ impl Stored<'_> {
         self.mining(mining::Limits::maximum())?.verify()?;
         self.rounds(rounds::Limits::maximum())?;
         self.payouts(payouts::Limits::maximum())?;
+        payouts::history::verify_all(self)?;
         Ok(())
     }
 }
@@ -643,6 +644,9 @@ impl Writer {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         payouts::validate_plan(&stored, &plan, &extra)?;
+        let history = payouts::history::transition(&stored, &extra)?;
+        let mut extra = extra;
+        extra.extend(history);
         if plan.is_empty() && extra.is_empty() {
             return Ok(Commit {
                 version: expected,

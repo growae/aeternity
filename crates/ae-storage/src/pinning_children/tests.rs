@@ -296,7 +296,7 @@ fn schema_twelve_upgrades_preserving_roots_and_child_journal() {
         let Value::List(mut fields) = Value::decode(&id.encode()).unwrap() else {
             panic!()
         };
-        assert_eq!(fields[0], number(20));
+        assert_eq!(fields[0], number(21));
         fields[0] = number(12);
         db.db
             .put(repo::IDENTITY, Value::List(fields).encode())

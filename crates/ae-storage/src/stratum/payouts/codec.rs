@@ -228,7 +228,11 @@ impl Record {
         }
         Ok(raw)
     }
-    fn decode(raw: &[u8], limits: Limits, accounting: core::Limits) -> Result<Self, Failure> {
+    pub(super) fn decode(
+        raw: &[u8],
+        limits: Limits,
+        accounting: core::Limits,
+    ) -> Result<Self, Failure> {
         let v = flat(raw, limits.bytes)?;
         let [version, seq, key, pay, q, s] = fields(&v)?;
         if integer(version)? != 1 {

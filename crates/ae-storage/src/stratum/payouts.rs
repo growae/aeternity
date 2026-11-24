@@ -8,6 +8,7 @@ use ae_stratum::payout;
 use ae_types::{AccountPublicKey, ContractPublicKey, Signature};
 mod codec;
 mod execution;
+pub mod history;
 pub use execution::{
     ExecutionFailure, FailureReason, Inclusion, ReceiptUnavailable, UnavailableReason,
 };
@@ -200,6 +201,7 @@ impl Stored<'_> {
             }
         }
         retention::verify(self, info.as_ref(), limits)?;
+        history::current(self, info.as_ref())?;
         Ok(info)
     }
 }

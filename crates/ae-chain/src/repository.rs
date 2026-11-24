@@ -151,7 +151,7 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(20)
+        self.encode_version(21)
     }
     // Archive ownership was introduced with version 7. Bind the identity
     // fields using that stable layout, independently of writer capabilities.
@@ -187,7 +187,7 @@ impl Identity {
         let v = decode(bytes)?;
         let all = items(&v)?;
         let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
-        if !matches!(version, 1..=20) {
+        if !matches!(version, 1..=21) {
             return Err(Error::Corrupt("schema version"));
         }
         let a = fields(&v, if version >= 10 { 6 } else { 5 })?;

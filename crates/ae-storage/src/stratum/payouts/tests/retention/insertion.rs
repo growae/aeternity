@@ -404,6 +404,7 @@ fn original_contract_inclusions_archive_with_real_commits_during_gc_and_side_bra
             let db = Arc::new(Database::open(&temp.0, id).unwrap());
             let mut w = Writer::start(db.clone(), Default::default()).unwrap();
             let info = w.begin_payouts(config, Default::default()).unwrap();
+            let retained = archived(&db);
             let Confirmation::Confirmed(done) = w
                 .confirm_payout(info.epoch, &record, Default::default())
                 .unwrap()
@@ -412,10 +413,33 @@ fn original_contract_inclusions_archive_with_real_commits_during_gc_and_side_bra
             };
             assert_eq!(done.block, second_hash);
             assert!(db.db.get(archive::KEY).unwrap().is_none());
+            let page = db
+                .stratum(Default::default())
+                .unwrap()
+                .payout_history(0, 1024, 256 << 20)
+                .unwrap();
+            let last = page.entries.last().unwrap();
+            assert_eq!(last.completed_request.as_ref(), Some(&record));
+            assert_eq!(last.information.last.as_ref(), Some(&done));
+            assert_eq!(last.receipt.as_ref(), Some(&retained));
+            let id = db.view().unwrap().identity().clone();
+            drop(w);
+            drop(db);
+            let db = Database::open(&temp.0, id).unwrap();
+            assert_eq!(
+                db.stratum(Default::default())
+                    .unwrap()
+                    .payout_history(0, 1024, 256 << 20)
+                    .unwrap(),
+                page
+            );
         }
     }
     println!(
         "Retained payout insertion: six original-contract forks survive active GC, reorg and reopen"
+    );
+    println!(
+        "Payout history integration: six original-contract completions retain full inclusion archives"
     );
 }
 

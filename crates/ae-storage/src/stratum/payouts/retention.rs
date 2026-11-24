@@ -6,7 +6,7 @@ use ae_trie::{MemoryStore, Nibbles, NodeReader, NodeWriter, Trie};
 use std::{cell::Cell, collections::BTreeMap};
 
 pub(crate) const KEY: &[u8] = b"\0stratum-payout-receipts";
-const MAX_BYTES: usize = 16 << 20;
+pub(super) const MAX_BYTES: usize = 16 << 20;
 const MAX_ENTRIES: usize = 16;
 const MAX_NODES: usize = 256;
 const MAX_READ_BYTES: usize = 16 << 20;
@@ -344,4 +344,61 @@ fn append(
     );
     archive.validate(view, &info.config, expected, limits)?;
     archive.encode().map(Some)
+}
+
+// Completion transfers its evidence into immutable history before the active
+// archive is released. Legacy inclusions can still be captured while retained.
+pub(super) fn completed(
+    view: &repo::View<Snapshot<'_>>,
+    info: &Info,
+    block: Hash256,
+) -> Result<Vec<u8>, Failure> {
+    if let Some(a) = load(view.source(), Limits::maximum())?
+        && a.entries.contains_key(&block)
+    {
+        return a.encode();
+    }
+    let Block::Micro(micro) = view.require_block(block)? else {
+        return Err(Error::Corrupt("payout history inclusion").into());
+    };
+    append(
+        view,
+        info,
+        micro,
+        view.require_record(block)?.roots.state,
+        None,
+    )?
+    .ok_or(Error::Corrupt("payout history capture").into())
+}
+pub(super) fn historical(
+    view: &repo::View<Snapshot<'_>>,
+    config: &Config,
+    record: &Record,
+    completion: &Completion,
+    raw: &[u8],
+) -> Result<(), Failure> {
+    let limits = Limits::maximum();
+    let a = Archive::decode(raw, MAX_BYTES)?;
+    a.validate(view, config, record, limits)?;
+    let proof = a
+        .entries
+        .get(&completion.block)
+        .ok_or(Error::Corrupt("payout history receipt block"))?;
+    if proof.header.common().height != completion.height {
+        return Err(Error::Corrupt("payout history receipt height").into());
+    }
+    let (id, key) = execution::call_key(config, &a.signed)?;
+    let raw = proof
+        .lookup(&key)?
+        .ok_or(Error::Corrupt("payout history receipt absent"))?;
+    let call = execution::validate_call(config, &a.signed, completion.height, id, &raw, limits)?;
+    let ae_tx::TransactionLeaf::Contract(tx) = a.signed.transaction().leaf() else {
+        return Err(Error::Corrupt("payout history call").into());
+    };
+    if call.return_type != ae_state::calls::ReturnType::Ok
+        || !payout::confirms_total(tx.amount(), &call.return_value)
+    {
+        return Err(Error::Corrupt("payout history successful receipt").into());
+    }
+    Ok(())
 }
