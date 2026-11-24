@@ -14,14 +14,22 @@ use ae_types::{AccountPublicKey, ContractPublicKey, Hash256, Id, IdTag, Signatur
 use ae_vm_aevm::heap::{self, Type, Value};
 use ae_vm_fate::maps::Traversal;
 use num_bigint::{BigInt, Sign};
+mod batches;
 mod codec;
 mod gas;
+pub use batches::{Batches, Batching, prepare_batches};
 pub use gas::{GasPolicy, Generation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Limit,
     GasPolicy,
+    DirtyPayment,
+    BatchLimit,
+    BatchIndex,
+    GrossAllocation,
+    UnpayableRecipient,
+    ExactAllocationRequiresBounded,
     TransferLimit {
         actual: usize,
         maximum: u32,
@@ -299,6 +307,7 @@ pub fn confirms_total(amount: &Unsigned, returned: &[u8]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub payment: rewards::Payment,
+    pub gross: Option<Amounts>,
     pub environment: Environment,
     pub balance: Unsigned,
     pub network: Vec<u8>,
@@ -402,7 +411,10 @@ pub fn prepare_with_generation(
     if network.len() > limits.network_bytes {
         return Err(Error::Limit);
     }
-    let first = rewards::absolute(&payment.relative, &payment.total, limits.transfers)?;
+    if payment.gross.is_some() && generation == Generation::Native {
+        return Err(Error::ExactAllocationRequiresBounded);
+    }
+    let first = batches::allocate(payment, &payment.total, limits.transfers)?;
     let estimate = generation.call(&first, environment, network, limits)?;
     let net = &payment.total - signed(estimate.transaction.fee()) - signed(&estimate.run_fee);
     if net.sign() != Sign::Plus {
@@ -413,7 +425,7 @@ pub fn prepare_with_generation(
             net,
         });
     }
-    let absolute = rewards::absolute(&payment.relative, &net, limits.transfers)?;
+    let absolute = batches::allocate(payment, &net, limits.transfers)?;
     let call = generation.call(&absolute, environment, network, limits)?;
     if matches!(generation, Generation::Bounded(_)) {
         let maximum_cost = signed(call.transaction.amount())
@@ -435,6 +447,7 @@ pub fn prepare_with_generation(
                 total: payment.total.clone(),
                 relative: payment.relative.clone(),
             },
+            gross: payment.gross.clone(),
             environment: environment.clone(),
             balance: balance.clone(),
             network: network.to_vec(),

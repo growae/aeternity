@@ -436,20 +436,47 @@ impl Writer {
             height: info.context.height,
             protocol: info.context.protocol,
         };
-        let prepared = payout::prepare_with_generation(
+        let mut plan = payout::prepare_batches(
             &p,
             &environment,
             Some(account.balance()),
             &info.network,
             generation,
-            limits.payout,
+            payout::Batching {
+                input: self.limits.transaction.maps,
+                payout: limits.payout,
+                maximum_index: p.id.1,
+                maximum_batches: self.limits.transaction.records.min(4096),
+            },
         )?;
+        if plan.payments.len() > 1 {
+            let maximum_index = s
+                .query(|t| t.payments(p.id.0))?
+                .iter()
+                .map(|p| p.id.1)
+                .max()
+                .ok_or(Error::Conflict)?;
+            for (offset, payment) in plan.payments.iter_mut().enumerate().skip(1) {
+                payment.id.1 = maximum_index
+                    .checked_add(u32::try_from(offset).map_err(|_| payout::Error::BatchIndex)?)
+                    .ok_or(payout::Error::BatchIndex)?;
+            }
+        }
+        let commands = if plan.payments.len() == 1 && plan.payments[0] == p {
+            vec![]
+        } else {
+            plan.payments
+                .iter()
+                .cloned()
+                .map(Command::Payment)
+                .collect()
+        };
         let r = Record {
             sequence: info.next,
-            payment: p,
+            payment: plan.payments.into_iter().next().ok_or(Error::Conflict)?,
             request: Some(Box::new(Request {
                 chain: v.status(),
-                prepared,
+                prepared: plan.first,
             })),
             signed: None,
         };
@@ -459,7 +486,7 @@ impl Writer {
         let checks = vec![status(&s)?];
         drop(v);
         drop(s);
-        self.commit_checked(version, vec![], changes, checks, |db, b| {
+        self.commit_checked(version, commands, changes, checks, |db, b| {
             write(Stage::Prepare, db, b)
         })?;
         Ok(Selection::Prepared(Box::new(r)))

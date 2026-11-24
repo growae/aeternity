@@ -935,7 +935,7 @@ fn default_live_payout_generation_uses_captured_execution_gas_and_restart_keeps_
 }
 
 #[test]
-fn default_payout_transfer_limit_holds_the_original_obligation_before_signing_or_pool_dispatch() {
+fn default_payout_selection_splits_oversized_obligations_before_signing_and_pool_dispatch() {
     let t = Temp::new();
     let db = database(&t);
     let mut pay = payment();
@@ -953,34 +953,30 @@ fn default_payout_transfer_limit_holds_the_original_obligation_before_signing_or
     let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
     let i = Inputs::new(config(), s.client(), p.client());
     let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
-    for _ in 0..2 {
-        a.request_check();
-        until(|| {
-            tick(&mut a, &mut w);
-            a.pending.is_none()
-                && matches!(
-                    a.shared.status().last,
-                    Some(Notice::Preparation(
-                        ae_stratum::payout::Error::TransferLimit {
-                            actual: 201,
-                            maximum: 200
-                        }
-                    ))
-                )
-        });
-    }
-    // submitted counts both pricing queries, not just transaction pushes.
-    let pool_info = p.client().info();
-    assert_eq!(pool_info.submitted, 2);
-    assert_eq!((pool_info.pool.active, pool_info.pool.visited), (0, 0));
-    assert!(stored(&db).pending.is_none());
-    assert_eq!(stored(&db).next, 1);
+    a.request_check();
+    let r = accepted(&mut a, &mut w);
+    assert!(r.payment.gross.is_some());
+    assert_eq!(r.request.as_ref().unwrap().prepared.absolute().len(), 101);
+    assert_eq!(stored(&db).next, 2);
     let found = db
         .stratum(Default::default())
         .unwrap()
         .query(|t| t.payments(100))
         .unwrap();
-    assert_eq!(found, vec![pay]);
+    assert_eq!(found.len(), 2);
+    let gross: ae_stratum::rewards::Amounts = found
+        .iter()
+        .flat_map(|p| p.gross.as_ref().unwrap().clone())
+        .collect();
+    assert_eq!(
+        gross,
+        ae_stratum::rewards::absolute(&pay.relative, &pay.total, Default::default()).unwrap()
+    );
+    assert_eq!(
+        found.iter().map(|p| &p.total).sum::<num_bigint::BigInt>(),
+        pay.total
+    );
+    assert_eq!(p.client().info().pool.active, 1);
     a.finish(&mut w).unwrap();
     p.shutdown().unwrap();
     s.retire();

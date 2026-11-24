@@ -106,6 +106,7 @@ impl Record {
                     || p.id != self.payment.id
                     || p.total != self.payment.total
                     || p.relative != self.payment.relative
+                    || q.prepared.request().gross != self.payment.gross
                 {
                     return Err(Error::Corrupt("Stratum payout preparation source").into());
                 }

@@ -443,3 +443,6 @@ fn prepared_envelopes_reject_mismatched_payloads_corruption_versions_and_resourc
 
 #[path = "payout/gas.rs"]
 mod gas;
+
+#[path = "payout/batches.rs"]
+mod batches;

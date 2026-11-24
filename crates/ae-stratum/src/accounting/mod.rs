@@ -164,6 +164,8 @@ pub struct Payment {
     pub id: PaymentId,
     pub total: BigInt,
     pub relative: Map,
+    // Exact gross entitlements for a Rust-generated split obligation.
+    pub gross: Option<Amounts>,
     pub absolute: Option<Amounts>,
     pub tx_hash: Option<Hash256>,
     pub nonce: Option<BigInt>,
@@ -178,6 +180,7 @@ impl From<rewards::Payment> for Payment {
             id: p.id,
             total: p.total,
             relative: p.relative,
+            gross: None,
             absolute: None,
             tx_hash: None,
             nonce: None,

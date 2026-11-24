@@ -236,3 +236,104 @@ fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_bu
         "Bounded payout live execution: {defaults} default successes, {retries} explicit budget retries"
     );
 }
+
+#[test]
+fn split_batches_execute_original_contract_code_and_pay_each_exact_net_entitlement() {
+    let mut count = 0;
+    for version in [3, 6, 8] {
+        let row = gas_find(version, "prepared_two_hundred");
+        let mut input = from_snapshot(&row["before"]);
+        let mut payment = prepared_payment(row);
+        payment.relative.insert(
+            ae_codec::api::encode(ae_codec::api::ApiType::AccountPubkey, &[255; 32]).into_bytes(),
+            Number::Float((1.0 / 201.0f64).to_bits()),
+        );
+        for value in payment.relative.values_mut() {
+            *value = Number::Float((1.0 / 201.0f64).to_bits());
+        }
+        let mut env = environment(row);
+        let plan = payout::prepare_batches(
+            &payment,
+            &env,
+            Some(
+                input
+                    .accounts
+                    .lookup(env.caller)
+                    .unwrap()
+                    .unwrap()
+                    .balance(),
+            ),
+            b"ae_mainnet",
+            payout::Generation::Bounded(Default::default()),
+            payout::Batching {
+                input: Default::default(),
+                payout: Default::default(),
+                maximum_index: 0,
+                maximum_batches: 4096,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.payments.len(), 2);
+        let mut all = ae_stratum::rewards::Amounts::new();
+        for payment in plan.payments {
+            let caller_before = input.accounts.lookup(env.caller).unwrap().unwrap();
+            env.account_nonce = caller_before.nonce().clone();
+            let prepared = payout::prepare_with_generation(
+                &payment,
+                &env,
+                Some(caller_before.balance()),
+                b"ae_mainnet",
+                payout::Generation::Bounded(Default::default()),
+                Default::default(),
+            )
+            .unwrap();
+            let mut expected = Vec::new();
+            for (address, amount) in prepared.absolute() {
+                assert!(all.insert(address.clone(), amount.clone()).is_none());
+                let (_, key) =
+                    ae_codec::api::decode(std::str::from_utf8(address).unwrap()).unwrap();
+                let key = AccountPublicKey(key.try_into().unwrap());
+                let before = input
+                    .accounts
+                    .lookup(key)
+                    .unwrap()
+                    .map_or(Unsigned::from(0), |a| a.balance().clone());
+                expected.push((key, before, amount.clone()));
+            }
+            let signed = prepared
+                .attach_signature(secret().sign(prepared.signing_bytes()))
+                .unwrap();
+            let receipt = aevm::execute_signed_call(
+                &signed,
+                &mut input,
+                &NetworkProfile::mainnet(),
+                &context(row),
+                &vm_config(b"ae_mainnet"),
+                corpus_limits(),
+            )
+            .unwrap();
+            assert_eq!(receipt.call.return_type, ReturnType::Ok);
+            assert!(payout::confirms_total(
+                signed.transaction().amount(),
+                &receipt.call.return_value
+            ));
+            assert!(receipt.call.gas_used <= *signed.transaction().gas());
+            for (key, before, amount) in expected {
+                let after = input.accounts.lookup(key).unwrap().unwrap();
+                assert_eq!(
+                    BigInt::from_bytes_be(num_bigint::Sign::Plus, after.balance().as_bytes())
+                        - BigInt::from_bytes_be(num_bigint::Sign::Plus, before.as_bytes()),
+                    amount
+                );
+            }
+            assert_eq!(
+                input.accounts.lookup(env.caller).unwrap().unwrap().nonce(),
+                &env.account_nonce.add(&1.into())
+            );
+            count += 1;
+        }
+        assert_eq!(all.len(), 201);
+    }
+    assert_eq!(count, 6);
+    println!("Split payout execution: six original-code calls preserve all 201 beneficiaries");
+}

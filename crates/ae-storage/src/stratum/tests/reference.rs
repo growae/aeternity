@@ -84,6 +84,7 @@ fn record(v: &J) -> Record {
             id: (uint(&tuple(&t[1])[0]), uint(&tuple(&t[1])[1]) as u32),
             total: int(&t[2]),
             relative: map(&t[3], number),
+            gross: None,
             absolute: optional(&t[4], |v| map(v, int)),
             tx_hash: optional(&t[5], h),
             nonce: optional(&t[6], int),

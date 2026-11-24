@@ -49,6 +49,7 @@ impl GasPolicy {
         limits: Limits,
     ) -> Result<Call, Error> {
         self.validate()?;
+        limits.validate()?;
         if transfers.len() > self.max_transfers as usize {
             return Err(Error::TransferLimit {
                 actual: transfers.len(),

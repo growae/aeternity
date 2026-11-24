@@ -54,7 +54,9 @@ impl Prepared {
         {
             return Err(Error::Limit);
         }
-        let record = crate::accounting::Record::Payment(request.payment.clone().into());
+        let mut payment: Payment = request.payment.clone().into();
+        payment.gross = request.gross.clone();
+        let record = crate::accounting::Record::Payment(payment);
         let payment = record
             .encode(accounting(limits))
             .map_err(Error::Accounting)?;
@@ -62,6 +64,8 @@ impl Prepared {
         let mut fields = vec![
             uint(if self.generation == Generation::Native {
                 1
+            } else if request.gross.is_some() {
+                3
             } else {
                 2
             }),
@@ -119,7 +123,7 @@ impl Prepared {
         };
         let generation = match values.first().map(number).transpose()? {
             Some(1) if values.len() == 12 => Generation::Native,
-            Some(2) if values.len() == 13 => {
+            Some(2 | 3) if values.len() == 13 => {
                 let policy = values.pop().expect("thirteen fields");
                 let [initial, per_transfer, count, maximum] = list(&policy)?;
                 let p = GasPolicy {

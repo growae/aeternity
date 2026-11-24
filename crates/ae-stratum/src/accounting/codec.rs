@@ -247,6 +247,16 @@ impl Record {
             Self::Payment(p) => {
                 b.int(&p.total)?;
                 b.map(&p.relative)?;
+                if let Some(m) = &p.gross {
+                    b.amounts(m)?;
+                    if m.is_empty()
+                        || !m.keys().eq(p.relative.keys())
+                        || m.values().any(|v| v.sign() != Sign::Plus || v.bits() > 256)
+                        || m.values().sum::<BigInt>() != p.total
+                    {
+                        return Err(Error::Corrupt("payment gross allocation"));
+                    }
+                }
                 if let Some(m) = &p.absolute {
                     b.amounts(m)?;
                 }
@@ -268,7 +278,7 @@ impl Record {
     }
     pub fn encode(&self, limits: Limits) -> Result<Vec<u8>, Error> {
         self.validate(limits)?;
-        let payload = match self {
+        let mut payload = match self {
             Self::Hash { hash, key } => vec![bytes(hash), uint(*key)],
             Self::Round(k) => vec![uint(*k)],
             Self::Share(s) => vec![uint(s.key), bytes(s.hash), int(&s.target), bytes(&s.miner)],
@@ -300,8 +310,17 @@ impl Record {
                 date(c.date),
             ],
         };
+        let version = if let Self::Payment(Payment {
+            gross: Some(gross), ..
+        }) = self
+        {
+            payload.push(amounts(gross));
+            2
+        } else {
+            1
+        };
         let encoded = Value::List(vec![
-            uint(1),
+            uint(version),
             uint(self.table() as u64),
             Value::List(payload),
         ])
@@ -321,7 +340,7 @@ impl Record {
                     max_items: limits
                         .maps
                         .entries
-                        .saturating_mul(16)
+                        .saturating_mul(24)
                         .saturating_add(256)
                         .min(limits.record_bytes.saturating_mul(2)),
                     max_depth: 10,
@@ -333,7 +352,8 @@ impl Record {
             })?,
         );
         let [version, table, payload] = fields(&value)?;
-        if read_uint(version)? != 1 {
+        let version = read_uint(version)?;
+        if !matches!(version, 1 | 2) {
             return Err(Error::Corrupt("accounting version"));
         }
         let table = Table::from_byte(
@@ -341,6 +361,9 @@ impl Record {
                 .try_into()
                 .map_err(|_| Error::Corrupt("accounting table"))?,
         )?;
+        if version == 2 && table != Table::Payments {
+            return Err(Error::Corrupt("accounting version table"));
+        }
         let record = match table {
             Table::Hashes => {
                 let [h, k] = fields(payload)?;
@@ -374,6 +397,18 @@ impl Record {
                 })
             }
             Table::Payments => {
+                let (payload, gross) = if version == 2 {
+                    let entries = list(payload)?;
+                    if entries.len() != 12 {
+                        return Err(Error::Corrupt("payment allocation arity"));
+                    }
+                    (
+                        Value::List(entries[..11].to_vec()),
+                        Some(read_map(&entries[11], limits, read_int)?),
+                    )
+                } else {
+                    (payload.clone(), None)
+                };
                 let [
                     height,
                     index,
@@ -386,7 +421,7 @@ impl Record {
                     gas,
                     run_gas,
                     date,
-                ] = fields(payload)?;
+                ] = fields(&payload)?;
                 Self::Payment(Payment {
                     id: (
                         read_uint(height)?,
@@ -396,6 +431,7 @@ impl Record {
                     ),
                     total: read_int(total)?,
                     relative: read_map(relative, limits, read_number)?,
+                    gross,
                     absolute: read_option(absolute, |m| read_map(m, limits, read_int))?,
                     tx_hash: read_option(h, hash)?,
                     nonce: read_option(nonce, read_int)?,
