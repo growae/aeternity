@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
-// Aeternity fa2a6d7 and aestratum_lib 17b56c5: deterministic pool work state.
-// Transport, registry ownership, persistence and node admission are separate.
+// Aeternity fa2a6d7 and aestratum_lib 17b56c5: pool work and session services.
+// Transport, persistence and node admission are separate.
 pub mod job;
 pub mod nonce;
 pub mod proof;
 pub mod queue;
+pub mod registry;
+pub mod services;
 pub mod session;
 pub mod share;
 pub mod target;
@@ -24,6 +26,7 @@ pub enum Error {
     Version,
     Hash,
     Configuration,
+    Entropy,
     NotEnoughJobs,
     Limit(&'static str),
 }

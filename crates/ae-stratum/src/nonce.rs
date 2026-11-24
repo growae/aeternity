@@ -1,5 +1,7 @@
 use crate::Error;
 
+pub mod cache;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Extra,

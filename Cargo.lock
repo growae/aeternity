@@ -219,6 +219,7 @@ dependencies = [
  "hex",
  "num-bigint",
  "num-traits",
+ "rand",
  "serde_json",
 ]
 
