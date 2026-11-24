@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 mod blocks;
 mod codec;
 mod decoding;
-mod execution;
+pub mod execution;
 mod history;
 pub mod hyperchain;
 pub mod pow;

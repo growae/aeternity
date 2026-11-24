@@ -7,6 +7,7 @@ use ae_stratum::candidate::{Candidate, Sealed};
 use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
 use std::sync::Arc;
+pub mod execution;
 
 #[derive(Debug)]
 pub enum Error {
@@ -166,8 +167,16 @@ pub struct Admitter {
     database: Arc<ae_storage::Database>,
     submit: Arc<Submit>,
     build: Arc<Build>,
+    execution: Arc<execution::Build>,
 }
 impl Admitter {
+    pub fn execution(
+        &self,
+        snapshots: snapshots::Owner,
+        limits: ae_chain::repository::pow::key::Limits,
+    ) -> Result<execution::Source, execution::Error> {
+        (self.execution)(snapshots, limits)
+    }
     pub fn preparer(
         &self,
         snapshots: snapshots::Owner,
@@ -191,8 +200,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
     pub fn stratum_admitter(&self) -> Admitter {
         let importer = self.borrowed();
         let preparation = self.borrowed();
+        let execution = self.borrowed();
         Admitter {
             database: self.database().clone(),
+            execution: Arc::new(move |snapshots, limits| {
+                execution::Source::new(&execution, snapshots, limits)
+            }),
             build: Arc::new(move |snapshots, limits| {
                 let builder = preparation.stratum_builder(snapshots, limits)?;
                 Ok(Preparer {

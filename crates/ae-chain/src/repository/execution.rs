@@ -6,7 +6,7 @@ use crate::block::Block;
 use ae_codec::headers::Header;
 use ae_execution::{Context, contracts};
 use ae_hyperchain::chain::{self, LookupError, source};
-use ae_protocol::{ConsensusType, Protocol};
+use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
 use ae_trie::{Overlay, OverlayLimits};
 use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub use ae_hyperchain::chain::Profile;
 pub type Reader<S, O> = chain::Reader<Overlay<S>, Overlay<S>, O, Snapshot<S>>;
-type ContractView<S> = chain::View<Overlay<S>, Overlay<S>>;
+pub type ContractView<S> = chain::View<Overlay<S>, Overlay<S>>;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -40,6 +40,24 @@ pub struct Snapshot<S> {
     config: Arc<Config>,
     gas_limit: BigInt,
 }
+// Services that need a transaction context can use the same binding as
+// contract queries without manufacturing an unrelated contract-query profile.
+pub fn snapshot<S: Read>(
+    view: View<S>,
+    expected: &Identity,
+    network: &NetworkProfile,
+    config: Config,
+) -> Result<Snapshot<S>, Error> {
+    if view.identity() != expected || !expected.matches(network) {
+        return Err(Error::Identity);
+    }
+    let gas_limit = network.block_gas_limit(&config.configured_block_gas_limit);
+    Ok(Snapshot {
+        repository: view,
+        config: Arc::new(config),
+        gas_limit: BigInt::from_bytes_be(Sign::Plus, gas_limit.as_bytes()),
+    })
+}
 pub(super) fn reader<S: Read, O>(
     view: View<S>,
     expected: &Identity,
@@ -56,15 +74,8 @@ pub(super) fn reader<S: Read, O>(
     {
         return Err(Error::Identity);
     }
-    let gas_limit = profile
-        .network
-        .block_gas_limit(&config.configured_block_gas_limit);
     Ok(chain::Reader::new(
-        Snapshot {
-            repository: view,
-            config: Arc::new(config),
-            gas_limit: BigInt::from_bytes_be(Sign::Plus, gas_limit.as_bytes()),
-        },
+        snapshot(view, expected, &profile.network, config)?,
         profile,
     ))
 }
@@ -98,7 +109,7 @@ impl<S: Read> Snapshot<S> {
     pub fn repository(&self) -> &View<S> {
         &self.repository
     }
-    fn contract_view(&self, hash: Hash256) -> Result<Arc<ContractView<S>>, LookupError> {
+    pub fn contract_view(&self, hash: Hash256) -> Result<Arc<ContractView<S>>, LookupError> {
         let view = &self.repository;
         let block = view
             .block(hash)

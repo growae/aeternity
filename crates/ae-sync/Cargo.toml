@@ -19,6 +19,7 @@ ae-chain.workspace = true
 ae-hyperchain.workspace = true
 ae-execution.workspace = true
 ae-vm-fate.workspace = true
+ae-vm-aevm.workspace = true
 ae-codec.workspace = true
 ae-protocol.workspace = true
 ae-tx.workspace = true
@@ -45,7 +46,6 @@ process-wrap.workspace = true
 [dev-dependencies]
 rocksdb.workspace = true
 ae-trie.workspace = true
-ae-vm-aevm.workspace = true
 ae-state.workspace = true
 hex.workspace = true
 
