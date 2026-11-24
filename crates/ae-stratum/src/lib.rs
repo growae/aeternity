@@ -6,6 +6,7 @@ pub mod nonce;
 pub mod queue;
 pub mod share;
 pub mod target;
+pub mod wire;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
