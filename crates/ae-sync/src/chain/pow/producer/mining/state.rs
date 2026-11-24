@@ -39,9 +39,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
         let builder = importer.pow_preparation(snapshots, config.preparation)?;
         let mut cpus = Vec::new();
         for instance in &config.instances {
-            let worker = miner::Worker::spawn(instance.worker).map_err(Error::Worker)?;
+            let worker = match &instance.external {
+                Some(config) => miner::Worker::spawn_external(instance.worker, config.clone()),
+                None => miner::Worker::spawn(instance.worker),
+            }
+            .map_err(Error::Worker)?;
             cpus.push(Cpu {
-                config: *instance,
+                config: instance.clone(),
                 worker: Some(worker),
                 job: None,
             });

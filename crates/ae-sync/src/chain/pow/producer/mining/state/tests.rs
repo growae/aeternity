@@ -286,4 +286,5 @@ async fn strict_stale_replay_is_rejected_and_ordinary_duplicate_keeps_its_receip
     }
 }
 
+mod external;
 mod timeouts;

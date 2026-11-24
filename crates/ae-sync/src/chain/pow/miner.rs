@@ -1,3 +1,5 @@
+pub mod external;
+
 use ae_codec::headers::KeyHeader;
 use ae_consensus::{
     cuckoo::{
@@ -69,6 +71,7 @@ pub enum Error {
     Panicked,
     Cancelled,
     InvalidProof,
+    External(external::Error),
     Solve {
         nonce: u64,
         failure: solver::Failure,
@@ -78,6 +81,8 @@ pub enum Error {
 pub enum Outcome {
     Found { nonce: u64, proof: Box<[u64; 42]> },
     Exhausted,
+    // External no_value maps to native no_solution, without attested coverage.
+    NoSolution,
 }
 #[derive(Debug, Clone)]
 pub struct Completion {
@@ -87,6 +92,7 @@ pub struct Completion {
     pub attempts: Option<u64>,
     pub work_units: Option<u64>,
     pub result: Result<Outcome, Error>,
+    pub external: Option<external::Report>,
     _credit: Arc<Credit>,
 }
 #[derive(Debug)]
@@ -148,6 +154,7 @@ pub struct Status {
     pub active: Option<Id>,
     pub nonce: Option<u64>,
     pub progress: Option<Progress>,
+    pub external: Option<external::Report>,
     pub failure: Option<Error>,
 }
 struct State {
@@ -157,13 +164,18 @@ struct State {
 }
 #[cfg(test)]
 type Hook = Box<dyn FnMut(Progress) + Send>;
+#[cfg(test)]
+type ExternalHook = Box<dyn FnMut(external::Report) + Send>;
 struct Shared {
     state: Mutex<State>,
     wake: Condvar,
     credits: Arc<AtomicUsize>,
     config: Config,
+    external: Option<external::Config>,
     #[cfg(test)]
     hook: Mutex<Option<Hook>>,
+    #[cfg(test)]
+    external_hook: Mutex<Option<ExternalHook>>,
 }
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -225,6 +237,13 @@ pub struct Worker {
 static NEXT_WORKER: AtomicU64 = AtomicU64::new(1);
 impl Worker {
     pub fn spawn(config: Config) -> Result<Self, Error> {
+        Self::spawn_backend(config, None)
+    }
+    pub fn spawn_external(config: Config, external: external::Config) -> Result<Self, Error> {
+        external.validate()?;
+        Self::spawn_backend(config, Some(external))
+    }
+    fn spawn_backend(config: Config, external: Option<external::Config>) -> Result<Self, Error> {
         if !(1..=65536).contains(&config.requests) || config.maximum_attempts == 0 {
             return Err(Error::Configuration);
         }
@@ -243,6 +262,7 @@ impl Worker {
                     active: None,
                     nonce: None,
                     progress: None,
+                    external: None,
                     failure: None,
                 },
                 queue: VecDeque::new(),
@@ -251,8 +271,11 @@ impl Worker {
             wake: Condvar::new(),
             credits: Arc::new(AtomicUsize::new(0)),
             config,
+            external,
             #[cfg(test)]
             hook: Mutex::new(None),
+            #[cfg(test)]
+            external_hook: Mutex::new(None),
         });
         let owned = shared.clone();
         let thread = thread::Builder::new()
@@ -273,6 +296,10 @@ impl Worker {
     #[cfg(test)]
     pub(crate) fn on_progress(&self, hook: impl FnMut(Progress) + Send + 'static) {
         *lock(&self.client.0.hook) = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(crate) fn on_external_progress(&self, hook: impl FnMut(external::Report) + Send + 'static) {
+        *lock(&self.client.0.external_hook) = Some(Box::new(hook));
     }
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
@@ -303,6 +330,7 @@ fn complete(
     attempts: Option<u64>,
     work_units: Option<u64>,
     result: Result<Outcome, Error>,
+    external: Option<external::Report>,
 ) {
     let mut slot = lock(&receipt.result);
     if slot.is_none() {
@@ -312,6 +340,7 @@ fn complete(
             attempts,
             work_units,
             result,
+            external,
             _credit: receipt.credit.clone(),
         }));
         receipt.ready.notify_all();
@@ -325,6 +354,7 @@ fn finish(shared: &Shared, error: Option<Error>) {
             None,
             None,
             Err(error.clone().unwrap_or(Error::Cancelled)),
+            None,
         );
         s.status.completed += 1;
     }
@@ -334,6 +364,7 @@ fn finish(shared: &Shared, error: Option<Error>) {
             Some(0),
             Some(0),
             Err(error.clone().unwrap_or(Error::Cancelled)),
+            None,
         );
         s.status.completed += 1;
     }
@@ -359,12 +390,22 @@ fn run(shared: &Shared) {
             s.status.active = Some(receipt.id);
             s.status.nonce = None;
             s.status.progress = None;
+            s.status.external = None;
             s.active = Some(receipt.clone());
             receipt
         };
-        let (attempts, work, result) = mine(shared, &receipt);
+        let (attempts, work, result, external) = if let Some(config) = &shared.external {
+            let (report, result) = external::execute(shared, &receipt, config);
+            // An external executable does not attest how many nonces or solver
+            // operations it attempted. Only unstarted work is known to be zero.
+            let count = report.pid.is_none().then_some(0);
+            (count, count, result, Some(report))
+        } else {
+            let (attempts, work, result) = mine(shared, &receipt);
+            (Some(attempts), Some(work), result, None)
+        };
         let mut s = lock(&shared.state);
-        complete(&receipt, Some(attempts), Some(work), result);
+        complete(&receipt, attempts, work, result, external);
         s.active = None;
         s.status.active = None;
         s.status.pending -= 1;

@@ -7,15 +7,17 @@ use ae_storage::snapshots;
 mod state;
 pub(super) use state::Mining;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Instance {
     pub worker: miner::Config,
+    pub external: Option<miner::external::Config>,
     pub repeats: u64,
 }
 impl Default for Instance {
     fn default() -> Self {
         Self {
             worker: miner::Config::default(),
+            external: None,
             repeats: 1,
         }
     }

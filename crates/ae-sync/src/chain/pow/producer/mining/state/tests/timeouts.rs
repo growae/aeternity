@@ -128,7 +128,7 @@ fn simultaneous_deadlines_fire_under_output_pressure_without_reusing_pending_ins
     let header = header();
     let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let mut config = configuration(&header);
-    config.instances = vec![config.instances[0]; 3];
+    config.instances = vec![config.instances[0].clone(); 3];
     config.retry = Duration::ZERO;
     config.attempt_timeout = Some(Duration::from_millis(5));
     let mut mining = ready(&importer, snapshots, &header, config);
@@ -338,7 +338,7 @@ fn invalid_duration_and_unrepresentable_deadline_fail_before_cpu_submission() {
         Err(Error::Configuration)
     ));
     config.attempt_timeout = Some(Duration::MAX);
-    config.instances = vec![config.instances[0]; 2];
+    config.instances = vec![config.instances[0].clone(); 2];
     let mut mining = ready(&importer, snapshots, &header, config);
     assert_eq!(
         mining.act(&importer, context(&header, true, false)),

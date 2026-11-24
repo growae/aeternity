@@ -25,7 +25,7 @@ ae-p2p.workspace = true
 ae-storage.workspace = true
 ae-mempool.workspace = true
 ae-types.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 serde_json.workspace = true
 httparse.workspace = true
 roxmltree.workspace = true
@@ -34,6 +34,12 @@ url.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+process-wrap.workspace = true
 
 [dev-dependencies]
 rocksdb.workspace = true

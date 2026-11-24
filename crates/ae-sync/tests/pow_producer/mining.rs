@@ -7,6 +7,7 @@ pub(super) fn config(instances: usize) -> mine::Config {
     config.retry = Duration::from_millis(20);
     config.instances = (0..instances)
         .map(|i| mine::Instance {
+            external: None,
             repeats: i as u64 + 1,
             worker: miner::Config {
                 requests: 2,
@@ -59,6 +60,65 @@ fn drain(client: &producer::Client) -> Vec<Arc<producer::Output>> {
 }
 fn healthy(client: &producer::Client) {
     assert!(client.status().failure.is_none(), "{:?}", client.status());
+}
+
+#[test]
+fn external_spawn_failures_retry_through_the_public_producer_and_join_on_stop() {
+    let node = Node::new(1, false);
+    let mut mining = config(2);
+    mining.instances[1].external = Some(miner::external::Config::new(
+        std::env::temp_dir().join(format!("missing-ae-miner-{}", rand::random::<u128>())),
+        std::env::temp_dir(),
+    ));
+    let worker = spawn(
+        &node,
+        stopped(&node),
+        mining,
+        Arc::new(generator::SystemClock),
+    );
+    let client = worker.client();
+    until(|| {
+        healthy(&client);
+        client.status().mining.as_ref().unwrap().candidate.is_some()
+    });
+    drop(drain(&client));
+    client.set_enabled(true).unwrap();
+    let mut failures = vec![];
+    until(|| {
+        healthy(&client);
+        for output in drain(&client) {
+            if let producer::Completion::Mining(c) = &output.completion
+                && let mine::Completion::Searched {
+                    result,
+                    selected,
+                    timed_out,
+                    ..
+                } = c.as_ref()
+                && result.external.is_some()
+            {
+                assert!(!selected && !timed_out);
+                assert!(matches!(
+                    result.result,
+                    Err(miner::Error::External(miner::external::Error::Io {
+                        operation: miner::external::Operation::Spawn,
+                        ..
+                    }))
+                ));
+                assert_eq!(result.attempts, Some(0));
+                assert_eq!(result.external.unwrap().pid, None);
+                failures.push(result.clone());
+            }
+        }
+        failures.len() >= 2
+    });
+    assert_eq!(failures[0].id.worker, failures[1].id.worker);
+    assert_ne!(failures[0].id.sequence, failures[1].id.sequence);
+    assert_ne!(failures[0].work.nonces, failures[1].work.nonces);
+    client.set_enabled(false).unwrap();
+    let report = finish(worker);
+    assert!(report.status.failure.is_none());
+    assert!(report.mining.as_ref().unwrap().is_settled());
+    assert_eq!(node._snapshots.live_snapshots(), 0);
 }
 
 #[test]
