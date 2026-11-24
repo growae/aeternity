@@ -211,7 +211,9 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_work: 1_000_000,
+            // Operational work is independent of consensus gas. Keep the
+            // memory/depth ceilings separate and honor explicit caller limits.
+            max_work: 2_000_000,
             max_bytes: 64 * 1024 * 1024,
             max_memory_words: 1_000_000,
             max_depth: 256,

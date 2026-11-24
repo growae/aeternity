@@ -166,17 +166,10 @@ impl Drop for ExecutionOwner {
     }
 }
 fn execution_owner(db: &Arc<Database>, network: &NetworkProfile) -> ExecutionOwner {
-    let execution = fixture::execution(network).with_config(|c| {
-        ae_execution::transactions::owned::Owned::capture(&ae_execution::transactions::Config {
-            aevm_limits: execution::corpus_limits(),
-            ..*c
-        })
-        .unwrap()
-    });
     ExecutionOwner(
         chain::Importer::new(
             db.clone(),
-            execution,
+            fixture::execution(network),
             fixture::rules(db.view().unwrap().identity().genesis),
             Default::default(),
         )

@@ -4,7 +4,10 @@ use ae_chain::repository::{self as repo, Roots};
 use ae_storage::snapshots;
 use ae_sync::chain::{self, pow::stratum::execution as bound};
 
-fn setup(temp: &Temp, row: &J) -> (Arc<Database>, NetworkProfile, Arc<payout::Prepared>) {
+pub(super) fn setup(
+    temp: &Temp,
+    row: &J,
+) -> (Arc<Database>, NetworkProfile, Arc<payout::Prepared>) {
     let input = from_snapshot(&row["before"]);
     let network = NetworkProfile::custom(
         b"ae_payout_preflight_local".to_vec(),
@@ -48,7 +51,12 @@ fn setup(temp: &Temp, row: &J) -> (Arc<Database>, NetworkProfile, Arc<payout::Pr
     .unwrap();
     (db, network, Arc::new(prepared))
 }
-fn importer(db: &Arc<Database>, network: &NetworkProfile, vm: Limits, gas: u64) -> chain::Importer {
+pub(super) fn importer(
+    db: &Arc<Database>,
+    network: &NetworkProfile,
+    vm: Limits,
+    gas: u64,
+) -> chain::Importer {
     let owned = fixture::execution(network).with_config(|c| {
         ae_execution::transactions::owned::Owned::capture(&ae_execution::transactions::Config {
             aevm_limits: vm,

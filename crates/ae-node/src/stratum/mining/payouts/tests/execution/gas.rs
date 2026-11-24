@@ -100,7 +100,7 @@ fn bounded_payout_generation_and_signed_execution_match_78_original_vm_cases() {
 #[test]
 fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_budgets() {
     let mut defaults = 0;
-    let mut retries = 0;
+    let mut lower_stops = 0;
     for p in [3, 6, 8] {
         for case in [
             "prepared_one",
@@ -193,42 +193,40 @@ fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_bu
                 payout::Generation::Bounded(Default::default())
             );
             let mut t = input;
-            let before = t.roots();
-            let first = aevm::execute_signed_call(
-                &signed,
-                &mut t,
-                &profile,
-                &context(row),
-                &vm_config(profile.network_id()),
-                Limits::default(),
-            );
-            let r = match first {
-                Ok(r) => {
-                    defaults += 1;
-                    r
-                }
-                Err(ae_vm_aevm::outer_call::Fault::Runtime(ae_vm_aevm::runtime::Fault::Stop(
-                    ae_vm_aevm::execution::Stop::ResourceLimit,
-                ))) => {
-                    assert_eq!(t.roots(), before);
-                    retries += 1;
-                    println!(
-                        "Bounded payout resource retry protocol {p} case {case}: default stop preserved all roots"
-                    );
+            if case == "prepared_two_hundred" {
+                let before = ae_chain::repository::Roots::of(&t);
+                assert!(matches!(
                     aevm::execute_signed_call(
                         &signed,
                         &mut t,
                         &profile,
                         &context(row),
                         &vm_config(profile.network_id()),
-                        corpus_limits(),
-                    )
-                    .unwrap()
-                }
-                Err(e) => {
-                    panic!("unexpected payout execution error protocol {p} case {case}: {e:?}")
-                }
-            };
+                        Limits {
+                            max_work: 1_000_000,
+                            ..Default::default()
+                        },
+                    ),
+                    Err(ae_vm_aevm::outer_call::Fault::Runtime(
+                        ae_vm_aevm::runtime::Fault::Stop(
+                            ae_vm_aevm::execution::Stop::ResourceLimit
+                        ),
+                    ))
+                ));
+                assert_eq!(ae_chain::repository::Roots::of(&t), before);
+                lower_stops += 1;
+                println!("Bounded payout lower work stop protocol {p}: all roots preserved");
+            }
+            let r = aevm::execute_signed_call(
+                &signed,
+                &mut t,
+                &profile,
+                &context(row),
+                &vm_config(profile.network_id()),
+                Limits::default(),
+            )
+            .unwrap();
+            defaults += 1;
             assert_eq!(r.call.return_type, ReturnType::Ok);
             assert_state(&t, &r, row);
             a.finish(&mut w).unwrap();
@@ -239,10 +237,9 @@ fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_bu
             s.retire();
         }
     }
-    assert_eq!(defaults + retries, 12);
-    assert!(defaults >= 6 && retries > 0);
+    assert_eq!((defaults, lower_stops), (12, 3));
     println!(
-        "Bounded payout live execution: {defaults} default successes, {retries} explicit budget retries"
+        "Bounded payout live execution: {defaults} default successes, {lower_stops} explicit lower-budget stops"
     );
 }
 
@@ -318,7 +315,7 @@ fn split_batches_execute_original_contract_code_and_pay_each_exact_net_entitleme
                 &NetworkProfile::mainnet(),
                 &context(row),
                 &vm_config(b"ae_mainnet"),
-                corpus_limits(),
+                Limits::default(),
             )
             .unwrap();
             assert_eq!(receipt.call.return_type, ReturnType::Ok);

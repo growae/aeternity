@@ -387,3 +387,46 @@ fn operational_limits_preserve_inputs_and_retry_to_native_outcomes() {
     );
     assert_eq!(memory, before);
 }
+
+#[test]
+fn default_work_cap_still_stops_hostile_loops_independently_of_consensus_gas() {
+    for version in [
+        Version::Sophia1,
+        Version::Solidity1,
+        Version::Sophia2,
+        Version::Sophia3,
+        Version::Sophia4,
+    ] {
+        let mut s = State::new(
+            version,
+            vec![0x5b, 0x60, 0, 0x56],
+            100_000_000u32.into(),
+            gas::FloatProfile::Otp26Word64,
+        );
+        let before = s.clone();
+        assert_eq!(
+            execution::evaluate(&s, Limits::default()),
+            Err(Stop::ResourceLimit)
+        );
+        assert_eq!(s, before);
+        assert_eq!(
+            execution::evaluate(
+                &s,
+                Limits {
+                    max_work: 0,
+                    ..Default::default()
+                }
+            ),
+            Err(Stop::ResourceLimit)
+        );
+        assert_eq!(s, before);
+        s.gas = 100u8.into();
+        assert!(matches!(
+            execution::evaluate(&s, Limits::default()),
+            Ok(Outcome::Error {
+                reason: Failure::OutOfGas,
+                ..
+            })
+        ));
+    }
+}
