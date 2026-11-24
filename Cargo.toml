@@ -9,6 +9,7 @@ rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
+fancy-regex = "=0.18.0"
 yaml-rust2 = { version = "=0.13.2", default-features = false }
 jsonschema = { version = "=0.46.6", default-features = false, features = ["arbitrary-precision"] }
 ae-stratum = { path = "crates/ae-stratum" }

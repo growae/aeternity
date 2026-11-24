@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use std::{collections::BTreeMap, fmt};
 
 mod files;
+pub mod resolution;
 mod schema;
 mod yaml;
 pub use files::{Discovery, Source};

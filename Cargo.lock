@@ -144,6 +144,7 @@ dependencies = [
  "ae-types",
  "ae-vm-aevm",
  "ae-vm-fate",
+ "fancy-regex",
  "hex",
  "jsonschema",
  "num-bigint",
@@ -151,6 +152,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "yaml-rust2",
+ "zeroize",
 ]
 
 [[package]]
