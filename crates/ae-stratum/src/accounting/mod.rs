@@ -67,6 +67,55 @@ pub type PaymentId = (u64, u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Date(pub [u32; 6]);
 impl Date {
+    pub fn from_unix_millis(ms: u64) -> Result<Self, Error> {
+        if ms > 253_402_300_799_999 {
+            return Err(Error::Corrupt("accounting UTC timestamp"));
+        }
+        let seconds = ms / 1000;
+        let mut days = seconds / 86400;
+        let mut year = 1970u32;
+        let leap = |year: u32| {
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+        };
+        loop {
+            let length = if leap(year) { 366 } else { 365 };
+            if days < length {
+                break;
+            }
+            days -= length;
+            year += 1;
+        }
+        let months = [
+            31u64,
+            if leap(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut month = 0;
+        while days >= months[month] {
+            days -= months[month];
+            month += 1;
+        }
+        let value = Self([
+            year,
+            month as u32 + 1,
+            days as u32 + 1,
+            ((seconds / 3600) % 24) as u32,
+            ((seconds / 60) % 60) as u32,
+            (seconds % 60) as u32,
+        ]);
+        value.validate()?;
+        Ok(value)
+    }
+
     pub fn validate(self) -> Result<(), Error> {
         let [year, month, day, hour, minute, second] = self.0;
         let leap =

@@ -61,6 +61,7 @@ pub enum Failure {
     Accounting(core::Error),
     Input(ae_stratum::Error),
     Candidate(ae_stratum::candidate::Error),
+    Events(crate::events::Error),
     AlreadyRunning,
     RecoveryRequired,
     MutationInQuery,
@@ -533,12 +534,15 @@ struct Pending {
     plan: core::Plan,
     extra: Vec<Extra>,
     replies: Vec<core::Reply>,
+    work_after: Option<(u64, u64)>,
 }
 pub struct Writer {
     db: Arc<Database>,
     limits: Limits,
     _lease: Arc<()>,
     pending: Option<Pending>,
+    work_revision: Option<u64>,
+    work_reset: u64,
 }
 impl Writer {
     pub fn start(db: Arc<Database>, limits: Limits) -> Result<Self, Failure> {
@@ -557,6 +561,8 @@ impl Writer {
             limits,
             _lease: lease,
             pending: None,
+            work_revision: None,
+            work_reset: 0,
         })
     }
     pub fn recovery_required(&self) -> bool {
@@ -684,6 +690,7 @@ impl Writer {
             plan,
             extra,
             replies,
+            work_after: None,
         });
         write(&self.db, batch)?;
         let pending = self.pending.take().expect("prepared accounting write");
@@ -740,6 +747,10 @@ impl Writer {
             }
             Some(true) => {
                 let p = self.pending.take().expect("pending accounting write");
+                if let Some((revision, reset)) = p.work_after {
+                    self.work_revision = Some(revision);
+                    self.work_reset = reset;
+                }
                 Recovery::Applied(Commit {
                     version,
                     replies: p.replies,

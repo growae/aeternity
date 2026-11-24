@@ -532,17 +532,30 @@ impl Writer {
             target: receipt.input.target.clone(),
             miner: receipt.input.account.as_bytes().to_vec(),
         }];
+        let mut checks = vec![];
+        let mut work_revision = None;
         if let Some((_, mining_limits)) = mining
             && receipt.input.solution.is_some()
         {
-            let prepared =
-                super::mining::prepare(&stored, &receipt, Some(receipt.share_key), mining_limits)?;
+            let prepared = super::mining::prepare(
+                self,
+                &stored,
+                &receipt,
+                Some(receipt.share_key),
+                mining_limits,
+            )?;
             commands.extend(prepared.commands);
             extra.extend(prepared.extra);
+            checks = prepared.checks;
+            work_revision = Some((prepared.revision, prepared.reset_revision));
         }
         drop(inbox);
         drop(stored);
-        let done = self.commit_extra(version, commands, extra, write)?;
+        let result = self.commit_checked(version, commands, extra, checks, write);
+        let done = match work_revision {
+            Some((revision, reset)) => self.finish_work(result, revision, reset)?,
+            None => result?,
+        };
         debug_assert!(
             matches!(done.replies.first(),Some(core::Reply::Record(r)) if matches!(&**r,core::Record::Share(s) if s.key==receipt.share_key))
         );

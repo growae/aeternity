@@ -552,3 +552,40 @@ fn codecs_and_startup_reject_dangling_journal_indices_receipts_and_totals() {
     }
 }
 mod recovery;
+#[test]
+fn uncertain_publication_recovers_the_same_work_cursor_as_its_durable_batch() {
+    for applied in [false, true] {
+        let t = Temp::new();
+        let db = Arc::new(Database::open(&t.0, identity()).unwrap());
+        let mut writer = writer(&db);
+        let epoch = writer.begin_mining(Default::default()).unwrap();
+        assert_eq!(writer.work_revision, Some(0));
+        db.commit(plan(&db)).unwrap();
+        let result = writer.publish_with(
+            &epoch,
+            1,
+            candidate(),
+            date(),
+            Default::default(),
+            |db, batch| {
+                if applied {
+                    db.db.write_opt(batch, &write_options()).unwrap();
+                }
+                Err(Error::Backend("publication response lost".into()))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(writer.work_revision, Some(0));
+        assert_eq!(writer.pending.as_ref().unwrap().work_after.unwrap().0, 1);
+        writer.recover().unwrap();
+        assert_eq!(writer.work_revision, Some(u64::from(applied)));
+        let publication = writer
+            .publish_work(&epoch, 1, candidate(), date(), Default::default())
+            .unwrap();
+        assert!(publication.published);
+        let frame = writer.refresh_work(&epoch, Default::default()).unwrap();
+        assert!(!frame.invalidated);
+        assert_eq!(frame.info.active, vec![candidate()]);
+        assert_eq!(writer.work_revision, Some(1));
+    }
+}

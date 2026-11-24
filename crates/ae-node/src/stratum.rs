@@ -41,6 +41,8 @@ pub enum Error {
     Chain(ae_sync::chain::Error),
     Admission(ae_sync::chain::Failure),
     Mining(&'static str),
+    Services(services::Error),
+    PreparationSetup(ae_sync::chain::pow::producer::mining::Error),
 }
 impl From<storage::Failure> for Error {
     fn from(e: storage::Failure) -> Self {
@@ -211,6 +213,7 @@ pub struct Report {
     pub pending: Vec<Pending>,
     pub controls: Vec<mining::Pending>,
     pub admission: Option<mining::Unsettled>,
+    pub production: Option<mining::production::Report>,
 }
 pub struct Accounting {
     client: Client,
@@ -470,6 +473,7 @@ fn run(
             report.failure = Some(e);
         }
         report.admission = w.unsettled();
+        report.production = w.production_report();
     }
     report
 }
@@ -483,6 +487,22 @@ pub struct Service {
     accounting: Option<Accounting>,
 }
 impl Service {
+    fn attach_production(accounting: &Accounting, transport: &runtime::Owner) -> Result<(), Error> {
+        if let Some(client) = accounting.client().mining()
+            && client.production_status().is_some()
+        {
+            client.attach_production(transport.client().services())?;
+        }
+        Ok(())
+    }
+    fn stop_production(&self) {
+        if let Some(accounting) = &self.accounting
+            && let Some(client) = accounting.client().mining()
+        {
+            client.stop_production();
+        }
+    }
+
     pub fn bind(
         db: Arc<Database>,
         config: runtime::Config,
@@ -493,6 +513,7 @@ impl Service {
         let accounting = Accounting::start(db, accounting, ingress, limits)?;
         let transport = runtime::Owner::with_pool(config, Arc::new(accounting.client()))
             .map_err(Error::Runtime)?;
+        Self::attach_production(&accounting, &transport)?;
         Ok(Self {
             transport: Some(transport),
             accounting: Some(accounting),
@@ -510,6 +531,7 @@ impl Service {
         let transport =
             runtime::Owner::with_sources_and_pool(config, sources, Arc::new(accounting.client()))
                 .map_err(Error::Runtime)?;
+        Self::attach_production(&accounting, &transport)?;
         Ok(Self {
             transport: Some(transport),
             accounting: Some(accounting),
@@ -526,6 +548,7 @@ impl Service {
         let accounting = Accounting::start_mining(db, accounting, ingress, limits, inputs)?;
         let transport = runtime::Owner::with_pool(config, Arc::new(accounting.client()))
             .map_err(Error::Runtime)?;
+        Self::attach_production(&accounting, &transport)?;
         Ok(Self {
             transport: Some(transport),
             accounting: Some(accounting),
@@ -544,6 +567,7 @@ impl Service {
         let transport =
             runtime::Owner::with_sources_and_pool(config, sources, Arc::new(accounting.client()))
                 .map_err(Error::Runtime)?;
+        Self::attach_production(&accounting, &transport)?;
         Ok(Self {
             transport: Some(transport),
             accounting: Some(accounting),
@@ -556,6 +580,7 @@ impl Service {
         self.accounting.as_ref().expect("live accounting").client()
     }
     pub fn shutdown(mut self) -> ServiceReport {
+        self.stop_production();
         let transport = self.transport.take().expect("transport").shutdown();
         let accounting = self.accounting.take().expect("accounting").shutdown();
         ServiceReport {
@@ -566,6 +591,7 @@ impl Service {
 }
 impl Drop for Service {
     fn drop(&mut self) {
+        self.stop_production();
         drop(self.transport.take());
         drop(self.accounting.take());
     }

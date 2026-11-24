@@ -9,6 +9,8 @@ use ae_stratum::{
 use ingress::Receipt;
 use std::sync::Weak;
 mod codec;
+mod work;
+pub use work::Frame;
 const RECORDS: u8 = 24;
 const INDEX: u8 = 25;
 const META: &[u8] = b"\0stratum-mining";
@@ -461,8 +463,12 @@ pub(super) struct Prepared {
     pub commands: Vec<Command>,
     pub extra: Vec<Extra>,
     pub record: Record,
+    pub revision: u64,
+    pub reset_revision: u64,
+    pub checks: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 pub(super) fn prepare(
+    writer: &Writer,
     stored: &Stored<'_>,
     receipt: &Receipt,
     new_share: Option<u64>,
@@ -472,7 +478,8 @@ pub(super) fn prepare(
     if journal.info.epoch == 0 || receipt.input.solution.is_none() {
         return Err(Error::Conflict.into());
     }
-    let mut info = journal.info.clone();
+    let frame = writer.work_frame(stored, &journal)?;
+    let mut info = frame.info;
     let candidate = cached(stored, receipt.input.hash)?;
     let mut commands = vec![];
     let (state, accounted_key) = if let Some(c) = &candidate {
@@ -518,6 +525,9 @@ pub(super) fn prepare(
         commands,
         extra,
         record,
+        revision: frame.revision,
+        reset_revision: frame.reset_revision,
+        checks: vec![status_check(stored)?],
     })
 }
 impl Writer {
@@ -560,9 +570,14 @@ impl Writer {
             owner: Arc::downgrade(&self._lease),
         };
         let extra = journal.extra(&info)?;
+        let view = repo::View::load_with_config(stored.source.clone(), self.db.config.clone())?;
+        let revision = view.status().revision;
+        let checks = vec![status_check(&stored)?];
+        drop(view);
         drop(journal);
         drop(stored);
-        self.commit_extra(version, vec![], vec![extra], write)?;
+        let result = self.commit_checked(version, vec![], vec![extra], checks, write);
+        self.finish_work(result, revision, revision)?;
         Ok(epoch)
     }
     pub fn publish_work(
@@ -610,7 +625,8 @@ impl Writer {
             candidate,
             date,
         };
-        let mut info = journal.info.clone();
+        let frame = self.work_frame(&stored, &journal)?;
+        let mut info = frame.info;
         let mut commands = vec![];
         if publication.published {
             if info.active.len() == limits.active {
@@ -630,7 +646,8 @@ impl Writer {
         drop(view);
         drop(journal);
         drop(stored);
-        self.commit_checked(version, commands, vec![extra], checks, write)?;
+        let result = self.commit_checked(version, commands, vec![extra], checks, write);
+        self.finish_work(result, frame.revision, frame.reset_revision)?;
         Ok(publication)
     }
     pub fn accept_mining(
@@ -665,12 +682,17 @@ impl Writer {
             return Ok(record);
         }
         let receipt = journal.inbox.get(id)?.ok_or(Error::Conflict)?;
-        let prepared = prepare(&stored, &receipt, None, limits)?;
+        let prepared = prepare(self, &stored, &receipt, None, limits)?;
         drop(journal);
         drop(stored);
-        self.commit_extra(version, prepared.commands, prepared.extra, |db, b| {
-            db.db.write_opt(b, &write_options()).map_err(backend)
-        })?;
+        let result = self.commit_checked(
+            version,
+            prepared.commands,
+            prepared.extra,
+            prepared.checks,
+            |db, b| db.db.write_opt(b, &write_options()).map_err(backend),
+        );
+        self.finish_work(result, prepared.revision, prepared.reset_revision)?;
         Ok(prepared.record)
     }
     fn change(

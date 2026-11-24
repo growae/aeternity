@@ -98,6 +98,7 @@ fn inputs(importer: &chain::Importer) -> Inputs {
         limits: Default::default(),
         strictly_follow_top: true,
         clock: Arc::new(ClockValue(WALL.into())),
+        production: None,
     }
 }
 fn start(db: &Arc<Database>, importer: &chain::Importer) -> Accounting {
@@ -607,4 +608,5 @@ fn foreign_admitter_and_stale_control_requests_never_silently_change_the_owner()
 }
 mod tcp;
 
+mod production;
 mod recovery;

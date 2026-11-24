@@ -1,6 +1,7 @@
 // One ordered accounting owner publishes work, records solutions, and joins
 // ordinary chain admissions. A miner acknowledgement confirms accounting only.
 use super::*;
+pub mod production;
 use ae_storage::stratum::mining as journal;
 use ae_stratum::{accounting::Date, candidate::Candidate};
 use ae_sync::chain::{
@@ -21,6 +22,7 @@ pub struct Inputs {
     pub limits: journal::Limits,
     pub strictly_follow_top: bool,
     pub clock: Arc<dyn Clock>,
+    pub production: Option<production::Inputs>,
 }
 #[derive(Clone)]
 pub(super) struct Read {
@@ -28,6 +30,7 @@ pub(super) struct Read {
     accounting: storage::Limits,
     limits: journal::Limits,
     epoch: u64,
+    production: Option<Arc<production::Shared>>,
 }
 #[derive(Clone)]
 pub struct Client(pub(super) super::Client);
@@ -71,6 +74,22 @@ impl Job {
     }
 }
 impl Client {
+    pub fn production_status(&self) -> Option<production::Status> {
+        self.read().production.as_ref().map(|p| p.status())
+    }
+    pub fn attach_production(&self, services: services::Client) -> Result<(), Error> {
+        self.read()
+            .production
+            .as_ref()
+            .ok_or(Error::Configuration)?
+            .attach(services)
+    }
+    pub(super) fn stop_production(&self) {
+        if let Some(p) = &self.read().production {
+            p.stop();
+        }
+    }
+
     fn read(&self) -> &Read {
         self.0.shared.mining.as_ref().expect("mining client")
     }
@@ -100,6 +119,9 @@ impl Client {
     // Only broadcast candidate.work() after Published { published: true }.
     // Closing or dropping a completion never erases an accepted publication.
     pub fn publish(&self, candidate: Candidate, date: Date) -> Result<Submission, pool::Error> {
+        if self.read().production.is_some() {
+            return Err(pool::Error::Invalid);
+        }
         date.validate().map_err(|_| pool::Error::Invalid)?;
         let mut state = self
             .0
@@ -193,6 +215,7 @@ pub(super) struct Worker {
     pub read: Read,
     inputs: Inputs,
     epoch: journal::Epoch,
+    production: Option<production::Worker>,
     inflight: Option<Inflight>,
     retry_at: Instant,
 }
@@ -202,8 +225,13 @@ impl Worker {
         db: Arc<Database>,
         accounting: storage::Limits,
         ingress: IngressLimits,
-        inputs: Inputs,
+        mut inputs: Inputs,
     ) -> Result<Self, Error> {
+        let production = inputs
+            .production
+            .take()
+            .map(|config| production::Worker::new(&inputs.admitter, config, inputs.clock.clone()))
+            .transpose()?;
         let epoch = writer.begin_mining(inputs.limits)?;
         let mut worker = Self {
             read: Read {
@@ -211,7 +239,9 @@ impl Worker {
                 accounting,
                 limits: inputs.limits,
                 epoch: epoch.value(),
+                production: production.as_ref().map(|p| p.shared.clone()),
             },
+            production,
             inputs,
             epoch,
             inflight: None,
@@ -266,14 +296,27 @@ impl Worker {
         input: Input,
         limits: IngressLimits,
     ) -> Result<Receipt, storage::Failure> {
-        writer.accept_mining(
+        let receipt = writer.accept_mining(
             epoch,
             sequence,
             input,
             limits,
             &self.epoch,
             self.inputs.limits,
-        )
+        )?;
+        if receipt.input.solution.is_some()
+            && let Some(production) = self.production.as_mut()
+            && self
+                .read
+                .db
+                .stratum(self.read.accounting)?
+                .mining(self.inputs.limits)?
+                .get(receipt.id)?
+                .is_some_and(|r| r.candidate.is_some())
+        {
+            production.refresh_requested = true;
+        }
+        Ok(receipt)
     }
     pub(super) fn control(
         &mut self,
@@ -307,6 +350,10 @@ impl Worker {
         writer: &mut storage::Writer,
         dispatch: bool,
     ) -> Result<(), Error> {
+        let frame = retry(writer, |w| w.refresh_work(&self.epoch, self.inputs.limits))?;
+        if let Some(production) = self.production.as_mut() {
+            production.tick(writer, &self.epoch, self.inputs.limits, frame, dispatch)?;
+        }
         if let Some(inflight) = self.inflight.as_mut() {
             if let Some(result) = inflight.admission.poll().cloned() {
                 let outcome = outcome(&inflight.record, result)?;
@@ -352,10 +399,16 @@ impl Worker {
         Ok(())
     }
     pub(super) fn finish(&mut self, writer: &mut storage::Writer) -> Result<(), Error> {
+        if let Some(p) = self.production.as_mut() {
+            p.stop();
+        }
         if let Some(inflight) = self.inflight.as_mut() {
             inflight.join();
         }
         self.tick(writer, false)
+    }
+    pub(super) fn production_report(&mut self) -> Option<production::Report> {
+        self.production.take().map(|p| p.finish())
     }
     pub(super) fn unsettled(&mut self) -> Option<Unsettled> {
         let mut inflight = self.inflight.take()?;

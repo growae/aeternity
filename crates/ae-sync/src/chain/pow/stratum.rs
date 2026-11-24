@@ -136,12 +136,45 @@ impl Prepared {
 // A narrow borrowed handle for the accounting actor. The root importer owns
 // shutdown; this handle keeps the same database, policy and execution profile.
 type Submit = dyn Fn(&Sealed, u64, bool) -> Result<Admission, chain::Error> + Send + Sync;
+type Build = dyn Fn(
+        snapshots::Owner,
+        ae_chain::repository::pow::key::Limits,
+    ) -> Result<Preparer, super::producer::mining::Error>
+    + Send
+    + Sync;
+type Start = dyn Fn(
+        preparation::Request,
+        Arc<dyn super::generator::Clock>,
+    ) -> Result<preparation::Task, preparation::Error>
+    + Send
+    + Sync;
+#[derive(Clone)]
+pub struct Preparer {
+    start: Arc<Start>,
+}
+impl Preparer {
+    pub fn start(
+        &self,
+        request: preparation::Request,
+        clock: Arc<dyn super::generator::Clock>,
+    ) -> Result<preparation::Task, preparation::Error> {
+        (self.start)(request, clock)
+    }
+}
 #[derive(Clone)]
 pub struct Admitter {
     database: Arc<ae_storage::Database>,
     submit: Arc<Submit>,
+    build: Arc<Build>,
 }
 impl Admitter {
+    pub fn preparer(
+        &self,
+        snapshots: snapshots::Owner,
+        limits: ae_chain::repository::pow::key::Limits,
+    ) -> Result<Preparer, super::producer::mining::Error> {
+        (self.build)(snapshots, limits)
+    }
     pub fn uses_database(&self, database: &Arc<ae_storage::Database>) -> bool {
         Arc::ptr_eq(&self.database, database)
     }
@@ -157,8 +190,15 @@ impl Admitter {
 impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
     pub fn stratum_admitter(&self) -> Admitter {
         let importer = self.borrowed();
+        let preparation = self.borrowed();
         Admitter {
             database: self.database().clone(),
+            build: Arc::new(move |snapshots, limits| {
+                let builder = preparation.stratum_builder(snapshots, limits)?;
+                Ok(Preparer {
+                    start: Arc::new(move |request, clock| builder.start(request, clock)),
+                })
+            }),
             submit: Arc::new(move |solution, now, strict| {
                 importer.import_stratum(solution, now, strict)
             }),
