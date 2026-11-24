@@ -39,6 +39,9 @@ fn until(mut f: impl FnMut() -> bool) {
     }
 }
 const GROSS: u64 = 1_000_000_000_000_000_000;
+// The historical recipe declares more gas than its estimated run-fee reserve.
+// A successful execution fixture must cover that declared maximum as well.
+const BALANCE: u64 = GROSS + 1_000_000_000_000_000;
 fn key(n: u8) -> [u8; 32] {
     let mut k = [0; 32];
     k[31] = n;
@@ -50,7 +53,7 @@ fn secret() -> Ed25519SecretKey {
 fn config() -> durable::Config {
     durable::Config {
         caller: secret().public_key(),
-        contract: ContractPublicKey(key(29)),
+        contract: execution::actor_contract(),
         delay: 180,
     }
 }
@@ -59,33 +62,28 @@ fn network() -> NetworkProfile {
         b"ae_payout_local".to_vec(),
         vec![Activation {
             height: 0,
-            protocol: Protocol::Roma,
+            protocol: Protocol::Salus,
         }],
     )
     .unwrap()
 }
 fn trees() -> Trees {
-    let mut t = Trees {
-        accounts: Default::default(),
-        contracts: Default::default(),
-        channels: Default::default(),
-        calls: Default::default(),
-        names: Default::default(),
-        oracles: Default::default(),
-    };
+    let mut t = execution::actor_trees();
     t.accounts
-        .enter(&Account::new(
-            config().caller,
-            (GROSS + 1_000_000_000).into(),
-        ))
+        .enter(&Account::new(config().caller, BALANCE.into()))
         .unwrap();
     t
 }
 fn database(t: &Temp) -> Arc<Database> {
+    database_with_trees(t, &trees())
+}
+fn database_with_trees(t: &Temp, trees: &Trees) -> Arc<Database> {
     let Header::Key(mut h) = genesis::header(Network::Uat).unwrap() else {
         panic!()
     };
-    h.common.state_hash = trees().roots().hash().0;
+    h.common.state_hash = trees.roots().hash().0;
+    h.common.version = 8;
+    h.info = Some([0; 4]);
     let id = Identity::new(
         &network(),
         Header::Key(h.clone()).hash().unwrap(),
@@ -98,7 +96,7 @@ fn database(t: &Temp) -> Arc<Database> {
                 &db.view().unwrap(),
                 &network(),
                 &h,
-                &trees(),
+                trees,
                 Default::default(),
             )
             .unwrap(),
@@ -151,8 +149,57 @@ impl Clock for Wall {
         1_700_000_000_000
     }
 }
-fn inputs(s: &keys::Worker, p: &txpool::Worker) -> Inputs {
-    let mut inputs = Inputs::new(config(), s.client(), p.client());
+fn snapshots(db: &Arc<Database>) -> ae_storage::snapshots::Owner {
+    ae_storage::snapshots::Owner::start(db.clone(), Default::default()).unwrap()
+}
+struct ExecutionOwner(chain::Importer);
+impl std::ops::Deref for ExecutionOwner {
+    type Target = chain::Importer;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for ExecutionOwner {
+    fn drop(&mut self) {
+        self.0.stop();
+        runtime().block_on(self.0.join());
+    }
+}
+fn execution_owner(db: &Arc<Database>, network: &NetworkProfile) -> ExecutionOwner {
+    let execution = fixture::execution(network).with_config(|c| {
+        ae_execution::transactions::owned::Owned::capture(&ae_execution::transactions::Config {
+            aevm_limits: execution::corpus_limits(),
+            ..*c
+        })
+        .unwrap()
+    });
+    ExecutionOwner(
+        chain::Importer::new(
+            db.clone(),
+            execution,
+            fixture::rules(db.view().unwrap().identity().genesis),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+}
+struct Actor {
+    worker: Worker,
+    _execution: ExecutionOwner,
+}
+impl std::ops::Deref for Actor {
+    type Target = Worker;
+    fn deref(&self) -> &Self::Target {
+        &self.worker
+    }
+}
+impl std::ops::DerefMut for Actor {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.worker
+    }
+}
+fn inputs(db: &Arc<Database>, s: &keys::Worker, p: &txpool::Worker) -> Inputs {
+    let mut inputs = Inputs::new(config(), s.client(), p.client(), snapshots(db));
     inputs.generation = ae_stratum::payout::Generation::Native;
     inputs
 }
@@ -161,15 +208,21 @@ fn actor(
     w: &mut storage::Writer,
     s: &keys::Worker,
     p: &txpool::Worker,
-) -> Worker {
-    Worker::start(
+) -> Actor {
+    let execution = execution_owner(db, &network());
+    let worker = Worker::start(
         w,
         db.clone(),
         Default::default(),
-        inputs(s, p),
+        inputs(db, s, p),
         Arc::new(Wall),
+        &execution.stratum_admitter(),
     )
-    .unwrap()
+    .unwrap();
+    Actor {
+        worker,
+        _execution: execution,
+    }
 }
 fn stored(db: &Database) -> durable::Info {
     db.stratum(Default::default())
@@ -230,7 +283,7 @@ fn live_accounting_timer_uses_real_signer_and_pool_without_manual_submission() {
         Default::default(),
     )
     .unwrap();
-    let mut i = inputs(&s, &p);
+    let mut i = inputs(&db, &s, &p);
     i.payout_interval = Duration::from_millis(2);
     i.confirmation_interval = Duration::from_millis(2);
     let owner = Accounting::start_mining(
@@ -276,19 +329,19 @@ fn live_accounting_timer_uses_real_signer_and_pool_without_manual_submission() {
     let before = client.payout().unwrap().unwrap().pending.unwrap();
     let tx = Signed::decode(&before.signed.as_ref().unwrap().transaction).unwrap();
     assert_eq!(tx.hash(), before.hash().unwrap().unwrap());
-    let reference: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../ae-stratum/tests/fixtures/erlang_stratum_payout_lifecycle.json"
-    ))
-    .unwrap();
-    let normal = reference["policy"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "normal")
-        .unwrap();
     assert_eq!(
-        hex::encode(tx.hash().0),
-        normal["after_callback"]["pending_hash"]["binary"]
+        before
+            .request
+            .as_ref()
+            .unwrap()
+            .prepared
+            .request()
+            .environment
+            .protocol,
+        Protocol::Salus
+    );
+    assert!(
+        matches!(client.payout_status().unwrap().last, Some(Notice::Preflight(ref result)) if result.result.is_ok())
     );
 
     assert!(matches!(
@@ -491,7 +544,7 @@ fn fresh_balance_equality_is_a_retryable_preparation_notice() {
     let temp = Temp::new();
     let db = database(&temp);
     let mut pay = payment();
-    pay.total = (GROSS + 1_000_000_000).into();
+    pay.total = BALANCE.into();
     seed(&db, pay.clone());
     let p = pool(&db, 1);
     let s = signer();
@@ -587,6 +640,7 @@ fn constructor_refuses_other_database_and_invalid_timers_before_external_work() 
     let t = Temp::new();
     let other = Temp::new();
     let db = database(&t);
+    let execution = execution_owner(&db, &network());
     let elsewhere = database(&other);
     let p = pool(&elsewhere, 1);
     let s = signer();
@@ -596,8 +650,9 @@ fn constructor_refuses_other_database_and_invalid_timers_before_external_work() 
             &mut w,
             db.clone(),
             Default::default(),
-            inputs(&s, &p),
-            Arc::new(Wall)
+            inputs(&db, &s, &p),
+            Arc::new(Wall),
+            &execution.stratum_admitter(),
         ),
         Err(Error::Configuration)
     ));
@@ -611,10 +666,17 @@ fn constructor_refuses_other_database_and_invalid_timers_before_external_work() 
     assert_eq!(p.client().info().submitted, 0);
     p.shutdown().unwrap();
     let p = pool(&db, 1);
-    let mut i = inputs(&s, &p);
+    let mut i = inputs(&db, &s, &p);
     i.payout_interval = Duration::ZERO;
     assert!(matches!(
-        Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)),
+        Worker::start(
+            &mut w,
+            db.clone(),
+            Default::default(),
+            i,
+            Arc::new(Wall),
+            &execution.stratum_admitter()
+        ),
         Err(Error::Configuration)
     ));
     assert!(
@@ -683,6 +745,7 @@ fn known_pool_rejection_keeps_the_exact_signed_request() {
 fn refusal_before_ticket_restores_ready_and_never_claims_submission() {
     let t = Temp::new();
     let db = database(&t);
+    let execution = execution_owner(&db, &network());
     seed(&db, payment());
     let p = pool(&db, 1);
     let s = signer();
@@ -691,7 +754,8 @@ fn refusal_before_ticket_restores_ready_and_never_claims_submission() {
     pending_sign(&mut a, &mut w);
     a.finish(&mut w).unwrap();
     let before = stored(&db).pending.unwrap();
-    let next_inputs = inputs(&s, &p);
+    let mut next_inputs = Inputs::new(config(), s.client(), p.client(), a.inputs.snapshots.clone());
+    next_inputs.generation = ae_stratum::payout::Generation::Native;
     drop(a);
     p.shutdown().unwrap();
     let mut a = Worker::start(
@@ -700,11 +764,17 @@ fn refusal_before_ticket_restores_ready_and_never_claims_submission() {
         Default::default(),
         next_inputs,
         Arc::new(Wall),
+        &execution.stratum_admitter(),
     )
     .unwrap();
+    let mut failure = None;
+    until(|| {
+        failure = a.tick(&mut w, true, Instant::now()).err();
+        failure.is_some()
+    });
     assert!(matches!(
-        a.tick(&mut w, true, Instant::now()),
-        Err(Error::PayoutPool(txpool::Error::Stopped))
+        failure,
+        Some(Error::PayoutPool(txpool::Error::Stopped))
     ));
     let after = stored(&db).pending.unwrap();
     assert!(matches!(
@@ -715,7 +785,13 @@ fn refusal_before_ticket_restores_ready_and_never_claims_submission() {
         after.signed.as_ref().unwrap().transaction,
         before.signed.as_ref().unwrap().transaction
     );
-    assert!(a.report().unsettled.is_none());
+    assert!(matches!(
+        a.report().unsettled,
+        Some(Completion::Unaccepted {
+            reason: Withdrawal::Pool(txpool::Error::Stopped),
+            ..
+        })
+    ));
     s.retire();
 }
 #[test]
@@ -724,9 +800,10 @@ fn native_default_confirmation_tick_without_pending_payment_does_not_create_work
     let db = database(&t);
     let p = pool(&db, 1);
     let s = signer();
-    let i = inputs(&s, &p);
+    let i = inputs(&db, &s, &p);
     assert_eq!(i.payout_interval, Duration::from_secs(120));
     assert_eq!(i.confirmation_interval, Duration::from_secs(10));
+    drop(i);
     let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
     let mut a = actor(&db, &mut w, &s, &p);
     let at = a.next_confirmation;
@@ -766,7 +843,7 @@ fn close_during_signature_completion_joins_and_prevents_a_late_pool_dispatch() {
     .unwrap();
     let (entered, observed) = std::sync::mpsc::sync_channel(1);
     let (release, waiting) = std::sync::mpsc::channel();
-    let mut i = inputs(&s, &p);
+    let mut i = inputs(&db, &s, &p);
     i.payout_interval = Duration::from_millis(1);
     let owner = Accounting::start_mining(
         db.clone(),
@@ -824,6 +901,7 @@ fn close_during_signature_completion_joins_and_prevents_a_late_pool_dispatch() {
 }
 
 mod execution;
+mod gating;
 
 #[test]
 fn failed_or_unavailable_confirmation_holds_real_dispatch_until_canonical_recheck() {
@@ -899,16 +977,25 @@ fn failed_or_unavailable_confirmation_holds_real_dispatch_until_canonical_rechec
 fn default_live_payout_generation_uses_captured_execution_gas_and_restart_keeps_the_same_request() {
     let t = Temp::new();
     let db = database(&t);
+    let execution = execution_owner(&db, &network());
     seed(&db, payment());
     let p = pool(&db, 1);
     let s = signer();
     let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
-    let i = Inputs::new(config(), s.client(), p.client());
+    let i = Inputs::new(config(), s.client(), p.client(), snapshots(&db));
     assert_eq!(
         i.generation,
         ae_stratum::payout::Generation::Bounded(Default::default())
     );
-    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    let mut a = Worker::start(
+        &mut w,
+        db.clone(),
+        Default::default(),
+        i,
+        Arc::new(Wall),
+        &execution.stratum_admitter(),
+    )
+    .unwrap();
     a.request_check();
     let r = accepted(&mut a, &mut w);
     let plan = &r.request.as_ref().unwrap().prepared;
@@ -922,9 +1009,17 @@ fn default_live_payout_generation_uses_captured_execution_gas_and_restart_keeps_
     drop(a);
     drop(w);
     let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
-    let mut i = Inputs::new(config(), s.client(), p.client());
+    let mut i = Inputs::new(config(), s.client(), p.client(), snapshots(&db));
     i.generation = ae_stratum::payout::Generation::Native;
-    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    let mut a = Worker::start(
+        &mut w,
+        db.clone(),
+        Default::default(),
+        i,
+        Arc::new(Wall),
+        &execution.stratum_admitter(),
+    )
+    .unwrap();
     assert_eq!(
         stored(&db).pending.unwrap().signed.unwrap().transaction,
         signed
@@ -938,6 +1033,7 @@ fn default_live_payout_generation_uses_captured_execution_gas_and_restart_keeps_
 fn default_payout_selection_splits_oversized_obligations_before_signing_and_pool_dispatch() {
     let t = Temp::new();
     let db = database(&t);
+    let execution = execution_owner(&db, &network());
     let mut pay = payment();
     pay.relative = (1..=201)
         .map(|n| {
@@ -951,8 +1047,16 @@ fn default_payout_selection_splits_oversized_obligations_before_signing_and_pool
     let p = pool(&db, 1);
     let s = signer();
     let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
-    let i = Inputs::new(config(), s.client(), p.client());
-    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    let i = Inputs::new(config(), s.client(), p.client(), snapshots(&db));
+    let mut a = Worker::start(
+        &mut w,
+        db.clone(),
+        Default::default(),
+        i,
+        Arc::new(Wall),
+        &execution.stratum_admitter(),
+    )
+    .unwrap();
     a.request_check();
     let r = accepted(&mut a, &mut w);
     assert!(r.payment.gross.is_some());

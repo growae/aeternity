@@ -159,6 +159,7 @@ fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_bu
                 },
             )
             .unwrap();
+            let execution = execution_owner(&db, &profile);
             let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
             let i = Inputs::new(
                 durable::Config {
@@ -168,9 +169,17 @@ fn bounded_live_payouts_sign_submit_and_execute_original_code_with_configured_bu
                 },
                 s.client(),
                 pool.client(),
+                snapshots(&db),
             );
-            let mut a =
-                Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+            let mut a = Worker::start(
+                &mut w,
+                db.clone(),
+                Default::default(),
+                i,
+                Arc::new(Wall),
+                &execution.stratum_admitter(),
+            )
+            .unwrap();
             a.request_check();
             let record = accepted(&mut a, &mut w);
             let signed = SignedTransaction::<ContractTransaction>::decode(

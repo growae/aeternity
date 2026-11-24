@@ -45,6 +45,7 @@ pub enum Error {
     PreparationSetup(ae_sync::chain::pow::producer::mining::Error),
     PayoutPool(ae_storage::pool::worker::Error),
     PayoutSigner(ae_sync::preset_keys::Error),
+    PayoutPreflight(Arc<mining::payouts::preflight::task::Error>),
 }
 impl From<storage::Failure> for Error {
     fn from(e: storage::Failure) -> Self {

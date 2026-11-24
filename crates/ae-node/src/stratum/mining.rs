@@ -272,7 +272,14 @@ impl Worker {
             .payouts
             .take()
             .map(|config| {
-                payouts::Worker::start(writer, db.clone(), accounting, config, inputs.clock.clone())
+                payouts::Worker::start(
+                    writer,
+                    db.clone(),
+                    accounting,
+                    config,
+                    inputs.clock.clone(),
+                    &inputs.admitter,
+                )
             })
             .transpose()?;
         let production = inputs

@@ -6,7 +6,10 @@ use ae_storage::pool::{Submission as PoolSubmission, worker as txpool};
 use ae_sync::preset_keys as keys;
 use ae_types::{Signature, Unsigned};
 use storage::payouts::{self as durable, Dispatch, Record};
+mod gating;
 pub mod preflight;
+use gating::Authority;
+use preflight::task;
 
 pub struct Inputs {
     pub config: durable::Config,
@@ -14,17 +17,26 @@ pub struct Inputs {
     pub generation: ae_stratum::payout::Generation,
     pub signer: keys::Client,
     pub pool: txpool::Client,
+    pub snapshots: ae_storage::snapshots::Owner,
+    pub preflight: ae_chain::repository::pow::key::Limits,
     pub payout_interval: Duration,
     pub confirmation_interval: Duration,
 }
 impl Inputs {
-    pub fn new(config: durable::Config, signer: keys::Client, pool: txpool::Client) -> Self {
+    pub fn new(
+        config: durable::Config,
+        signer: keys::Client,
+        pool: txpool::Client,
+        snapshots: ae_storage::snapshots::Owner,
+    ) -> Self {
         Self {
             config,
             limits: Default::default(),
             generation: ae_stratum::payout::Generation::Bounded(Default::default()),
             signer,
             pool,
+            snapshots,
+            preflight: Default::default(),
             payout_interval: Duration::from_secs(120),
             confirmation_interval: Duration::from_secs(10),
         }
@@ -32,6 +44,7 @@ impl Inputs {
     fn validate(&self, db: &Arc<Database>) -> Result<(), Error> {
         if self.generation.validate().is_err()
             || !self.pool.uses_database(db)
+            || !self.snapshots.uses_database(db)
             || [self.payout_interval, self.confirmation_interval]
                 .iter()
                 .any(|d| *d < Duration::from_millis(1) || *d > Duration::from_secs(86400))
@@ -45,6 +58,7 @@ impl Inputs {
 pub enum Phase {
     Idle,
     Pricing,
+    Preflight,
     Signing,
     Submitting,
     Waiting,
@@ -59,6 +73,19 @@ pub enum Notice {
     MissingReward,
     ExecutionFailed(Box<durable::ExecutionFailure>),
     ReceiptUnavailable(durable::ReceiptUnavailable),
+    Preflight(Arc<task::Completion>),
+    PreflightStart(Arc<task::Error>),
+    AwaitingConfirmation {
+        hash: ae_types::Hash256,
+        block: ae_types::Hash256,
+    },
+}
+#[derive(Debug, Clone)]
+pub enum Withdrawal {
+    Stopped,
+    Stale,
+    Pool(txpool::Error),
+    Preflight(Arc<task::Error>),
 }
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -101,6 +128,14 @@ impl Shared {
 #[derive(Debug, Clone)]
 pub enum Completion {
     Price(Result<Unsigned, txpool::Error>),
+    Preflight {
+        record: Box<Record>,
+        result: Arc<task::Completion>,
+    },
+    Unaccepted {
+        record: Box<Record>,
+        reason: Withdrawal,
+    },
     Signature {
         record: Box<Record>,
         result: Result<Signature, keys::Error>,
@@ -118,6 +153,15 @@ pub struct Report {
     pub unsettled: Option<Completion>,
 }
 enum Pending {
+    Preflight {
+        record: Box<Record>,
+        task: task::Task,
+        result: Option<Arc<task::Completion>>,
+    },
+    Unaccepted {
+        record: Box<Record>,
+        reason: Withdrawal,
+    },
     Price {
         ticket: txpool::Ticket<Unsigned>,
         result: Option<Result<Unsigned, txpool::Error>>,
@@ -143,6 +187,13 @@ fn pool_result<T>(ticket: &txpool::Ticket<T>) -> Option<Result<T, txpool::Error>
 impl Pending {
     fn poll(&mut self) -> bool {
         match self {
+            Self::Preflight { task, result, .. } => {
+                if result.is_none() {
+                    *result = task.try_result().map(Arc::new);
+                }
+                result.is_some()
+            }
+            Self::Unaccepted { .. } => true,
             Self::Price { ticket, result } => {
                 if result.is_none() {
                     *result = pool_result(ticket);
@@ -168,8 +219,18 @@ impl Pending {
             thread::sleep(Duration::from_millis(1));
         }
     }
+    fn cancel(&self) {
+        if let Self::Preflight { task, .. } = self {
+            task.request_cancel();
+        }
+    }
     fn completion(self) -> Completion {
         match self {
+            Self::Preflight { record, result, .. } => Completion::Preflight {
+                record,
+                result: result.expect("settled preflight"),
+            },
+            Self::Unaccepted { record, reason } => Completion::Unaccepted { record, reason },
             Self::Price { result, .. } => Completion::Price(result.expect("settled price")),
             Self::Signature { record, result, .. } => Completion::Signature {
                 record,
@@ -190,6 +251,8 @@ pub(super) struct Worker {
     clock: Arc<dyn Clock>,
     epoch: u64,
     pending: Option<Pending>,
+    preflight: task::Builder,
+    authority: Option<Authority>,
     check: bool,
     confirmation_hold: bool,
     next_payout: Instant,
@@ -202,8 +265,13 @@ impl Worker {
         accounting: storage::Limits,
         inputs: Inputs,
         clock: Arc<dyn Clock>,
+        admitter: &Admitter,
     ) -> Result<Self, Error> {
         inputs.validate(&db)?;
+        let source = admitter
+            .execution(inputs.snapshots.clone(), inputs.preflight)
+            .map_err(|e| Error::PayoutPreflight(Arc::new(task::Error::Source(e))))?;
+        let preflight = task::Builder::new(source, inputs.limits.payout);
         let info = retry(writer, |w| {
             w.begin_payouts(inputs.config.clone(), inputs.limits)
         })?;
@@ -236,6 +304,8 @@ impl Worker {
             clock,
             epoch: info.epoch,
             pending: None,
+            preflight,
+            authority: None,
             check: info.pending.is_some(),
             confirmation_hold: false,
             next_payout: now + inputs.payout_interval,
@@ -266,9 +336,66 @@ impl Worker {
         if !pending.poll() {
             return Ok(());
         }
+        // Read before taking the mutable result borrow. A failed read retains
+        // the joined completion and its original accepted request for retry.
+        let expected = if matches!(self.pending, Some(Pending::Preflight { .. })) {
+            Some(self.info()?)
+        } else {
+            None
+        };
         let epoch = self.epoch;
         let limits = self.inputs.limits;
-        match pending {
+        match self.pending.as_mut().expect("settled request") {
+            Pending::Preflight {
+                record,
+                task,
+                result: Some(result),
+            } => {
+                let request = record
+                    .request
+                    .as_ref()
+                    .ok_or(Error::Mining("preflight request missing"))?;
+                if expected.as_ref().and_then(|i| i.pending.as_ref()) != Some(record.as_ref())
+                    || result.id != task.id()
+                    || result.prepared.as_ref() != &request.prepared
+                {
+                    return Err(Error::Mining("preflight completion binding"));
+                }
+                let current = match &result.result {
+                    Ok(checked) if dispatch => self
+                        .preflight
+                        .is_current(checked)
+                        .map_err(|e| Error::PayoutPreflight(Arc::new(e)))?,
+                    _ => false,
+                };
+                self.authority = match &result.result {
+                    Ok(checked) if current => Some(Authority {
+                        sequence: record.sequence,
+                        checked: checked.clone(),
+                    }),
+                    _ => None,
+                };
+                self.check = dispatch && result.result.is_ok();
+                self.shared.notice(Notice::Preflight(result.clone()));
+            }
+            Pending::Unaccepted { record, reason } => {
+                retry(writer, |w| {
+                    w.unaccepted_payout_submission(epoch, record, limits)
+                })?;
+                match reason {
+                    Withdrawal::Stopped => {}
+                    Withdrawal::Stale => self.check = dispatch,
+                    Withdrawal::Pool(error) => {
+                        self.shared.notice(Notice::Pool(error.clone()));
+                        if *error != txpool::Error::Saturated {
+                            return Err(Error::PayoutPool(error.clone()));
+                        }
+                    }
+                    Withdrawal::Preflight(error) => {
+                        return Err(Error::PayoutPreflight(error.clone()));
+                    }
+                }
+            }
             Pending::Price {
                 result: Some(result),
                 ..
@@ -388,8 +515,7 @@ impl Worker {
         if !dispatch || !self.shared.running() {
             return Ok(());
         }
-        if confirm
-            && !busy
+        if (confirm || (self.check && !self.confirmation_hold))
             && let Some(record) = &info.pending
             && record.hash()?.is_some()
         {
@@ -428,15 +554,15 @@ impl Worker {
                 }
             }
             Some(record) if record.signed.is_none() && record.request.is_some() => {
-                let prepared = &record.request.as_ref().expect("prepared request").prepared;
-                let gate = self
-                    .shared
-                    .dispatch
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let shared = self.shared.clone();
+                let gate = shared.dispatch.lock().unwrap_or_else(|e| e.into_inner());
                 if !*gate {
                     return Ok(());
                 }
+                if !self.authorize(&record)? {
+                    return Ok(());
+                }
+                let prepared = &record.request.as_ref().expect("prepared request").prepared;
                 match self
                     .inputs
                     .signer
@@ -457,49 +583,20 @@ impl Worker {
             }
             Some(record) => match record.signed.as_ref().map(|s| &s.dispatch) {
                 Some(Dispatch::Ready(_)) => {
+                    {
+                        let shared = self.shared.clone();
+                        let gate = shared.dispatch.lock().unwrap_or_else(|e| e.into_inner());
+                        if !*gate || !self.authorize(&record)? {
+                            return Ok(());
+                        }
+                    }
                     let tx =
                         Signed::decode(&record.signed.as_ref().expect("signed record").transaction)
                             .map_err(|_| Error::Mining("saved payout transaction"))?;
                     let record = retry(writer, |w| {
                         w.begin_payout_submission(self.epoch, &record, self.inputs.limits)
                     })?;
-                    let gate = self
-                        .shared
-                        .dispatch
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if !*gate {
-                        drop(gate);
-                        retry(writer, |w| {
-                            w.unaccepted_payout_submission(self.epoch, &record, self.inputs.limits)
-                        })?;
-                        return Ok(());
-                    }
-                    let accepted = self.inputs.pool.push(Arc::new(tx), Event::Created, false);
-                    drop(gate);
-                    match accepted {
-                        Ok(ticket) => {
-                            self.pending = Some(Pending::Submission {
-                                record: Box::new(record),
-                                ticket,
-                                result: None,
-                            });
-                            self.shared.phase(Phase::Submitting);
-                        }
-                        Err(error) => {
-                            retry(writer, |w| {
-                                w.unaccepted_payout_submission(
-                                    self.epoch,
-                                    &record,
-                                    self.inputs.limits,
-                                )
-                            })?;
-                            if error != txpool::Error::Saturated {
-                                return Err(Error::PayoutPool(error));
-                            }
-                            self.shared.notice(Notice::Pool(error));
-                        }
-                    }
+                    self.submit(writer, record, tx, dispatch)?;
                 }
                 Some(Dispatch::Sending(_)) => {
                     retry(writer, |w| {
@@ -515,6 +612,7 @@ impl Worker {
     fn confirmation(&mut self, result: durable::Confirmation) -> bool {
         match result {
             durable::Confirmation::Confirmed(done) => {
+                self.authority = None;
                 self.confirmation_hold = false;
                 self.shared.notice(Notice::Confirmed(done));
                 self.shared.phase(Phase::Idle);
@@ -555,6 +653,7 @@ impl Worker {
     pub(super) fn finish(&mut self, writer: &mut storage::Writer) -> Result<(), Error> {
         self.shared.stop();
         if let Some(pending) = self.pending.as_mut() {
+            pending.cancel();
             pending.join();
         }
         self.tick(writer, false, Instant::now())
@@ -562,6 +661,7 @@ impl Worker {
     pub(super) fn report(&mut self) -> Report {
         self.shared.stop();
         if let Some(pending) = self.pending.as_mut() {
+            pending.cancel();
             pending.join();
         }
         self.shared
@@ -580,6 +680,7 @@ impl Drop for Worker {
         // This field is dropped before the accounting Writer, including unwind.
         self.shared.stop();
         if let Some(pending) = self.pending.as_mut() {
+            pending.cancel();
             pending.join();
         }
         self.shared

@@ -83,7 +83,7 @@ fn context(row: &J) -> Context {
 }
 // Cumulative cloning/work and list-depth budgets for the 1,000-recipient corpus.
 // These operational limits do not alter transaction gas or block acceptance.
-fn corpus_limits() -> Limits {
+pub(super) fn corpus_limits() -> Limits {
     Limits {
         max_work: 100_000_000,
         max_bytes: 2 << 30,
@@ -319,6 +319,12 @@ fn find(p: u32, name: &str) -> &'static J {
         .find(|r| r["protocol"] == p && r["case_name"] == name)
         .unwrap()
 }
+pub(super) fn actor_contract() -> ContractPublicKey {
+    environment(find(8, "prepared_one")).contract
+}
+pub(super) fn actor_trees() -> Trees {
+    from_snapshot(&find(8, "prepared_one")["before"])
+}
 
 #[test]
 fn original_deployed_aevm_payout_code_creates_the_same_state_and_executes_all_historical_profiles()
@@ -480,6 +486,7 @@ fn live_payout_actor_signs_and_submits_transactions_that_execute_the_deployed_co
                 },
             )
             .unwrap();
+            let execution = execution_owner(&db, &profile);
             let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
             let mut i = Inputs::new(
                 durable::Config {
@@ -489,11 +496,19 @@ fn live_payout_actor_signs_and_submits_transactions_that_execute_the_deployed_co
                 },
                 s.client(),
                 pool.client(),
+                snapshots(&db),
             );
             // This compatibility case intentionally retains the original recipe.
             i.generation = payout::Generation::Native;
-            let mut a =
-                Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+            let mut a = Worker::start(
+                &mut w,
+                db.clone(),
+                Default::default(),
+                i,
+                Arc::new(Wall),
+                &execution.stratum_admitter(),
+            )
+            .unwrap();
             a.request_check();
             let record = accepted(&mut a, &mut w);
             let signed = SignedTransaction::<ContractTransaction>::decode(

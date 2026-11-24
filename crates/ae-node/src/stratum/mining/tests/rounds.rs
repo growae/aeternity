@@ -269,6 +269,7 @@ fn canonical_reward_callback_triggers_payout_before_the_periodic_timer() {
         },
         keys.client(),
         pool.client(),
+        ae_storage::snapshots::Owner::start(db.clone(), Default::default()).unwrap(),
     ));
     let owner = Accounting::start_mining(
         db.clone(),

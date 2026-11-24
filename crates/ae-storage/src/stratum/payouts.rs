@@ -583,7 +583,8 @@ impl Writer {
             write(Stage::Submit, db, b)
         })
     }
-    // The caller may use this only when the pool refused to return a ticket.
+    // The caller must prove no request was accepted: either it never called
+    // the pool or the pool refused to return a ticket.
     // A timeout, lost reply or restart is not evidence of non-submission.
     pub fn unaccepted_payout_submission(
         &mut self,
