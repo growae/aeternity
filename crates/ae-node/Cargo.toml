@@ -15,19 +15,19 @@ ae-storage.workspace = true
 ae-p2p.workspace = true
 ae-vm-fate.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
 ae-codec.workspace = true
 ae-crypto.workspace = true
 ae-execution.workspace = true
-ae-hyperchain.workspace = true
-ae-protocol.workspace = true
 ae-state.workspace = true
 ae-trie.workspace = true
 ae-tx.workspace = true
 ae-vm-aevm.workspace = true
-hex.workspace = true
 num-bigint.workspace = true
+
+[dev-dependencies]
+ae-hyperchain.workspace = true
+ae-protocol.workspace = true
+hex.workspace = true
 serde_json.workspace = true
 
 [lints]

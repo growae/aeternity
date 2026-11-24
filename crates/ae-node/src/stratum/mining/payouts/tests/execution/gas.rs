@@ -1,5 +1,5 @@
 use super::*;
-static GAS_DATA: LazyLock<J> = LazyLock::new(|| {
+pub(super) static GAS_DATA: LazyLock<J> = LazyLock::new(|| {
     let p: J = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/erlang_stratum_payout_gas.json"
@@ -7,7 +7,7 @@ static GAS_DATA: LazyLock<J> = LazyLock::new(|| {
     .unwrap();
     expand(&p["root"], p["values"].as_array().unwrap())
 });
-fn gas_find(p: u32, name: &str) -> &'static J {
+pub(super) fn gas_find(p: u32, name: &str) -> &'static J {
     GAS_DATA["runs"]
         .as_array()
         .unwrap()

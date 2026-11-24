@@ -6,6 +6,7 @@ use ae_storage::pool::{Submission as PoolSubmission, worker as txpool};
 use ae_sync::preset_keys as keys;
 use ae_types::{Signature, Unsigned};
 use storage::payouts::{self as durable, Dispatch, Record};
+pub mod preflight;
 
 pub struct Inputs {
     pub config: durable::Config,
