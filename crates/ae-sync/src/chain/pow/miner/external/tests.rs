@@ -94,7 +94,7 @@ fn native_argument_and_parser_capture_preserves_supported_values_and_repairs_str
         assert_eq!(packed, row["raw"]);
     }
     config.hex_header = true;
-    config.device = Some(7);
+    config.device = Some(7.into());
     config.extra_args = Config::native_extra_args("a  b\tc");
     let args = config.arguments(work);
     assert_eq!(args[1], OsString::from(rows["hex_hash"].as_str().unwrap()));
@@ -461,7 +461,7 @@ fn process_receives_literal_native_arguments_and_the_selected_working_directory(
     let mut config = configuration("proof");
     config.directory = directory.clone();
     config.hex_header = true;
-    config.device = Some(7);
+    config.device = Some(7.into());
     config.extra_args.extend([
         "--fixture-argv".into(),
         "arguments.json".into(),
@@ -481,6 +481,30 @@ fn process_receives_literal_native_arguments_and_the_selected_working_directory(
     assert_eq!(observed, expected);
     fs::remove_file(directory.join("arguments.json")).unwrap();
     fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn signed_and_large_native_device_ids_reach_the_child_without_narrowing() {
+    for device in ["-1", "18446744073709551616"] {
+        let directory =
+            std::env::temp_dir().join(format!("ae device args {}", rand::random::<u128>()));
+        fs::create_dir(&directory).unwrap();
+        let mut config = configuration("proof");
+        config.directory = directory.clone();
+        config.device = Some(device.parse().unwrap());
+        config
+            .extra_args
+            .extend(["--fixture-argv".into(), "argv.json".into()]);
+        assert!(matches!(
+            run(config, work()).result,
+            Ok(Outcome::Found { .. })
+        ));
+        let args: Vec<String> =
+            serde_json::from_slice(&fs::read(directory.join("argv.json")).unwrap()).unwrap();
+        assert_eq!(&args[args.len() - 2..], &["-d", device]);
+        fs::remove_file(directory.join("argv.json")).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
 }
 
 #[cfg(unix)]

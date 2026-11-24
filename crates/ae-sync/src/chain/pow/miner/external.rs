@@ -19,7 +19,7 @@ pub struct Config {
     pub executable: PathBuf,
     pub directory: PathBuf,
     pub extra_args: Vec<OsString>,
-    pub device: Option<u32>,
+    pub device: Option<num_bigint::BigInt>,
     pub hex_header: bool,
     pub line_bytes: usize,
     pub output_bytes: u64,
@@ -51,7 +51,7 @@ impl Config {
             .map(OsString::from)
             .collect()
     }
-    pub(super) fn validate(&self) -> Result<(), super::Error> {
+    pub(crate) fn validate(&self) -> Result<(), super::Error> {
         if !self.executable.is_absolute()
             || !self.directory.is_absolute()
             || !(1..=1024 * 1024).contains(&self.line_bytes)
@@ -84,7 +84,7 @@ impl Config {
             work.nonces.repeats().to_string().into(),
         ]);
         args.extend(self.extra_args.iter().cloned());
-        if let Some(device) = self.device {
+        if let Some(device) = &self.device {
             args.extend(["-d".into(), device.to_string().into()]);
         }
         args

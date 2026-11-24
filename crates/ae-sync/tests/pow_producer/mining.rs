@@ -63,6 +63,156 @@ fn healthy(client: &producer::Client) {
 }
 
 #[test]
+fn parsed_empty_miners_replace_the_default_without_starting_any_solver() {
+    use ae_sync::chain::pow::configuration;
+    let node = Node::new(1, false);
+    let parsed =
+        configuration::Configuration::parse(br#"{"miners":[]}"#, &Default::default()).unwrap();
+    let prepared = parsed
+        .prepare(&Default::default(), Default::default(), config(1))
+        .unwrap();
+    assert!(prepared.instances.is_empty());
+    let worker = spawn(
+        &node,
+        stopped(&node),
+        prepared.config,
+        Arc::new(generator::SystemClock),
+    );
+    let client = worker.client();
+    until(|| {
+        healthy(&client);
+        client.status().mining.as_ref().unwrap().candidate.is_some()
+    });
+    assert!(client.status().mining.unwrap().workers.is_empty());
+    drop(drain(&client));
+    client.set_enabled(true).unwrap();
+    until(|| client.status().enabled);
+    healthy(&client);
+    let report = finish(worker);
+    assert!(report.status.mining.as_ref().unwrap().workers.is_empty());
+    assert!(report.mining.as_ref().unwrap().is_settled());
+    assert_eq!(node._snapshots.live_snapshots(), 0);
+}
+
+#[test]
+fn parsed_instances_dispatch_in_native_order_and_preserve_spawn_failure_receipts() {
+    use ae_consensus::cuckoo::solver::Nonces;
+    use ae_sync::chain::pow::configuration;
+    let node = Node::new(1, false);
+    let prefix = format!("missing-configured-miner-{}", rand::random::<u128>());
+    let value = serde_json::json!({"miners":[{"executable":format!("{prefix}-a"),"repeats":2,"addressed_instances":[-1,serde_json::from_str::<serde_json::Value>("18446744073709551616").unwrap()]},{"executable":format!("{prefix}-b"),"repeats":3}]});
+    let parsed = configuration::Configuration::parse(
+        &serde_json::to_vec(&value).unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    let mut settings = config(1);
+    settings.retry = Duration::from_secs(60);
+    let prepared = parsed
+        .prepare(
+            &configuration::Directories {
+                cuckoo: Some(std::env::temp_dir()),
+                prebuilt: None,
+            },
+            Default::default(),
+            settings,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared
+            .instances
+            .iter()
+            .map(|i| i.native_id)
+            .collect::<Vec<_>>(),
+        [2, 1, 0]
+    );
+    let worker = spawn(
+        &node,
+        stopped(&node),
+        prepared.config,
+        Arc::new(generator::SystemClock),
+    );
+    let client = worker.client();
+    until(|| {
+        healthy(&client);
+        client.status().mining.as_ref().unwrap().candidate.is_some()
+    });
+    let workers: Vec<_> = client
+        .status()
+        .mining
+        .unwrap()
+        .workers
+        .iter()
+        .map(|w| w.worker)
+        .collect();
+    assert_eq!(workers.len(), 3);
+    drop(drain(&client));
+    client.set_enabled(true).unwrap();
+    let mut receipts = std::collections::BTreeMap::new();
+    until(|| {
+        healthy(&client);
+        for output in drain(&client) {
+            if let producer::Completion::Mining(c) = &output.completion
+                && let mine::Completion::Searched {
+                    result,
+                    selected,
+                    timed_out,
+                    ..
+                } = c.as_ref()
+            {
+                assert!(!selected && !timed_out);
+                assert_eq!(result.id.sequence, 1);
+                assert!(matches!(
+                    result.result,
+                    Err(miner::Error::External(miner::external::Error::Io {
+                        operation: miner::external::Operation::Spawn,
+                        ..
+                    }))
+                ));
+                assert_eq!(result.external.unwrap().pid, None);
+                assert_eq!(result.attempts, Some(0));
+                assert!(receipts.insert(result.id.worker, result.clone()).is_none());
+            }
+        }
+        receipts.len() == 3
+    });
+    let ordered: Vec<_> = workers.iter().map(|id| receipts[id].clone()).collect();
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|r| r.work.nonces.repeats())
+            .collect::<Vec<_>>(),
+        [2, 2, 3]
+    );
+    for pair in ordered.windows(2) {
+        assert_eq!(pair[0].work.hash, pair[1].work.hash);
+        assert_eq!(
+            pair[1].work.nonces,
+            Nonces::reserve(
+                pair[0].work.nonces.next().into(),
+                pair[1].work.nonces.repeats()
+            )
+            .unwrap()
+        );
+    }
+    client.set_enabled(false).unwrap();
+    let report = finish(worker);
+    assert!(report.status.failure.is_none());
+    assert!(report.mining.as_ref().unwrap().is_settled());
+    assert!(
+        report
+            .status
+            .mining
+            .as_ref()
+            .unwrap()
+            .workers
+            .iter()
+            .all(|w| w.submitted == 1 && w.completed == 1)
+    );
+    assert_eq!(node._snapshots.live_snapshots(), 0);
+}
+
+#[test]
 fn external_spawn_failures_retry_through_the_public_producer_and_join_on_stop() {
     let node = Node::new(1, false);
     let mut mining = config(2);

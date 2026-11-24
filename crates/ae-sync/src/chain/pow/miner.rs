@@ -55,6 +55,14 @@ impl Default for Config {
         }
     }
 }
+impl Config {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !(1..=65536).contains(&self.requests) || self.maximum_attempts == 0 {
+            return Err(Error::Configuration);
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Id {
     pub worker: u64,
@@ -244,9 +252,7 @@ impl Worker {
         Self::spawn_backend(config, Some(external))
     }
     fn spawn_backend(config: Config, external: Option<external::Config>) -> Result<Self, Error> {
-        if !(1..=65536).contains(&config.requests) || config.maximum_attempts == 0 {
-            return Err(Error::Configuration);
-        }
+        config.validate()?;
         let worker = NEXT_WORKER
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
             .map_err(|_| Error::Sequence)?;
