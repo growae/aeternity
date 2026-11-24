@@ -6,6 +6,7 @@ pub mod candidate;
 pub mod ingress;
 pub mod job;
 pub mod nonce;
+pub mod payout;
 pub mod proof;
 pub mod queue;
 pub mod registry;
