@@ -5,7 +5,7 @@ use super::*;
 use ae_stratum::ingress::{Id, Input};
 use std::sync::Weak;
 const SOLUTIONS: u8 = 23;
-const META: &[u8] = b"\0stratum-ingress";
+pub(super) const META: &[u8] = b"\0stratum-ingress";
 const RECORD_BYTES: usize = 16384;
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -68,7 +68,7 @@ fn flat(raw: &[u8]) -> Result<Value, Failure> {
     Ok(Value::from_rlp(&v))
 }
 impl Receipt {
-    fn encode(&self) -> Result<Vec<u8>, Failure> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, Failure> {
         self.id.validate()?;
         Ok(Value::List(vec![
             number(1),
@@ -79,7 +79,7 @@ impl Receipt {
         ])
         .encode())
     }
-    fn decode(raw: &[u8]) -> Result<Self, Failure> {
+    pub(super) fn decode(raw: &[u8]) -> Result<Self, Failure> {
         let Value::List(v) = flat(raw)? else {
             return Err(Error::Corrupt("Stratum receipt").into());
         };
@@ -99,7 +99,7 @@ impl Receipt {
         }
         Ok(r)
     }
-    fn key(&self) -> Vec<u8> {
+    pub(super) fn key(&self) -> Vec<u8> {
         key(self.id)
     }
 }
@@ -115,14 +115,18 @@ struct Metadata {
     last: Option<Receipt>,
     solutions: u64,
     bytes: u64,
+    closed: bool,
 }
 impl Metadata {
     fn sequence(&self) -> u64 {
         self.last.as_ref().map_or(0, |r| r.id.sequence)
     }
     fn encode(&self) -> Result<Vec<u8>, Failure> {
-        Ok(Value::List(vec![
-            number(1),
+        self.encode_version(2)
+    }
+    fn encode_version(&self, version: u64) -> Result<Vec<u8>, Failure> {
+        let mut fields = vec![
+            number(version),
             number(self.epoch),
             Value::List(
                 self.last
@@ -134,8 +138,11 @@ impl Metadata {
             ),
             number(self.solutions),
             number(self.bytes),
-        ])
-        .encode())
+        ];
+        if version >= 2 {
+            fields.push(number(u64::from(self.closed)));
+        }
+        Ok(Value::List(fields).encode())
     }
     fn decode(raw: Option<&[u8]>) -> Result<Self, Failure> {
         let Some(raw) = raw else {
@@ -144,7 +151,28 @@ impl Metadata {
         let Value::List(v) = flat(raw)? else {
             return Err(Error::Corrupt("Stratum ingress metadata").into());
         };
-        let [version, epoch, Value::List(last), solutions, bytes] = v.as_slice() else {
+        let version = v
+            .first()
+            .map(integer)
+            .transpose()?
+            .ok_or(Error::Corrupt("Stratum ingress version"))?;
+        let closed = if version == 1 {
+            false
+        } else if version == 2 {
+            match v.last().map(integer).transpose()? {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err(Error::Corrupt("Stratum ingress closed receipt").into()),
+            }
+        } else {
+            return Err(Error::Corrupt("Stratum ingress version").into());
+        };
+        let fields = if version == 2 {
+            &v[..v.len().saturating_sub(1)]
+        } else {
+            v.as_slice()
+        };
+        let [_, epoch, Value::List(last), solutions, bytes] = fields else {
             return Err(Error::Corrupt("Stratum ingress fields").into());
         };
         let last = match last.as_slice() {
@@ -157,11 +185,12 @@ impl Metadata {
             last,
             solutions: integer(solutions)?,
             bytes: integer(bytes)?,
+            closed,
         };
-        if integer(version)? != 1
-            || m.epoch == 0
+        if m.epoch == 0
             || m.last.as_ref().is_some_and(|r| r.id.epoch != m.epoch)
-            || m.encode()? != raw
+            || (m.closed && !m.last.as_ref().is_some_and(|r| r.input.solution.is_some()))
+            || m.encode_version(version)? != raw
         {
             return Err(Error::Corrupt("Stratum ingress metadata encoding").into());
         }
@@ -209,7 +238,46 @@ impl Inbox<'_> {
     pub fn last(&self) -> Option<&Receipt> {
         self.metadata.last.as_ref()
     }
-    fn valid(&self, r: &Receipt) -> Result<(), Failure> {
+    pub fn last_closed(&self) -> bool {
+        self.metadata.closed
+    }
+    pub fn get(&self, id: Id) -> Result<Option<Receipt>, Failure> {
+        id.validate()?;
+        let key = key(id);
+        self.source
+            .snapshot
+            .get_pinned(&key)
+            .map_err(backend)?
+            .map(|raw| self.record(&key, &raw))
+            .transpose()
+    }
+    pub(super) fn remove(&self, receipt: &Receipt) -> Result<Vec<Extra>, Failure> {
+        if self.get(receipt.id)?.as_ref() != Some(receipt) {
+            return Err(Error::Conflict.into());
+        }
+        let raw = receipt.encode()?;
+        let mut metadata = self.metadata.clone();
+        metadata.solutions = metadata
+            .solutions
+            .checked_sub(1)
+            .ok_or(Error::Corrupt("Stratum pending count"))?;
+        metadata.bytes = metadata
+            .bytes
+            .checked_sub((receipt.key().len() + raw.len()) as u64)
+            .ok_or(Error::Corrupt("Stratum pending bytes"))?;
+        if self.last().is_some_and(|r| r.id == receipt.id) {
+            metadata.closed = true;
+        }
+        Ok(vec![
+            Extra {
+                key: receipt.key(),
+                before: Some(raw),
+                after: None,
+            },
+            self.extra(&metadata)?,
+        ])
+    }
+    pub(super) fn valid(&self, r: &Receipt) -> Result<(), Failure> {
         if r.id.epoch > self.metadata.epoch
             || (r.id.epoch == self.metadata.epoch && r.id.sequence > self.sequence())
         {
@@ -312,7 +380,8 @@ impl Inbox<'_> {
         it.status().map_err(backend)?;
         if count != self.metadata.solutions
             || bytes != self.metadata.bytes
-            || (self.last().is_some_and(|r| r.input.solution.is_some()) && !latest_solution)
+            || (self.last().is_some_and(|r| r.input.solution.is_some())
+                && latest_solution == self.metadata.closed)
         {
             return Err(Error::Corrupt("Stratum ingress totals").into());
         }
@@ -349,6 +418,7 @@ impl Writer {
         let mut metadata = inbox.metadata.clone();
         metadata.epoch = metadata.epoch.checked_add(1).ok_or(Error::ResourceLimit)?;
         metadata.last = None;
+        metadata.closed = false;
         let epoch = Epoch {
             value: metadata.epoch,
             source: self.db.source_id,
@@ -379,6 +449,17 @@ impl Writer {
         limits: Limits,
         write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
     ) -> Result<Receipt, Failure> {
+        self.accept_maybe_mining(epoch, sequence, input, limits, None, write)
+    }
+    pub(super) fn accept_maybe_mining(
+        &mut self,
+        epoch: &Epoch,
+        sequence: u64,
+        input: Input,
+        limits: Limits,
+        mining: Option<(&super::mining::Epoch, super::mining::Limits)>,
+        write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<Receipt, Failure> {
         input.validate()?;
         let id = Id {
             epoch: epoch.value,
@@ -391,12 +472,24 @@ impl Writer {
         let version = self.version()?;
         let stored = self.db.stratum(self.limits)?;
         let inbox = stored.ingress(limits)?;
+        if let Some((mining_epoch, mining_limits)) = mining {
+            self.check_mining_epoch(mining_epoch, &stored.mining(mining_limits)?)?;
+        }
         if inbox.epoch() != epoch.value {
             return Err(Error::Conflict.into());
         }
         if let Some(r) = inbox.last()
             && r.id == id
         {
+            if let Some((_, mining_limits)) = mining
+                && r.input.solution.is_some()
+                && !inbox.last_closed()
+                && stored.mining(mining_limits)?.get(id)?.is_none()
+            {
+                // Legacy receipts must be explicitly prepared; replay cannot
+                // claim that their accounting/admission journal already exists.
+                return Err(Error::Conflict.into());
+            }
             return if r.input == input {
                 Ok(r.clone())
             } else {
@@ -413,6 +506,7 @@ impl Writer {
         };
         let mut metadata = inbox.metadata.clone();
         metadata.last = Some(receipt.clone());
+        metadata.closed = false;
         let mut extra = vec![];
         if receipt.input.solution.is_some() {
             let raw = receipt.encode()?;
@@ -433,16 +527,24 @@ impl Writer {
         }
         metadata.check(limits)?;
         extra.push(inbox.extra(&metadata)?);
-        let command = Command::Share {
+        let mut commands = vec![Command::Share {
             hash: receipt.input.hash,
             target: receipt.input.target.clone(),
             miner: receipt.input.account.as_bytes().to_vec(),
-        };
+        }];
+        if let Some((_, mining_limits)) = mining
+            && receipt.input.solution.is_some()
+        {
+            let prepared =
+                super::mining::prepare(&stored, &receipt, Some(receipt.share_key), mining_limits)?;
+            commands.extend(prepared.commands);
+            extra.extend(prepared.extra);
+        }
         drop(inbox);
         drop(stored);
-        let done = self.commit_extra(version, vec![command], extra, write)?;
+        let done = self.commit_extra(version, commands, extra, write)?;
         debug_assert!(
-            matches!(done.replies.as_slice(),[core::Reply::Record(r)] if matches!(&**r,core::Record::Share(s) if s.key==receipt.share_key))
+            matches!(done.replies.first(),Some(core::Reply::Record(r)) if matches!(&**r,core::Record::Share(s) if s.key==receipt.share_key))
         );
         Ok(receipt)
     }

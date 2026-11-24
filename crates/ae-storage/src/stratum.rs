@@ -10,6 +10,7 @@ use rocksdb::WriteBatch;
 use std::sync::Arc;
 
 pub mod ingress;
+pub mod mining;
 const RECORDS: u8 = 22;
 const METADATA: &[u8] = b"\0stratum";
 const MAX_RECORDS: usize = 1_000_000;
@@ -59,9 +60,20 @@ pub enum Failure {
     Storage(Error),
     Accounting(core::Error),
     Input(ae_stratum::Error),
+    Candidate(ae_stratum::candidate::Error),
     AlreadyRunning,
     RecoveryRequired,
     MutationInQuery,
+}
+impl Failure {
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Storage(Error::Conflict))
+    }
+}
+impl From<ae_stratum::candidate::Error> for Failure {
+    fn from(e: ae_stratum::candidate::Error) -> Self {
+        Self::Candidate(e)
+    }
 }
 impl From<Error> for Failure {
     fn from(e: Error) -> Self {
@@ -378,6 +390,7 @@ impl Stored<'_> {
             return Err(Error::Corrupt("Stratum metadata totals").into());
         }
         self.ingress(ingress::Limits::maximum())?.verify()?;
+        self.mining(mining::Limits::maximum())?.verify()?;
         Ok(())
     }
 }
@@ -575,6 +588,16 @@ impl Writer {
         extra: Vec<Extra>,
         write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
     ) -> Result<Commit, Failure> {
+        self.commit_checked(expected, commands, extra, Vec::new(), write)
+    }
+    fn commit_checked(
+        &mut self,
+        expected: Version,
+        commands: Vec<Command>,
+        extra: Vec<Extra>,
+        checks: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<Commit, Failure> {
         if self.recovery_required() {
             return Err(Failure::RecoveryRequired);
         }
@@ -586,6 +609,12 @@ impl Writer {
         let stored = self.db.stratum_snapshot(self.limits, *guard)?;
         if stored.version() != expected {
             return Err(Error::Conflict.into());
+        }
+        for (key, expected) in checks {
+            let actual = stored.source.snapshot.get_pinned(&key).map_err(backend)?;
+            if actual.as_deref() != expected.as_deref() {
+                return Err(Error::Conflict.into());
+            }
         }
         let before = stored.info;
         let mut after = before;

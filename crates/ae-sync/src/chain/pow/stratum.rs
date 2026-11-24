@@ -132,3 +132,36 @@ impl Prepared {
         self.candidate.parent()
     }
 }
+
+// A narrow borrowed handle for the accounting actor. The root importer owns
+// shutdown; this handle keeps the same database, policy and execution profile.
+type Submit = dyn Fn(&Sealed, u64, bool) -> Result<Admission, chain::Error> + Send + Sync;
+#[derive(Clone)]
+pub struct Admitter {
+    database: Arc<ae_storage::Database>,
+    submit: Arc<Submit>,
+}
+impl Admitter {
+    pub fn uses_database(&self, database: &Arc<ae_storage::Database>) -> bool {
+        Arc::ptr_eq(&self.database, database)
+    }
+    pub fn submit(
+        &self,
+        solution: &Sealed,
+        now_ms: u64,
+        strictly_follow_top: bool,
+    ) -> Result<Admission, chain::Error> {
+        (self.submit)(solution, now_ms, strictly_follow_top)
+    }
+}
+impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
+    pub fn stratum_admitter(&self) -> Admitter {
+        let importer = self.borrowed();
+        Admitter {
+            database: self.database().clone(),
+            submit: Arc::new(move |solution, now, strict| {
+                importer.import_stratum(solution, now, strict)
+            }),
+        }
+    }
+}

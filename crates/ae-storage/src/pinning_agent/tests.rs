@@ -235,7 +235,7 @@ fn quotas_corruption_and_schema_thirteen_upgrade_are_checked_before_publication(
     else {
         panic!()
     };
-    assert_eq!(fields[0], ae_trie::Value::Bytes(vec![16]));
+    assert_eq!(fields[0], ae_trie::Value::Bytes(vec![17]));
     fields[0] = ae_trie::Value::Bytes(vec![13]);
     let old = ae_trie::Value::List(fields).encode();
     db.db.put(repo::IDENTITY, &old).unwrap();
