@@ -1,6 +1,7 @@
 use crate::{
     Error, integer,
     nonce::Part,
+    proof::Proof,
     queue::Queue,
     share::{self, Share},
     target,
@@ -8,6 +9,9 @@ use crate::{
 use ae_types::Hash256;
 use num_bigint::BigInt;
 use std::collections::VecDeque;
+
+pub const MAX_JOB_SHARE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_RETAINED_SHARE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
@@ -50,12 +54,14 @@ impl Work {
 pub struct Limits {
     pub shares: usize,
     pub errors: usize,
+    pub bytes: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             shares: 4096,
             errors: 4096,
+            bytes: MAX_JOB_SHARE_BYTES,
         }
     }
 }
@@ -63,6 +69,9 @@ impl Limits {
     fn validate(self) -> Result<(), Error> {
         if self.shares > 65536 || self.errors > 65536 {
             return Err(Error::Limit("share capacity"));
+        }
+        if self.bytes > MAX_JOB_SHARE_BYTES {
+            return Err(Error::Limit("job share bytes"));
         }
         Ok(())
     }
@@ -78,6 +87,7 @@ pub struct Job {
     shares: VecDeque<Share>,
     errors: VecDeque<Share>,
     limits: Limits,
+    retained_bytes: usize,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timing {
@@ -116,6 +126,7 @@ impl Job {
             shares: VecDeque::new(),
             errors: VecDeque::new(),
             limits,
+            retained_bytes: 0,
         })
     }
     pub fn id(&self) -> &str {
@@ -152,7 +163,7 @@ impl Job {
             |s| &s.created - &self.created,
         )
     }
-    pub fn contains(&self, nonce: Part, proof: &[u32; 42]) -> bool {
+    pub fn contains(&self, nonce: Part, proof: &Proof) -> bool {
         self.shares.iter().any(|s| s.duplicates(nonce, proof))
     }
     pub fn add_share(&mut self, share: Share) -> Result<(), Error> {
@@ -160,6 +171,7 @@ impl Job {
         if self.shares.len() == self.limits.shares {
             return Err(Error::Limit("shares"));
         }
+        self.reserve_share(&share)?;
         self.shares.push_front(share);
         Ok(())
     }
@@ -168,17 +180,30 @@ impl Job {
         if self.errors.len() == self.limits.errors {
             return Err(Error::Limit("error shares"));
         }
+        self.reserve_share(&share)?;
         self.errors.push_front(share);
         Ok(())
     }
     fn retained(&self) -> usize {
         self.shares.len() + self.errors.len()
     }
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+    fn reserve_share(&mut self, share: &Share) -> Result<(), Error> {
+        let next = self.retained_bytes + share.retained_bytes();
+        if next > self.limits.bytes {
+            return Err(Error::Limit("job share bytes"));
+        }
+        self.retained_bytes = next;
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Jobs {
     queue: Queue<String, Job>,
     maximum_retained: usize,
+    maximum_bytes: usize,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
@@ -192,12 +217,23 @@ pub struct Receipt {
 }
 impl Jobs {
     pub fn new(capacity: usize, maximum_retained: usize) -> Result<Self, Error> {
+        Self::with_limits(capacity, maximum_retained, MAX_RETAINED_SHARE_BYTES)
+    }
+    pub fn with_limits(
+        capacity: usize,
+        maximum_retained: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, Error> {
         if maximum_retained > 65536 {
             return Err(Error::Limit("retained shares"));
+        }
+        if maximum_bytes > MAX_RETAINED_SHARE_BYTES {
+            return Err(Error::Limit("retained share bytes"));
         }
         Ok(Self {
             queue: Queue::new(capacity)?,
             maximum_retained,
+            maximum_bytes,
         })
     }
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Job> {
@@ -231,6 +267,15 @@ impl Jobs {
         if retained - evicted + job.retained() > self.maximum_retained {
             return Err(Error::Limit("retained shares"));
         }
+        let bytes: usize = self.iter().map(Job::retained_bytes).sum();
+        let evicted_bytes = if self.queue.is_full() {
+            self.front().map_or(0, Job::retained_bytes)
+        } else {
+            0
+        };
+        if bytes - evicted_bytes + job.retained_bytes() > self.maximum_bytes {
+            return Err(Error::Limit("retained share bytes"));
+        }
         Ok(self.queue.push(job.id.clone(), job).map(|(_, j)| j))
     }
     pub fn replace(&mut self, id: &str, job: Job) -> Result<(), Error> {
@@ -251,6 +296,20 @@ impl Jobs {
             .sum();
         if retained > self.maximum_retained {
             return Err(Error::Limit("retained shares"));
+        }
+        let bytes: usize = self
+            .queue
+            .iter()
+            .map(|(key, j)| {
+                if key == id {
+                    job.retained_bytes()
+                } else {
+                    j.retained_bytes()
+                }
+            })
+            .sum();
+        if bytes > self.maximum_bytes {
+            return Err(Error::Limit("retained share bytes"));
         }
         self.queue.replace(&id.to_owned(), job);
         Ok(())
@@ -292,7 +351,12 @@ impl Jobs {
                     effects.push(share::Effect::SubmitSolution {
                         hash: job.work().hash(),
                         nonce: decision.nonce.expect("verified block nonce"),
-                        proof: submitted.proof,
+                        proof: Box::new(
+                            submitted
+                                .proof
+                                .integer_edges()
+                                .expect("verified block proof"),
+                        ),
                     });
                 }
             } else {

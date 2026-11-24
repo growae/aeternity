@@ -54,7 +54,7 @@ fn effect(e: &Effect) -> Value {
     }
 }
 fn share_json(s: &Share) -> Value {
-    json!({"user":[s.user.account,s.user.worker],"miner_nonce":s.miner_nonce.to_hex(),"pow":s.proof.to_vec(),"created":number(&s.created),"validity":s.validity.map(validity)})
+    json!({"user":[s.user.account,s.user.worker],"miner_nonce":s.miner_nonce.to_hex(),"pow":s.proof.to_json(),"created":number(&s.created),"validity":s.validity.map(validity)})
 }
 fn job_json(j: &Job) -> Value {
     json!({"status":{"id":j.id(),"block_hash":j.work().hash_text(),"block_version":j.work().version,"block_target":target::to_hex(&j.work().block_target).unwrap(),"share_target":target::to_hex(&j.share_target()).unwrap(),"desired_solve_time":number(j.desired_solve_time()),"max_solve_time":number(j.maximum_solve_time()),"created":number(j.created()),"shares":j.shares().iter().map(share_json).collect::<Vec<_>>(),"error_shares":j.errors().iter().map(share_json).collect::<Vec<_>>()},"solve_time":number(&j.solve_time()),"submitted":j.is_submitted()})
@@ -66,7 +66,7 @@ fn make_share(nonce: Part, proof: [u32; 42], created: i64) -> Share {
             worker: "worker".into(),
         },
         miner_nonce: nonce,
-        proof,
+        proof: proof.into(),
         validity: None,
         created: created.into(),
     }

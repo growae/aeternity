@@ -773,8 +773,9 @@ pub fn share_response(id: &BigInt, response: crate::share::Response) -> Result<V
         }
     })
 }
-// Lossless domain conversion only; actual Cuckoo/target verification stays in
-// the work engine. In-range floating values accepted on the wire are rejected.
+// Canonical u32 domain conversion only, not submission validation. Sessions
+// retain the wire numbers using Proof::from_json and submit that complete share
+// to the work engine, preserving its earlier errors and arithmetic failures.
 pub fn proof(v: &Value) -> Option<[u32; 42]> {
     let a = v.as_array()?;
     if a.len() != 42 {

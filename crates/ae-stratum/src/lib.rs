@@ -3,6 +3,7 @@
 // Transport, registry ownership, persistence and node admission are separate.
 pub mod job;
 pub mod nonce;
+pub mod proof;
 pub mod queue;
 pub mod share;
 pub mod target;
@@ -15,6 +16,10 @@ pub enum Error {
     Integer,
     Arithmetic,
     Float,
+    Proof,
+    // Original Cuckoo numeric fold raises badarith. This is terminal for the
+    // submitting session, not an invalid_solution response or retained error.
+    ProofArithmetic,
     Version,
     Hash,
     Configuration,

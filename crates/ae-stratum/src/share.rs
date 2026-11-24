@@ -2,6 +2,7 @@ use crate::{
     Error, integer,
     job::Job,
     nonce::{Kind, Nonce, Part},
+    proof::Proof,
 };
 use ae_consensus::cuckoo;
 use ae_types::Hash256;
@@ -68,14 +69,14 @@ pub enum Effect {
     SubmitSolution {
         hash: Hash256,
         nonce: Nonce,
-        proof: [u32; 42],
+        proof: Box<[u64; 42]>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Share {
     pub user: User,
     pub miner_nonce: Part,
-    pub proof: [u32; 42],
+    pub proof: Proof,
     pub validity: Option<Validity>,
     pub created: BigInt,
 }
@@ -86,8 +87,14 @@ impl Share {
         }
         integer(&self.created)
     }
-    pub fn duplicates(&self, nonce: Part, proof: &[u32; 42]) -> bool {
-        self.miner_nonce == nonce && &self.proof == proof
+    pub fn retained_bytes(&self) -> usize {
+        256 + self.user.account.len()
+            + self.user.worker.len()
+            + self.created.bits().div_ceil(8) as usize
+            + self.proof.retained_bytes()
+    }
+    pub fn duplicates(&self, nonce: Part, proof: &Proof) -> bool {
+        self.miner_nonce == nonce && self.proof.duplicates(proof)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +139,9 @@ pub fn classify(
         return rejected(Validity::DuplicateShare);
     }
     let nonce = context.extra_nonce.merge(share.miner_nonce)?;
-    let proof = share.proof.map(u64::from);
+    let Some(proof) = share.proof.checked_edges(context.edge_bits)? else {
+        return rejected(Validity::InvalidSolution);
+    };
     if !cuckoo::verify_proof_from_hash(job.work().hash(), nonce.0, &proof, context.edge_bits) {
         return rejected(Validity::InvalidSolution);
     }

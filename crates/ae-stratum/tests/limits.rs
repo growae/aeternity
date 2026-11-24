@@ -15,7 +15,7 @@ fn share() -> Share {
             worker: "w".into(),
         },
         miner_nonce: Part::new(Kind::Miner, 1, 4).unwrap(),
-        proof: [1; 42],
+        proof: [1; 42].into(),
         validity: None,
         created: 1001.into(),
     }
@@ -132,6 +132,7 @@ fn job_and_queue_limits_leave_original_state_available_for_retry() {
         Limits {
             shares: 1,
             errors: 1,
+            ..Limits::default()
         },
     );
     j.add_share(share()).unwrap();
@@ -167,7 +168,8 @@ fn job_and_queue_limits_leave_original_state_available_for_retry() {
             },
             Limits {
                 shares: 65537,
-                errors: 1
+                errors: 1,
+                ..Limits::default()
             }
         )
         .is_err()
