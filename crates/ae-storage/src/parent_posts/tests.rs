@@ -211,7 +211,7 @@ fn schema_upgrade_validates_journal_and_preserves_canonical_pool_and_peer_metada
         else {
             panic!()
         };
-        assert_eq!(fields[0], number(14));
+        assert_eq!(fields[0], number(15));
         fields[0] = number(11);
         let legacy = Value::List(fields).encode();
         db.db.put(repo::IDENTITY, &legacy).unwrap();

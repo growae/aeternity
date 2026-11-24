@@ -25,6 +25,7 @@ pub mod pool;
 pub mod pow;
 pub mod replay;
 pub mod snapshots;
+pub mod stratum;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Notifications {
@@ -48,6 +49,7 @@ pub struct Database {
     pool_worker: Mutex<std::sync::Weak<pool::worker::Shared>>,
     peer_owner: Mutex<std::sync::Weak<()>>,
     parent_posts_owner: Mutex<std::sync::Weak<()>>,
+    stratum_owner: Mutex<std::sync::Weak<()>>,
     pinning_children_owner: Mutex<std::sync::Weak<()>>,
     pinning_agent_owner: Mutex<std::sync::Weak<()>>,
     hyperchain_owner: Mutex<std::sync::Weak<()>>,
@@ -249,6 +251,7 @@ impl Database {
             pool_worker: Mutex::new(Default::default()),
             peer_owner: Mutex::new(Default::default()),
             parent_posts_owner: Mutex::new(Default::default()),
+            stratum_owner: Mutex::new(Default::default()),
             pinning_children_owner: Mutex::new(Default::default()),
             pinning_agent_owner: Mutex::new(Default::default()),
             hyperchain_owner: Mutex::new(Default::default()),
@@ -269,6 +272,7 @@ impl Database {
         result.validate_pool()?;
         result.validate_peers()?;
         result.validate_parent_posts()?;
+        result.validate_stratum()?;
         result.validate_pinning_children()?;
         result.validate_pinning_agent()?;
         if upgrade {

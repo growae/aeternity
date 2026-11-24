@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ae-stratum.workspace = true
 num-bigint.workspace = true
 ae-chain.workspace = true
 ae-execution.workspace = true

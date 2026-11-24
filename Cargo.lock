@@ -198,6 +198,7 @@ dependencies = [
  "ae-mempool",
  "ae-protocol",
  "ae-state",
+ "ae-stratum",
  "ae-trie",
  "ae-tx",
  "ae-types",

@@ -483,7 +483,16 @@ fn finalized_record_corruption_and_future_schema_never_reinitialize_storage() {
     let List(mut fields) = ae_trie::Value::decode(&id.encode()).unwrap() else {
         panic!()
     };
-    fields[0] = Bytes(vec![15]);
+    let Bytes(version) = &fields[0] else { panic!() };
+    let version = ae_types::Unsigned::from_field_bytes(version)
+        .unwrap()
+        .to_u64()
+        .unwrap();
+    fields[0] = Bytes(
+        ae_types::Unsigned::from(version.checked_add(1).unwrap())
+            .as_bytes()
+            .to_vec(),
+    );
     let encoded = List(fields).encode();
     db.db.put(repo::IDENTITY, &encoded).unwrap();
     drop(db);
