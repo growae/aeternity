@@ -245,6 +245,7 @@ dependencies = [
  "ae-protocol",
  "ae-state",
  "ae-storage",
+ "ae-stratum",
  "ae-trie",
  "ae-tx",
  "ae-types",

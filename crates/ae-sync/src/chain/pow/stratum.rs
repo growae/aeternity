@@ -1,0 +1,134 @@
+// Canonical work preparation and ordinary Created admission for Stratum.
+// This boundary does not drain durable pool receipts or mutate accounting.
+use super::preparation;
+use crate::chain::{self, Importer};
+use ae_storage::snapshots;
+use ae_stratum::candidate::{Candidate, Sealed};
+use ae_types::Hash256;
+use ae_vm_fate::maps::MapOrder;
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub enum Error {
+    Preparation(preparation::Error),
+    Binding,
+    Candidate(ae_stratum::candidate::Error),
+}
+#[derive(Debug)]
+pub struct Prepared {
+    pub id: preparation::Id,
+    pub request: preparation::Request,
+    pub calculation_time: u64,
+    pub final_time: u64,
+    pub source: snapshots::Metadata,
+    candidate: Arc<Candidate>,
+}
+impl Prepared {
+    pub fn from_completion(completion: preparation::Completion) -> Result<Self, Error> {
+        let preparation::Completion {
+            id,
+            request,
+            calculation_time,
+            final_time,
+            result,
+        } = completion;
+        let prepared = result.map_err(Error::Preparation)?;
+        let calculation_time = calculation_time.ok_or(Error::Binding)?;
+        let final_time = final_time.ok_or(Error::Binding)?;
+        if prepared.header.common.previous_hash != request.parent.0
+            || prepared.header.miner != request.miner.0
+            || prepared.header.beneficiary != request.beneficiary.0
+            || prepared.state.value.candidate.temporary().time != calculation_time
+            || prepared.state.value.candidate.temporary().info
+                != (prepared.header.common.version >= 2)
+                    .then_some(request.release_info.to_be_bytes())
+            || prepared.state.metadata.status != prepared.state.value.status
+            || prepared.state.metadata.source_id != prepared.state.value.source_id
+            || prepared
+                .state
+                .value
+                .finish(final_time)
+                .map_err(|_| Error::Binding)?
+                != prepared.header
+        {
+            return Err(Error::Binding);
+        }
+        let candidate = Arc::new(Candidate::new(prepared.header).map_err(Error::Candidate)?);
+        // A work record needs frozen bytes, not a live trie/snapshot lease.
+        Ok(Self {
+            id,
+            request,
+            calculation_time,
+            final_time,
+            source: prepared.state.metadata,
+            candidate,
+        })
+    }
+    pub fn candidate(&self) -> &Arc<Candidate> {
+        &self.candidate
+    }
+}
+
+// The exact submission and final outcome remain together. Empty polling is
+// neither a timeout nor permission to repeat an accepted submission. The
+// caller retains this handle until its outcome has been durably reconciled.
+pub struct Admission {
+    solution: Sealed,
+    ticket: chain::Ticket,
+    result: Option<Result<chain::Report, chain::Failure>>,
+}
+impl Admission {
+    pub fn solution(&self) -> &Sealed {
+        &self.solution
+    }
+    pub fn result(&self) -> Option<&Result<chain::Report, chain::Failure>> {
+        self.result.as_ref()
+    }
+    pub fn poll(&mut self) -> Option<&Result<chain::Report, chain::Failure>> {
+        if self.result.is_none() {
+            self.result = self.ticket.try_result();
+        }
+        self.result()
+    }
+    pub fn cancel(&self) {
+        self.ticket.cancel();
+    }
+}
+impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
+    pub fn stratum_builder(
+        &self,
+        snapshots: snapshots::Owner,
+        limits: ae_chain::repository::pow::key::Limits,
+    ) -> Result<preparation::Builder<O>, super::producer::mining::Error> {
+        if !snapshots.uses_database(self.database()) {
+            return Err(super::producer::mining::Error::Binding);
+        }
+        self.pow_preparation(snapshots, limits)
+    }
+    pub fn import_stratum(
+        &self,
+        solution: &Sealed,
+        now_ms: u64,
+        strictly_follow_top: bool,
+    ) -> Result<Admission, chain::Error> {
+        if self.consensus() != ae_protocol::ConsensusType::Pow {
+            return Err(chain::Error::WrongConsensus);
+        }
+        let ticket = if strictly_follow_top {
+            self.import_created_block_at(solution.bytes().to_vec(), now_ms, solution.parent())?
+        } else {
+            self.import_created_block(solution.bytes().to_vec(), now_ms)?
+        };
+        Ok(Admission {
+            solution: solution.clone(),
+            ticket,
+            result: None,
+        })
+    }
+}
+
+impl Prepared {
+    pub fn parent(&self) -> Hash256 {
+        self.candidate.parent()
+    }
+}

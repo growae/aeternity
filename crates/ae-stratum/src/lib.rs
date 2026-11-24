@@ -2,6 +2,7 @@
 // Aeternity fa2a6d7 and aestratum_lib 17b56c5: pool work and session services.
 // Transport, persistence and node admission are separate.
 pub mod accounting;
+pub mod candidate;
 pub mod ingress;
 pub mod job;
 pub mod nonce;

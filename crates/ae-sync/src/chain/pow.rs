@@ -5,3 +5,4 @@ pub mod miner;
 pub mod packing;
 pub mod preparation;
 pub mod producer;
+pub mod stratum;
