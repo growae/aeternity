@@ -40,7 +40,7 @@ use ae_stratum::{ingress::Solution, nonce::Nonce, runtime::pool::Sink};
 use ae_sync::chain::pow::{preparation, stratum::Prepared};
 use ae_types::{AccountPublicKey, Hash256};
 #[path = "../../../../ae-sync/tests/common/ledger_fixtures.rs"]
-mod fixture;
+pub(super) mod fixture;
 const WALL: u64 = u64::MAX - 600_000;
 struct ClockValue(i128);
 impl Clock for ClockValue {
@@ -100,6 +100,7 @@ fn inputs(importer: &chain::Importer) -> Inputs {
         clock: Arc::new(ClockValue(WALL.into())),
         production: None,
         rounds: None,
+        payouts: None,
     }
 }
 fn start(db: &Arc<Database>, importer: &chain::Importer) -> Accounting {

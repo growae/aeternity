@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ae-chain.workspace = true
+ae-mempool.workspace = true
 ae-types.workspace = true
 ae-stratum.workspace = true
 ae-sync.workspace = true
@@ -20,7 +21,6 @@ ae-codec.workspace = true
 ae-crypto.workspace = true
 ae-execution.workspace = true
 ae-hyperchain.workspace = true
-ae-mempool.workspace = true
 ae-protocol.workspace = true
 ae-state.workspace = true
 ae-trie.workspace = true

@@ -1,6 +1,7 @@
 // One ordered accounting owner publishes work, records solutions, and joins
 // ordinary chain admissions. A miner acknowledgement confirms accounting only.
 use super::*;
+pub mod payouts;
 pub mod production;
 pub mod rounds;
 use ae_storage::stratum::mining as journal;
@@ -25,6 +26,7 @@ pub struct Inputs {
     pub clock: Arc<dyn Clock>,
     pub production: Option<production::Inputs>,
     pub rounds: Option<rounds::Inputs>,
+    pub payouts: Option<payouts::Inputs>,
 }
 #[derive(Clone)]
 pub(super) struct Read {
@@ -34,6 +36,7 @@ pub(super) struct Read {
     epoch: u64,
     production: Option<Arc<production::Shared>>,
     rounds: Option<storage::rounds::Limits>,
+    payouts: Option<Arc<payouts::Shared>>,
 }
 #[derive(Clone)]
 pub struct Client(pub(super) super::Client);
@@ -77,6 +80,17 @@ impl Job {
     }
 }
 impl Client {
+    pub fn payout_status(&self) -> Option<payouts::Status> {
+        self.read().payouts.as_ref().map(|p| p.status())
+    }
+    pub fn payout(&self) -> Result<Option<storage::payouts::Info>, Error> {
+        let r = self.read();
+        r.payouts
+            .as_ref()
+            .map(|p| Ok(r.db.stratum(r.accounting)?.payouts(p.limits)?))
+            .transpose()
+            .map(Option::flatten)
+    }
     pub fn rounds(&self) -> Result<Option<storage::rounds::Info>, Error> {
         self.read()
             .rounds
@@ -100,6 +114,11 @@ impl Client {
             .as_ref()
             .ok_or(Error::Configuration)?
             .attach(services)
+    }
+    pub(super) fn stop_payouts(&self) {
+        if let Some(p) = &self.read().payouts {
+            p.stop();
+        }
     }
     pub(super) fn stop_production(&self) {
         if let Some(p) = &self.read().production {
@@ -234,6 +253,7 @@ pub(super) struct Worker {
     epoch: journal::Epoch,
     production: Option<production::Worker>,
     rounds: Option<storage::rounds::Limits>,
+    payouts: Option<payouts::Worker>,
     inflight: Option<Inflight>,
     retry_at: Instant,
 }
@@ -245,6 +265,16 @@ impl Worker {
         ingress: IngressLimits,
         mut inputs: Inputs,
     ) -> Result<Self, Error> {
+        if inputs.payouts.is_some() && inputs.rounds.is_none() {
+            return Err(Error::Configuration);
+        }
+        let payouts = inputs
+            .payouts
+            .take()
+            .map(|config| {
+                payouts::Worker::start(writer, db.clone(), accounting, config, inputs.clock.clone())
+            })
+            .transpose()?;
         let production = inputs
             .production
             .take()
@@ -264,9 +294,11 @@ impl Worker {
                 epoch: epoch.value(),
                 production: production.as_ref().map(|p| p.shared.clone()),
                 rounds,
+                payouts: payouts.as_ref().map(|p| p.shared.clone()),
             },
             production,
             rounds,
+            payouts,
             inputs,
             epoch,
             inflight: None,
@@ -375,8 +407,16 @@ impl Worker {
         writer: &mut storage::Writer,
         dispatch: bool,
     ) -> Result<(), Error> {
-        if dispatch && let Some(limits) = self.rounds {
-            rounds::tick(writer, limits)?;
+        if dispatch
+            && let Some(limits) = self.rounds
+            && let Some(receipt) = rounds::tick(writer, limits)?
+            && matches!(receipt.outcome, storage::rounds::Outcome::Reward { .. })
+            && let Some(payouts) = self.payouts.as_mut()
+        {
+            payouts.request_check();
+        }
+        if let Some(payouts) = self.payouts.as_mut() {
+            payouts.tick(writer, dispatch, Instant::now())?;
         }
         let frame = retry(writer, |w| w.refresh_work(&self.epoch, self.inputs.limits))?;
         if let Some(production) = self.production.as_mut() {
@@ -433,7 +473,13 @@ impl Worker {
         if let Some(inflight) = self.inflight.as_mut() {
             inflight.join();
         }
+        if let Some(payouts) = self.payouts.as_mut() {
+            payouts.finish(writer)?;
+        }
         self.tick(writer, false)
+    }
+    pub(super) fn payout_report(&mut self) -> Option<payouts::Report> {
+        self.payouts.take().map(|mut p| p.report())
     }
     pub(super) fn production_report(&mut self) -> Option<production::Report> {
         self.production.take().map(|p| p.finish())

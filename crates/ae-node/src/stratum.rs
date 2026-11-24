@@ -43,6 +43,8 @@ pub enum Error {
     Mining(&'static str),
     Services(services::Error),
     PreparationSetup(ae_sync::chain::pow::producer::mining::Error),
+    PayoutPool(ae_storage::pool::worker::Error),
+    PayoutSigner(ae_sync::preset_keys::Error),
 }
 impl From<storage::Failure> for Error {
     fn from(e: storage::Failure) -> Self {
@@ -155,6 +157,9 @@ impl Client {
             .take()
     }
     pub fn close(&self) {
+        if let Some(mining) = self.mining() {
+            mining.stop_payouts();
+        }
         self.shared
             .state
             .lock()
@@ -214,6 +219,7 @@ pub struct Report {
     pub controls: Vec<mining::Pending>,
     pub admission: Option<mining::Unsettled>,
     pub production: Option<mining::production::Report>,
+    pub payout: Option<mining::payouts::Report>,
 }
 pub struct Accounting {
     client: Client,
@@ -474,6 +480,7 @@ fn run(
         }
         report.admission = w.unsettled();
         report.production = w.production_report();
+        report.payout = w.payout_report();
     }
     report
 }

@@ -49,6 +49,27 @@ impl Limits {
         Ok(())
     }
 }
+#[derive(Clone, Copy)]
+pub(super) struct Owner {
+    epoch: u64,
+    limits: Limits,
+}
+// Native top_changed uses the notification height and queries balance when the
+// callback runs. Publish context in the same batch as the round mailbox step.
+pub(super) fn round_context(
+    s: &Stored<'_>,
+    v: &repo::View<Snapshot<'_>>,
+    owner: Owner,
+    height: u64,
+) -> Result<Extra, Failure> {
+    let mut info = s.payouts(owner.limits)?.ok_or(Error::Uninitialized)?;
+    if info.epoch != owner.epoch {
+        return Err(Error::Conflict.into());
+    }
+    info.context = context(v, &info.config, Some(info.context.protocol), owner.limits)?;
+    info.context.height = height;
+    extra(s, &info, owner.limits)
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub caller: AccountPublicKey,
@@ -242,7 +263,7 @@ impl Writer {
         self.version()?;
         let stored = self.db.stratum(self.limits)?;
         let info = stored.payouts(limits)?.ok_or(Error::Uninitialized)?;
-        if self.payout_epoch != Some(epoch) || info.epoch != epoch {
+        if self.payout_owner.map(|o| o.epoch) != Some(epoch) || info.epoch != epoch {
             return Err(Error::Conflict.into());
         }
         Ok((stored, info))
@@ -262,13 +283,16 @@ impl Writer {
         if old.as_ref().is_some_and(|i| i.config != config) {
             return Err(Error::Identity.into());
         }
-        if let Some(i) = old.as_ref().filter(|i| Some(i.epoch) == self.payout_epoch) {
+        if let Some(i) = old
+            .as_ref()
+            .filter(|i| Some(i.epoch) == self.payout_owner.map(|o| o.epoch))
+        {
             return Ok(i.clone());
         }
         let epoch = old.as_ref().map_or(Ok(1), |i| {
             i.epoch.checked_add(1).ok_or(Error::ResourceLimit)
         })?;
-        if self.payout_epoch.is_some_and(|e| e != epoch) {
+        if self.payout_owner.is_some_and(|o| o.epoch != epoch) {
             return Err(Error::Conflict.into());
         }
         let v = view(&s, self.db.config.clone())?;
@@ -306,7 +330,7 @@ impl Writer {
         let checks = vec![status(&s)?];
         drop(v);
         drop(s);
-        self.payout_epoch = Some(epoch);
+        self.payout_owner = Some(Owner { epoch, limits });
         self.commit_checked(version, vec![], changes, checks, |db, b| {
             write(Stage::Initialize, db, b)
         })?;
@@ -691,11 +715,31 @@ impl Writer {
     ) -> Result<Confirmation, Failure> {
         self.confirm_payout_with(epoch, expected, limits, |_, db, b| write(db, b))
     }
+    // The timer cannot run ahead of its processed key notifications, nor can
+    // an old cached height bypass the current canonical depth after a reorg.
+    pub fn confirm_scheduled_payout(
+        &mut self,
+        epoch: u64,
+        expected: &Record,
+        limits: Limits,
+    ) -> Result<Confirmation, Failure> {
+        self.confirm_payout_at(epoch, expected, limits, true, |_, db, b| write(db, b))
+    }
     fn confirm_payout_with(
         &mut self,
         epoch: u64,
         expected: &Record,
         limits: Limits,
+        write: impl FnMut(Stage, &Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<Confirmation, Failure> {
+        self.confirm_payout_at(epoch, expected, limits, false, write)
+    }
+    fn confirm_payout_at(
+        &mut self,
+        epoch: u64,
+        expected: &Record,
+        limits: Limits,
+        cached: bool,
         mut write: impl FnMut(Stage, &Database, WriteBatch) -> Result<(), Error>,
     ) -> Result<Confirmation, Failure> {
         let (s, mut info) = self.payout_info(epoch, limits)?;
@@ -731,9 +775,13 @@ impl Writer {
             return Err(Error::TransactionMetadataConflict.into());
         }
         let height = b.header.common.height;
-        if top(&v)?
-            .common
-            .height
+        let top_height = top(&v)?.common.height;
+        let confirmed_height = if cached {
+            top_height.min(info.context.height)
+        } else {
+            top_height
+        };
+        if confirmed_height
             .checked_sub(height)
             .is_none_or(|n| n < info.config.delay)
         {

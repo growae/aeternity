@@ -1,6 +1,6 @@
 // The mining/accounting actor owns both callbacks and their single Writer.
 use super::*;
-use storage::rounds::{Config, Info, Limits};
+use storage::rounds::{Config, Limits, Receipt};
 pub struct Inputs {
     pub config: Config,
     pub limits: Limits,
@@ -24,10 +24,10 @@ pub(super) fn start(writer: &mut storage::Writer, inputs: Inputs) -> Result<Limi
     }
     Ok(inputs.limits)
 }
-pub(super) fn tick(writer: &mut storage::Writer, limits: Limits) -> Result<Info, Error> {
+pub(super) fn tick(writer: &mut storage::Writer, limits: Limits) -> Result<Option<Receipt>, Error> {
     let info = retry(writer, |w| w.capture_rounds(limits))?;
     if !info.pending.is_empty() {
-        retry(writer, |w| w.step_rounds(info.next, limits))?;
+        return Ok(Some(retry(writer, |w| w.step_rounds(info.next, limits))?));
     }
-    Ok(info)
+    Ok(None)
 }

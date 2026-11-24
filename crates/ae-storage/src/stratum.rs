@@ -553,7 +553,7 @@ pub struct Writer {
     pending: Option<Pending>,
     work_revision: Option<u64>,
     work_reset: u64,
-    payout_epoch: Option<u64>,
+    payout_owner: Option<payouts::Owner>,
 }
 impl Writer {
     pub fn start(db: Arc<Database>, limits: Limits) -> Result<Self, Failure> {
@@ -574,7 +574,7 @@ impl Writer {
             pending: None,
             work_revision: None,
             work_reset: 0,
-            payout_epoch: None,
+            payout_owner: None,
         })
     }
     pub fn recovery_required(&self) -> bool {

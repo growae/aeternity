@@ -930,3 +930,5 @@ fn schema_upgrade_preserves_bindings_and_rejects_corrupt_or_oversized_pending_in
 }
 
 mod reference;
+
+mod rounds;

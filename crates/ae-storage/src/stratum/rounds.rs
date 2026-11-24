@@ -300,7 +300,7 @@ fn extra(stored: &Stored<'_>, info: &Info, limits: Limits) -> Result<Extra, Fail
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
+pub(super) enum Stage {
     Initialize,
     Capture,
     Round,
@@ -412,7 +412,7 @@ impl Writer {
             db.db.write_opt(b, &write_options()).map_err(backend)
         })
     }
-    fn step_rounds_with(
+    pub(super) fn step_rounds_with(
         &mut self,
         sequence: u64,
         limits: Limits,
@@ -484,7 +484,17 @@ impl Writer {
                 }
             };
             info.complete(receipt.clone())?;
-            let changes = vec![extra(&stored, &info, limits)?];
+            let mut changes = vec![extra(&stored, &info, limits)?];
+            if receipt.outcome == Outcome::Top
+                && let Some(owner) = self.payout_owner
+            {
+                changes.push(super::payouts::round_context(
+                    &stored,
+                    &view,
+                    owner,
+                    receipt.height,
+                )?);
+            }
             let checks = vec![status(&stored)?];
             drop(view);
             drop(stored);

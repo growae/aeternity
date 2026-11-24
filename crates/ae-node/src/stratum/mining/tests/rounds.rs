@@ -242,3 +242,62 @@ fn resource_failure_retains_computation_and_restart_finishes_before_opening_ingr
     assert!(next.shutdown().failure.is_none());
     stop(importer);
 }
+#[test]
+fn canonical_reward_callback_triggers_payout_before_the_periodic_timer() {
+    use ae_storage::pool::worker as txpool;
+    use ae_sync::preset_keys;
+    let temp = Temp::new();
+    let db = open(&temp);
+    let importer = importer(&db, 1);
+    let pool = txpool::Worker::spawn(
+        db.clone(),
+        NetworkProfile::mainnet(),
+        Default::default(),
+        txpool::Settings {
+            origins_interval: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let keys = preset_keys::Worker::spawn(Default::default(), Default::default()).unwrap();
+    let mut i = configured(&importer);
+    i.payouts = Some(super::super::payouts::Inputs::new(
+        storage::payouts::Config {
+            caller: AccountPublicKey([17; 32]),
+            contract: ae_types::ContractPublicKey([18; 32]),
+            delay: 180,
+        },
+        keys.client(),
+        pool.client(),
+    ));
+    let owner = Accounting::start_mining(
+        db.clone(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        i,
+    )
+    .unwrap();
+    let client = owner.client().mining().unwrap();
+    assert_eq!(pool.client().info().submitted, 0);
+    submit_first(&owner);
+    drained(&db, &client, 1);
+    until(|| {
+        matches!(
+            client.payout_status().unwrap().last,
+            Some(super::super::payouts::Notice::Deferred(
+                storage::payouts::Deferred::BalanceUnavailable
+            ))
+        )
+    });
+    let context = client.payout().unwrap().unwrap().context;
+    assert_eq!(context.height, 1);
+    assert_eq!(context.protocol, ae_protocol::Protocol::Roma);
+    assert_eq!(pool.client().info().submitted, 1);
+    let report = owner.shutdown();
+    assert!(report.failure.is_none(), "{:?}", report.failure);
+    assert!(report.payout.unwrap().unsettled.is_none());
+    pool.shutdown().unwrap();
+    keys.retire();
+    stop(importer);
+}
