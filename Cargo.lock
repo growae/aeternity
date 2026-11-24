@@ -210,6 +210,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-stratum"
+version = "0.1.0"
+dependencies = [
+ "ae-consensus",
+ "ae-crypto",
+ "ae-types",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "serde_json",
+]
+
+[[package]]
 name = "ae-sync"
 version = "0.1.0"
 dependencies = [
