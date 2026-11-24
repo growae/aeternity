@@ -383,6 +383,25 @@ impl Writer {
         epoch: u64,
         price: Unsigned,
         limits: Limits,
+        write: impl FnMut(Stage, &Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<Selection, Failure> {
+        self.prepare_generated_with(epoch, price, payout::Generation::Native, limits, write)
+    }
+    pub fn prepare_payout_with_generation(
+        &mut self,
+        epoch: u64,
+        price: Unsigned,
+        generation: payout::Generation,
+        limits: Limits,
+    ) -> Result<Selection, Failure> {
+        self.prepare_generated_with(epoch, price, generation, limits, |_, db, b| write(db, b))
+    }
+    fn prepare_generated_with(
+        &mut self,
+        epoch: u64,
+        price: Unsigned,
+        generation: payout::Generation,
+        limits: Limits,
         mut write: impl FnMut(Stage, &Database, WriteBatch) -> Result<(), Error>,
     ) -> Result<Selection, Failure> {
         let (s, mut info) = self.payout_info(epoch, limits)?;
@@ -417,11 +436,12 @@ impl Writer {
             height: info.context.height,
             protocol: info.context.protocol,
         };
-        let prepared = payout::prepare(
+        let prepared = payout::prepare_with_generation(
             &p,
             &environment,
             Some(account.balance()),
             &info.network,
+            generation,
             limits.payout,
         )?;
         let r = Record {

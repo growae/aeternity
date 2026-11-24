@@ -152,7 +152,9 @@ impl Clock for Wall {
     }
 }
 fn inputs(s: &keys::Worker, p: &txpool::Worker) -> Inputs {
-    Inputs::new(config(), s.client(), p.client())
+    let mut inputs = Inputs::new(config(), s.client(), p.client());
+    inputs.generation = ae_stratum::payout::Generation::Native;
+    inputs
 }
 fn actor(
     db: &Arc<Database>,
@@ -891,4 +893,95 @@ fn failed_or_unavailable_confirmation_holds_real_dispatch_until_canonical_rechec
         p.shutdown().unwrap();
         s.retire();
     }
+}
+
+#[test]
+fn default_live_payout_generation_uses_captured_execution_gas_and_restart_keeps_the_same_request() {
+    let t = Temp::new();
+    let db = database(&t);
+    seed(&db, payment());
+    let p = pool(&db, 1);
+    let s = signer();
+    let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
+    let i = Inputs::new(config(), s.client(), p.client());
+    assert_eq!(
+        i.generation,
+        ae_stratum::payout::Generation::Bounded(Default::default())
+    );
+    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    a.request_check();
+    let r = accepted(&mut a, &mut w);
+    let plan = &r.request.as_ref().unwrap().prepared;
+    assert_eq!(plan.call().transaction().gas(), &Unsigned::from(22250));
+    assert_eq!(
+        plan.generation(),
+        ae_stratum::payout::Generation::Bounded(Default::default())
+    );
+    let signed = r.signed.as_ref().unwrap().transaction.clone();
+    a.finish(&mut w).unwrap();
+    drop(a);
+    drop(w);
+    let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
+    let mut i = Inputs::new(config(), s.client(), p.client());
+    i.generation = ae_stratum::payout::Generation::Native;
+    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    assert_eq!(
+        stored(&db).pending.unwrap().signed.unwrap().transaction,
+        signed
+    );
+    a.finish(&mut w).unwrap();
+    p.shutdown().unwrap();
+    s.retire();
+}
+
+#[test]
+fn default_payout_transfer_limit_holds_the_original_obligation_before_signing_or_pool_dispatch() {
+    let t = Temp::new();
+    let db = database(&t);
+    let mut pay = payment();
+    pay.relative = (1..=201)
+        .map(|n| {
+            (
+                ae_codec::api::encode(ae_codec::api::ApiType::AccountPubkey, &key(n)).into_bytes(),
+                Number::Float((1.0f64 / 201.0).to_bits()),
+            )
+        })
+        .collect();
+    seed(&db, pay.clone());
+    let p = pool(&db, 1);
+    let s = signer();
+    let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
+    let i = Inputs::new(config(), s.client(), p.client());
+    let mut a = Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
+    for _ in 0..2 {
+        a.request_check();
+        until(|| {
+            tick(&mut a, &mut w);
+            a.pending.is_none()
+                && matches!(
+                    a.shared.status().last,
+                    Some(Notice::Preparation(
+                        ae_stratum::payout::Error::TransferLimit {
+                            actual: 201,
+                            maximum: 200
+                        }
+                    ))
+                )
+        });
+    }
+    // submitted counts both pricing queries, not just transaction pushes.
+    let pool_info = p.client().info();
+    assert_eq!(pool_info.submitted, 2);
+    assert_eq!((pool_info.pool.active, pool_info.pool.visited), (0, 0));
+    assert!(stored(&db).pending.is_none());
+    assert_eq!(stored(&db).next, 1);
+    let found = db
+        .stratum(Default::default())
+        .unwrap()
+        .query(|t| t.payments(100))
+        .unwrap();
+    assert_eq!(found, vec![pay]);
+    a.finish(&mut w).unwrap();
+    p.shutdown().unwrap();
+    s.retire();
 }

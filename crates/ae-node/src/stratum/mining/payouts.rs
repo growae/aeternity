@@ -10,6 +10,7 @@ use storage::payouts::{self as durable, Dispatch, Record};
 pub struct Inputs {
     pub config: durable::Config,
     pub limits: durable::Limits,
+    pub generation: ae_stratum::payout::Generation,
     pub signer: keys::Client,
     pub pool: txpool::Client,
     pub payout_interval: Duration,
@@ -20,6 +21,7 @@ impl Inputs {
         Self {
             config,
             limits: Default::default(),
+            generation: ae_stratum::payout::Generation::Bounded(Default::default()),
             signer,
             pool,
             payout_interval: Duration::from_secs(120),
@@ -27,7 +29,8 @@ impl Inputs {
         }
     }
     fn validate(&self, db: &Arc<Database>) -> Result<(), Error> {
-        if !self.pool.uses_database(db)
+        if self.generation.validate().is_err()
+            || !self.pool.uses_database(db)
             || [self.payout_interval, self.confirmation_interval]
                 .iter()
                 .any(|d| *d < Duration::from_millis(1) || *d > Duration::from_secs(86400))
@@ -270,7 +273,14 @@ impl Worker {
                 ..
             } => match result {
                 Ok(price) if dispatch => {
-                    match retry(writer, |w| w.prepare_payout(epoch, price.clone(), limits)) {
+                    match retry(writer, |w| {
+                        w.prepare_payout_with_generation(
+                            epoch,
+                            price.clone(),
+                            self.inputs.generation,
+                            limits,
+                        )
+                    }) {
                         Ok(durable::Selection::Prepared(_) | durable::Selection::Existing(_)) => {
                             self.check = true
                         }

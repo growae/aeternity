@@ -440,3 +440,6 @@ fn prepared_envelopes_reject_mismatched_payloads_corruption_versions_and_resourc
         prepared.signing_bytes()
     );
 }
+
+#[path = "payout/gas.rs"]
+mod gas;

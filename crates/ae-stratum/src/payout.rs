@@ -15,10 +15,26 @@ use ae_vm_aevm::heap::{self, Type, Value};
 use ae_vm_fate::maps::Traversal;
 use num_bigint::{BigInt, Sign};
 mod codec;
+mod gas;
+pub use gas::{GasPolicy, Generation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Limit,
+    GasPolicy,
+    TransferLimit {
+        actual: usize,
+        maximum: u32,
+    },
+    BlockGas {
+        declared: Unsigned,
+        maximum: u64,
+    },
+    AmountWord,
+    OverGross {
+        gross: BigInt,
+        maximum_cost: BigInt,
+    },
     Address,
     NegativeAmount,
     AlreadySent,
@@ -290,6 +306,7 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     request: Request,
+    generation: Generation,
     net: BigInt,
     absolute: Amounts,
     estimate: Call,
@@ -297,6 +314,9 @@ pub struct Prepared {
     signing_bytes: Vec<u8>,
 }
 impl Prepared {
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
     pub fn payment_id(&self) -> (u64, u32) {
         self.request.payment.id
     }
@@ -348,7 +368,25 @@ pub fn prepare(
     network: &[u8],
     limits: Limits,
 ) -> Result<Prepared, Error> {
+    prepare_with_generation(
+        payment,
+        environment,
+        balance,
+        network,
+        Generation::Native,
+        limits,
+    )
+}
+pub fn prepare_with_generation(
+    payment: &Payment,
+    environment: &Environment,
+    balance: Option<&Unsigned>,
+    network: &[u8],
+    generation: Generation,
+    limits: Limits,
+) -> Result<Prepared, Error> {
     limits.validate()?;
+    generation.validate()?;
     if payment.tx_hash.is_some() {
         return Err(Error::AlreadySent);
     }
@@ -365,7 +403,7 @@ pub fn prepare(
         return Err(Error::Limit);
     }
     let first = rewards::absolute(&payment.relative, &payment.total, limits.transfers)?;
-    let estimate = call(&first, environment, limits)?;
+    let estimate = generation.call(&first, environment, network, limits)?;
     let net = &payment.total - signed(estimate.transaction.fee()) - signed(&estimate.run_fee);
     if net.sign() != Sign::Plus {
         return Err(Error::NonpositiveNet {
@@ -376,7 +414,18 @@ pub fn prepare(
         });
     }
     let absolute = rewards::absolute(&payment.relative, &net, limits.transfers)?;
-    let call = call(&absolute, environment, limits)?;
+    let call = generation.call(&absolute, environment, network, limits)?;
+    if matches!(generation, Generation::Bounded(_)) {
+        let maximum_cost = signed(call.transaction.amount())
+            + signed(call.transaction.fee())
+            + signed(&call.run_fee);
+        if maximum_cost > payment.total {
+            return Err(Error::OverGross {
+                gross: payment.total.clone(),
+                maximum_cost,
+            });
+        }
+    }
     let mut signing_bytes = network.to_vec();
     signing_bytes.extend(call.transaction.encode());
     Ok(Prepared {
@@ -390,6 +439,7 @@ pub fn prepare(
             balance: balance.clone(),
             network: network.to_vec(),
         },
+        generation,
         net,
         absolute,
         estimate,

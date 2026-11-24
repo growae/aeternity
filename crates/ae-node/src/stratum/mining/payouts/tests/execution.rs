@@ -481,7 +481,7 @@ fn live_payout_actor_signs_and_submits_transactions_that_execute_the_deployed_co
             )
             .unwrap();
             let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
-            let i = Inputs::new(
+            let mut i = Inputs::new(
                 durable::Config {
                     caller: env.caller,
                     contract: env.contract,
@@ -490,6 +490,8 @@ fn live_payout_actor_signs_and_submits_transactions_that_execute_the_deployed_co
                 s.client(),
                 pool.client(),
             );
+            // This compatibility case intentionally retains the original recipe.
+            i.generation = payout::Generation::Native;
             let mut a =
                 Worker::start(&mut w, db.clone(), Default::default(), i, Arc::new(Wall)).unwrap();
             a.request_check();
@@ -626,3 +628,5 @@ fn payout_completion_total_is_strict_and_matches_the_captured_successful_calls()
         &[0; 64]
     ));
 }
+
+mod gas;

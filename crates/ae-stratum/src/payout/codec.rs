@@ -59,8 +59,12 @@ impl Prepared {
             .encode(accounting(limits))
             .map_err(Error::Accounting)?;
         let env = &request.environment;
-        let encoded = Rlp::List(vec![
-            uint(1),
+        let mut fields = vec![
+            uint(if self.generation == Generation::Native {
+                1
+            } else {
+                2
+            }),
             bytes(record.key()),
             bytes(payment),
             Rlp::List(vec![
@@ -79,8 +83,17 @@ impl Prepared {
             bytes(unsigned(&self.net)?.as_bytes()),
             bytes(self.call.run_gas.as_bytes()),
             bytes(self.call.run_fee.as_bytes()),
-        ])
-        .encode();
+        ];
+        if let Generation::Bounded(p) = self.generation {
+            p.validate()?;
+            fields.push(Rlp::List(vec![
+                uint(p.initial),
+                uint(p.per_transfer),
+                uint(p.max_transfers.into()),
+                uint(p.block_gas_limit),
+            ]));
+        }
+        let encoded = Rlp::List(fields).encode();
         if encoded.len() > limits.record_bytes {
             return Err(Error::Limit);
         }
@@ -101,8 +114,28 @@ impl Prepared {
             _ => Error::Corrupt("payout RLP"),
         })?;
         let root = Rlp::from_rlp(&value);
+        let Rlp::List(mut values) = root else {
+            return Err(Error::Corrupt("payout list"));
+        };
+        let generation = match values.first().map(number).transpose()? {
+            Some(1) if values.len() == 12 => Generation::Native,
+            Some(2) if values.len() == 13 => {
+                let policy = values.pop().expect("thirteen fields");
+                let [initial, per_transfer, count, maximum] = list(&policy)?;
+                let p = GasPolicy {
+                    initial: number(initial)?,
+                    per_transfer: number(per_transfer)?,
+                    max_transfers: u32::try_from(number(count)?).map_err(|_| Error::GasPolicy)?,
+                    block_gas_limit: number(maximum)?,
+                };
+                p.validate()?;
+                Generation::Bounded(p)
+            }
+            _ => return Err(Error::Corrupt("payout version")),
+        };
+        let root = Rlp::List(values);
         let [
-            version,
+            _,
             key,
             payment,
             environment,
@@ -115,9 +148,6 @@ impl Prepared {
             _,
             _,
         ] = list(&root)?;
-        if number(version)? != 1 {
-            return Err(Error::Corrupt("payout version"));
-        }
         let crate::accounting::Record::Payment(payment) =
             crate::accounting::Record::decode(blob(key)?, blob(payment)?, accounting(limits))
                 .map_err(Error::Accounting)?
@@ -149,11 +179,12 @@ impl Prepared {
         {
             return Err(Error::Limit);
         }
-        let plan = prepare(
+        let plan = prepare_with_generation(
             &payment,
             &environment,
             Some(&uint_value(balance)?),
             blob(network)?,
+            generation,
             limits,
         )?;
         if plan.encode(limits)? != raw {
