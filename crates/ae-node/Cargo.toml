@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ae-stratum.workspace = true
 ae-sync.workspace = true
 ae-storage.workspace = true
 ae-p2p.workspace = true

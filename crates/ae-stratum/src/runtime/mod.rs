@@ -3,6 +3,7 @@
 // outputs are handed off explicitly, not executed as accounting/admission.
 mod budget;
 mod connection;
+pub mod pool;
 #[cfg(test)]
 mod tests;
 use crate::{services, session, share, wire::json};
@@ -34,6 +35,7 @@ pub enum Error {
     Io(std::io::ErrorKind),
     Session(session::Error),
     Services(services::Error),
+    Pool(pool::Error),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,6 +123,7 @@ pub enum ExitReason {
     Engine(session::Error),
     Clock,
     OutputLimit,
+    Pool(pool::Error),
     Panicked,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +138,7 @@ pub struct Exit {
     // Accepted session effects not handed off to the output consumer. Caller
     // must reconcile these before assuming the request had no pool effect.
     pub pending_pool: Vec<share::Effect>,
+    pub pending_receipt: Option<crate::ingress::Id>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
@@ -247,6 +251,7 @@ struct Shared {
     closed: AtomicBool,
     dropped_report: Mutex<Option<Report>>,
     services: services::Client,
+    pool: Option<Arc<dyn pool::Sink>>,
 }
 #[derive(Clone)]
 pub struct Client {
@@ -335,7 +340,7 @@ impl Owner {
     pub fn bind(config: Config) -> Result<Self, Error> {
         config.validate()?;
         let services = services::Owner::new(config.services.clone())?;
-        Self::start(config, services)
+        Self::start(config, services, None)
     }
     pub fn with_sources(
         config: Config,
@@ -343,9 +348,27 @@ impl Owner {
     ) -> Result<Self, Error> {
         config.validate()?;
         let services = services::Owner::with_sources(config.services.clone(), sources)?;
-        Self::start(config, services)
+        Self::start(config, services, None)
     }
-    fn start(config: Config, services: services::Owner) -> Result<Self, Error> {
+    pub fn with_pool(config: Config, pool: Arc<dyn pool::Sink>) -> Result<Self, Error> {
+        config.validate()?;
+        let services = services::Owner::new(config.services.clone())?;
+        Self::start(config, services, Some(pool))
+    }
+    pub fn with_sources_and_pool(
+        config: Config,
+        sources: impl services::Sources + 'static,
+        pool: Arc<dyn pool::Sink>,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        let services = services::Owner::with_sources(config.services.clone(), sources)?;
+        Self::start(config, services, Some(pool))
+    }
+    fn start(
+        config: Config,
+        services: services::Owner,
+        pool: Option<Arc<dyn pool::Sink>>,
+    ) -> Result<Self, Error> {
         let limits = &config.limits;
         let shared = Arc::new(Shared {
             connections: Mutex::new(BTreeMap::new()),
@@ -360,6 +383,7 @@ impl Owner {
             closed: AtomicBool::new(false),
             dropped_report: Mutex::new(None),
             services: services.client(),
+            pool,
         });
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let state = shared.clone();
@@ -456,11 +480,16 @@ async fn serve(
     let mut tasks = JoinSet::new();
     let mut stop = shared.stop.subscribe();
     let mut changes = shared.services.changes();
+    let mut pool_closed = shared.pool.as_ref().map(|pool| pool.closed());
     let mut credits = shared.outbox.budget.changed.subscribe();
     let mut pending = None;
     let mut failure = None;
     loop {
         if *stop.borrow() || shared.services.is_closed() {
+            break;
+        }
+        if pool_closed.as_ref().is_some_and(|closed| *closed.borrow()) {
+            failure = Some(Error::Pool(pool::Error::Closed));
             break;
         }
         if let Some(exit) = pending.take() {
@@ -475,6 +504,7 @@ async fn serve(
         tokio::select! {
             _ = stop.changed() => {},
             _ = changes.changed() => {},
+            dropped = async { match &mut pool_closed { Some(closed) => closed.changed().await.is_err(), None => std::future::pending::<bool>().await } } => { if dropped { failure=Some(Error::Pool(pool::Error::Closed)); break; } },
             _ = credits.changed(), if pending.is_some() => {},
             result = tasks.join_next(), if !tasks.is_empty() && pending.is_none() => {
                 match result.expect("task exists") {

@@ -502,6 +502,13 @@ fn proof_request(row: &Value, id: &str) -> Vec<u8> {
     )
 }
 fn proof_setup(row: &Value, records: usize) -> (Owner, Client, Peer, String, crate::job::Work) {
+    proof_setup_pool(row, records, None)
+}
+fn proof_setup_pool(
+    row: &Value,
+    records: usize,
+    pool: Option<Arc<dyn pool::Sink>>,
+) -> (Owner, Client, Peer, String, crate::job::Work) {
     let mut cfg = config();
     cfg.session.skip_blocks = 0;
     cfg.limits.output_records = records;
@@ -518,13 +525,14 @@ fn proof_setup(row: &Value, records: usize) -> (Owner, Client, Peer, String, cra
     let (extra, _) = Nonce(row["nonce"].as_u64().unwrap())
         .split(Kind::Extra, 4)
         .unwrap();
-    let owner = Owner::with_sources(
-        cfg,
-        Sources {
-            nonce: extra.value(),
-            fail: false,
-        },
-    )
+    let sources = Sources {
+        nonce: extra.value(),
+        fail: false,
+    };
+    let owner = match pool {
+        Some(pool) => Owner::with_sources_and_pool(cfg, sources, pool),
+        None => Owner::with_sources(cfg, sources),
+    }
     .unwrap();
     let client = owner.client();
     let mut peer = Peer::new(&client);
@@ -700,3 +708,5 @@ fn releasing_consumer_credit_resumes_pool_handoff_before_acknowledgement() {
             .all(|e| e.pending_pool.is_empty())
     );
 }
+
+mod durable;

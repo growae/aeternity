@@ -112,6 +112,7 @@ struct Driver {
     written_bytes: u64,
     unsent_bytes: usize,
     pending_pool: Vec<share::Effect>,
+    pending_receipt: Option<crate::ingress::Id>,
 }
 impl Driver {
     fn snapshot(&self) -> Result<Lease<Snapshot>, Error> {
@@ -172,6 +173,35 @@ impl Driver {
             return Ok(());
         }
         let deadline = Instant::now() + self.limits.operation_timeout;
+        if let Some(pool) = self.shared.pool.clone() {
+            self.shared.waiting_pool.fetch_add(1, Ordering::AcqRel);
+            let _waiting = WaitingPool(self.shared.clone());
+            loop {
+                self.cancel.check()?;
+                match pool.submit(&self.pending_pool) {
+                    Ok(submission) => {
+                        self.pending_receipt = Some(submission.id);
+                        let id = self
+                            .cancel
+                            .wait(submission.completion, deadline)
+                            .await?
+                            .map_err(ExitReason::Pool)?;
+                        if id != submission.id {
+                            return Err(ExitReason::Pool(pool::Error::Receipt));
+                        }
+                        self.pending_pool.clear();
+                        self.pending_receipt = None;
+                        return Ok(());
+                    }
+                    Err(pool::Error::Busy) => {
+                        self.cancel
+                            .wait(tokio::time::sleep(Duration::from_millis(2)), deadline)
+                            .await?;
+                    }
+                    Err(e) => return Err(ExitReason::Pool(e)),
+                }
+            }
+        }
         let mut changes = self.shared.outbox.budget.changed.subscribe();
         let mut waiting = None;
         loop {
@@ -389,6 +419,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Unpin>(
         written_bytes: 0,
         unsent_bytes: 0,
         pending_pool: Vec::new(),
+        pending_receipt: None,
     };
     let reason = match Catch(Box::pin(driver.drive(&mut stream, commands))).await {
         Ok(Err(reason)) => reason,
@@ -406,6 +437,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Unpin>(
         written_bytes: driver.written_bytes,
         unsent_bytes: driver.unsent_bytes,
         pending_pool: driver.pending_pool,
+        pending_receipt: driver.pending_receipt,
     }
 }
 
@@ -624,6 +656,7 @@ mod failure_tests {
                 written_bytes: 0,
                 unsent_bytes: 0,
                 pending_pool: Vec::new(),
+                pending_receipt: None,
             };
             runtime.block_on(async {
                 let (mut server, mut peer) = tokio::io::duplex(4096);

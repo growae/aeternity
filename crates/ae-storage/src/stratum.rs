@@ -9,6 +9,7 @@ use num_bigint::BigInt;
 use rocksdb::WriteBatch;
 use std::sync::Arc;
 
+pub mod ingress;
 const RECORDS: u8 = 22;
 const METADATA: &[u8] = b"\0stratum";
 const MAX_RECORDS: usize = 1_000_000;
@@ -57,6 +58,7 @@ impl Limits {
 pub enum Failure {
     Storage(Error),
     Accounting(core::Error),
+    Input(ae_stratum::Error),
     AlreadyRunning,
     RecoveryRequired,
     MutationInQuery,
@@ -64,6 +66,11 @@ pub enum Failure {
 impl From<Error> for Failure {
     fn from(e: Error) -> Self {
         Self::Storage(e)
+    }
+}
+impl From<ae_stratum::Error> for Failure {
+    fn from(e: ae_stratum::Error) -> Self {
+        Self::Input(e)
     }
 }
 impl From<core::Error> for Failure {
@@ -370,6 +377,7 @@ impl Stored<'_> {
         if counts != self.info.counts || bytes as u64 != self.info.bytes {
             return Err(Error::Corrupt("Stratum metadata totals").into());
         }
+        self.ingress(ingress::Limits::maximum())?.verify()?;
         Ok(())
     }
 }
@@ -501,10 +509,16 @@ pub enum Recovery {
     NotApplied(Version),
     Applied(Commit),
 }
+struct Extra {
+    key: Vec<u8>,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
 struct Pending {
     before: Info,
     after: Info,
     plan: core::Plan,
+    extra: Vec<Extra>,
     replies: Vec<core::Reply>,
 }
 pub struct Writer {
@@ -552,6 +566,15 @@ impl Writer {
         commands: Vec<Command>,
         write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
     ) -> Result<Commit, Failure> {
+        self.commit_extra(expected, commands, Vec::new(), write)
+    }
+    fn commit_extra(
+        &mut self,
+        expected: Version,
+        commands: Vec<Command>,
+        extra: Vec<Extra>,
+        write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<Commit, Failure> {
         if self.recovery_required() {
             return Err(Failure::RecoveryRequired);
         }
@@ -572,13 +595,23 @@ impl Writer {
                 .map(|c| tx.apply(c.operation(&mut after.next_key)?))
                 .collect::<Result<Vec<_>, _>>()
         })?;
-        if plan.is_empty() {
+        if plan.is_empty() && extra.is_empty() {
             return Ok(Commit {
                 version: expected,
                 replies,
             });
         }
         let mut batch = WriteBatch::default();
+        for e in &extra {
+            let old = stored.source.snapshot.get_pinned(&e.key).map_err(backend)?;
+            if old.as_deref() != e.before.as_deref() {
+                return Err(Error::Conflict.into());
+            }
+            match &e.after {
+                Some(v) => batch.put(&e.key, v),
+                None => batch.delete(&e.key),
+            }
+        }
         for (k, new) in plan.writes() {
             let table = valid_key(k)?;
             let index = table as usize - 1;
@@ -620,6 +653,7 @@ impl Writer {
             before,
             after,
             plan,
+            extra,
             replies,
         });
         write(&self.db, batch)?;
@@ -652,6 +686,17 @@ impl Writer {
                 };
                 for (k, v) in values {
                     if stored.get(k)? != *v {
+                        return Err(Error::Conflict.into());
+                    }
+                }
+                for e in &p.extra {
+                    let value = if applied == Some(true) {
+                        &e.after
+                    } else {
+                        &e.before
+                    };
+                    let actual = stored.source.snapshot.get_pinned(&e.key).map_err(backend)?;
+                    if actual.as_deref() != value.as_deref() {
                         return Err(Error::Conflict.into());
                     }
                 }

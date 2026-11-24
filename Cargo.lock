@@ -137,6 +137,7 @@ dependencies = [
  "ae-protocol",
  "ae-state",
  "ae-storage",
+ "ae-stratum",
  "ae-sync",
  "ae-trie",
  "ae-tx",
