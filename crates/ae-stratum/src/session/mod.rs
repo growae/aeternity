@@ -84,7 +84,7 @@ pub struct Config {
     pub targets: Targets,
 }
 impl Config {
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         Part::maximum(self.extra_nonce_bytes)?;
         if !(1..=63).contains(&self.edge_bits)
             || !(1..=crate::queue::MAX_CAPACITY).contains(&self.max_jobs)

@@ -6,6 +6,7 @@ pub mod nonce;
 pub mod proof;
 pub mod queue;
 pub mod registry;
+pub mod runtime;
 pub mod services;
 pub mod session;
 pub mod share;

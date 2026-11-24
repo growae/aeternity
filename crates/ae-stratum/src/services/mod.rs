@@ -17,6 +17,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
@@ -112,6 +113,7 @@ impl Sources for System {
     }
 }
 struct Budget {
+    changed: watch::Sender<()>,
     used: AtomicUsize,
     maximum: usize,
 }
@@ -136,6 +138,7 @@ impl Credit {
 impl Drop for Credit {
     fn drop(&mut self) {
         self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget.changed.send_modify(|_| ());
     }
 }
 struct Retained<T> {
@@ -313,6 +316,7 @@ impl Shared {
     }
     fn close_data(&self, data: &mut Data) {
         self.closed.store(true, Ordering::Release);
+        self.budget.changed.send_modify(|_| ());
         while let Some(id) = data.connections.keys().next().copied() {
             data.remove(id);
         }
@@ -338,7 +342,9 @@ impl Token {
     fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) && !self.shared.closed.load(Ordering::Acquire)
         {
+            self.shared.budget.changed.send_modify(|_| ());
             self.shared.lock().remove(self.id);
+            self.shared.budget.changed.send_modify(|_| ());
         }
     }
 }
@@ -350,6 +356,37 @@ impl Drop for Token {
 #[derive(Clone)]
 pub struct Connection(Arc<Token>);
 impl Connection {
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.0.shared.budget.changed.subscribe()
+    }
+    // Self-notifications share FIFO order with already admitted broadcasts.
+    pub(crate) fn enqueue(&self, event: Chain) -> Result<(), Error> {
+        let bytes = chain_bytes(&event)?;
+        let shared = &self.0.shared;
+        let mut data = shared.try_open()?;
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        let r = data.connections.get_mut(&self.id()).ok_or(Error::Closed)?;
+        if r.notifications.len() >= shared.config.notifications_per_connection
+            || bytes
+                > shared
+                    .config
+                    .notification_bytes_per_connection
+                    .saturating_sub(r.notification_bytes)
+        {
+            data.remove(self.id());
+            shared.budget.changed.send_modify(|_| ());
+            return Err(Error::Limit);
+        }
+        let credit = Credit::reserve(&shared.budget, bytes)?;
+        r.notifications.push_back(View::new(event, credit));
+        r.notification_bytes += bytes;
+        drop(data);
+        shared.budget.changed.send_modify(|_| ());
+        Ok(())
+    }
+
     pub fn id(&self) -> u64 {
         self.0.id
     }
@@ -431,6 +468,13 @@ pub struct Client {
     shared: Arc<Shared>,
 }
 impl Client {
+    pub fn is_closed(&self) -> bool {
+        self.shared.closed.load(Ordering::Acquire)
+    }
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.shared.budget.changed.subscribe()
+    }
+
     pub fn info(&self) -> Info {
         self.shared.info(&self.shared.lock())
     }
@@ -560,6 +604,8 @@ impl Client {
                 result.queued += 1;
             }
         }
+        drop(data);
+        self.shared.budget.changed.send_modify(|_| ());
         Ok(result)
     }
 }
@@ -613,6 +659,7 @@ impl Owner {
             sources: Box::new(sources),
         };
         let budget = Arc::new(Budget {
+            changed: watch::channel(()).0,
             used: AtomicUsize::new(0),
             maximum: config.retained_reply_bytes,
         });
@@ -638,6 +685,8 @@ impl Owner {
         self.client.shared.closed.store(true, Ordering::Release);
         let mut data = self.client.shared.lock();
         self.client.shared.close_data(&mut data);
+        drop(data);
+        self.client.shared.budget.changed.send_modify(|_| ());
     }
 }
 impl Drop for Owner {

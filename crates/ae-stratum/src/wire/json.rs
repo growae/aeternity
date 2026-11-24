@@ -479,6 +479,13 @@ impl Frames {
         self.pending.len()
     }
     pub fn next(&mut self, input: &mut &[u8]) -> Result<Option<Value>, Error> {
+        self.next_raw(input)?
+            .map(|bytes| decode(&bytes, self.limits))
+            .transpose()
+    }
+    // Preserve raw line bytes for the session decoder, including malformed
+    // JSON that must receive the original protocol error response.
+    pub fn next_raw(&mut self, input: &mut &[u8]) -> Result<Option<Vec<u8>>, Error> {
         if self.closed {
             return Err(Error::Closed);
         }
@@ -496,9 +503,7 @@ impl Frames {
         if newline.is_none() {
             return Ok(None);
         }
-        let result = decode(&self.pending, self.limits);
-        self.pending.clear();
-        result.map(Some)
+        Ok(Some(std::mem::take(&mut self.pending)))
     }
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.closed {

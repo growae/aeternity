@@ -1,0 +1,172 @@
+[
+  {
+    "name": "fragmented_pipeline",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "phase": "authorized",
+      "fragment_waited": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b5d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a",
+      "7b226964223a6e756c6c2c226a736f6e727063223a22322e30222c226d6574686f64223a226d696e696e672e7365745f746172676574222c22706172616d73223a5b2266666666303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "malformed_then_configure",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "phase": "configured"
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a5b2d33323730302c225061727365206572726f72222c6e756c6c5d2c226964223a6e756c6c2c226a736f6e727063223a22322e30222c22726573756c74223a6e756c6c7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b5d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "connected_timeout",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "closed": true
+    },
+    "nonce_cache_after": [],
+    "packets": [],
+    "registry_after": 0
+  },
+  {
+    "name": "configured_timeout",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "closed": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b5d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "subscribed_timeout",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "closed": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "authorized_timer_cancel",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "survived_timeout": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a",
+      "7b226964223a6e756c6c2c226a736f6e727063223a22322e30222c226d6574686f64223a226d696e696e672e7365745f746172676574222c22706172616d73223a5b2266666666303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "queued_timeout_after_cancel",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "authorized_ignores_queued_timeout": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a",
+      "7b226964223a6e756c6c2c226a736f6e727063223a22322e30222c226d6574686f64223a226d696e696e672e7365745f746172676574222c22706172616d73223a5b2266666666303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030225d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "queued_timeout_after_configure",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "old_timeout_closes_current_preauth_phase": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b5d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "send_failure_after_registration",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "failure_after_registry_add": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "peer_close_after_subscription",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "peer_closed": true
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "administrative_updates",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "settings": {
+        "maximum": 5,
+        "desired": 100,
+        "max_solve": 200,
+        "threshold": 3.0
+      }
+    },
+    "nonce_cache_after": [],
+    "packets": [
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a5b6e756c6c2c223462646334373230225d7d0a",
+      "7b226572726f72223a6e756c6c2c226964223a312c226a736f6e727063223a22322e30222c22726573756c74223a747275657d0a",
+      "7b226964223a6e756c6c2c226a736f6e727063223a22322e30222c226d6574686f64223a226d696e696e672e7365745f746172676574222c22706172616d73223a5b2266666666303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030225d7d0a"
+    ],
+    "registry_after": 0
+  },
+  {
+    "name": "unknown_mailbox_message",
+    "reason": "normal",
+    "keepalive": true,
+    "details": {
+      "closed": true
+    },
+    "nonce_cache_after": [],
+    "packets": [],
+    "registry_after": 0
+  }
+]
