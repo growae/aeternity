@@ -53,6 +53,8 @@ pub enum Notice {
     Pool(txpool::Error),
     Confirmed(durable::Completion),
     MissingReward,
+    ExecutionFailed(Box<durable::ExecutionFailure>),
+    ReceiptUnavailable(durable::ReceiptUnavailable),
 }
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -185,6 +187,7 @@ pub(super) struct Worker {
     epoch: u64,
     pending: Option<Pending>,
     check: bool,
+    confirmation_hold: bool,
     next_payout: Instant,
     next_confirmation: Instant,
 }
@@ -200,6 +203,13 @@ impl Worker {
         let info = retry(writer, |w| {
             w.begin_payouts(inputs.config.clone(), inputs.limits)
         })?;
+        let restore_confirmation = info
+            .pending
+            .as_ref()
+            .map(Record::hash)
+            .transpose()?
+            .flatten()
+            .is_some();
         let now = Instant::now();
         Ok(Self {
             shared: Arc::new(Shared {
@@ -223,8 +233,13 @@ impl Worker {
             epoch: info.epoch,
             pending: None,
             check: info.pending.is_some(),
+            confirmation_hold: false,
             next_payout: now + inputs.payout_interval,
-            next_confirmation: now + inputs.confirmation_interval,
+            next_confirmation: if restore_confirmation {
+                now
+            } else {
+                now + inputs.confirmation_interval
+            },
             inputs,
         })
     }
@@ -367,19 +382,14 @@ impl Worker {
             && let Some(record) = &info.pending
             && record.hash()?.is_some()
         {
-            match retry(writer, |w| {
+            let result = retry(writer, |w| {
                 w.confirm_scheduled_payout(self.epoch, record, self.inputs.limits)
-            })? {
-                durable::Confirmation::Confirmed(done) => {
-                    self.shared.notice(Notice::Confirmed(done));
-                    info = self.info()?;
-                    self.shared.phase(Phase::Idle);
-                }
-                durable::Confirmation::MissingReward => self.shared.notice(Notice::MissingReward),
-                durable::Confirmation::Pending => {}
+            })?;
+            if self.confirmation(result) {
+                info = self.info()?;
             }
         }
-        if !std::mem::take(&mut self.check) {
+        if self.confirmation_hold || !std::mem::take(&mut self.check) {
             return Ok(());
         }
         match info.pending {
@@ -489,6 +499,47 @@ impl Worker {
             },
         }
         Ok(())
+    }
+    // Return true only when storage atomically removed the pending payment.
+    fn confirmation(&mut self, result: durable::Confirmation) -> bool {
+        match result {
+            durable::Confirmation::Confirmed(done) => {
+                self.confirmation_hold = false;
+                self.shared.notice(Notice::Confirmed(done));
+                self.shared.phase(Phase::Idle);
+                true
+            }
+            durable::Confirmation::Failed(failure) => {
+                self.confirmation_hold = true;
+                self.shared.notice(Notice::ExecutionFailed(failure));
+                false
+            }
+            durable::Confirmation::Unavailable(receipt) => {
+                self.confirmation_hold = true;
+                self.shared.notice(Notice::ReceiptUnavailable(receipt));
+                false
+            }
+            durable::Confirmation::MissingReward => {
+                self.confirmation_hold = true;
+                self.shared.notice(Notice::MissingReward);
+                false
+            }
+            durable::Confirmation::Pending => {
+                self.confirmation_hold = false;
+                let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(
+                    status.last,
+                    Some(
+                        Notice::ExecutionFailed(_)
+                            | Notice::ReceiptUnavailable(_)
+                            | Notice::MissingReward
+                    )
+                ) {
+                    status.last = None;
+                }
+                false
+            }
+        }
     }
     pub(super) fn finish(&mut self, writer: &mut storage::Writer) -> Result<(), Error> {
         self.shared.stop();

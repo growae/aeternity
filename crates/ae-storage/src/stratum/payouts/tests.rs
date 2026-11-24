@@ -507,6 +507,14 @@ fn reward(w: &mut Writer, include: bool) {
 // Authenticated inclusion checks use real transaction bytes, with explicitly
 // synthetic block/state metadata. Execution/admission is a separate node gate.
 fn include(db: &Database, r: &Record, height: u64) -> Hash256 {
+    include_call(db, r, height, |_| {})
+}
+fn include_call(
+    db: &Database,
+    r: &Record,
+    height: u64,
+    edit: impl FnOnce(&mut Option<ae_state::calls::Call>),
+) -> Hash256 {
     let v = db.view().unwrap();
     let k = top(&v).unwrap();
     let mut common = k.common.clone();
@@ -514,6 +522,31 @@ fn include(db: &Database, r: &Record, height: u64) -> Hash256 {
     common.previous_hash = v.status().tip.unwrap().0;
     common.previous_key_hash = Header::Key(k).hash().unwrap().0;
     let tx = signed_tx(r);
+    let ae_tx::TransactionLeaf::Contract(t) = tx.transaction().leaf() else {
+        panic!()
+    };
+    let mut call = ae_state::calls::Call::new(
+        t.actor(),
+        t.nonce().clone(),
+        config().contract.0,
+        None,
+        height.into(),
+        t.gas_price().clone(),
+    );
+    call.gas_used = 200.into();
+    call.return_value = vec![0; 32];
+    let amount = t.amount().as_bytes();
+    call.return_value[32 - amount.len()..].copy_from_slice(amount);
+    let mut call = Some(call);
+    edit(&mut call);
+    let mut trees = v
+        .trees(v.status().tip.unwrap(), Default::default())
+        .unwrap();
+    trees.calls.prune();
+    if let Some(call) = call {
+        trees.calls.insert(&call).unwrap();
+    }
+    common.state_hash = trees.roots().hash().0;
     let block = Block::Micro(ae_chain::block::MicroBlock {
         header: ae_codec::headers::MicroHeader {
             common,
@@ -528,8 +561,12 @@ fn include(db: &Database, r: &Record, height: u64) -> Hash256 {
         proof: None,
     });
     let h = block.hash().unwrap();
-    let rec = v.require_record(v.status().tip.unwrap()).unwrap();
+    let mut rec = v.require_record(v.status().tip.unwrap()).unwrap();
+    rec.roots = Roots::of(&trees);
     let mut b = WriteBatch::default();
+    for (h, raw) in trees.calls.tree().store().pending() {
+        b.put(repo::key(repo::NODES, h.0), raw);
+    }
     b.put(repo::key(repo::BLOCKS, h.0), block.encode().unwrap());
     b.put(repo::key(repo::RECORDS, h.0), rec.encode());
     b.put(repo::key(repo::CANONICAL, h.0), []);
@@ -932,3 +969,5 @@ fn schema_upgrade_preserves_bindings_and_rejects_corrupt_or_oversized_pending_in
 mod reference;
 
 mod rounds;
+
+mod execution;

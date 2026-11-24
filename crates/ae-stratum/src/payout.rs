@@ -268,6 +268,18 @@ pub fn call(transfers: &Amounts, environment: &Environment, limits: Limits) -> R
         run_fee,
     })
 }
+// The deployed ABI-1 payout returns its distributed total as one heap word.
+// This is an operational completion check, not a transaction validity rule.
+pub fn confirms_total(amount: &Unsigned, returned: &[u8]) -> bool {
+    let amount = amount.as_bytes();
+    if amount.len() > 32 || returned.len() != 32 {
+        return false;
+    }
+    let mut expected = [0u8; 32];
+    expected[32 - amount.len()..].copy_from_slice(amount);
+    returned == expected
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub payment: rewards::Payment,

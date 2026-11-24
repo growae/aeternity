@@ -588,3 +588,41 @@ fn large_payout_resource_stops_and_wrong_network_leave_all_input_roots_retryable
     );
     assert_eq!(trees.roots(), after);
 }
+
+#[test]
+fn payout_completion_total_is_strict_and_matches_the_captured_successful_calls() {
+    for p in 3..=8 {
+        for name in [
+            "empty",
+            "one",
+            "two",
+            "three",
+            "ten",
+            "prepared_one",
+            "prepared_two",
+        ] {
+            let row = find(p, name);
+            let tx = ContractTransaction::decode(&bytes(&row["transaction"])).unwrap();
+            let after = from_snapshot(&row["result"][1][1]);
+            let env = environment(row);
+            let id = ae_state::calls::call_id(env.caller.0, tx.nonce(), env.contract.0).0;
+            let call = after.calls.lookup(&env.contract.0, id).unwrap().unwrap();
+            assert!(payout::confirms_total(tx.amount(), &call.return_value));
+            assert!(!payout::confirms_total(
+                &tx.amount().add(&1.into()),
+                &call.return_value
+            ));
+            let mut trailing = call.return_value.clone();
+            trailing.push(0);
+            assert!(!payout::confirms_total(tx.amount(), &trailing));
+            assert!(!payout::confirms_total(
+                tx.amount(),
+                &call.return_value[..31]
+            ));
+        }
+    }
+    assert!(!payout::confirms_total(
+        &Unsigned::from_field_bytes(&[1; 33]).unwrap(),
+        &[0; 64]
+    ));
+}

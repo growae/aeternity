@@ -822,3 +822,73 @@ fn close_during_signature_completion_joins_and_prevents_a_late_pool_dispatch() {
 }
 
 mod execution;
+
+#[test]
+fn failed_or_unavailable_confirmation_holds_real_dispatch_until_canonical_recheck() {
+    for missing in [false, true] {
+        let t = Temp::new();
+        let db = database(&t);
+        seed(&db, payment());
+        let p = pool(&db, 1);
+        let s = signer();
+        let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
+        let mut a = actor(&db, &mut w, &s, &p);
+        pending_sign(&mut a, &mut w);
+        a.finish(&mut w).unwrap();
+        drop(a);
+        drop(w);
+        let mut w = storage::Writer::start(db.clone(), Default::default()).unwrap();
+        let mut a = actor(&db, &mut w, &s, &p);
+        let r = stored(&db).pending.unwrap();
+        let inclusion = durable::Inclusion {
+            sequence: r.sequence,
+            payment: r.payment.id,
+            hash: r.hash().unwrap().unwrap(),
+            block: Hash256(key(55)),
+            height: 100,
+            chain: db.view().unwrap().status(),
+        };
+        // The storage tests independently bind these outcomes to actual call
+        // tries. Here they drive the real actor's response/dispatch boundary.
+        let result = if missing {
+            durable::Confirmation::Unavailable(durable::ReceiptUnavailable {
+                inclusion,
+                reason: durable::UnavailableReason::MissingCall,
+            })
+        } else {
+            let tx = r.request.as_ref().unwrap().prepared.call().transaction();
+            let mut call = ae_state::calls::Call::new(
+                tx.actor(),
+                tx.nonce().clone(),
+                config().contract.0,
+                None,
+                100.into(),
+                tx.gas_price().clone(),
+            );
+            call.return_type = ae_state::calls::ReturnType::Error;
+            durable::Confirmation::Failed(Box::new(durable::ExecutionFailure {
+                inclusion,
+                reason: durable::FailureReason::ContractError,
+                call,
+            }))
+        };
+        assert!(!a.confirmation(result));
+        a.next_confirmation = Instant::now() + Duration::from_secs(60);
+        let before = p.client().info().submitted;
+        for _ in 0..3 {
+            a.request_check();
+            tick(&mut a, &mut w);
+        }
+        assert!(a.confirmation_hold);
+        assert_eq!(p.client().info().submitted, before);
+        assert_eq!(stored(&db).pending, Some(r));
+        assert!(!a.confirmation(durable::Confirmation::Pending));
+        assert!(!a.confirmation_hold);
+        assert!(a.shared.status().last.is_none());
+        accepted(&mut a, &mut w);
+        assert_eq!(p.client().info().submitted, before + 1);
+        a.finish(&mut w).unwrap();
+        p.shutdown().unwrap();
+        s.retire();
+    }
+}

@@ -7,6 +7,10 @@ use ae_protocol::Protocol;
 use ae_stratum::payout;
 use ae_types::{AccountPublicKey, ContractPublicKey, Signature};
 mod codec;
+mod execution;
+pub use execution::{
+    ExecutionFailure, FailureReason, Inclusion, ReceiptUnavailable, UnavailableReason,
+};
 mod record;
 pub use record::{Completion, Context, Dispatch, Info, Outcome, Record, Request, Signed};
 const META: &[u8] = b"\0stratum-payouts";
@@ -94,6 +98,8 @@ pub enum Confirmation {
     Pending,
     MissingReward,
     Confirmed(Completion),
+    Failed(Box<ExecutionFailure>),
+    Unavailable(ReceiptUnavailable),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -786,6 +792,14 @@ impl Writer {
             .is_none_or(|n| n < info.config.delay)
         {
             return Ok(Confirmation::Pending);
+        }
+        // Inclusion alone can represent a reverted or out-of-gas payout.
+        // Read the inclusion block's authenticated call tree, never the top's
+        // transient calls tree, before publishing any accounting cleanup.
+        if let Some(result) =
+            execution::check(&v, &info.config, expected, tx, block, height, limits)?
+        {
+            return Ok(result);
         }
         let payments = s.query(|t| t.payments(expected.payment.id.0))?;
         let pruned = payments.len() == 1;
