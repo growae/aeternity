@@ -1,5 +1,5 @@
-// Durable operational Stratum accounting, not canonical chain state or a
-// payout broadcast journal. Every batch uses one immutable repository view.
+// Durable operational Stratum accounting and payout recovery. Canonical chain
+// state remains separate. Every batch uses one immutable repository view.
 use super::{Database, Snapshot, backend, backend_lock, write_options};
 use ae_chain::repository::Error;
 use ae_stratum::{accounting as core, proof::Number, rewards::Amounts};
@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub mod ingress;
 pub mod mining;
+pub mod payouts;
 pub mod rounds;
 const RECORDS: u8 = 22;
 const METADATA: &[u8] = b"\0stratum";
@@ -62,10 +63,16 @@ pub enum Failure {
     Accounting(core::Error),
     Input(ae_stratum::Error),
     Candidate(ae_stratum::candidate::Error),
+    Payout(ae_stratum::payout::Error),
     Events(crate::events::Error),
     AlreadyRunning,
     RecoveryRequired,
     MutationInQuery,
+}
+impl From<ae_stratum::payout::Error> for Failure {
+    fn from(e: ae_stratum::payout::Error) -> Self {
+        Self::Payout(e)
+    }
 }
 impl Failure {
     pub fn is_conflict(&self) -> bool {
@@ -394,6 +401,7 @@ impl Stored<'_> {
         self.ingress(ingress::Limits::maximum())?.verify()?;
         self.mining(mining::Limits::maximum())?.verify()?;
         self.rounds(rounds::Limits::maximum())?;
+        self.payouts(payouts::Limits::maximum())?;
         Ok(())
     }
 }
@@ -545,6 +553,7 @@ pub struct Writer {
     pending: Option<Pending>,
     work_revision: Option<u64>,
     work_reset: u64,
+    payout_epoch: Option<u64>,
 }
 impl Writer {
     pub fn start(db: Arc<Database>, limits: Limits) -> Result<Self, Failure> {
@@ -565,6 +574,7 @@ impl Writer {
             pending: None,
             work_revision: None,
             work_reset: 0,
+            payout_epoch: None,
         })
     }
     pub fn recovery_required(&self) -> bool {
@@ -632,6 +642,7 @@ impl Writer {
                 .map(|c| tx.apply(c.operation(&mut after.next_key)?))
                 .collect::<Result<Vec<_>, _>>()
         })?;
+        payouts::validate_plan(&stored, &plan, &extra)?;
         if plan.is_empty() && extra.is_empty() {
             return Ok(Commit {
                 version: expected,

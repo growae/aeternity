@@ -422,7 +422,7 @@ fn opening_rejects_missing_totals_malformed_records_and_unallocated_keys() {
     }
 }
 #[test]
-fn schema_eighteen_upgrade_keeps_chain_identity_roots_and_operational_metadata() {
+fn schema_nineteen_upgrade_keeps_chain_identity_roots_and_operational_metadata() {
     for with_accounting in [false, true] {
         let t = Temp::new();
         let db = database(&t);
@@ -444,7 +444,7 @@ fn schema_eighteen_upgrade_keeps_chain_identity_roots_and_operational_metadata()
         let Value::List(mut fields) = Value::decode(&db.identity.encode()).unwrap() else {
             panic!()
         };
-        assert_eq!(fields[0], number(18));
+        assert_eq!(fields[0], number(19));
         fields[0] = number(14);
         let legacy = Value::List(fields).encode();
         assert_eq!(repo::Identity::decode(&legacy).unwrap(), db.identity);
