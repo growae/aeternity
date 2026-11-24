@@ -93,6 +93,16 @@ fn binary(bytes: &[u8], init: u32) -> u32 {
     }
     jenkins(a, b, c).2
 }
+// A root binary term never consults word size, atom indices or CRC mixing.
+pub(super) fn binary_term(bytes: &[u8]) -> u32 {
+    let initial = 3432918353u32.wrapping_add(constant(13));
+    if bytes.is_empty() {
+        initial
+    } else {
+        binary(bytes, initial)
+    }
+}
+
 pub(super) fn term(
     profile: &Otp26,
     term: &Term<'_>,

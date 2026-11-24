@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 // Aeternity fa2a6d7 and aestratum_lib 17b56c5: pool work and session services.
 // Transport, persistence and node admission are separate.
+pub mod accounting;
 pub mod job;
 pub mod nonce;
 pub mod proof;
 pub mod queue;
 pub mod registry;
+pub mod rewards;
 pub mod runtime;
 pub mod services;
 pub mod session;

@@ -213,9 +213,12 @@ dependencies = [
 name = "ae-stratum"
 version = "0.1.0"
 dependencies = [
+ "ae-codec",
  "ae-consensus",
  "ae-crypto",
+ "ae-trie",
  "ae-types",
+ "ae-vm-fate",
  "hex",
  "num-bigint",
  "num-traits",

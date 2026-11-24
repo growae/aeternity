@@ -54,6 +54,14 @@ pub(super) fn owner(
     mut config: managed::Config,
 ) -> managed::Owner {
     config.eoe.block_time = 4.into();
+    configured_owner(node, source, pair, config)
+}
+fn configured_owner(
+    node: &Node,
+    source: &Arc<live::Source>,
+    pair: &Pair,
+    config: managed::Config,
+) -> managed::Owner {
     let mut i = inputs(node, source, &config);
     i.parent = Some(pair.client.clone());
     managed::Owner::start(
@@ -100,6 +108,9 @@ async fn real_eoe_pool_and_candidate_retry_preserve_nonces_then_admit_created_mi
                     storage.insert(b, 1_000_000, Origin::Gossip).unwrap();
                 }
                 drop(storage);
+                // Keep the importer's producer binding and EOE configuration
+                // identical when selecting this test's negotiation deadline.
+                node.config.rules.consensus.child_block_time = 1000.into();
                 let c = &row["parents"][1]["cases"][if with_spend { 4 } else { 3 }];
                 let leader = AccountPublicKey(bytes(&c["leader"]).try_into().unwrap());
                 let source = source(&node);
@@ -113,7 +124,12 @@ async fn real_eoe_pool_and_candidate_retry_preserve_nonces_then_admit_created_mi
                 .unwrap();
                 let mut config = cfg(&node);
                 config.calls.requests = 1;
-                let mut owner = owner(&node, &source, &pair, config);
+                // This checks candidate nonce refresh and admission. A 4 ms
+                // wall-clock negotiation can legitimately lose quorum under
+                // host preemption. Keep deadline tests separate; epoch 1 has
+                // zero length delta independently of this block-time value.
+                config.eoe.block_time = 1000.into();
+                let mut owner = configured_owner(&node, &source, &pair, config);
                 let pool = pool(&node);
                 let client = pool.client();
                 if with_spend {
@@ -205,7 +221,12 @@ async fn real_eoe_pool_and_candidate_retry_preserve_nonces_then_admit_created_mi
                     panic!()
                 };
                 let txs = &prepared.candidate.block().transactions;
-                assert_eq!(txs.len(), 2 + usize::from(with_spend));
+                assert_eq!(
+                    txs.len(),
+                    2 + usize::from(with_spend),
+                    "profile={profile}, corpus={}, with_spend={with_spend}",
+                    row["corpus_index"]
+                );
                 for (i, tx) in txs.iter().enumerate() {
                     assert_eq!(
                         tx.transaction().view().nonce(),

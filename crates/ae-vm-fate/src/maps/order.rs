@@ -182,6 +182,41 @@ impl MapOrder for Otp26 {
         Ok(indices)
     }
 }
+// OTP26 maps with binary-only keys have no atom-index, word-size or CPU
+// mixing dependency. Reuse the term hash here for non-VM protocols as well.
+pub fn binary_indices(
+    keys: &[&[u8]],
+    mode: Traversal,
+    limits: Limits,
+) -> Result<Vec<usize>, Error> {
+    if keys.len() > limits.max_nodes {
+        return Err(Error::ResourceLimit);
+    }
+    let mut bytes = 0usize;
+    for key in keys {
+        bytes = bytes.checked_add(key.len()).ok_or(Error::ResourceLimit)?;
+        if bytes > limits.max_bytes || key.len() > u32::MAX as usize {
+            return Err(Error::ResourceLimit);
+        }
+    }
+    let mut indices: Vec<_> = (0..keys.len()).collect();
+    indices.sort_by_key(|&i| keys[i]);
+    if indices.windows(2).any(|w| keys[w[0]] == keys[w[1]]) {
+        return Err(Error::InvalidMapKey);
+    }
+    if mode != Traversal::TermSorted && keys.len() > 32 {
+        let hashes: Vec<_> = keys
+            .iter()
+            .map(|k| hash::nibble_key(hash::binary_term(k)))
+            .collect();
+        indices.sort_by_key(|&i| hashes[i]);
+        if mode == Traversal::ToList {
+            indices.reverse();
+        }
+    }
+    Ok(indices)
+}
+
 pub fn compare(a: &Value, b: &Value, limits: Limits) -> Result<Ordering, Error> {
     compare_counted(a, b, limits).map(|(order, _)| order)
 }
