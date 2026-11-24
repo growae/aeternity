@@ -5,6 +5,7 @@ pub mod job;
 pub mod nonce;
 pub mod proof;
 pub mod queue;
+pub mod session;
 pub mod share;
 pub mod target;
 pub mod wire;

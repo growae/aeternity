@@ -21,6 +21,82 @@ fn fixture(index: usize) -> (Node, eoe::pool::Hub, votes::independent::Relay, Po
 }
 
 #[tokio::test]
+async fn owner_observing_worker_budget_exhaustion_keeps_the_consensus_runtime_and_hub() {
+    for exhausted_by_vote in [false, true] {
+        let node = Node::new(1);
+        let source = Source::new(
+            node.db.clone(),
+            node.config.identity.clone(),
+            node.config.profile.network.clone(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut owner = Owner::start(
+            Inputs {
+                source,
+                database: node.db.clone(),
+                publications: votes::Publications::new(&node.db, Default::default()).unwrap(),
+                gossip: Default::default(),
+                parent: None,
+            },
+            Config {
+                eoe: super::super::super::Config {
+                    host: local_host::Config {
+                        network: node.config.profile.network.clone(),
+                        election_contract: node.config.profile.contracts.election,
+                        parent_epoch_length: 5.into(),
+                        parent_start_height: 1.into(),
+                        limits: Default::default(),
+                    },
+                    block_time: 10000.into(),
+                    coordinator: Default::default(),
+                    runtime: Default::default(),
+                    epochs: Default::default(),
+                },
+                votes: Default::default(),
+                pool: Default::default(),
+                calls: Default::default(),
+            },
+            Default::default(),
+            node.config.profile.order.clone(),
+        )
+        .unwrap();
+        let (group, _clock) = Group::controlled();
+        owner.votes.group = group.clone();
+        let eoe = owner.runtime_client();
+        let hub = eoe.independent_pool().unwrap().clone();
+        let worker = owner.votes();
+        let binding = owner.vote_binding();
+        // Model a successful conductor preflight, followed by another owner
+        // spending the shared budget before the inner owner polls it again.
+        owner.poll_votes().unwrap();
+        for _ in 0..5 {
+            assert!(group.try_acquire().unwrap().record());
+        }
+        if exhausted_by_vote {
+            owner.request_vote_restart(1).unwrap();
+            within(async {
+                while !owner.votes.worker.as_ref().unwrap().is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        } else {
+            assert!(!group.try_acquire().unwrap().record());
+        }
+        assert_eq!(owner.step(), Err(Error::VoteRestartLimit));
+        assert_eq!(owner.step(), Err(Error::VoteRestartLimit));
+        assert_eq!(group.attempts(), 6);
+        assert!(eoe.same_runtime(&owner.runtime_client()) && !eoe.is_closed());
+        assert!(!hub.is_closed());
+        assert!(binding.is_closed() && !worker.info().accepting);
+        assert_eq!(owner.shutdown().errors, vec![Error::VoteRestartLimit]);
+        assert!(worker.info().joined);
+        assert!(eoe.is_closed());
+    }
+}
+
+#[tokio::test]
 async fn actor_panics_trigger_automatic_empty_pool_replacement_and_retain_the_joined_cause() {
     for index in [1, 3, 5] {
         let (_node, hub, relay, mut pool) = fixture(index);

@@ -510,7 +510,12 @@ impl Owner {
             }
         });
         if let Err(e) = &result {
-            if !matches!(
+            if matches!(e, Error::VoteRestartLimit) {
+                // This shared worker-group failure can arrive after the
+                // conductor's preflight. It must have the same scope here:
+                // retire votes without closing the separate consensus owner.
+                self.votes.request_shutdown();
+            } else if !matches!(
                 e,
                 Error::CancelRejected(_, _)
                     | Error::Source(super::Error::ResourceLimit | super::Error::Rejected(_))
