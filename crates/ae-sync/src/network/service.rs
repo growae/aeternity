@@ -1,3 +1,4 @@
+use super::listener::{Accepted, Listener};
 use super::*;
 use crate::tasks::Tasks;
 use ae_p2p::discovery::Peer;
@@ -6,7 +7,7 @@ use std::{
     future::Future,
     pin::Pin,
 };
-use tokio::{net::TcpListener, time::Instant};
+use tokio::time::Instant;
 
 mod admission;
 mod operations;
@@ -17,6 +18,7 @@ enum Resolution {
     Dial { peer: Peer, probe: bool },
 }
 enum Completion {
+    Inbound(Accepted),
     Dns(resolver::Completion),
     Socket(transport::Event),
     Ping {
@@ -39,7 +41,7 @@ pub struct Service {
     pool: pool::Handle,
     pool_run: Option<PoolFuture>,
     pool_exit: Option<pool::Status>,
-    listener: Option<TcpListener>,
+    listener: Option<Listener>,
     resolver: resolver::Resolver,
     resolutions: BTreeMap<policy::Token, Resolution>,
     ready_dials: BTreeMap<policy::Token, (Peer, bool)>,
@@ -119,6 +121,7 @@ impl Service {
         u64::try_from(self.origin.elapsed().as_millis()).map_err(|_| Error::TimeOverflow)
     }
     fn publish(&mut self) {
+        self.current.listener = self.listener.as_ref().map(Listener::status);
         self.current.sockets = self.sockets.occupied();
         self.current.resolutions = self.resolutions.len() + self.ready_dials.len();
         self.current.pings = self.ping_tokens.len();
@@ -127,7 +130,9 @@ impl Service {
     fn begin_stop(&mut self) {
         self.stopping = true;
         self.current.ready = false;
-        self.listener = None;
+        if let Some(listener) = &mut self.listener {
+            listener.close();
+        }
         self.current.listening = None;
         self.sockets.stop();
         self.resolver.stop();
@@ -163,6 +168,10 @@ impl Service {
                 },
                 (_, result) = self.dns.next(), if room && !self.stopping => self.pending.push_back(Completion::Dns(result)),
                 (token, outcome) = self.ping_jobs.next(), if room && !self.stopping => self.pending.push_back(Completion::Ping { token, outcome }),
+                accepted = accept(&self.listener), if room && !self.stopping => match accepted {
+                    Ok(accepted) => self.pending.push_back(Completion::Inbound(accepted)),
+                    Err(error) => self.fail(error),
+                },
             }
         }
     }
@@ -230,11 +239,8 @@ impl Service {
             return Ok(());
         }
         if let Some(address) = self.config.listen {
-            let listener = TcpListener::bind(address).await?;
-            let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
-                return Err(Error::Configuration);
-            };
-            self.current.listening = Some(address);
+            let listener = Listener::bind(address, self.config.listener).await?;
+            self.current.listening = Some(listener.address()?);
             self.listener = Some(listener);
         }
         let ticket = self.client.configure_startup(
@@ -318,9 +324,8 @@ impl Service {
                 },
                 (_, result) = self.dns.next(), if room => self.pending.push_back(Completion::Dns(result)),
                 (token, outcome) = self.ping_jobs.next(), if room => self.pending.push_back(Completion::Ping { token, outcome }),
-                socket = accept(&self.listener), if room => {
-                    let (socket, address) = socket?;
-                    self.inbound(socket, address).await?;
+                accepted = accept(&self.listener), if room => {
+                    self.inbound(accepted?).await?;
                 },
                 _ = sleep(deadline) => (),
                 _ = tokio::task::yield_now(), if progress || !self.pending.is_empty() => (),
@@ -385,9 +390,7 @@ async fn poll_pool(pool: &mut Option<PoolFuture>) -> pool::Status {
         None => std::future::pending().await,
     }
 }
-async fn accept(
-    listener: &Option<TcpListener>,
-) -> Result<(tokio::net::TcpStream, std::net::SocketAddr), std::io::Error> {
+async fn accept(listener: &Option<Listener>) -> Result<Accepted, Error> {
     match listener {
         Some(listener) => listener.accept().await,
         None => std::future::pending().await,

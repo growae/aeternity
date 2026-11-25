@@ -4,6 +4,8 @@ use ae_sync::chain::on_demand::control::{Command, Kind};
 
 #[path = "family/core.rs"]
 mod core;
+#[path = "../common/network_settings.rs"]
+mod network_settings;
 
 fn prepare(p: Prepared) -> node::Prepared {
     node::Prepared::new(p.into_open(), Default::default()).unwrap()
@@ -53,6 +55,90 @@ fn transfer(open: &configured::Open) -> Arc<ae_tx::SignedTransaction<ae_tx::Tran
         ae_tx::Transaction::new(ae_tx::TransactionLeaf::Spend(tx)),
         vec![payer().sign(&bytes)],
     ))
+}
+
+#[tokio::test]
+async fn configured_network_reaches_both_pow_families_and_respects_application_modes() {
+    for kind in ["pow_cuckoo", "on_demand"] {
+        for mode in [
+            json!({}),
+            json!({"dev_mode":true}),
+            json!({"offline_mode":true}),
+            json!({"maintenance_mode":true}),
+        ] {
+            let normal = mode == json!({});
+            let lab = Lab::new();
+            let prepared = prepare(lab.services(kind, mode, Default::default()));
+            let database = prepared.configured().chain().database().clone();
+            let mut settings = if kind == "on_demand" {
+                commands(&lab)
+            } else {
+                cuckoo(&lab)
+            };
+            network_settings::configure(&prepared, &mut settings);
+            let running = prepared
+                .launch(settings, || Ok(Default::default()))
+                .unwrap();
+            let mut handle = running.handle();
+            ready(&mut handle).await;
+            assert_eq!(handle.connections().is_some(), normal);
+            let generation = if normal {
+                let local = handle
+                    .pow()
+                    .unwrap()
+                    .workers()
+                    .unwrap()
+                    .bindings()
+                    .keys
+                    .as_ref()
+                    .unwrap()
+                    .current()
+                    .unwrap()
+                    .peer_identity()
+                    .unwrap()
+                    .await
+                    .unwrap()
+                    .public_key();
+                Some(
+                    network_settings::verify(handle.connections().unwrap(), &database, local).await,
+                )
+            } else {
+                None
+            };
+            let exit = running.shutdown().await.unwrap();
+            assert!(exit.status().joined && exit.status().failure.is_none());
+            if let Some(generation) = generation {
+                assert!(generation.network.status().joined);
+                assert!(generation.observer.status().joined);
+                assert_eq!(generation.network.status().listener.unwrap().active, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn configured_network_rejects_wrong_family_before_changing_settings() {
+    let lab = Lab::new();
+    let prepared = prepare(lab.services("on_demand", json!({}), Default::default()));
+    let mut settings = cuckoo(&lab);
+    let cfg = Configuration::empty();
+    let context = Context::new(Directories {
+        home: "release".into(),
+        data: "data".into(),
+        log: "log".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        prepared.configure_network(&cfg.resolve(&context).unwrap(), &mut settings),
+        Err(ae_node::configuration::network::Error::Family)
+    );
+    let node::Settings::Cuckoo(settings) = settings else {
+        unreachable!()
+    };
+    assert_eq!(
+        settings.config.connections.network.listen.unwrap().port(),
+        0
+    );
 }
 
 #[tokio::test]

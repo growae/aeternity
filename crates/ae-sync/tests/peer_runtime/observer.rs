@@ -146,6 +146,75 @@ impl Write for Log {
     }
 }
 #[tokio::test]
+async fn peer_count_log_has_its_own_timer_and_uses_current_registry_counts_and_maxima() {
+    for interval in [Duration::from_millis(50), Duration::ZERO] {
+        let node = Node::new();
+        let log = Log::default();
+        let mut run = start_monitor(
+            &node,
+            observe::Outputs {
+                log: Some(Box::new(log.clone())),
+                statsd: None,
+            },
+            observe::Config {
+                interval: Duration::from_secs(30),
+                peer_count_interval: Some(interval),
+                ..Default::default()
+            },
+        )
+        .await;
+        run.ping(&node).await;
+        let mut feed = run.observer.subscribe(None).unwrap();
+        let record = within(async {
+            loop {
+                if let Some(observe::Delivery::Record(record)) = feed.recv().await {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(record.json_line()).unwrap();
+                    if record.category == "peers" && value["data"]["inbound"] == 1 {
+                        break value;
+                    }
+                }
+            }
+        })
+        .await;
+        let data = &record["data"];
+        assert_eq!(data["maximum_inbound"], 100);
+        assert_eq!(data["maximum_outbound"], 0);
+        assert_eq!(data["outbound"], 0);
+        assert_eq!(
+            data["message"],
+            format!(
+                "Peer connections outbound: 0/0, inbound: 1/100, verified {}, unverified {}, standby {}",
+                data["verified"], data["unverified"], data["standby"]
+            )
+        );
+        await_status(&mut run.observer, |s| {
+            s.peer_count_samples >= 3 && s.samples == 1
+        })
+        .await;
+        let status = run.stop().await;
+        assert_eq!(status.peer_count_errors, 0);
+        assert_eq!(status.samples, 1);
+        assert!(
+            String::from_utf8(log.0.lock().unwrap().clone())
+                .unwrap()
+                .contains("Peer connections outbound:")
+        );
+    }
+    let node = Node::new();
+    let mut run = start_monitor(
+        &node,
+        Default::default(),
+        observe::Config {
+            peer_count_interval: None,
+            ..compact()
+        },
+    )
+    .await;
+    await_status(&mut run.observer, |s| s.samples >= 3).await;
+    assert_eq!(run.stop().await.peer_count_samples, 0);
+}
+#[tokio::test]
 async fn diagnostic_overflow_never_blocks_encrypted_requests_and_statsd_uses_live_state() {
     let node = Node::new();
     let log = Log::default();

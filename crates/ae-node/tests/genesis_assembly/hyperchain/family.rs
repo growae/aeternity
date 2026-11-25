@@ -6,6 +6,8 @@ use std::sync::atomic::Ordering;
 
 #[path = "family/core.rs"]
 mod core;
+#[path = "../../common/network_settings.rs"]
+mod network_settings;
 
 fn prepare(lab: &Hc, resources: Resources) -> node::Prepared {
     let mut options = node::Preparation::default();
@@ -43,6 +45,58 @@ async fn ready(h: &mut node::Handle) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn configured_network_reaches_hyperchain_owner_and_respects_application_modes() {
+    let parent = Parent::start();
+    for mode in [
+        json!({}),
+        json!({"dev_mode":true}),
+        json!({"offline_mode":true}),
+        json!({"maintenance_mode":true}),
+    ] {
+        let normal = mode == json!({});
+        let lab = Hc::new(8, mode, &parent);
+        let prepared = prepare(&lab, Default::default());
+        let database = prepared.configured().chain().database().clone();
+        let clock = Clock::new();
+        let mut settings = settings(&lab, &prepared, Arc::new(move |_| Ok(clock.clone())));
+        network_settings::configure(&prepared, &mut settings);
+        let running = prepared
+            .launch(settings, || Ok(Default::default()))
+            .unwrap();
+        let mut handle = running.handle();
+        ready(&mut handle).await;
+        assert_eq!(handle.connections().is_some(), normal);
+        let generation = if normal {
+            let local = handle
+                .hyperchain()
+                .unwrap()
+                .workers()
+                .unwrap()
+                .bindings()
+                .keys
+                .as_ref()
+                .unwrap()
+                .current()
+                .unwrap()
+                .peer_identity()
+                .unwrap()
+                .await
+                .unwrap()
+                .public_key();
+            Some(network_settings::verify(handle.connections().unwrap(), &database, local).await)
+        } else {
+            None
+        };
+        let exit = running.shutdown().await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        if let Some(generation) = generation {
+            assert!(generation.network.status().joined && generation.observer.status().joined);
+            assert_eq!(generation.network.status().listener.unwrap().active, 0);
+        }
+    }
 }
 
 #[tokio::test]

@@ -35,6 +35,13 @@ fn pow<P>(core: &Core, target: &mut crate::pow::Config<P>) -> Result<(), Error> 
     Ok(())
 }
 impl Settings {
+    pub fn apply_network(&mut self, network: &crate::configuration::network::Network) {
+        match self {
+            Self::Cuckoo(s) => network.apply(&mut s.config.connections),
+            Self::OnDemand(s) => network.apply(&mut s.config.connections),
+            Self::Hyperchain(s) => network.apply(&mut s.config.connections),
+        }
+    }
     pub fn apply_core(&mut self, core: &Core) -> Result<(), Error> {
         match self {
             Self::Cuckoo(s) => pow(core, &mut s.config),
@@ -62,6 +69,18 @@ impl Settings {
     }
 }
 impl Prepared {
+    pub fn configure_network(
+        &self,
+        resolved: &Resolved<'_>,
+        settings: &mut Settings,
+    ) -> Result<(), crate::configuration::network::Error> {
+        if self.family() != settings.family() {
+            return Err(crate::configuration::network::Error::Family);
+        }
+        let network = crate::configuration::network::Network::resolve(resolved)?;
+        settings.apply_network(&network);
+        Ok(())
+    }
     pub fn configure_core(
         &self,
         resolved: &Resolved<'_>,

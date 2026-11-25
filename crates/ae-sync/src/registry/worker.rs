@@ -65,6 +65,8 @@ pub struct Metrics {
     pub verified: usize,
     pub unverified: usize,
     pub standby: usize,
+    pub maximum_inbound: usize,
+    pub maximum_outbound: usize,
 }
 pub(crate) struct Frame {
     pub inspection: Inspection,
@@ -418,6 +420,8 @@ impl Client {
                 verified: pool.count(Count::All, Target::Verified),
                 unverified: pool.count(Count::All, Target::Unverified),
                 standby: pool.count(Count::Standby, Target::Both),
+                maximum_inbound: s.policy().configuration().maximum_inbound,
+                maximum_outbound: s.policy().configuration().maximum_outbound,
             })
         })
     }

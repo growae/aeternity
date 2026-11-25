@@ -8,6 +8,7 @@ pub mod chain;
 pub mod consensus;
 pub mod execution;
 mod files;
+pub mod network;
 pub mod presets;
 pub mod protocols;
 pub mod resolution;

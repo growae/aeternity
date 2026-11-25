@@ -212,6 +212,11 @@ impl Service {
     }
     pub(super) async fn completed(&mut self, completion: Completion) -> Result<(), Error> {
         match completion {
+            Completion::Inbound(accepted) => {
+                if !self.stopping {
+                    self.inbound(accepted).await?;
+                }
+            }
             Completion::Dns(result) => {
                 let Some(purpose) = self.resolutions.remove(&result.token) else {
                     return Ok(());
@@ -452,11 +457,12 @@ impl Service {
         }
         self.refresh().await
     }
-    pub(super) async fn inbound(
-        &mut self,
-        socket: tokio::net::TcpStream,
-        address: std::net::SocketAddr,
-    ) -> Result<(), Error> {
+    pub(super) async fn inbound(&mut self, accepted: Accepted) -> Result<(), Error> {
+        let Accepted {
+            socket,
+            address,
+            permit,
+        } = accepted;
         let std::net::SocketAddr::V4(address) = address else {
             self.current.counts.rejected = self.current.counts.rejected.saturating_add(1);
             return Ok(());
@@ -475,7 +481,12 @@ impl Service {
             Err(error) => return Err(error),
             Ok(_) => return Err(Error::Registry("unexpected inbound reservation".into())),
         };
-        if self.sockets.inbound_authenticated(token, socket).is_err() {
+        if self.stopping
+            || self
+                .sockets
+                .inbound_authenticated(token, socket, permit)
+                .is_err()
+        {
             self.current.counts.rejected = self.current.counts.rejected.saturating_add(1);
             self.apply(policy::Command::AbandonInbound(token)).await?;
         }

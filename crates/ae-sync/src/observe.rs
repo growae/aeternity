@@ -13,6 +13,7 @@ mod feed;
 mod file;
 mod gc;
 pub mod metrics;
+mod peers;
 mod sink;
 pub use feed::{Cursor, Delivery, Record, Subscription};
 pub use file::RotatingFile;
@@ -22,6 +23,7 @@ pub use sink::{Info as SinkInfo, Outputs};
 pub struct Config {
     pub interval: Duration,
     pub sample_timeout: Duration,
+    pub peer_count_interval: Option<Duration>,
     pub records: usize,
     pub history_bytes: usize,
     pub record_bytes: usize,
@@ -34,6 +36,7 @@ impl Default for Config {
         Self {
             interval: Duration::from_secs(10),
             sample_timeout: Duration::from_secs(5),
+            peer_count_interval: Some(Duration::from_secs(300)),
             records: 1024,
             history_bytes: 1 << 20,
             record_bytes: 64 << 10,
@@ -46,6 +49,9 @@ impl Default for Config {
 impl Config {
     fn validate(&self) -> Result<(), Error> {
         if self.interval.is_zero()
+            || self
+                .peer_count_interval
+                .is_some_and(|d| Instant::now().checked_add(d).is_none())
             || self.sample_timeout.is_zero()
             || Instant::now()
                 .checked_add(self.interval.max(self.sample_timeout))
@@ -115,6 +121,8 @@ pub struct Status {
     pub gc_missed: u64,
     pub samples: u64,
     pub sample_errors: u64,
+    pub peer_count_samples: u64,
+    pub peer_count_errors: u64,
     pub routing_errors: u64,
     pub filtered_log: u64,
     pub filtered_send: u64,
@@ -170,6 +178,7 @@ pub struct Service {
     current: Status,
     ring: Arc<Mutex<feed::Ring>>,
     pending: Option<Sample>,
+    peer_counts: Option<peers::Read>,
     reads: blocking::Pool,
     log: Option<sink::Worker>,
     statsd: Option<sink::Worker>,
@@ -248,6 +257,7 @@ pub(crate) fn create_bound(
             current,
             ring,
             pending: None,
+            peer_counts: None,
             reads,
             log,
             statsd,
@@ -405,6 +415,7 @@ impl Service {
     pub async fn run(mut self) -> Status {
         let mut interval = tokio::time::interval(self.config.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut next_peer_count = self.config.peer_count_interval.map(|d| Instant::now() + d);
         self.record("observer", json!({"state":"started"}));
         loop {
             if *self.stopped.borrow() {
@@ -429,6 +440,15 @@ impl Service {
             tokio::select! {
                 _ = self.stopped.changed() => break,
                 _ = interval.tick() => self.sample(),
+                _ = peers::wait(next_peer_count) => {
+                    next_peer_count = None;
+                    self.count_peers();
+                },
+                result = async { self.peer_counts.as_mut().expect("active peer count").await }, if self.peer_counts.is_some() => {
+                    self.peer_counts = None;
+                    self.peer_counted(result);
+                    next_peer_count = self.config.peer_count_interval.map(|d| Instant::now() + d);
+                },
                 _ = self.admission.changed() => (),
                 _ = async{match &mut self.routing {Some(r)=>r.changed().await,None=>std::future::pending().await}}=>(),
                 _ = tokio::task::yield_now(), if self.gc_pending => (),
@@ -446,6 +466,7 @@ impl Service {
             }
         }
         self.pending = None;
+        self.peer_counts = None;
         self.reads.stop();
         self.current.running = false;
         self.record("observer", json!({"state":"stopped"}));

@@ -5,12 +5,14 @@ use ae_storage::{Database, pool::worker as admission};
 use std::{net::SocketAddrV4, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
+pub mod listener;
 mod service;
 pub use service::{Exit, Service};
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: Option<SocketAddrV4>,
+    pub listener: listener::Config,
     pub commands: usize,
     pub command_bytes: usize,
     pub events: usize,
@@ -29,6 +31,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: Some(SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 3015)),
+            listener: Default::default(),
             commands: 256,
             command_bytes: 32 << 20,
             events: 256,
@@ -56,6 +59,7 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
+        self.listener.validate().map_err(|_| Error::Configuration)?;
         let frame_bytes = self
             .registry
             .policy
@@ -144,6 +148,7 @@ pub struct Status {
     pub ready: bool,
     pub joined: bool,
     pub listening: Option<SocketAddrV4>,
+    pub listener: Option<listener::Status>,
     pub policy: Option<registry::worker::Inspection>,
     pub startup: Option<registry::startup::Progress>,
     pub sockets: usize,
@@ -557,6 +562,7 @@ pub(crate) async fn create_bound(
         ready: false,
         joined: false,
         listening: None,
+        listener: None,
         policy: None,
         startup: None,
         sockets: 0,

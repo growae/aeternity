@@ -1,4 +1,6 @@
 mod common;
+#[path = "network_runtime/listener.rs"]
+mod listener;
 use ae_p2p::{
     discovery::{Class, Peer},
     message::{Kind, Message, Value},
@@ -113,6 +115,10 @@ async fn stop(h: &network::Handle, task: JoinHandle<network::Exit>) -> network::
     assert!(!exit.status.ready);
     assert!(exit.status.listening.is_none());
     assert!(exit.status.failure.is_none(), "{:?}", exit.status.failure);
+    if let Some(listener) = exit.status.listener {
+        assert!(listener.closed);
+        assert_eq!(listener.active, 0);
+    }
     assert_eq!(
         (
             exit.status.sockets,
@@ -482,6 +488,7 @@ async fn graceful_transport_exit_releases_peer_without_failure_penalty() {
     .unwrap();
     assert!(matches!(within(request).await, Ok(net::Reply::Response(_))));
     let monitor = client.monitor();
+    status(&mut h, |s| s.listener.unwrap().active == 1).await;
     client.disconnect();
     assert!(client.is_disconnecting());
     assert!(!client.is_closed());
@@ -492,6 +499,7 @@ async fn graceful_transport_exit_releases_peer_without_failure_penalty() {
     );
     assert_eq!(within(monitor.wait()).await.reason, net::Error::LocalClose);
     status(&mut h, |s| s.counts.closed == 1 && s.sockets == 0).await;
+    assert_eq!(h.status().listener.unwrap().active, 0);
     let exit = stop(&h, task).await;
     let registry = exit.registry.unwrap();
     let saved = registry.policy().pool().state(remote.public_key()).unwrap();
@@ -521,6 +529,7 @@ async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_respon
         ae_p2p::registry::Kind::Temporary
     );
     status(&mut h, |s| s.policy.as_ref().unwrap().counts.temporary == 1).await;
+    assert_eq!(h.status().listener.unwrap().active, 1);
     let (finished, continuation) = local_client
         .finish_ping_before_close(
             &received,
@@ -542,6 +551,7 @@ async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_respon
         net::Error::RemoteClose
     );
     status(&mut h, |s| s.sockets == 0).await;
+    assert_eq!(h.status().listener.unwrap().active, 0);
     command(
         &h,
         Command::Block(Info {
@@ -574,6 +584,7 @@ async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_respon
     );
     let response =
         Message::response_error(Kind::Ping, b"blocked".to_vec(), Default::default()).unwrap();
+    status(&mut h, |s| s.listener.unwrap().active == 1).await;
     // The policy retirement receipt enforces stop even through the ordinary
     // finish API, after this error response has been fully written.
     within(blocked.finish_ping(&received, Some(&response)).unwrap())

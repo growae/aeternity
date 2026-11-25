@@ -108,8 +108,8 @@ enum Attempt {
     Inbound,
 }
 enum Completed {
-    Ready(Box<Ready>),
-    Authenticated(Box<Authenticated>),
+    Ready(Box<Ready>, Option<crate::network::listener::Permit>),
+    Authenticated(Box<Authenticated>, Option<crate::network::listener::Permit>),
     Probe,
 }
 
@@ -207,13 +207,16 @@ impl Sockets {
             .await?;
             let connection =
                 Connection::new(client, events, driver).map_err(|_| Error::Configuration)?;
-            Ok(Completed::Ready(Box::new(Ready {
-                token,
-                peer: Info::from(&peer),
-                address: peer.address,
-                inbound: false,
-                connection,
-            })))
+            Ok(Completed::Ready(
+                Box::new(Ready {
+                    token,
+                    peer: Info::from(&peer),
+                    address: peer.address,
+                    inbound: false,
+                    connection,
+                }),
+                None,
+            ))
         });
         self.attempts.insert(token, attempt);
         Ok(())
@@ -222,19 +225,26 @@ impl Sockets {
     // this method. Every failure still requires that reservation to be retired
     // by the policy owner. Rejection drops the supplied socket immediately.
     pub fn inbound(&mut self, token: Token, socket: TcpStream) -> Result<(), Error> {
-        self.inbound_mode(token, socket, false)
+        self.inbound_mode(token, socket, false, None)
     }
     pub(crate) fn inbound_authenticated(
         &mut self,
         token: Token,
         socket: TcpStream,
+        permit: crate::network::listener::Permit,
     ) -> Result<(), Error> {
         if !self.settings.runtime.defer_pings {
             return Err(Error::Configuration);
         }
-        self.inbound_mode(token, socket, true)
+        self.inbound_mode(token, socket, true, Some(permit))
     }
-    fn inbound_mode(&mut self, token: Token, socket: TcpStream, early: bool) -> Result<(), Error> {
+    fn inbound_mode(
+        &mut self,
+        token: Token,
+        socket: TcpStream,
+        early: bool,
+        permit: Option<crate::network::listener::Permit>,
+    ) -> Result<(), Error> {
         self.reserve(token)?;
         let std::net::SocketAddr::V4(remote) = socket.peer_addr()? else {
             return Err(Error::Address);
@@ -259,12 +269,15 @@ impl Sockets {
                 .checked_add(settings.first_ping_timeout)
                 .ok_or(Error::Configuration)?;
             if early {
-                return Ok(Completed::Authenticated(Box::new(Authenticated {
-                    token,
-                    address,
-                    deadline,
-                    connection,
-                })));
+                return Ok(Completed::Authenticated(
+                    Box::new(Authenticated {
+                        token,
+                        address,
+                        deadline,
+                        connection,
+                    }),
+                    permit,
+                ));
             }
             // Native first-ping timeout starts only after the Noise handshake.
             let port = tokio::time::timeout_at(deadline, async {
@@ -287,17 +300,20 @@ impl Sockets {
             })
             .await
             .map_err(|_| Error::Timeout(Stage::FirstPing))??;
-            Ok(Completed::Ready(Box::new(Ready {
-                token,
-                peer: Info {
-                    id,
-                    host: address.to_string().into_bytes(),
-                    port,
-                },
-                address,
-                inbound: true,
-                connection,
-            })))
+            Ok(Completed::Ready(
+                Box::new(Ready {
+                    token,
+                    peer: Info {
+                        id,
+                        host: address.to_string().into_bytes(),
+                        port,
+                    },
+                    address,
+                    inbound: true,
+                    connection,
+                }),
+                permit,
+            ))
         });
         self.attempts.insert(token, Attempt::Inbound);
         Ok(())
@@ -335,11 +351,19 @@ impl Sockets {
         }
         self.clients.get(&token).is_some_and(|c| !c.is_closed())
     }
-    fn track(&mut self, token: Token, client: net::Client) {
+    fn track(
+        &mut self,
+        token: Token,
+        client: net::Client,
+        permit: Option<crate::network::listener::Permit>,
+    ) {
         let monitor = client.monitor();
         self.clients.insert(token, client);
-        self.terminals
-            .insert(token, async move { monitor.wait().await });
+        self.terminals.insert(token, async move {
+            let exit = monitor.wait().await;
+            drop(permit);
+            exit
+        });
     }
     // A Ready connection must be polled by its new owner (or dropped). Continue
     // next() after stop to observe actual handed-off driver teardown. Neither
@@ -368,13 +392,13 @@ impl Sockets {
             (token, result) = self.work.next() => {
                 let attempt = self.attempts.remove(&token).expect("owned attempt");
                 Some(match (attempt, result) {
-                    (_, Ok(Completed::Ready(ready))) => {
+                    (_, Ok(Completed::Ready(ready, permit))) => {
                         let client = ready.connection.client().clone();
-                        self.track(token, client);
+                        self.track(token, client, permit);
                         Event::Ready(ready)
                     }
-                    (_, Ok(Completed::Authenticated(ready))) => {
-                        self.track(token, ready.connection.client().clone());
+                    (_, Ok(Completed::Authenticated(ready, permit))) => {
+                        self.track(token, ready.connection.client().clone(), permit);
                         self.admissions.insert(token, ready.deadline);
                         Event::Authenticated(ready)
                     }
