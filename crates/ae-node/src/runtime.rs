@@ -20,6 +20,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+mod configuration;
 mod launch;
 pub use launch::{Cuckoo, Hyperchain, OnDemand, Settings, StartError};
 

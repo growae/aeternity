@@ -485,13 +485,13 @@ impl Owner {
             .mode()
             .application()
             == ApplicationMode::Normal;
-        let (cache, controller) = if network {
-            let (c, o) = GossipCache::managed(self.config.cache_entries, self.config.cache_limit)
+        let (cache, controller) =
+            GossipCache::managed(self.config.cache_entries, self.config.cache_limit)
                 .map_err(|e| Error::Start(format!("{e:?}")))?;
-            (c, Some(o))
-        } else {
-            (Default::default(), None)
-        };
+        // The native cache belongs to aesync, absent outside normal mode.
+        // Dropping the unused controller preserves unavailable-cache misses;
+        // a fixed in-memory default would incorrectly retain duplicate hits.
+        let controller = network.then_some(controller);
         self.phase(Phase::Workers);
         let (h, service) = self
             .prepared

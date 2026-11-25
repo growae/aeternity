@@ -129,6 +129,11 @@ async fn selected_epoch_end_produces_vote_micro_then_key_using_the_admitted_micr
                     storage.insert(b, 1_000_000, Origin::Gossip).unwrap();
                 }
                 drop(storage);
+                // This checks successful EOE admission and parent selection.
+                // A 4 ms negotiation can legitimately lose quorum when the
+                // host preempts the worker. Keep importer and EOE timing bound
+                // to the same value; epoch 1's length delta remains zero.
+                node.config.rules.consensus.child_block_time = 1000.into();
                 let source = source(&node);
                 let pair = Pair::new(false);
                 let (importer, accepted) = Importer::new_hyperchain_scoped(
@@ -139,7 +144,9 @@ async fn selected_epoch_end_produces_vote_micro_then_key_using_the_admitted_micr
                 )
                 .unwrap();
                 let producer = accepted.producer();
-                let mut owner = candidate::owner(&node, &source, &pair, cfg(&node));
+                let mut settings = cfg(&node);
+                settings.eoe.block_time = 1000.into();
+                let mut owner = candidate::configured_owner(&node, &source, &pair, settings);
                 let mut parents = owner.parent_delivery(accepted).unwrap();
                 let pool = candidate::pool(&node);
                 if with_spend {
@@ -225,7 +232,11 @@ async fn selected_epoch_end_produces_vote_micro_then_key_using_the_admitted_micr
                     else {
                         panic!()
                     };
-                    assert_eq!(block.transactions.len(), 2 + usize::from(with_spend));
+                    assert_eq!(
+                        block.transactions.len(),
+                        2 + usize::from(with_spend),
+                        "profile {profile}, corpus {index}, spend {with_spend}, progress {progress:?}"
+                    );
                     assert_eq!(done.parent, micro.hash);
                     let Block::Key(block) =
                         node.db.view().unwrap().require_block(key.hash).unwrap()

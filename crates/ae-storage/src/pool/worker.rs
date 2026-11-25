@@ -13,7 +13,9 @@ pub mod events;
 mod gossip;
 mod reply;
 pub use client::{Client, Clock, SelectOptions};
-pub use gossip::{CacheController, CacheHandle, CacheOwner, GossipCache, LifecycleError};
+pub use gossip::{
+    CacheConfigurationError, CacheController, CacheHandle, CacheOwner, GossipCache, LifecycleError,
+};
 pub use reply::Ticket;
 
 #[derive(Debug, Clone, Copy)]

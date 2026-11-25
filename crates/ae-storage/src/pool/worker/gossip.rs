@@ -6,7 +6,9 @@ use ae_mempool::{
 };
 
 mod lifecycle;
-pub use lifecycle::{CacheController, CacheHandle, CacheOwner, LifecycleError};
+pub use lifecycle::{
+    CacheConfigurationError, CacheController, CacheHandle, CacheOwner, LifecycleError,
+};
 
 #[derive(Clone)]
 enum Source {

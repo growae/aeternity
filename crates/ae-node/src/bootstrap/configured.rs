@@ -34,6 +34,7 @@ pub struct Prepared {
     auxiliary: auxiliary::Loaded,
 }
 pub struct Open {
+    cwd: PathBuf,
     mode: Mode,
     chain: Opened,
     execution: execution::Bound,
@@ -103,6 +104,7 @@ impl Prepared {
         let path = self.cwd.join(path);
         let chain = self.genesis.open(path, config).map_err(Error::Genesis)?;
         Ok(Open {
+            cwd: self.cwd,
             mode: self.mode,
             chain,
             execution: self.execution,
@@ -111,6 +113,9 @@ impl Prepared {
     }
 }
 impl Open {
+    pub fn startup_directory(&self) -> &Path {
+        &self.cwd
+    }
     pub fn mode(&self) -> Mode {
         self.mode
     }

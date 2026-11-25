@@ -56,7 +56,7 @@ pub(super) fn owner(
     config.eoe.block_time = 4.into();
     configured_owner(node, source, pair, config)
 }
-fn configured_owner(
+pub(super) fn configured_owner(
     node: &Node,
     source: &Arc<live::Source>,
     pair: &Pair,

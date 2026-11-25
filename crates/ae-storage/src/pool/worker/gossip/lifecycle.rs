@@ -63,6 +63,11 @@ pub enum LifecycleError {
     AlreadyRunning,
     Closed,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheConfigurationError {
+    Lifecycle(LifecycleError),
+    Capacity(ae_mempool::gossip::Error),
+}
 // A single controller creates cache incarnations. Cloned lookup clients have
 // no authority to install one and never retain a mutable cache across restart.
 pub struct CacheController(Arc<State>);
@@ -76,6 +81,23 @@ pub struct CacheHandle {
     instance: Weak<Mutex<Cache>>,
 }
 impl CacheController {
+    // Update only an idle template, preserving the binding and its hard limit.
+    // A live incarnation must be changed through GossipCache::reconfigure.
+    pub fn configure_idle(&mut self, capacity: usize) -> Result<(), CacheConfigurationError> {
+        let mut inner = self.0.lock();
+        if inner.closed {
+            return Err(CacheConfigurationError::Lifecycle(LifecycleError::Closed));
+        }
+        if inner.current.is_some() {
+            return Err(CacheConfigurationError::Lifecycle(
+                LifecycleError::AlreadyRunning,
+            ));
+        }
+        inner
+            .template
+            .reconfigure(capacity)
+            .map_err(CacheConfigurationError::Capacity)
+    }
     pub fn shutdown(&self) {
         let mut inner = self.0.lock();
         inner.closed = true;

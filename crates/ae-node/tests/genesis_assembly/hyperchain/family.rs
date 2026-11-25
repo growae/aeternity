@@ -4,6 +4,9 @@ use ae_sync::chain::hyperchain::eoe::owner::production;
 use producer::supervision::{self, Notice};
 use std::sync::atomic::Ordering;
 
+#[path = "family/core.rs"]
+mod core;
+
 fn prepare(lab: &Hc, resources: Resources) -> node::Prepared {
     let mut options = node::Preparation::default();
     options.hyperchain.micro_cycle_ms = 1;

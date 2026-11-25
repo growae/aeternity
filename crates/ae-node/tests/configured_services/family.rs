@@ -2,6 +2,9 @@ use super::*;
 use ae_node::runtime as node;
 use ae_sync::chain::on_demand::control::{Command, Kind};
 
+#[path = "family/core.rs"]
+mod core;
+
 fn prepare(p: Prepared) -> node::Prepared {
     node::Prepared::new(p.into_open(), Default::default()).unwrap()
 }
