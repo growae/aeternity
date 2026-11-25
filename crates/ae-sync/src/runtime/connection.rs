@@ -271,6 +271,30 @@ where
     let dependencies = workers.for_producer(producer).ok_or(Error::Configuration)?;
     create_inner(inputs, config, outputs, dependencies, Some(cache))
 }
+// The enclosing root owns this PoW importer. Connection replacement and joined
+// shutdown drain its accepted work without stopping its production authority.
+// Config.importer applies only to constructors which create a fresh importer.
+pub fn create_pow_with_importer<O, F>(
+    importer: &chain::Importer<O>,
+    workers: &super::workers::Handle,
+    identity: Arc<noise::Identity>,
+    cache: admission::CacheController,
+    config: Config,
+    outputs: F,
+) -> Result<(Handle, Service<O, F>), Error>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let dependencies = workers.bindings();
+    let admission = dependencies
+        .admission
+        .current()
+        .ok_or(Error::Dependency(Child::GossipCache))?
+        .client;
+    let inputs = Sources::pow(importer, admission, identity)?;
+    create_inner(inputs, config, outputs, dependencies, Some(cache))
+}
 fn create_inner<O, F>(
     inputs: Sources<O>,
     config: Config,

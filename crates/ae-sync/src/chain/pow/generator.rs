@@ -6,6 +6,7 @@ use ae_chain::{
     hyperchain::candidate as core,
     repository::{self as repo, pow},
 };
+use ae_execution::transactions::owned::Owned;
 use ae_storage::{Database, events, pool::worker as pool, pow as owned, snapshots};
 use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
@@ -227,6 +228,32 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         config: Config<O>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(database, snapshots, pool, config, clock, None)
+    }
+    pub fn spawn_owned(
+        database: Arc<Database>,
+        snapshots: snapshots::Owner,
+        pool: pool::Client,
+        config: Config<O>,
+        clock: Arc<dyn Clock>,
+        execution: Arc<Owned<O>>,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(database, snapshots, pool, config, clock, Some(execution))
+    }
+    fn spawn_inner(
+        database: Arc<Database>,
+        snapshots: snapshots::Owner,
+        pool: pool::Client,
+        config: Config<O>,
+        clock: Arc<dyn Clock>,
+        execution: Option<Arc<Owned<O>>>,
+    ) -> Result<Self, Error> {
+        if execution.as_ref().is_some_and(|e| {
+            e.consensus() != ae_protocol::ConsensusType::Pow
+                || e.network() != &config.preparation.profile.network
+        }) {
+            return Err(Error::Binding);
+        }
         if !(1..=1024).contains(&config.controls)
             || !(1..=128).contains(&config.publications)
             || !(1..=100_000).contains(&config.queued_transactions)
@@ -280,6 +307,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             config,
             clock,
             lease,
+            execution,
         );
         let worker = thread::Builder::new()
             .name("ae-pow-generator".into())

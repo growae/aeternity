@@ -13,6 +13,27 @@ pub struct Mode {
     pub offline: bool,
     pub development: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationMode {
+    Normal,
+    Offline,
+    Maintenance,
+    Development,
+}
+impl Mode {
+    // aecore_app:set_app_ctrl_mode/0, with maintenance taking precedence.
+    pub fn application(self) -> ApplicationMode {
+        if self.maintenance {
+            ApplicationMode::Maintenance
+        } else if self.offline {
+            ApplicationMode::Offline
+        } else if self.development {
+            ApplicationMode::Development
+        } else {
+            ApplicationMode::Normal
+        }
+    }
+}
 impl Resolved<'_> {
     pub fn mode(&self) -> Result<Mode, Error> {
         let flag = |name| {

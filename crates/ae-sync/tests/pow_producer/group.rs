@@ -829,3 +829,54 @@ fn child_exit_during_supervisor_clock_read_withdraws_current_pair() {
     generation(&client, 2);
     assert!(finish(worker).status.failure.is_none());
 }
+
+#[test]
+fn owned_signature_budget_survives_actual_pair_replacement_and_remains_retryable() {
+    let node = node();
+    let execution = common::ledger_fixtures::execution(&node.network).with_config(|base| {
+        ae_execution::transactions::owned::Owned::capture(&ae_execution::transactions::Config {
+            signature_limits: ae_execution::transactions::SignatureLimits {
+                max_encoded_bytes: 0,
+                ..base.signature_limits
+            },
+            ..*base
+        })
+        .unwrap()
+    });
+    let worker = production::Worker::spawn_owned(
+        &node.importer,
+        node._snapshots.clone(),
+        node.pool.as_ref().unwrap().client(),
+        node.keys(),
+        config(&node),
+        Arc::new(production::SystemClocks::default()),
+        Arc::new(execution),
+    )
+    .unwrap();
+    let client = worker.client();
+    let first = generation(&client, 1);
+    node.push(1);
+    until(|| first.generator.status().last_error.is_some());
+    assert!(first.generator.candidate().is_none());
+    assert_eq!(first.producer.status().admissions, 0);
+    first.generator.request_shutdown();
+    let second = generation(&client, 2);
+    until(|| second.generator.status().last_error.is_some());
+    assert!(second.generator.candidate().is_none());
+    assert_eq!(second.producer.status().admissions, 0);
+    let report = finish(worker);
+    assert!(report.is_settled());
+    drop(report);
+    drop(client);
+    drop(first);
+    drop(second);
+    let retry = start(&node);
+    let client = retry.client();
+    generation(&client, 1);
+    let hash = admitted(&client);
+    assert!(node.db.view().unwrap().is_canonical(hash).unwrap());
+    drop(finish(retry));
+    println!(
+        "Owned PoW production: signature budget retained across real pair replacement; unchanged pending spend succeeds under restored explicit resources"
+    );
+}

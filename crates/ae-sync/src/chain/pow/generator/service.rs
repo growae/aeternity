@@ -10,6 +10,7 @@ pub(super) struct Service<O> {
     snapshots: snapshots::Owner,
     pool: pool::Client,
     config: Config<O>,
+    execution: Option<Arc<Owned<O>>>,
     clock: Arc<dyn Clock>,
     lease: Option<owned::GeneratorLease>,
     status: Status,
@@ -35,6 +36,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         config: Config<O>,
         clock: Arc<dyn Clock>,
         lease: owned::GeneratorLease,
+        execution: Option<Arc<Owned<O>>>,
     ) -> Self {
         let pool_cursor = pool.event_cursor();
         Self {
@@ -46,6 +48,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             snapshots,
             pool,
             config,
+            execution,
             clock,
             lease: Some(lease),
             status: Status::default(),
@@ -277,6 +280,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             self.pool.clone(),
             self.config.clone(),
             self.clock.clone(),
+            self.execution.clone(),
         ) {
             Ok(active) => self.active = Some(active),
             Err(e) => self.completed = Some(task::Outcome::Failed(e)),

@@ -2,6 +2,7 @@
 // aeternity fa2a6d7. ISC copyright: repository LICENSE.
 use super::{generator, packing, producer};
 use crate::{chain, keys, production_group as supervisor};
+use ae_execution::transactions::owned::Owned;
 use ae_storage::{pool::worker as pool, pow::GroupLease, snapshots};
 use ae_vm_fate::maps::MapOrder;
 use std::{
@@ -13,7 +14,7 @@ use std::{
 mod factory;
 mod retirement;
 mod service;
-pub use retirement::{GeneratorExit, ProducerExit, Report, Retired, Retirement};
+pub use retirement::{GeneratorExit, ProducerExit, Released, Report, Retired, Retirement};
 
 pub trait Clocks: Send + Sync + 'static {
     fn generator(&self, generation: u64) -> Arc<dyn generator::Clock>;
@@ -208,6 +209,43 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         config: Config<O>,
         clocks: Arc<dyn Clocks>,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(importer, snapshots, pool, keys, config, clocks, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_owned(
+        importer: &chain::Importer<O>,
+        snapshots: snapshots::Owner,
+        pool: pool::Client,
+        keys: keys::Client,
+        config: Config<O>,
+        clocks: Arc<dyn Clocks>,
+        execution: Arc<Owned<O>>,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(
+            importer,
+            snapshots,
+            pool,
+            keys,
+            config,
+            clocks,
+            Some(execution),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_inner(
+        importer: &chain::Importer<O>,
+        snapshots: snapshots::Owner,
+        pool: pool::Client,
+        keys: keys::Client,
+        config: Config<O>,
+        clocks: Arc<dyn Clocks>,
+        execution: Option<Arc<Owned<O>>>,
+    ) -> Result<Self, Error> {
+        if execution.as_ref().is_some_and(|e| {
+            e.network() != importer.network() || e.consensus() != importer.consensus()
+        }) {
+            return Err(Error::Binding);
+        }
         if config.poll.is_zero()
             || config.poll > Duration::from_secs(1)
             || !(1..=128).contains(&config.outputs)
@@ -256,6 +294,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             keys,
             &config,
             clocks.clone(),
+            execution,
         );
         let service =
             service::Service::new(factory, shared.clone(), pool, clocks, config.poll, lease);

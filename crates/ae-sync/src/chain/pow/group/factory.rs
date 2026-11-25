@@ -8,6 +8,7 @@ struct Inputs<O> {
     producer: producer::Config,
     mining: Option<producer::mining::Config>,
     clocks: Arc<dyn Clocks>,
+    execution: Option<Arc<Owned<O>>>,
 }
 pub(super) struct Factory<O>(Mutex<Inputs<O>>);
 impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
@@ -18,6 +19,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
         keys: keys::Client,
         config: &Config<O>,
         clocks: Arc<dyn Clocks>,
+        execution: Option<Arc<Owned<O>>>,
     ) -> Self {
         Self(Mutex::new(Inputs {
             importer: importer.borrowed(),
@@ -28,6 +30,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
             producer: config.producer,
             mining: config.mining.clone(),
             clocks,
+            execution,
         }))
     }
 }
@@ -42,7 +45,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
     type Conductor = producer::Worker;
     type Error = StartError;
     fn generator(&self, generation: u64) -> Result<Self::Generator, StartError> {
-        let (db, snapshots, pool, config, clocks) = {
+        let (db, snapshots, pool, config, clocks, execution) = {
             let i = lock(&self.0);
             (
                 i.importer.database().clone(),
@@ -50,10 +53,23 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
                 i.pool.clone(),
                 i.generator.clone(),
                 i.clocks.clone(),
+                i.execution.clone(),
             )
         };
-        generator::Worker::spawn(db, snapshots, pool, config, clocks.generator(generation))
-            .map_err(StartError::Generator)
+        match execution {
+            Some(execution) => generator::Worker::spawn_owned(
+                db,
+                snapshots,
+                pool,
+                config,
+                clocks.generator(generation),
+                execution,
+            ),
+            None => {
+                generator::Worker::spawn(db, snapshots, pool, config, clocks.generator(generation))
+            }
+        }
+        .map_err(StartError::Generator)
     }
     fn conductor(
         &self,

@@ -1,0 +1,740 @@
+// One configured Cuckoo root. Subordinate worker, connection and production
+// owners retain their own native restart policies; root failures are terminal.
+use crate::bootstrap::configured::pow::{self as configured, Prepared, Services};
+use crate::configuration::resolution::ApplicationMode;
+use ae_protocol::ConsensusAlgorithm;
+use ae_storage::pool::worker::GossipCache;
+use ae_sync::{
+    chain::pow::group,
+    observe,
+    runtime::{connection, workers},
+};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{sync::watch, task::JoinHandle, time::Instant};
+
+#[derive(Clone)]
+pub struct Config {
+    pub workers: workers::Config,
+    pub connections: connection::Config,
+    pub production: configured::Production,
+    pub cache_entries: usize,
+    pub cache_limit: usize,
+    pub startup_timeout: Duration,
+    pub poll: Duration,
+    pub outputs: usize,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            workers: Default::default(),
+            connections: Default::default(),
+            production: Default::default(),
+            cache_entries: 1000,
+            cache_limit: 100_000,
+            startup_timeout: Duration::from_secs(30),
+            poll: Duration::from_millis(10),
+            outputs: 16,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Prepared,
+    Workers,
+    Importer,
+    Identity,
+    Connections,
+    Production,
+    Running,
+    Rebinding,
+    Stopping,
+    Stopped,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Child {
+    Workers,
+    Connections,
+    Production,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    Configuration,
+    NoRuntime,
+    Closed,
+    ReceiptTaken,
+    NotReady,
+    StartupTimeout(Phase),
+    Start(String),
+    Workers(workers::Error),
+    Connections(connection::Error),
+    Production(group::Error),
+    ChildStopped(Child),
+    ChildTask(Child),
+    Unsettled,
+    RootTask,
+}
+#[derive(Debug, Clone)]
+pub struct Status {
+    pub phase: Phase,
+    pub running: bool,
+    pub ready: bool,
+    pub joined: bool,
+    pub failure: Option<Error>,
+    pub workers: Option<workers::Status>,
+    pub connections: Option<connection::Status>,
+    pub production: Option<group::Status>,
+    pub production_starts: u64,
+}
+pub enum Output {
+    Production(Arc<group::Output>),
+    Retired(Box<group::Released>),
+}
+pub struct Exit {
+    pub status: Status,
+    pub production: Option<Result<group::Report, Error>>,
+    pub retained: Vec<Output>,
+    pub services: Option<Services>,
+    pub prepared: Option<Prepared>,
+}
+struct Controls {
+    importer: Option<Arc<ae_sync::chain::Importer>>,
+    workers: Option<workers::Handle>,
+    connections: Option<connection::Handle>,
+    production: Option<group::Client<ae_vm_fate::maps::order::Otp26>>,
+    enabled: bool,
+}
+struct Shared {
+    stop: watch::Sender<bool>,
+    published: watch::Sender<Status>,
+    controls: Mutex<Controls>,
+    outputs: Mutex<VecDeque<Output>>,
+    exit: Mutex<Option<Exit>>,
+}
+#[derive(Clone)]
+pub struct Handle {
+    shared: Arc<Shared>,
+    observed: watch::Receiver<Status>,
+}
+impl Handle {
+    pub fn request_shutdown(&self) {
+        self.shared.stop.send_replace(true);
+    }
+    pub fn status(&self) -> Status {
+        self.shared.published.borrow().clone()
+    }
+    pub async fn changed(&mut self) -> Result<Status, Error> {
+        self.observed.changed().await.map_err(|_| Error::Closed)?;
+        Ok(self.observed.borrow_and_update().clone())
+    }
+    pub fn workers(&self) -> Option<workers::Handle> {
+        lock(&self.shared.controls).workers.clone()
+    }
+    // Stable across subordinate replacements. Shutdown closes this capability
+    // before the root publishes its terminal receipt, including retained clones.
+    pub fn importer(&self) -> Option<Arc<ae_sync::chain::Importer>> {
+        lock(&self.shared.controls).importer.clone()
+    }
+    pub fn connections(&self) -> Option<connection::Handle> {
+        lock(&self.shared.controls).connections.clone()
+    }
+    pub fn production(&self) -> Option<group::Client<ae_vm_fate::maps::order::Otp26>> {
+        lock(&self.shared.controls).production.clone()
+    }
+    // Desired production state is retained while worker dependencies rebind.
+    pub fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
+        if *self.shared.stop.borrow() || !self.status().running {
+            return Err(Error::Closed);
+        }
+        let mut c = lock(&self.shared.controls);
+        if let Some(p) = &c.production {
+            p.set_enabled(enabled).map_err(Error::Production)?;
+        }
+        c.enabled = enabled;
+        Ok(())
+    }
+    pub fn try_output(&self) -> Option<Output> {
+        lock(&self.shared.outputs).pop_front()
+    }
+    pub fn take_exit(&self) -> Option<Exit> {
+        lock(&self.shared.exit).take()
+    }
+}
+pub struct Running {
+    handle: Handle,
+    task: Option<JoinHandle<()>>,
+}
+impl Running {
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+    pub async fn wait(mut self) -> Result<Exit, Error> {
+        self.task
+            .take()
+            .expect("root task")
+            .await
+            .map_err(|_| Error::RootTask)?;
+        self.handle.take_exit().ok_or(Error::ReceiptTaken)
+    }
+    pub async fn shutdown(self) -> Result<Exit, Error> {
+        self.handle.request_shutdown();
+        self.wait().await
+    }
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.handle.request_shutdown();
+    }
+}
+pub struct StartError {
+    pub error: Error,
+    pub prepared: Prepared,
+}
+impl std::fmt::Debug for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+struct Owner {
+    shared: Arc<Shared>,
+    stop: watch::Receiver<bool>,
+    status: Status,
+    config: Config,
+    prepared: Option<Prepared>,
+    services: Option<Services>,
+    workers: Option<workers::Handle>,
+    worker_task: Option<JoinHandle<workers::Status>>,
+    connections: Option<connection::Handle>,
+    connection_task: Option<JoinHandle<connection::Status>>,
+    production: Option<group::Worker<ae_vm_fate::maps::order::Otp26>>,
+    pending_retirement: Option<group::Report>,
+    dependencies: (u64, u64),
+    clocks: Arc<dyn group::Clocks>,
+}
+pub fn launch<F>(
+    prepared: Prepared,
+    config: Config,
+    clocks: Arc<dyn group::Clocks>,
+    outputs: F,
+) -> Result<Running, Box<StartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let error = if prepared.configured().chain().identity().algorithm != ConsensusAlgorithm::Cuckoo
+        || config.workers.keys.is_none()
+        || config.poll.is_zero()
+        || config.poll > Duration::from_secs(1)
+        || config.startup_timeout.is_zero()
+        || config.startup_timeout > Duration::from_secs(300)
+        || !(1..=128).contains(&config.outputs)
+        || config.production.producer.micro_cycle_ms != prepared.rules().admission.micro_cycle_ms
+    {
+        Some(Error::Configuration)
+    } else if tokio::runtime::Handle::try_current().is_err() {
+        Some(Error::NoRuntime)
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        return Err(Box::new(StartError { error, prepared }));
+    }
+    let status = Status {
+        phase: Phase::Prepared,
+        running: true,
+        ready: false,
+        joined: false,
+        failure: None,
+        workers: None,
+        connections: None,
+        production: None,
+        production_starts: 0,
+    };
+    let (published, observed) = watch::channel(status.clone());
+    let (stop, stopped) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        stop,
+        published,
+        controls: Mutex::new(Controls {
+            importer: None,
+            workers: None,
+            connections: None,
+            production: None,
+            enabled: config.production.producer.enabled,
+        }),
+        outputs: Mutex::new(VecDeque::new()),
+        exit: Mutex::new(None),
+    });
+    let handle = Handle {
+        shared: shared.clone(),
+        observed,
+    };
+    let mut owner = Owner {
+        shared,
+        stop: stopped,
+        status,
+        config,
+        prepared: Some(prepared),
+        services: None,
+        workers: None,
+        worker_task: None,
+        connections: None,
+        connection_task: None,
+        production: None,
+        pending_retirement: None,
+        dependencies: (0, 0),
+        clocks,
+    };
+    let task = tokio::spawn(async move {
+        let result = match owner.start(outputs).await {
+            Ok(()) => owner.run().await,
+            Err(e) => Err(e),
+        };
+        if let Err(error) = result
+            && (error != Error::Closed || !owner.stopping())
+        {
+            owner.status.failure = Some(error);
+        }
+        owner.finish().await;
+    });
+    Ok(Running {
+        handle,
+        task: Some(task),
+    })
+}
+impl Owner {
+    fn stopping(&self) -> bool {
+        *self.stop.borrow()
+    }
+    fn publish(&mut self) {
+        self.status.workers = self.workers.as_ref().map(workers::Handle::status);
+        self.status.connections = self.connections.as_ref().map(connection::Handle::status);
+        if let Some(p) = &self.production {
+            self.status.production = Some(p.client().status());
+        }
+        self.status.ready = self.status.phase == Phase::Running
+            && self.status.workers.as_ref().is_some_and(|w| w.ready)
+            && self.status.connections.as_ref().is_none_or(|c| c.ready)
+            && self
+                .production
+                .as_ref()
+                .is_some_and(|p| p.client().current().is_some());
+        self.shared.published.send_replace(self.status.clone());
+    }
+    fn phase(&mut self, phase: Phase) {
+        self.status.phase = phase;
+        self.publish();
+    }
+    async fn pause(&mut self) {
+        tokio::select! {biased;_=self.stop.changed()=>(),_=tokio::time::sleep(self.config.poll)=>()}
+    }
+    fn startup_check(&self, end: Instant) -> Result<(), Error> {
+        if self.stopping() {
+            Err(Error::Closed)
+        } else if Instant::now() >= end {
+            Err(Error::StartupTimeout(self.status.phase))
+        } else {
+            Ok(())
+        }
+    }
+    fn worker_health(&self) -> Result<(), Error> {
+        let w = self.workers.as_ref().ok_or(Error::NotReady)?.status();
+        if let Some(e) = w.error {
+            return Err(Error::Workers(e));
+        }
+        if !w.running
+            || self
+                .worker_task
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished)
+        {
+            return Err(Error::ChildStopped(Child::Workers));
+        }
+        Ok(())
+    }
+    fn connection_health(&self) -> Result<(), Error> {
+        if let Some(c) = &self.connections {
+            let s = c.status();
+            if let Some(e) = s.error {
+                return Err(Error::Connections(e));
+            }
+            if !s.running
+                || self
+                    .connection_task
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished)
+            {
+                return Err(Error::ChildStopped(Child::Connections));
+            }
+        }
+        Ok(())
+    }
+    async fn workers_ready(&mut self, end: Instant) -> Result<(), Error> {
+        loop {
+            self.startup_check(end)?;
+            self.worker_health()?;
+            self.publish();
+            if self.workers.as_ref().unwrap().status().ready {
+                return Ok(());
+            }
+            self.pause().await;
+        }
+    }
+    async fn start<F>(&mut self, outputs: F) -> Result<(), Error>
+    where
+        F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+    {
+        let end = Instant::now() + self.config.startup_timeout;
+        self.startup_check(end)?;
+        let network = self
+            .prepared
+            .as_ref()
+            .unwrap()
+            .configured()
+            .mode()
+            .application()
+            == ApplicationMode::Normal;
+        let (cache, controller) = if network {
+            let (c, o) = GossipCache::managed(self.config.cache_entries, self.config.cache_limit)
+                .map_err(|e| Error::Start(format!("{e:?}")))?;
+            (c, Some(o))
+        } else {
+            (Default::default(), None)
+        };
+        self.phase(Phase::Workers);
+        let (h, service) = self
+            .prepared
+            .as_ref()
+            .unwrap()
+            .workers(self.config.workers.clone(), cache)
+            .map_err(|e| Error::Start(format!("{e:?}")))?;
+        lock(&self.shared.controls).workers = Some(h.clone());
+        self.workers = Some(h);
+        self.worker_task = Some(tokio::spawn(service.run()));
+        self.workers_ready(end).await?;
+        self.phase(Phase::Importer);
+        match self
+            .prepared
+            .take()
+            .unwrap()
+            .activate(self.workers.as_ref().unwrap())
+        {
+            Ok(s) => {
+                lock(&self.shared.controls).importer = Some(s.shared_importer());
+                self.services = Some(s);
+            }
+            Err(e) => {
+                let configured::ActivationError { error, prepared } = *e;
+                self.prepared = Some(prepared);
+                return Err(Error::Start(format!("{error:?}")));
+            }
+        }
+        if let Some(controller) = controller {
+            self.phase(Phase::Identity);
+            let keys = self
+                .workers
+                .as_ref()
+                .unwrap()
+                .bindings()
+                .keys
+                .and_then(|k| k.current())
+                .ok_or(Error::NotReady)?;
+            let ticket = keys
+                .peer_identity()
+                .map_err(|e| Error::Start(format!("{e:?}")))?;
+            let identity = tokio::select! {biased;_=self.stop.changed()=>return Err(Error::Closed),
+            _=tokio::time::sleep_until(end)=>return Err(Error::StartupTimeout(Phase::Identity)),
+            r=ticket=>r.map_err(|e|Error::Start(format!("{e:?}")))?};
+            self.startup_check(end)?;
+            self.phase(Phase::Connections);
+            let (h, service) = self
+                .services
+                .as_ref()
+                .unwrap()
+                .connections(
+                    self.workers.as_ref().unwrap(),
+                    identity,
+                    controller,
+                    self.config.connections.clone(),
+                    outputs,
+                )
+                .map_err(|e| Error::Start(format!("{e:?}")))?;
+            lock(&self.shared.controls).connections = Some(h.clone());
+            self.connections = Some(h);
+            self.connection_task = Some(tokio::spawn(service.run()));
+            loop {
+                self.startup_check(end)?;
+                self.worker_health()?;
+                self.connection_health()?;
+                self.publish();
+                if self.connections.as_ref().unwrap().status().ready {
+                    break;
+                }
+                self.pause().await;
+            }
+        }
+        self.phase(Phase::Production);
+        self.start_production(end).await?;
+        self.phase(Phase::Running);
+        Ok(())
+    }
+    async fn start_production(&mut self, end: Instant) -> Result<(), Error> {
+        self.workers_ready(end).await?;
+        let w = self.workers.as_ref().unwrap();
+        let status = w.status();
+        let b = w.bindings();
+        let pool = b.admission.current().ok_or(Error::NotReady)?.client;
+        let keys = b.keys.and_then(|k| k.current()).ok_or(Error::NotReady)?;
+        let mut config = self.config.production.clone();
+        config.producer.enabled = false;
+        let production = self
+            .services
+            .as_ref()
+            .unwrap()
+            .production(pool, keys, config, self.clocks.clone())
+            .map_err(|e| Error::Start(format!("{e:?}")))?;
+        let client = production.client();
+        self.production = Some(production);
+        self.dependencies = (status.admission_generation, status.keys_generation);
+        self.status.production_starts = self
+            .status
+            .production_starts
+            .checked_add(1)
+            .ok_or(Error::Configuration)?;
+        {
+            let mut controls = lock(&self.shared.controls);
+            client
+                .set_enabled(controls.enabled)
+                .map_err(Error::Production)?;
+            controls.production = Some(client.clone());
+        }
+        loop {
+            self.startup_check(end)?;
+            self.worker_health()?;
+            self.connection_health()?;
+            self.publish();
+            let s = client.status();
+            if let Some(e) = s.failure {
+                return Err(Error::Production(e));
+            }
+            if !s.running {
+                return Err(Error::ChildStopped(Child::Production));
+            }
+            if client.current().is_some() {
+                return Ok(());
+            }
+            self.pause().await;
+        }
+    }
+    fn collect(&mut self) {
+        let Some(p) = &self.production else {
+            return;
+        };
+        let client = p.client();
+        let mut queue = lock(&self.shared.outputs);
+        while queue.len() < self.config.outputs {
+            let Some(output) = client.front() else {
+                break;
+            };
+            queue.push_back(Output::Production(output.clone()));
+            assert!(client.acknowledge(&output));
+        }
+    }
+    fn changed_dependencies(&self) -> bool {
+        let w = self.workers.as_ref().unwrap();
+        let s = w.status();
+        let b = w.bindings();
+        (s.admission_generation, s.keys_generation) != self.dependencies
+            || b.admission.current().is_none()
+            || b.keys.as_ref().is_none_or(|k| k.current().is_none())
+    }
+    async fn stop_production(&mut self) -> Result<(), Error> {
+        lock(&self.shared.controls).production = None;
+        if let Some(p) = self.production.take() {
+            p.client().request_shutdown();
+            let report = tokio::task::spawn_blocking(move || p.shutdown())
+                .await
+                .map_err(|_| Error::ChildTask(Child::Production))?
+                .map_err(|_| Error::ChildTask(Child::Production))?;
+            self.status.production = Some(report.status.clone());
+            self.pending_retirement = Some(report);
+        }
+        Ok(())
+    }
+    async fn rebind(&mut self) -> Result<(), Error> {
+        self.phase(Phase::Rebinding);
+        self.stop_production().await?;
+        let end = Instant::now() + self.config.startup_timeout;
+        loop {
+            if self.stopping() {
+                return Err(Error::Closed);
+            }
+            self.worker_health()?;
+            self.connection_health()?;
+            let settled = self
+                .pending_retirement
+                .as_mut()
+                .unwrap()
+                .poll()
+                .map_err(Error::Production)?;
+            if settled && lock(&self.shared.outputs).len() < self.config.outputs {
+                break;
+            }
+            // A slow reader applies bounded backpressure, not a child failure.
+            // Only unsettled accepted work is subject to the retirement bound.
+            if !settled {
+                self.startup_check(end)?;
+            }
+            self.publish();
+            self.pause().await;
+        }
+        let report = self.pending_retirement.take().unwrap();
+        let released = match report.release() {
+            Ok(r) => r,
+            Err(r) => {
+                self.pending_retirement = Some(*r);
+                return Err(Error::Unsettled);
+            }
+        };
+        lock(&self.shared.outputs).push_back(Output::Retired(Box::new(released)));
+        self.start_production(Instant::now() + self.config.startup_timeout)
+            .await?;
+        self.phase(Phase::Running);
+        Ok(())
+    }
+    async fn run(&mut self) -> Result<(), Error> {
+        while !self.stopping() {
+            self.worker_health()?;
+            self.collect();
+            if self.changed_dependencies() {
+                self.rebind().await?;
+                continue;
+            }
+            self.connection_health()?;
+            let p = self.production.as_ref().unwrap().client().status();
+            if let Some(e) = p.failure {
+                return Err(Error::Production(e));
+            }
+            if !p.running || self.production.as_ref().unwrap().is_finished() {
+                return Err(Error::ChildStopped(Child::Production));
+            }
+            self.publish();
+            self.pause().await;
+        }
+        Ok(())
+    }
+    async fn finish(&mut self) {
+        self.phase(Phase::Stopping);
+        let mut joined = true;
+        let mut production_failure = None;
+        if let Err(e) = self.stop_production().await {
+            joined = false;
+            self.status.failure.get_or_insert(e.clone());
+            production_failure = Some(e);
+        }
+        if let Some(c) = &self.connections {
+            c.shutdown();
+        }
+        if let Some(t) = self.connection_task.take() {
+            match t.await {
+                Ok(s) => {
+                    joined &= s.joined;
+                    if let Some(e) = &s.error {
+                        self.status
+                            .failure
+                            .get_or_insert(Error::Connections(e.clone()));
+                    }
+                    self.status.connections = Some(s);
+                }
+                Err(_) => {
+                    joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::Connections));
+                }
+            }
+        }
+        if let Some(w) = &self.workers {
+            w.shutdown();
+        }
+        if let Some(t) = self.worker_task.take() {
+            match t.await {
+                Ok(s) => {
+                    joined &= s.joined;
+                    if let Some(e) = &s.error {
+                        self.status.failure.get_or_insert(Error::Workers(e.clone()));
+                    }
+                    self.status.workers = Some(s);
+                }
+                Err(_) => {
+                    joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::Workers));
+                }
+            }
+        }
+        if let Some(s) = &self.services {
+            s.stop_and_join().await;
+        }
+        if let Some(r) = &mut self.pending_retirement {
+            if let Some(e) = &r.status.failure {
+                self.status
+                    .failure
+                    .get_or_insert(Error::Production(e.clone()));
+            }
+            match r.poll() {
+                Ok(true) => (),
+                Ok(false) => {
+                    joined = false;
+                    self.status.failure.get_or_insert(Error::Unsettled);
+                }
+                Err(e) => {
+                    joined = false;
+                    self.status.failure.get_or_insert(Error::Production(e));
+                }
+            }
+        }
+        let production = production_failure
+            .map(Err)
+            .or_else(|| self.pending_retirement.take().map(Ok));
+        self.status.phase = Phase::Stopped;
+        self.status.running = false;
+        self.status.ready = false;
+        self.status.joined = joined;
+        let retained = lock(&self.shared.outputs).drain(..).collect();
+        *lock(&self.shared.exit) = Some(Exit {
+            status: self.status.clone(),
+            production,
+            retained,
+            services: self.services.take(),
+            prepared: self.prepared.take(),
+        });
+        self.shared.published.send_replace(self.status.clone());
+    }
+}
+// Even an unexpected root task drop fences children; normal shutdown above
+// additionally joins them and retains the single terminal receipt.
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if let Some(p) = &self.production {
+            p.client().request_shutdown();
+        }
+        if let Some(c) = &self.connections {
+            c.shutdown();
+        }
+        if let Some(w) = &self.workers {
+            w.shutdown();
+        }
+        if let Some(s) = &self.services {
+            s.importer().stop();
+        }
+    }
+}

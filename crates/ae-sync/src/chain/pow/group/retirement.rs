@@ -99,7 +99,26 @@ pub struct Report {
     pub(super) pool: pool::Client,
     pub(super) _lease: GroupLease,
 }
+// Settled observations can outlive this group without retaining its exclusive
+// construction lease. Unresolved accepted work must keep the original Report.
+pub struct Released {
+    pub status: Status,
+    pub outputs: Vec<Arc<Output>>,
+    pub unpublished: Vec<Event>,
+    pub settled: Vec<Retired>,
+}
 impl Report {
+    pub fn release(self) -> Result<Released, Box<Self>> {
+        if !self.is_settled() {
+            return Err(Box::new(self));
+        }
+        Ok(Released {
+            status: self.status,
+            outputs: self.outputs,
+            unpublished: self.unpublished,
+            settled: self.settled,
+        })
+    }
     // Settlement never constructs services or retries accepted requests. A
     // matching pool may have to be joined by its independent owner first.
     pub fn poll(&mut self) -> Result<bool, Error> {

@@ -53,6 +53,7 @@ pub(super) fn spawn<O: MapOrder + Clone + Send + Sync + 'static>(
     pool: pool::Client,
     config: Config<O>,
     clock: Arc<dyn Clock>,
+    execution: Option<Arc<Owned<O>>>,
 ) -> std::result::Result<Active<O>, Error> {
     let cancel = Arc::new(AtomicBool::new(false));
     let signal = cancel.clone();
@@ -73,7 +74,7 @@ pub(super) fn spawn<O: MapOrder + Clone + Send + Sync + 'static>(
                             if signal.load(Ordering::Acquire) {
                                 return Ok(Outcome::Cancelled);
                             }
-                            let input = owned::prepare_micro(
+                            let mut input = owned::prepare_micro(
                                 &snapshots,
                                 &config.preparation,
                                 pow::Input {
@@ -83,6 +84,10 @@ pub(super) fn spawn<O: MapOrder + Clone + Send + Sync + 'static>(
                                 },
                             )
                             .map_err(|e| Error::Preparation(bounded(&e)))?;
+                            if let Some(execution) = &execution {
+                                input.value.reader =
+                                    input.value.reader.with_owned_execution(execution.clone());
+                            }
                             if signal.load(Ordering::Acquire) {
                                 return Ok(Outcome::Cancelled);
                             }

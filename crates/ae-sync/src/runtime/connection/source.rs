@@ -5,8 +5,8 @@ enum Ledger<O> {
     Owned(Box<(Owned<O>, Rules)>),
     Borrowed(chain::Importer<O>),
 }
-// Only the conductor can supply the borrowed PoS admission authority. Public
-// PoW inputs still construct one importer per connection generation.
+// A root owner can retain admission across connection generations. Legacy
+// standalone inputs still construct one importer per connection generation.
 pub(super) struct Sources<O> {
     pub database: Arc<Database>,
     pub admission: admission::Client,
@@ -26,9 +26,28 @@ impl<O> From<Inputs<O>> for Sources<O> {
     }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Sources<O> {
+    pub fn pow(
+        importer: &chain::Importer<O>,
+        admission: admission::Client,
+        identity: Arc<noise::Identity>,
+    ) -> Result<Self, Error> {
+        if importer.consensus() != ConsensusType::Pow {
+            return Err(Error::Configuration);
+        }
+        importer
+            .check_open()
+            .map_err(|_| Error::Dependency(Child::Importer))?;
+        Ok(Self {
+            database: importer.database().clone(),
+            admission,
+            gc: None,
+            identity,
+            ledger: Ledger::Borrowed(importer.borrowed()),
+        })
+    }
     pub fn accepts_gc(&self, configured: bool) -> bool {
-        // The borrowed path is sealed to the conductor's optional-worker
-        // handle. Its managed GC may still be awaiting initial publication.
+        // Borrowed paths receive a managed worker handle. Its GC may still
+        // be awaiting initial publication or an independent replacement.
         matches!(self.ledger, Ledger::Borrowed(_)) || self.gc.is_some() == configured
     }
     pub fn hyperchain(

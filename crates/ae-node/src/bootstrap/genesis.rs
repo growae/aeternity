@@ -14,6 +14,7 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub enum Error {
+    WorkingDirectory,
     Configuration(crate::configuration::chain::Error),
     Presets(presets::Error),
     Binding,
@@ -44,6 +45,53 @@ impl Prepared {
         configured_gas_limit: &Unsigned,
         limits: presets::Limits,
     ) -> Result<Self, Error> {
+        Self::load_from(
+            resolved,
+            network,
+            Path::new("."),
+            initial,
+            execution,
+            execution_profile,
+            configured_gas_limit,
+            limits,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_at<O: MapOrder>(
+        resolved: &Resolved<'_>,
+        network: Option<&[u8]>,
+        cwd: &Path,
+        initial: &Trees,
+        execution: &Owned<O>,
+        execution_profile: Hash256,
+        configured_gas_limit: &Unsigned,
+        limits: presets::Limits,
+    ) -> Result<Self, Error> {
+        if !cwd.is_absolute() {
+            return Err(Error::WorkingDirectory);
+        }
+        Self::load_from(
+            resolved,
+            network,
+            cwd,
+            initial,
+            execution,
+            execution_profile,
+            configured_gas_limit,
+            limits,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn load_from<O: MapOrder>(
+        resolved: &Resolved<'_>,
+        network: Option<&[u8]>,
+        cwd: &Path,
+        initial: &Trees,
+        execution: &Owned<O>,
+        execution_profile: Hash256,
+        configured_gas_limit: &Unsigned,
+        limits: presets::Limits,
+    ) -> Result<Self, Error> {
         let settings = Settings::resolve(resolved, network).map_err(Error::Configuration)?;
         if settings.profile() != execution.network()
             || (if settings.consensus().genesis().kind() == Kind::Hyperchain {
@@ -57,7 +105,7 @@ impl Prepared {
         let plan = Plan::resolve(resolved, &settings, limits).map_err(Error::Presets)?;
         let mut inputs = vec![];
         let mut read = |source: &presets::Source| -> Result<Vec<u8>, Error> {
-            let bytes = source.read(limits.bytes).map_err(Error::Presets)?;
+            let bytes = source.read_at(cwd, limits.bytes).map_err(Error::Presets)?;
             inputs.push(Input {
                 source: source.clone(),
                 hash: ae_crypto::blake2b_256(&bytes),

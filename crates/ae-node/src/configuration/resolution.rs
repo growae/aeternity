@@ -13,7 +13,7 @@ mod expand;
 mod pattern;
 mod services;
 mod text;
-pub use services::Mode;
+pub use services::{ApplicationMode, Mode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

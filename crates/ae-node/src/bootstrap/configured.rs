@@ -2,25 +2,38 @@
 // with the identity written to storage. No worker or network is started here.
 use super::{Config, Opened, genesis};
 use crate::configuration::{
-    auxiliary, chain::Settings, consensus::Kind, execution, presets, resolution::Resolved,
+    auxiliary,
+    chain::Settings,
+    consensus::Kind,
+    execution, presets,
+    resolution::{Mode, Resolved},
 };
 use ae_state::Trees;
 use ae_types::{Hash256, Unsigned};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+pub mod pow;
 
 #[derive(Debug)]
 pub enum Error {
+    Resolution(crate::configuration::resolution::Error),
     Chain(crate::configuration::chain::Error),
     Auxiliary(auxiliary::Error),
     Execution(execution::Error),
     Genesis(genesis::Error),
 }
 pub struct Prepared {
+    cwd: PathBuf,
+    mode: Mode,
     genesis: genesis::Prepared,
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
 }
 pub struct Open {
+    mode: Mode,
     chain: Opened,
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
@@ -57,9 +70,10 @@ impl Prepared {
             resources,
         )
         .map_err(Error::Execution)?;
-        let genesis = genesis::Prepared::load(
+        let genesis = genesis::Prepared::load_at(
             resolved,
             network,
+            cwd,
             initial,
             execution.execution(),
             execution.fingerprint(),
@@ -68,6 +82,8 @@ impl Prepared {
         )
         .map_err(Error::Genesis)?;
         Ok(Self {
+            cwd: cwd.into(),
+            mode: resolved.mode().map_err(Error::Resolution)?,
             genesis,
             execution,
             auxiliary,
@@ -83,8 +99,10 @@ impl Prepared {
         &self.auxiliary
     }
     pub fn open(self, path: impl AsRef<Path>, config: Config) -> Result<Open, Error> {
+        let path = self.cwd.join(path);
         let chain = self.genesis.open(path, config).map_err(Error::Genesis)?;
         Ok(Open {
+            mode: self.mode,
             chain,
             execution: self.execution,
             auxiliary: self.auxiliary,
@@ -92,6 +110,9 @@ impl Prepared {
     }
 }
 impl Open {
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
     pub fn chain(&self) -> &Opened {
         &self.chain
     }
