@@ -742,3 +742,6 @@ fn pinned_readers_keep_vm_limits_while_rebinding_block_environment() {
         assert_eq!(reader, (7, 503, 9, 117, atoms.clone()));
     }
 }
+
+#[path = "on_demand_commands/service.rs"]
+mod service;

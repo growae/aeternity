@@ -2,3 +2,4 @@
 // Copyright (c) 2020, Aeternity Anstalt. ISC: repository LICENSE.
 pub mod control;
 pub mod runtime;
+pub mod service;

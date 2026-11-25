@@ -1,11 +1,13 @@
-// One configured Cuckoo root. Subordinate worker, connection and production
+// One configured PoW root. Subordinate worker, connection and production
 // owners retain their own native restart policies; root failures are terminal.
 use crate::bootstrap::configured::pow::{self as configured, Prepared, Services};
 use crate::configuration::resolution::ApplicationMode;
-use ae_protocol::ConsensusAlgorithm;
 use ae_storage::pool::worker::GossipCache;
 use ae_sync::{
-    chain::pow::group,
+    chain::{
+        on_demand::service,
+        pow::{generator, group},
+    },
     observe,
     runtime::{connection, workers},
 };
@@ -15,30 +17,53 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
+mod production;
+pub use production::{CommandGeneration, Commands};
+use production::{Input, Live, Retired, Retirement};
 
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<P = configured::Production> {
     pub workers: workers::Config,
     pub connections: connection::Config,
-    pub production: configured::Production,
+    pub production: P,
     pub cache_entries: usize,
     pub cache_limit: usize,
     pub startup_timeout: Duration,
     pub poll: Duration,
     pub outputs: usize,
 }
-impl Default for Config {
+impl<P: Default> Default for Config<P> {
     fn default() -> Self {
+        Self::with_production(P::default())
+    }
+}
+impl<P> Config<P> {
+    pub fn with_production(production: P) -> Self {
         Self {
             workers: Default::default(),
             connections: Default::default(),
-            production: Default::default(),
+            production,
             cache_entries: 1000,
             cache_limit: 100_000,
             startup_timeout: Duration::from_secs(30),
             poll: Duration::from_millis(10),
             outputs: 16,
         }
+    }
+    fn into_parts(self) -> (P, Config<()>) {
+        (
+            self.production,
+            Config {
+                workers: self.workers,
+                connections: self.connections,
+                production: (),
+                cache_entries: self.cache_entries,
+                cache_limit: self.cache_limit,
+                startup_timeout: self.startup_timeout,
+                poll: self.poll,
+                outputs: self.outputs,
+            },
+        )
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,11 +92,13 @@ pub enum Error {
     Closed,
     ReceiptTaken,
     NotReady,
+    UnsupportedControl,
     StartupTimeout(Phase),
     Start(String),
     Workers(workers::Error),
     Connections(connection::Error),
     Production(group::Error),
+    Commands(service::Error),
     ChildStopped(Child),
     ChildTask(Child),
     Unsettled,
@@ -87,15 +114,25 @@ pub struct Status {
     pub workers: Option<workers::Status>,
     pub connections: Option<connection::Status>,
     pub production: Option<group::Status>,
+    pub commands: Option<service::Status>,
     pub production_starts: u64,
 }
 pub enum Output {
     Production(Arc<group::Output>),
     Retired(Box<group::Released>),
+    Command {
+        generation: u64,
+        completion: Arc<service::Completion>,
+    },
+    CommandsRetired {
+        generation: u64,
+        report: Box<service::Released>,
+    },
 }
 pub struct Exit {
     pub status: Status,
     pub production: Option<Result<group::Report, Error>>,
+    pub commands: Option<Result<service::Report, Error>>,
     pub retained: Vec<Output>,
     pub services: Option<Services>,
     pub prepared: Option<Prepared>,
@@ -105,7 +142,8 @@ struct Controls {
     workers: Option<workers::Handle>,
     connections: Option<connection::Handle>,
     production: Option<group::Client<ae_vm_fate::maps::order::Otp26>>,
-    enabled: bool,
+    commands: Option<CommandGeneration>,
+    enabled: Option<bool>,
 }
 struct Shared {
     stop: watch::Sender<bool>,
@@ -144,16 +182,22 @@ impl Handle {
     pub fn production(&self) -> Option<group::Client<ae_vm_fate::maps::order::Otp26>> {
         lock(&self.shared.controls).production.clone()
     }
+    pub fn commands(&self) -> Option<CommandGeneration> {
+        lock(&self.shared.controls).commands.clone()
+    }
     // Desired production state is retained while worker dependencies rebind.
     pub fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
         if *self.shared.stop.borrow() || !self.status().running {
             return Err(Error::Closed);
         }
         let mut c = lock(&self.shared.controls);
+        if c.enabled.is_none() {
+            return Err(Error::UnsupportedControl);
+        }
         if let Some(p) = &c.production {
             p.set_enabled(enabled).map_err(Error::Production)?;
         }
-        c.enabled = enabled;
+        c.enabled = Some(enabled);
         Ok(())
     }
     pub fn try_output(&self) -> Option<Output> {
@@ -207,17 +251,17 @@ struct Owner {
     shared: Arc<Shared>,
     stop: watch::Receiver<bool>,
     status: Status,
-    config: Config,
+    config: Config<()>,
+    input: Input,
     prepared: Option<Prepared>,
     services: Option<Services>,
     workers: Option<workers::Handle>,
     worker_task: Option<JoinHandle<workers::Status>>,
     connections: Option<connection::Handle>,
     connection_task: Option<JoinHandle<connection::Status>>,
-    production: Option<group::Worker<ae_vm_fate::maps::order::Otp26>>,
-    pending_retirement: Option<group::Report>,
+    production: Option<Live>,
+    pending_retirement: Option<Retirement>,
     dependencies: (u64, u64),
-    clocks: Arc<dyn group::Clocks>,
 }
 pub fn launch<F>(
     prepared: Prepared,
@@ -228,16 +272,57 @@ pub fn launch<F>(
 where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
-    let error = if prepared.configured().chain().identity().algorithm != ConsensusAlgorithm::Cuckoo
+    let (production, config) = config.into_parts();
+    launch_inner(
+        prepared,
+        config,
+        Input::Cuckoo {
+            config: Box::new(production),
+            clocks,
+        },
+        outputs,
+    )
+}
+pub fn launch_commands<F>(
+    prepared: Prepared,
+    config: Config<Commands>,
+    clock: Arc<dyn generator::Clock>,
+    outputs: F,
+) -> Result<Running, Box<StartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let (production, config) = config.into_parts();
+    launch_inner(
+        prepared,
+        config,
+        Input::Commands {
+            config: Box::new(production),
+            clock,
+        },
+        outputs,
+    )
+}
+fn launch_inner<F>(
+    prepared: Prepared,
+    config: Config<()>,
+    input: Input,
+    outputs: F,
+) -> Result<Running, Box<StartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let error = if prepared.configured().chain().identity().algorithm != input.algorithm()
         || config.workers.keys.is_none()
         || config.poll.is_zero()
         || config.poll > Duration::from_secs(1)
         || config.startup_timeout.is_zero()
         || config.startup_timeout > Duration::from_secs(300)
         || !(1..=128).contains(&config.outputs)
-        || config.production.producer.micro_cycle_ms != prepared.rules().admission.micro_cycle_ms
     {
         Some(Error::Configuration)
+    } else if let Err(error) = input.validate(prepared.rules().admission.micro_cycle_ms) {
+        Some(error)
     } else if tokio::runtime::Handle::try_current().is_err() {
         Some(Error::NoRuntime)
     } else {
@@ -255,6 +340,7 @@ where
         workers: None,
         connections: None,
         production: None,
+        commands: None,
         production_starts: 0,
     };
     let (published, observed) = watch::channel(status.clone());
@@ -267,7 +353,8 @@ where
             workers: None,
             connections: None,
             production: None,
-            enabled: config.production.producer.enabled,
+            commands: None,
+            enabled: input.enabled(),
         }),
         outputs: Mutex::new(VecDeque::new()),
         exit: Mutex::new(None),
@@ -281,6 +368,7 @@ where
         stop: stopped,
         status,
         config,
+        input,
         prepared: Some(prepared),
         services: None,
         workers: None,
@@ -290,7 +378,6 @@ where
         production: None,
         pending_retirement: None,
         dependencies: (0, 0),
-        clocks,
     };
     let task = tokio::spawn(async move {
         let result = match owner.start(outputs).await {
@@ -317,15 +404,12 @@ impl Owner {
         self.status.workers = self.workers.as_ref().map(workers::Handle::status);
         self.status.connections = self.connections.as_ref().map(connection::Handle::status);
         if let Some(p) = &self.production {
-            self.status.production = Some(p.client().status());
+            p.update(&mut self.status);
         }
         self.status.ready = self.status.phase == Phase::Running
             && self.status.workers.as_ref().is_some_and(|w| w.ready)
             && self.status.connections.as_ref().is_none_or(|c| c.ready)
-            && self
-                .production
-                .as_ref()
-                .is_some_and(|p| p.client().current().is_some());
+            && self.production.as_ref().is_some_and(Live::ready);
         self.shared.published.send_replace(self.status.clone());
     }
     fn phase(&mut self, phase: Phase) {
@@ -492,59 +576,66 @@ impl Owner {
         let b = w.bindings();
         let pool = b.admission.current().ok_or(Error::NotReady)?.client;
         let keys = b.keys.and_then(|k| k.current()).ok_or(Error::NotReady)?;
-        let mut config = self.config.production.clone();
-        config.producer.enabled = false;
-        let production = self
-            .services
-            .as_ref()
-            .unwrap()
-            .production(pool, keys, config, self.clocks.clone())
-            .map_err(|e| Error::Start(format!("{e:?}")))?;
-        let client = production.client();
-        self.production = Some(production);
-        self.dependencies = (status.admission_generation, status.keys_generation);
-        self.status.production_starts = self
+        let number = self
             .status
             .production_starts
             .checked_add(1)
             .ok_or(Error::Configuration)?;
+        let production = match self
+            .input
+            .spawn(self.services.as_ref().unwrap(), pool, keys)
+        {
+            Ok(p) => p,
+            Err(failure) => {
+                let production::StartFailure { error, retired } = *failure;
+                if let Some(value) = retired {
+                    value.update(&mut self.status);
+                    self.pending_retirement = Some(Retirement { number, value });
+                }
+                return Err(error);
+            }
+        };
+        self.production = Some(production);
+        self.dependencies = (status.admission_generation, status.keys_generation);
+        self.status.production_starts = number;
         {
             let mut controls = lock(&self.shared.controls);
-            client
-                .set_enabled(controls.enabled)
-                .map_err(Error::Production)?;
-            controls.production = Some(client.clone());
+            match self.production.as_ref().unwrap() {
+                Live::Cuckoo(worker) => {
+                    let client = worker.client();
+                    client
+                        .set_enabled(controls.enabled.expect("Cuckoo control"))
+                        .map_err(Error::Production)?;
+                    controls.production = Some(client);
+                }
+                Live::Commands(worker) => {
+                    controls.commands = Some(CommandGeneration {
+                        number,
+                        client: worker.client(),
+                    });
+                }
+            }
         }
         loop {
             self.startup_check(end)?;
             self.worker_health()?;
             self.connection_health()?;
             self.publish();
-            let s = client.status();
-            if let Some(e) = s.failure {
-                return Err(Error::Production(e));
-            }
-            if !s.running {
-                return Err(Error::ChildStopped(Child::Production));
-            }
-            if client.current().is_some() {
+            let production = self.production.as_ref().unwrap();
+            production.check()?;
+            if production.ready() {
                 return Ok(());
             }
             self.pause().await;
         }
     }
     fn collect(&mut self) {
-        let Some(p) = &self.production else {
-            return;
-        };
-        let client = p.client();
-        let mut queue = lock(&self.shared.outputs);
-        while queue.len() < self.config.outputs {
-            let Some(output) = client.front() else {
-                break;
-            };
-            queue.push_back(Output::Production(output.clone()));
-            assert!(client.acknowledge(&output));
+        if let Some(p) = &self.production {
+            p.collect(
+                &mut lock(&self.shared.outputs),
+                self.config.outputs,
+                self.status.production_starts,
+            );
         }
     }
     fn changed_dependencies(&self) -> bool {
@@ -556,15 +647,19 @@ impl Owner {
             || b.keys.as_ref().is_none_or(|k| k.current().is_none())
     }
     async fn stop_production(&mut self) -> Result<(), Error> {
-        lock(&self.shared.controls).production = None;
+        {
+            let mut controls = lock(&self.shared.controls);
+            controls.production = None;
+            controls.commands = None;
+        }
         if let Some(p) = self.production.take() {
-            p.client().request_shutdown();
-            let report = tokio::task::spawn_blocking(move || p.shutdown())
-                .await
-                .map_err(|_| Error::ChildTask(Child::Production))?
-                .map_err(|_| Error::ChildTask(Child::Production))?;
-            self.status.production = Some(report.status.clone());
-            self.pending_retirement = Some(report);
+            p.request_shutdown();
+            let value = p.stop().await?;
+            value.update(&mut self.status);
+            self.pending_retirement = Some(Retirement {
+                number: self.status.production_starts,
+                value,
+            });
         }
         Ok(())
     }
@@ -578,12 +673,15 @@ impl Owner {
             }
             self.worker_health()?;
             self.connection_health()?;
-            let settled = self
-                .pending_retirement
-                .as_mut()
-                .unwrap()
-                .poll()
-                .map_err(Error::Production)?;
+            let retired = &mut self.pending_retirement.as_mut().unwrap().value;
+            // A command with a recovery-required or unknown outcome must not
+            // be retried by constructing a replacement controller.
+            if matches!(retired, Retired::Commands(_))
+                && let Some(e) = retired.failure()
+            {
+                return Err(e);
+            }
+            let settled = retired.poll()?;
             if settled && lock(&self.shared.outputs).len() < self.config.outputs {
                 break;
             }
@@ -599,11 +697,11 @@ impl Owner {
         let released = match report.release() {
             Ok(r) => r,
             Err(r) => {
-                self.pending_retirement = Some(*r);
+                self.pending_retirement = Some(r);
                 return Err(Error::Unsettled);
             }
         };
-        lock(&self.shared.outputs).push_back(Output::Retired(Box::new(released)));
+        lock(&self.shared.outputs).push_back(released);
         self.start_production(Instant::now() + self.config.startup_timeout)
             .await?;
         self.phase(Phase::Running);
@@ -618,13 +716,7 @@ impl Owner {
                 continue;
             }
             self.connection_health()?;
-            let p = self.production.as_ref().unwrap().client().status();
-            if let Some(e) = p.failure {
-                return Err(Error::Production(e));
-            }
-            if !p.running || self.production.as_ref().unwrap().is_finished() {
-                return Err(Error::ChildStopped(Child::Production));
-            }
+            self.production.as_ref().unwrap().check()?;
             self.publish();
             self.pause().await;
         }
@@ -634,10 +726,14 @@ impl Owner {
         self.phase(Phase::Stopping);
         let mut joined = true;
         let mut production_failure = None;
+        let mut command_failure = None;
         if let Err(e) = self.stop_production().await {
             joined = false;
             self.status.failure.get_or_insert(e.clone());
-            production_failure = Some(e);
+            match self.input {
+                Input::Cuckoo { .. } => production_failure = Some(e),
+                Input::Commands { .. } => command_failure = Some(e),
+            }
         }
         if let Some(c) = &self.connections {
             c.shutdown();
@@ -685,12 +781,10 @@ impl Owner {
             s.stop_and_join().await;
         }
         if let Some(r) = &mut self.pending_retirement {
-            if let Some(e) = &r.status.failure {
-                self.status
-                    .failure
-                    .get_or_insert(Error::Production(e.clone()));
+            if let Some(e) = r.value.failure() {
+                self.status.failure.get_or_insert(e);
             }
-            match r.poll() {
+            match r.value.poll() {
                 Ok(true) => (),
                 Ok(false) => {
                     joined = false;
@@ -698,13 +792,18 @@ impl Owner {
                 }
                 Err(e) => {
                     joined = false;
-                    self.status.failure.get_or_insert(Error::Production(e));
+                    self.status.failure.get_or_insert(e);
                 }
             }
         }
-        let production = production_failure
-            .map(Err)
-            .or_else(|| self.pending_retirement.take().map(Ok));
+        let mut production = production_failure.map(Err);
+        let mut commands = command_failure.map(Err);
+        if let Some(retirement) = self.pending_retirement.take() {
+            match retirement.value {
+                Retired::Cuckoo(report) => production = Some(Ok(*report)),
+                Retired::Commands(report) => commands = Some(Ok(*report)),
+            }
+        }
         self.status.phase = Phase::Stopped;
         self.status.running = false;
         self.status.ready = false;
@@ -713,6 +812,7 @@ impl Owner {
         *lock(&self.shared.exit) = Some(Exit {
             status: self.status.clone(),
             production,
+            commands,
             retained,
             services: self.services.take(),
             prepared: self.prepared.take(),
@@ -725,7 +825,7 @@ impl Owner {
 impl Drop for Owner {
     fn drop(&mut self) {
         if let Some(p) = &self.production {
-            p.client().request_shutdown();
+            p.request_shutdown();
         }
         if let Some(c) = &self.connections {
             c.shutdown();

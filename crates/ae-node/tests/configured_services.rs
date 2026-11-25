@@ -623,6 +623,9 @@ fn assert_root_joined(exit: &root::Exit) {
     if let Some(p) = &exit.production {
         assert!(p.as_ref().unwrap().is_settled());
     }
+    if let Some(p) = &exit.commands {
+        assert!(p.as_ref().unwrap().is_settled());
+    }
 }
 
 #[tokio::test]
@@ -992,3 +995,6 @@ async fn configured_importer_activation_rejects_unready_or_foreign_worker_owner(
     assert!(within(task).await.unwrap().joined);
     services.stop_and_join().await;
 }
+
+#[path = "configured_services/on_demand.rs"]
+mod on_demand_root;

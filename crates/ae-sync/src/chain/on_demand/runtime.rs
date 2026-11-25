@@ -101,6 +101,9 @@ pub struct Report {
 #[derive(Clone)]
 pub struct Stop(Arc<AtomicBool>);
 impl Stop {
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
     pub fn request(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -120,6 +123,24 @@ pub struct Retired {
 impl Retired {
     pub fn pending_pool(&self) -> bool {
         self.pending.is_some()
+    }
+    // Poll ordinary cancellation first. A joined matching pool also permits
+    // retirement of an uncertain receipt; a live foreign pool never does.
+    pub fn poll(
+        &mut self,
+        pool: &worker::Client,
+    ) -> Result<Option<packing::CancelReport>, packing::Error> {
+        let Some(pending) = self.pending.as_mut() else {
+            return Ok(None);
+        };
+        if pool.info().joined && !pending.retire_pool(pool)? {
+            return Err(packing::Error::Binding);
+        }
+        if pending.step()? {
+            Ok(Some(self.pending.take().unwrap().finish()))
+        } else {
+            Ok(None)
+        }
     }
     pub fn settle_pool(
         &mut self,
@@ -263,6 +284,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
     }
     pub fn stop_handle(&self) -> Stop {
         self.stop.clone()
+    }
+    pub(super) fn pool_client(&self) -> worker::Client {
+        self.pool.clone()
     }
     pub fn recovery_required(&self) -> bool {
         self.failed || self.quarantine.is_some()
