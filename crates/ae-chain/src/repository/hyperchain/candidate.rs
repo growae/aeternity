@@ -59,18 +59,9 @@ pub fn micro<S: Read, O: MapOrder + Clone, H: consensus::Host>(
         return Err(Error::Candidate(candidate::Error::WrongParent));
     };
     let header = Header::Key(key.clone());
-    let reader = super::reader(
-        view.clone(),
-        &execution.identity,
-        execution.profile.clone(),
-        super::Config {
-            overlays: execution.limits.overlay,
-            maximum_history_headers: execution.limits.history,
-            configured_block_gas_limit: execution.rules.configured_gas_limit.clone(),
-            aevm: execution.aevm.clone(),
-        },
-    )
-    .map_err(repository)?;
+    let reader = execution
+        .reader(view.clone(), execution.profile.clone())
+        .map_err(repository)?;
     let parent_view = reader
         .view(&chain::RunEnv::Hash(input.parent.0.to_vec()))
         .map_err(Error::Query)?;
@@ -201,18 +192,9 @@ pub fn key<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     profile.network = view
         .protocol_profile(&profile.network, height, execution.limits.history)
         .map_err(repository)?;
-    let reader = super::reader(
-        view.clone(),
-        &execution.identity,
-        Arc::new(profile),
-        super::Config {
-            overlays: execution.limits.overlay,
-            maximum_history_headers: execution.limits.history,
-            configured_block_gas_limit: execution.rules.configured_gas_limit.clone(),
-            aevm: execution.aevm.clone(),
-        },
-    )
-    .map_err(repository)?;
+    let reader = execution
+        .reader(view.clone(), Arc::new(profile))
+        .map_err(repository)?;
     let temporary = candidate::key_template::<H::Error, Overlay<S>, Overlay<S>>(
         &header,
         &key,

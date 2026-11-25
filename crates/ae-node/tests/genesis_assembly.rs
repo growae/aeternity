@@ -593,3 +593,6 @@ fn configured_hyperchain_genesis_matches_original_contract_roots_and_reopens() {
         "Genesis assembly: configured original Hyperchain contracts, validators, epochs, roots and durable reopen at protocols 6–8"
     );
 }
+
+#[path = "genesis_assembly/hyperchain.rs"]
+mod configured_hc;

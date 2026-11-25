@@ -223,19 +223,9 @@ pub fn prepare<S: Read + std::fmt::Debug, O: MapOrder + Clone>(
             (hash, key.common.height)
         }
     };
-    let limits = execution.limits;
-    let reader = super::reader(
-        view.clone(),
-        &execution.identity,
-        execution.profile.clone(),
-        super::Config {
-            overlays: limits.overlay,
-            maximum_history_headers: limits.history,
-            configured_block_gas_limit: execution.rules.configured_gas_limit.clone(),
-            aevm: execution.aevm.clone(),
-        },
-    )
-    .map_err(repository)?;
+    let reader = execution
+        .reader(view.clone(), execution.profile.clone())
+        .map_err(repository)?;
     let run = reader
         .view(&chain::RunEnv::Hash(top.0.to_vec()))
         .map_err(|e| Failure::new(Kind::View, e.is_operational(), e))?;

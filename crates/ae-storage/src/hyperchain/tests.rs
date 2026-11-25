@@ -167,6 +167,7 @@ fn setup_corpus(path: &Temp, corpus: &J, index: usize) -> (Arc<Database>, Config
         profile: Arc::new(profile),
         rules,
         aevm: None,
+        owned: None,
         limits: Default::default(),
     };
     let db = Arc::new(

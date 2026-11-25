@@ -108,6 +108,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
         <P::Host as Host>::Error: std::fmt::Debug,
     {
         Self::validate_config(&config)?;
+        execution.validate_execution()?;
         if db.events().info().failure.is_some() || db.policy_recovery_required() {
             return Err(Error::RecoveryRequired);
         }

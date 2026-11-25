@@ -9,7 +9,46 @@ pub struct HyperchainConfig<O> {
     pub profile: Arc<chain::Profile<O>>,
     pub rules: hc::Rules,
     pub aevm: Option<ae_execution::contracts::aevm::Config>,
+    // Configured nodes retain the complete transaction execution owner.
+    // None preserves the explicit legacy standalone profile constructor.
+    pub owned: Option<Arc<ae_execution::transactions::owned::Owned<O>>>,
     pub limits: Limits,
+}
+impl<O: MapOrder> HyperchainConfig<O> {
+    pub fn validate_execution(&self) -> Result<(), Error> {
+        if self.owned.as_ref().is_some_and(|owned| {
+            owned.consensus() != ConsensusType::Pos || !self.identity.matches(owned.network())
+        }) {
+            return Err(Error::Identity);
+        }
+        Ok(())
+    }
+    pub fn reader<S: Read>(
+        &self,
+        view: View<S>,
+        profile: Arc<chain::Profile<O>>,
+    ) -> Result<super::super::hyperchain::Reader<S, O>, Error> {
+        self.validate_execution()?;
+        let aevm = match &self.owned {
+            Some(owned) => owned.with_config(|base| base.aevm.cloned()),
+            None => self.aevm.clone(),
+        };
+        let reader = super::super::hyperchain::reader(
+            view,
+            &self.identity,
+            profile,
+            super::super::hyperchain::Config {
+                overlays: self.limits.overlay,
+                maximum_history_headers: self.limits.history,
+                configured_block_gas_limit: self.rules.configured_gas_limit.clone(),
+                aevm,
+            },
+        )?;
+        Ok(match &self.owned {
+            Some(owned) => reader.with_owned_execution(owned.clone()),
+            None => reader,
+        })
+    }
 }
 #[derive(Debug)]
 pub enum HyperchainError<E, S = MemoryStore> {
@@ -95,17 +134,7 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     }
     let mut profile = config.profile.as_ref().clone();
     profile.network = network;
-    let reader = super::super::hyperchain::reader(
-        view.clone(),
-        &config.identity,
-        Arc::new(profile),
-        super::super::hyperchain::Config {
-            overlays: limits.overlay,
-            maximum_history_headers: limits.history,
-            configured_block_gas_limit: config.rules.configured_gas_limit.clone(),
-            aevm: config.aevm.clone(),
-        },
-    )?;
+    let reader = config.reader(view.clone(), Arc::new(profile))?;
     let parent_hash = Hash256(header.common().previous_hash);
     let previous = view.require_block(parent_hash)?.header();
     let key_hash = match &previous {
@@ -241,18 +270,9 @@ pub fn hyperchain_pin_request<S: Read, O: MapOrder + Clone>(
         .0;
     let mut profile = config.profile.as_ref().clone();
     profile.network = network;
-    let reader = super::super::hyperchain::reader(
-        view.clone(),
-        &config.identity,
-        Arc::new(profile),
-        super::super::hyperchain::Config {
-            overlays: config.limits.overlay,
-            maximum_history_headers: config.limits.history,
-            configured_block_gas_limit: config.rules.configured_gas_limit.clone(),
-            aevm: config.aevm.clone(),
-        },
-    )
-    .map_err(E::Repository)?;
+    let reader = config
+        .reader(view.clone(), Arc::new(profile))
+        .map_err(E::Repository)?;
     let parent_hash = Hash256(k.common.previous_hash);
     let previous = view
         .require_block(parent_hash)

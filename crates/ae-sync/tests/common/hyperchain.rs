@@ -192,6 +192,7 @@ fn setup_fork(
         profile: Arc::new(profile),
         rules,
         aevm: None,
+        owned: None,
         limits: Default::default(),
     };
     let db = Arc::new(

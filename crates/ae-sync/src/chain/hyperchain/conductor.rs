@@ -296,6 +296,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         backend: Arc<impl Backend>,
         targets: impl FnOnce(Arc<eoe::Source>, &repo::HyperchainConfig<O>) -> Result<T, Error>,
     ) -> Result<Self, Error> {
+        execution
+            .validate_execution()
+            .map_err(|e| Error::Importer(e.into()))?;
         if config.producing && !config.block_producer {
             return Err(Error::NotBlockProducer);
         }

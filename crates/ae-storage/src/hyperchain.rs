@@ -105,6 +105,7 @@ pub struct Owner<O, H> {
 }
 impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
     pub fn start(database: Arc<Database>, config: Config<O>, host: H) -> Result<Self, repo::Error> {
+        config.validate_execution()?;
         let checkpoint = {
             let mut lease = database
                 .hyperchain_owner

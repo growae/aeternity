@@ -684,6 +684,7 @@ fn pin_preflight_uses_incoming_predecessor_even_when_selected_tip_changes() {
                 },
             ),
             aevm: None,
+            owned: None,
             limits: Default::default(),
         };
         let (hash, side_chain) = extend(&mut memory, hash);

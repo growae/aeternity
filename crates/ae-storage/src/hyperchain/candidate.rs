@@ -71,6 +71,33 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         &self,
         snapshots: &snapshots::Owner,
         request: Request,
+        acquire: impl FnMut(
+            &mut inputs::Captured<snapshots::Reader>,
+            &inputs::InputError,
+            &mut dyn FnMut() -> Result<(), G>,
+        ) -> Result<bool, G>,
+        check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Prepared<O>, Error<G>> {
+        self.prepare_candidate_inner(snapshots, request, false, acquire, check)
+    }
+    pub fn prepare_candidate_with_entropy<G>(
+        &self,
+        snapshots: &snapshots::Owner,
+        request: Request,
+        acquire: impl FnMut(
+            &mut inputs::Captured<snapshots::Reader>,
+            &inputs::InputError,
+            &mut dyn FnMut() -> Result<(), G>,
+        ) -> Result<bool, G>,
+        check: impl FnMut() -> Result<(), G>,
+    ) -> Result<Prepared<O>, Error<G>> {
+        self.prepare_candidate_inner(snapshots, request, true, acquire, check)
+    }
+    fn prepare_candidate_inner<G>(
+        &self,
+        snapshots: &snapshots::Owner,
+        request: Request,
+        entropy: bool,
         mut acquire: impl FnMut(
             &mut inputs::Captured<snapshots::Reader>,
             &inputs::InputError,
@@ -104,6 +131,9 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
             request.limits,
         )
         .map_err(|e| Error::Execution(failure(true, e)))?;
+        if entropy {
+            host.require_entropy();
+        }
         let outcome = loop {
             let outcome = match request.input {
                 Input::Micro(input) => {

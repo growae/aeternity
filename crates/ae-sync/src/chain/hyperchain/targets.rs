@@ -14,13 +14,9 @@ use std::sync::{Arc, Weak};
 #[derive(Clone)]
 pub struct Live<O> {
     source: Weak<eoe::Source>,
-    identity: repo::Identity,
-    profile: Arc<chain::Profile<O>>,
-    query: repo::hyperchain::Config,
-    length: Unsigned,
-    start: Unsigned,
+    execution: repo::HyperchainConfig<O>,
 }
-impl<O> Live<O> {
+impl<O: Clone> Live<O> {
     pub fn new(
         source: &Arc<eoe::Source>,
         execution: &repo::HyperchainConfig<O>,
@@ -30,16 +26,7 @@ impl<O> Live<O> {
         }
         Ok(Self {
             source: Arc::downgrade(source),
-            identity: execution.identity.clone(),
-            profile: execution.profile.clone(),
-            query: repo::hyperchain::Config {
-                overlays: execution.limits.overlay,
-                maximum_history_headers: execution.limits.history,
-                configured_block_gas_limit: execution.rules.configured_gas_limit.clone(),
-                aevm: execution.aevm.clone(),
-            },
-            length: execution.rules.consensus.parent_epoch_length.clone(),
-            start: execution.rules.consensus.parent_start.clone(),
+            execution: execution.clone(),
         })
     }
 }
@@ -61,21 +48,18 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Targets for Live<O> {
         {
             return Err(TargetError::Native);
         }
-        let mut profile = self.profile.as_ref().clone();
+        let mut profile = self.execution.profile.as_ref().clone();
         profile.network = view
-            .protocol_profile(
-                &profile.network,
-                height_u64,
-                self.query.maximum_history_headers,
-            )
+            .protocol_profile(&profile.network, height_u64, self.execution.limits.history)
             .map_err(|_| TargetError::Unavailable)?;
-        let reader =
-            repo::hyperchain::reader(view, &self.identity, Arc::new(profile), self.query.clone())
-                .map_err(|_| TargetError::Unavailable)?;
+        let reader = self
+            .execution
+            .reader(view, Arc::new(profile))
+            .map_err(|_| TargetError::Unavailable)?;
         chain::ParentTargets {
             reader,
-            epoch_length: self.length.clone(),
-            start_height: self.start.clone(),
+            epoch_length: self.execution.rules.consensus.parent_epoch_length.clone(),
+            start_height: self.execution.rules.consensus.parent_start.clone(),
         }
         .targets(height)
     }

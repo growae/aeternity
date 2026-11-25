@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod hyperchain;
 pub mod pow;
 
 #[derive(Debug)]

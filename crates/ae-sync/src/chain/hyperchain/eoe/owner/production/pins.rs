@@ -42,7 +42,7 @@ pub(super) fn start<O: MapOrder + Clone + Send + Sync + 'static>(
     source: scoped::Producer<O>,
     snapshots: ae_storage::snapshots::Owner,
     request: owned::Request,
-    pins: crate::parent_pins::Client,
+    pins: Option<crate::parent_pins::Client>,
     parent: ae_hyperchain::parent_cache::runtime::Client,
     client: super::super::Client,
 ) -> Result<Pending<O>, chain::Error> {
@@ -51,7 +51,7 @@ pub(super) fn start<O: MapOrder + Clone + Send + Sync + 'static>(
     let worker = thread::Builder::new()
         .name("ae-hc-key-inputs".into())
         .spawn(move || {
-            source.candidate_with_pins(&snapshots, request, &pins, || {
+            source.candidate_with_parent(&snapshots, request, &parent, pins.as_ref(), || {
                 if stopped.load(Ordering::Acquire) {
                     return Err(chain::Error::Cancelled);
                 }

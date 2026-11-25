@@ -243,6 +243,7 @@ impl Configuration {
         mut runtime: conductor::Config,
         services: Services,
     ) -> Result<Prepared<O>, Error> {
+        execution.validate_execution().map_err(|_| Error::Binding)?;
         let rules = &execution.rules.consensus;
         if self.child_block_time != rules.child_block_time
             || self.parent_epoch_length.as_ref() != Some(&rules.parent_epoch_length)

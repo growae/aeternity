@@ -23,7 +23,7 @@ pub(super) fn acquire<P: PinInputs>(
     Ok(true)
 }
 
-fn fetch(
+pub(super) fn fetch(
     cache: &cache::Client,
     height: &BigInt,
     check: &mut dyn FnMut() -> Result<(), Error>,

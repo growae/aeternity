@@ -157,7 +157,7 @@ impl<O: MapOrder + Clone> Producer<O> {
         request: storage::candidate::Request,
         check: impl FnMut() -> Result<(), Error>,
     ) -> Result<storage::candidate::Prepared<O>, Error> {
-        self.candidate_inner(snapshots, request, None, check)
+        self.candidate_inner(snapshots, request, None, None, check)
     }
     pub fn candidate_with_pins(
         &self,
@@ -166,51 +166,74 @@ impl<O: MapOrder + Clone> Producer<O> {
         pins: &crate::parent_pins::Client,
         check: impl FnMut() -> Result<(), Error>,
     ) -> Result<storage::candidate::Prepared<O>, Error> {
-        self.candidate_inner(snapshots, request, Some(pins), check)
+        self.candidate_inner(snapshots, request, None, Some(pins), check)
+    }
+    pub fn candidate_with_parent(
+        &self,
+        snapshots: &ae_storage::snapshots::Owner,
+        request: storage::candidate::Request,
+        parent: &cache::Client,
+        pins: Option<&crate::parent_pins::Client>,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<storage::candidate::Prepared<O>, Error> {
+        self.candidate_inner(snapshots, request, Some(parent), pins, check)
     }
     fn candidate_inner(
         &self,
         snapshots: &ae_storage::snapshots::Owner,
         request: storage::candidate::Request,
+        parent: Option<&cache::Client>,
         pins: Option<&crate::parent_pins::Client>,
         mut check: impl FnMut() -> Result<(), Error>,
     ) -> Result<storage::candidate::Prepared<O>, Error> {
         let context = self.context.upgrade().ok_or(Error::Closed)?;
-        self.owner
-            .upgrade()
-            .ok_or(Error::Closed)?
-            .prepare_candidate_with_inputs(
-                snapshots,
-                request,
-                |host, error, check| {
-                    if let (Some(pins), inputs::InputError::PinNotCaptured(hash)) = (pins, error) {
-                        acquire_pin(pins, host, hash, check)?;
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                },
-                || {
-                    producer_guard(&context)?;
-                    if let Some(pins) = pins {
-                        pins.check().map_err(input_error)?;
-                    }
-                    check()
-                },
-            )
-            .map_err(|e| match e {
-                storage::candidate::Error::Repository(e) => Error::Storage(e),
-                storage::candidate::Error::Snapshot(ae_storage::snapshots::Error::Repository(
-                    e,
-                )) => Error::Storage(e),
-                storage::candidate::Error::Snapshot(e) => input_error(e),
-                storage::candidate::Error::RecoveryRequired => Error::RecoveryRequired,
-                storage::candidate::Error::Guard(e) => e,
-                storage::candidate::Error::Execution(e) => Error::Validation {
-                    operational: e.operational,
-                    reason: e.reason,
-                },
-            })
+        let owner = self.owner.upgrade().ok_or(Error::Closed)?;
+        let acquire = |host: &mut inputs::Captured<ae_storage::snapshots::Reader>,
+                       error: &inputs::InputError,
+                       check: &mut dyn FnMut() -> Result<(), Error>| {
+            match error {
+                inputs::InputError::EntropyNotCaptured(height) if parent.is_some() => {
+                    let block = entropy::fetch(parent.expect("parent acquisition"), height, check)?;
+                    check()?;
+                    host.capture_entropy(height.clone(), block)
+                        .map_err(input_error)?;
+                    Ok(true)
+                }
+                inputs::InputError::PinNotCaptured(hash) if pins.is_some() => {
+                    acquire_pin(pins.expect("pin acquisition"), host, hash, check)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        };
+        let guard = || {
+            producer_guard(&context)?;
+            if parent.is_some_and(cache::Client::is_closed) {
+                return Err(Error::Closed);
+            }
+            if let Some(pins) = pins {
+                pins.check().map_err(input_error)?;
+            }
+            check()
+        };
+        let result = if parent.is_some() {
+            owner.prepare_candidate_with_entropy(snapshots, request, acquire, guard)
+        } else {
+            owner.prepare_candidate_with_inputs(snapshots, request, acquire, guard)
+        };
+        result.map_err(|e| match e {
+            storage::candidate::Error::Repository(e) => Error::Storage(e),
+            storage::candidate::Error::Snapshot(ae_storage::snapshots::Error::Repository(e)) => {
+                Error::Storage(e)
+            }
+            storage::candidate::Error::Snapshot(e) => input_error(e),
+            storage::candidate::Error::RecoveryRequired => Error::RecoveryRequired,
+            storage::candidate::Error::Guard(e) => e,
+            storage::candidate::Error::Execution(e) => Error::Validation {
+                operational: e.operational,
+                reason: e.reason,
+            },
+        })
     }
     pub fn uses_database(&self, database: &Arc<Database>) -> bool {
         self.database.ptr_eq(&Arc::downgrade(database))
@@ -306,6 +329,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
         config: Config,
     ) -> Result<(Self, Accepted<O, P::State>), Error> {
         Self::validate_config(&config)?;
+        execution.validate_execution()?;
         if db.events().info().failure.is_some() || db.policy_recovery_required() {
             return Err(Error::RecoveryRequired);
         }

@@ -182,18 +182,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Client<O> {
                 execution.limits.history,
             )
             .map_err(|_| Error::State("selected protocol"))?;
-        let reader = repo::hyperchain::reader(
-            view.clone(),
-            &execution.identity,
-            Arc::new(profile),
-            repo::hyperchain::Config {
-                overlays: execution.limits.overlay,
-                maximum_history_headers: execution.limits.history,
-                configured_block_gas_limit: execution.rules.configured_gas_limit.clone(),
-                aevm: execution.aevm.clone(),
-            },
-        )
-        .map_err(|_| Error::State("selected reader"))?;
+        let reader = execution
+            .reader(view.clone(), Arc::new(profile))
+            .map_err(|_| Error::State("selected reader"))?;
         let info = reader
             .epoch_info(&RunEnv::Top)
             .map_err(|_| Error::State("current epoch"))?;

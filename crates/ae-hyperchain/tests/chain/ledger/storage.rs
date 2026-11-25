@@ -29,6 +29,7 @@ fn config(s: &Step<'_>) -> repo::HyperchainConfig<Otp26> {
         profile: s.reader.profile.clone(),
         rules: s.rules.clone(),
         aevm: None,
+        owned: None,
         limits: Default::default(),
     }
 }
@@ -294,6 +295,7 @@ fn native_competing_hc_branches_preserve_side_events_and_reorganize_shared_trans
             profile: reader.profile.clone(),
             rules: rules(gh),
             aevm: None,
+            owned: None,
             limits: Default::default(),
         };
         let db = open(&path, &c);

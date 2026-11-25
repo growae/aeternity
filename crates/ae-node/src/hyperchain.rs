@@ -1,5 +1,7 @@
 // Root ownership follows aecore_sup's zero-restart boundary (fa2a6d7).
 // Subordinate worker/connection owners retain their existing restart policies.
+use crate::bootstrap::configured::{self, hyperchain as configured_hc};
+use crate::configuration::resolution::ApplicationMode;
 use ae_p2p::noise;
 use ae_storage::pool::worker::CacheController;
 use ae_sync::{
@@ -65,6 +67,7 @@ pub enum Child {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Configuration,
+    Start(String),
     NoRuntime,
     Closed,
     ReceiptTaken,
@@ -92,11 +95,13 @@ pub struct Status {
     pub producer: Option<conductor::Status>,
 }
 pub struct Exit<O> {
+    pub configured: Option<configured::Open>,
     pub status: Status,
     pub producer: Option<Result<conductor::Shutdown<O>, Error>>,
     pub retained: Vec<Output>,
 }
 struct Controls<O> {
+    importer: Option<Arc<ae_sync::chain::Importer<O>>>,
     producer: Option<producer::Handle>,
     connections: Option<connection::Handle>,
     workers: Option<workers::hyperchain::Handle<O>>,
@@ -115,6 +120,14 @@ impl<O> Clone for Handle<O> {
     }
 }
 impl<O> Handle<O> {
+    pub fn importer(&self) -> Option<Arc<ae_sync::chain::Importer<O>>> {
+        self.0
+            .controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .importer
+            .clone()
+    }
     pub fn request_shutdown(&self) {
         self.0.stop.send_replace(true);
     }
@@ -203,7 +216,34 @@ pub struct StartError<O: MapOrder + Clone + Send + Sync + 'static> {
     pub error: Error,
     pub inputs: Inputs<O>,
 }
+pub struct ConfiguredInputs {
+    pub prepared: configured_hc::Prepared,
+    pub runtime: conductor::Config,
+    pub services: ae_sync::chain::hyperchain::configuration::Services,
+    pub cache: CacheController,
+    pub identity: Identity,
+}
+pub struct ConfiguredStartError {
+    pub error: Error,
+    pub inputs: ConfiguredInputs,
+}
+struct Activated<O: MapOrder + Clone + Send + Sync + 'static> {
+    conductor: Conductor<O>,
+    configured: configured::Open,
+}
+type Activate<O> =
+    Box<dyn FnOnce(bool) -> Result<Activated<O>, Box<configured_hc::Failure>> + Send>;
+struct Startup<O: MapOrder + Clone + Send + Sync + 'static> {
+    conductor: Option<Conductor<O>>,
+    activate: Option<Activate<O>>,
+    cache: CacheController,
+    identity: Identity,
+    network: bool,
+}
 struct Owner<O: MapOrder + Clone + Send + Sync + 'static> {
+    activate: Option<Activate<O>>,
+    configured: Option<configured::Open>,
+    network: bool,
     shared: Arc<Shared<O>>,
     stop: watch::Receiver<bool>,
     status: Status,
@@ -225,7 +265,24 @@ where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
-    let error = if config.poll.is_zero()
+    if let Some(error) = validate(&config) {
+        return Err(Box::new(StartError { error, inputs }));
+    }
+    Ok(spawn(
+        Startup {
+            conductor: Some(inputs.conductor),
+            activate: None,
+            cache: inputs.cache,
+            identity: inputs.identity,
+            network: true,
+        },
+        config,
+        clock,
+        outputs,
+    ))
+}
+fn validate(config: &Config) -> Option<Error> {
+    if config.poll.is_zero()
         || config.poll > Duration::from_secs(1)
         || config.startup_timeout.is_zero()
         || config.startup_timeout > Duration::from_secs(300)
@@ -236,10 +293,65 @@ where
         Some(Error::NoRuntime)
     } else {
         None
-    };
-    if let Some(error) = error {
-        return Err(Box::new(StartError { error, inputs }));
     }
+}
+pub fn launch_configured<F>(
+    inputs: ConfiguredInputs,
+    config: Config,
+    clock: impl producer::Clock,
+    outputs: F,
+) -> Result<Running<ae_vm_fate::maps::order::Otp26>, Box<ConfiguredStartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    if let Some(error) = validate(&config) {
+        return Err(Box::new(ConfiguredStartError { error, inputs }));
+    }
+    let network = inputs.prepared.configured().mode().application() == ApplicationMode::Normal;
+    let ConfiguredInputs {
+        prepared,
+        runtime,
+        services,
+        cache,
+        identity,
+    } = inputs;
+    let activate = Box::new(move |stopping| {
+        if stopping {
+            return Err(Box::new(configured_hc::Failure {
+                error: configured_hc::Error::Closed,
+                open: prepared.into_open(),
+            }));
+        }
+        prepared
+            .activate(runtime, services)
+            .map(|active| Activated {
+                conductor: active.conductor,
+                configured: active.open,
+            })
+    });
+    Ok(spawn(
+        Startup {
+            conductor: None,
+            activate: Some(activate),
+            cache,
+            identity,
+            network,
+        },
+        config,
+        clock,
+        outputs,
+    ))
+}
+fn spawn<O, F>(
+    inputs: Startup<O>,
+    config: Config,
+    clock: impl producer::Clock,
+    outputs: F,
+) -> Running<O>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
     let status = Status {
         phase: Phase::Prepared,
         ready: false,
@@ -248,7 +360,7 @@ where
         failure: None,
         workers: None,
         connections: None,
-        producer: Some(inputs.conductor.status()),
+        producer: inputs.conductor.as_ref().map(Conductor::status),
     };
     let (published, observed) = watch::channel(status.clone());
     let (stop, stopped) = watch::channel(false);
@@ -256,6 +368,7 @@ where
         stop,
         published,
         controls: Mutex::new(Controls {
+            importer: None,
             producer: None,
             connections: None,
             workers: None,
@@ -265,11 +378,14 @@ where
     });
     let handle = Handle(shared.clone(), observed);
     let mut owner = Owner {
+        activate: inputs.activate,
+        configured: None,
+        network: inputs.network,
         shared,
         stop: stopped,
         status,
         config,
-        conductor: Some(inputs.conductor),
+        conductor: inputs.conductor,
         producer: None,
         worker: None,
         worker_task: None,
@@ -289,10 +405,10 @@ where
         }
         owner.finish().await;
     });
-    Ok(Running {
+    Running {
         handle,
         task: Some(task),
-    })
+    }
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
     fn publish(&mut self) {
@@ -307,7 +423,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         }
         if self.status.phase == Phase::Running {
             self.status.ready = self.status.workers.as_ref().is_some_and(|s| s.ready)
-                && self.status.connections.as_ref().is_some_and(|s| s.ready);
+                && (!self.network || self.status.connections.as_ref().is_some_and(|s| s.ready));
         }
         self.shared.published.send_replace(self.status.clone());
     }
@@ -341,8 +457,39 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
     {
         let end = Instant::now() + self.config.startup_timeout;
+        if let Some(activate) = self.activate.take() {
+            let stopping = self.stopping();
+            // Consume accepted startup before observing cancellation. The
+            // failure/active result retains the exact opened chain either way.
+            match tokio::task::spawn_blocking(move || activate(stopping)).await {
+                Ok(Ok(active)) => {
+                    self.status.producer = Some(active.conductor.status());
+                    self.conductor = Some(active.conductor);
+                    self.configured = Some(active.configured);
+                }
+                Ok(Err(failure)) => {
+                    let configured_hc::Failure { error, open } = *failure;
+                    self.configured = Some(open);
+                    return Err(match error {
+                        configured_hc::Error::Closed => Error::Closed,
+                        error => Error::Start(format!("{error:?}")),
+                    });
+                }
+                Err(_) => return Err(Error::ChildTask(Child::Producer)),
+            }
+        }
         self.startup_check(end)?;
         self.phase(Phase::Workers);
+        self.shared
+            .controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .importer = Some(
+            self.conductor
+                .as_ref()
+                .expect("startup conductor")
+                .importer(),
+        );
         let (handle, service) = workers::hyperchain::create(
             self.conductor.as_mut().expect("startup conductor"),
             self.config.workers.clone(),
@@ -375,65 +522,67 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
             }
             self.pause().await;
         }
-        self.phase(Phase::Identity);
-        let identity = match identity {
-            Identity::Fixed(identity) => identity,
-            Identity::Managed => {
-                let keys = self
-                    .worker
-                    .as_ref()
-                    .expect("workers")
-                    .bindings()
-                    .keys
-                    .and_then(|k| k.current())
-                    .ok_or(Error::Identity)?;
-                let ticket = keys.peer_identity().map_err(|_| Error::Identity)?;
-                tokio::select! {
-                    biased;
-                    _=self.stop.changed()=>return Err(Error::Closed),
-                    _=tokio::time::sleep_until(end)=>return Err(Error::StartupTimeout(Phase::Identity)),
-                    result=ticket=>result.map_err(|_|Error::Identity)?,
+        if self.network {
+            self.phase(Phase::Identity);
+            let identity = match identity {
+                Identity::Fixed(identity) => identity,
+                Identity::Managed => {
+                    let keys = self
+                        .worker
+                        .as_ref()
+                        .expect("workers")
+                        .bindings()
+                        .keys
+                        .and_then(|k| k.current())
+                        .ok_or(Error::Identity)?;
+                    let ticket = keys.peer_identity().map_err(|_| Error::Identity)?;
+                    tokio::select! {
+                        biased;
+                        _=self.stop.changed()=>return Err(Error::Closed),
+                        _=tokio::time::sleep_until(end)=>return Err(Error::StartupTimeout(Phase::Identity)),
+                        result=ticket=>result.map_err(|_|Error::Identity)?,
+                    }
                 }
-            }
-        };
-        self.startup_check(end)?;
-        self.phase(Phase::Connections);
-        let (handle, service) = connection::create_hyperchain_with_workers(
-            self.conductor.as_ref().expect("conductor"),
-            self.worker.as_ref().expect("workers"),
-            identity,
-            cache,
-            self.config.connections.clone(),
-            outputs,
-        )
-        .map_err(Error::Connections)?;
-        self.shared
-            .controls
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .connections = Some(handle.clone());
-        self.connection = Some(handle);
-        self.connection_task = Some(tokio::spawn(service.run()));
-        loop {
+            };
             self.startup_check(end)?;
-            self.publish();
-            self.worker_health()?;
-            let c = self.connection.as_ref().expect("connections").status();
-            if let Some(error) = c.error {
-                return Err(Error::Connections(error));
+            self.phase(Phase::Connections);
+            let (handle, service) = connection::create_hyperchain_with_workers(
+                self.conductor.as_ref().expect("conductor"),
+                self.worker.as_ref().expect("workers"),
+                identity,
+                cache,
+                self.config.connections.clone(),
+                outputs,
+            )
+            .map_err(Error::Connections)?;
+            self.shared
+                .controls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .connections = Some(handle.clone());
+            self.connection = Some(handle);
+            self.connection_task = Some(tokio::spawn(service.run()));
+            loop {
+                self.startup_check(end)?;
+                self.publish();
+                self.worker_health()?;
+                let c = self.connection.as_ref().expect("connections").status();
+                if let Some(error) = c.error {
+                    return Err(Error::Connections(error));
+                }
+                if self
+                    .connection_task
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished)
+                    || !c.running
+                {
+                    return Err(Error::ChildStopped(Child::Connections));
+                }
+                if c.ready {
+                    break;
+                }
+                self.pause().await;
             }
-            if self
-                .connection_task
-                .as_ref()
-                .is_some_and(JoinHandle::is_finished)
-                || !c.running
-            {
-                return Err(Error::ChildStopped(Child::Connections));
-            }
-            if c.ready {
-                break;
-            }
-            self.pause().await;
         }
         self.startup_check(end)?;
         self.phase(Phase::Producer);
@@ -479,21 +628,23 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
     async fn run(&mut self) -> Result<(), Error> {
         while !self.stopping() {
             self.worker_health()?;
-            let c = self
-                .connection
-                .as_ref()
-                .ok_or(Error::ChildStopped(Child::Connections))?
-                .status();
-            if let Some(e) = c.error {
-                return Err(Error::Connections(e));
-            }
-            if !c.running
-                || self
-                    .connection_task
+            if self.network {
+                let c = self
+                    .connection
                     .as_ref()
-                    .is_some_and(JoinHandle::is_finished)
-            {
-                return Err(Error::ChildStopped(Child::Connections));
+                    .ok_or(Error::ChildStopped(Child::Connections))?
+                    .status();
+                if let Some(e) = c.error {
+                    return Err(Error::Connections(e));
+                }
+                if !c.running
+                    || self
+                        .connection_task
+                        .as_ref()
+                        .is_some_and(JoinHandle::is_finished)
+                {
+                    return Err(Error::ChildStopped(Child::Connections));
+                }
             }
             let p = self.producer.as_ref().expect("running producer");
             let status = p.handle().status();
@@ -542,7 +693,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         if let Some(c) = &self.connection {
             c.shutdown();
         }
-        let mut joined = true;
+        let mut joined = !matches!(self.status.failure, Some(Error::ChildTask(_)));
         if let Some(task) = self.connection_task.take() {
             match task.await {
                 Ok(status) => {
@@ -567,12 +718,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         }
         let runtime = self.producer.take();
         let conductor = self.conductor.take();
-        let producer = tokio::task::spawn_blocking(move || {
-            if let Some(p) = runtime {
-                p.shutdown().map_err(|_| Error::ChildTask(Child::Producer))
-            } else {
-                Ok(conductor.expect("unstarted conductor").shutdown())
-            }
+        let producer = (runtime.is_some() || conductor.is_some()).then(|| {
+            tokio::task::spawn_blocking(move || {
+                if let Some(p) = runtime {
+                    p.shutdown().map_err(|_| Error::ChildTask(Child::Producer))
+                } else {
+                    Ok(conductor.expect("unstarted conductor").shutdown())
+                }
+            })
         });
         if let Some(task) = self.worker_task.take() {
             match task.await {
@@ -591,11 +744,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                 }
             }
         }
-        let report = producer
-            .await
-            .unwrap_or(Err(Error::ChildTask(Child::Producer)));
+        let report = match producer {
+            Some(producer) => Some(
+                producer
+                    .await
+                    .unwrap_or(Err(Error::ChildTask(Child::Producer))),
+            ),
+            None => None,
+        };
         match &report {
-            Ok(s) => {
+            Some(Ok(s)) => {
                 self.status.producer = Some(s.status.clone());
                 if let Some(e) = &s.status.failure {
                     self.status
@@ -623,10 +781,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                     self.status.failure.get_or_insert(Error::ProducerCleanup);
                 }
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 joined = false;
                 self.status.failure.get_or_insert(e.clone());
             }
+            None => (),
         }
         let mut retained: Vec<_> = self
             .shared
@@ -643,8 +802,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         self.status.joined = joined;
         *self.shared.exit.lock().unwrap_or_else(|e| e.into_inner()) = Some(Exit {
             status: self.status.clone(),
-            producer: Some(report),
+            producer: report,
             retained,
+            configured: self.configured.take(),
         });
         self.shared.published.send_replace(self.status.clone());
     }

@@ -624,40 +624,21 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                         },
                     }),
                 };
-                if let Some(client) = &self.config.parent_pins {
-                    self.key_task = Some(
-                        pins::start(
-                            self.source.clone(),
-                            owner.source.snapshots().clone(),
-                            request,
-                            client.clone(),
-                            parent.clone(),
-                            self.client.clone(),
-                        )
-                        .map_err(Error::Source)?,
-                    );
-                    self.phase = Phase::KeyPreparing;
-                    return Ok(Progress::KeyPreparing);
-                }
-                let mut key = self
-                    .source
-                    .candidate(owner.source.snapshots(), request, || {
-                        if parent.is_closed() || self.client.is_closed() {
-                            Err(chain::Error::Closed)
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .map_err(Error::Source)?;
-                self.effects = Some(effects::Pending::new(
-                    &mut key.effects,
-                    parent.clone(),
-                    self.client.clone(),
-                ));
-                self.key = Some(key);
-                self.phase = Phase::KeyEffects;
-                Ok(Progress::KeyPrepared)
+                self.key_task = Some(
+                    pins::start(
+                        self.source.clone(),
+                        owner.source.snapshots().clone(),
+                        request,
+                        self.config.parent_pins.clone(),
+                        parent.clone(),
+                        self.client.clone(),
+                    )
+                    .map_err(Error::Source)?,
+                );
+                self.phase = Phase::KeyPreparing;
+                Ok(Progress::KeyPreparing)
             }
+
             Phase::KeyPreparing => {
                 let Some(result) = self.key_task.as_mut().expect("key task").poll() else {
                     return Ok(Progress::KeyPreparing);
