@@ -12,6 +12,7 @@ use std::{
     time::Instant,
 };
 use tokio::net::UdpSocket;
+mod manager;
 fn name() -> String {
     "aec_metrics_main".into()
 }

@@ -30,6 +30,7 @@ pub enum Error {
     Panicked,
     Sequence,
     Stale,
+    RestartLimit,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {

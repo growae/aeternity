@@ -1,4 +1,5 @@
 use super::*;
+use crate::observe::supervision;
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
@@ -12,6 +13,8 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{oneshot, watch};
+mod owner;
+pub use owner::Owner;
 
 struct Credit {
     shared: Weak<Shared>,
@@ -77,6 +80,11 @@ pub struct Info {
     pub callback_drops: u64,
     pub completed: u64,
     pub last_error: Option<Error>,
+    pub manager_generation: u64,
+    pub manager_previous_joined: bool,
+    pub manager_restart_attempts: u64,
+    pub recovering: bool,
+    pub last_manager_error: Option<Error>,
 }
 #[derive(Debug, Clone)]
 pub struct ReporterInfo {
@@ -115,6 +123,12 @@ struct Queue {
     info: Info,
     closing: bool,
     woken: bool,
+    retiring: bool,
+    restart: Option<ManagerRestart>,
+}
+struct ManagerRestart {
+    reply: oneshot::Sender<Result<u64, Error>>,
+    _credit: Arc<Credit>,
 }
 pub(super) struct Shared {
     queue: Mutex<Queue>,
@@ -123,6 +137,17 @@ pub(super) struct Shared {
     done: watch::Sender<bool>,
     limits: Limits,
     clock: Arc<dyn Clock>,
+    parent: Option<supervision::Budget>,
+}
+impl supervision::Halt for Shared {
+    fn halt(&self) {
+        let mut q = self.lock();
+        q.closing = true;
+        q.info.last_error = Some(Error::RestartLimit);
+        self.wake.notify_all();
+        drop(q);
+        self.changed.send_replace(());
+    }
 }
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
@@ -142,7 +167,7 @@ impl Signal {
         }
     }
     pub fn closed(&self) -> bool {
-        self.0.upgrade().is_none_or(|s| !s.lock().info.running)
+        self.0.upgrade().is_none_or(|s| s.lock().closing)
     }
 }
 #[derive(Clone)]
@@ -162,6 +187,47 @@ impl Client {
         q.closing = true;
         self.shared.wake.notify_one();
     }
+    pub fn restart_manager(&self, generation: u64) -> Result<Ticket<u64>, Error> {
+        if self.shared.parent.is_none() {
+            return Err(Error::Configuration);
+        }
+        let mut q = self.shared.lock();
+        if q.closing || !q.info.running {
+            return Err(Error::Closed);
+        }
+        if q.info.manager_generation != generation {
+            return Err(Error::Stale);
+        }
+        if q.retiring
+            || q.info.pending >= self.shared.limits.requests
+            || 128
+                > self
+                    .shared
+                    .limits
+                    .pending_bytes
+                    .saturating_sub(q.info.pending_bytes)
+        {
+            return Err(Error::Busy);
+        }
+        let credit = Arc::new(Credit {
+            shared: Arc::downgrade(&self.shared),
+            bytes: AtomicUsize::new(128),
+        });
+        let (reply, receiver) = oneshot::channel();
+        q.restart = Some(ManagerRestart {
+            reply,
+            _credit: credit.clone(),
+        });
+        q.retiring = true;
+        q.info.recovering = true;
+        q.info.pending += 1;
+        q.info.pending_bytes += 128;
+        self.shared.wake.notify_one();
+        Ok(Ticket {
+            receiver,
+            _credit: credit,
+        })
+    }
     fn call<T: Send + 'static>(
         &self,
         bytes: usize,
@@ -177,7 +243,7 @@ impl Client {
     ) -> Result<Ticket<T>, Error> {
         let admitted = self.shared.clock.now().monotonic;
         let mut q = self.shared.lock();
-        if q.closing || !q.info.running {
+        if q.closing || q.retiring || !q.info.running {
             return Err(Error::Closed);
         }
         if q.info.pending >= self.shared.limits.requests
@@ -400,98 +466,7 @@ impl Client {
         })
     }
 }
-pub struct Owner {
-    client: Client,
-    thread: Option<thread::JoinHandle<()>>,
-}
-impl Owner {
-    pub fn spawn(
-        limits: Limits,
-        source: Arc<dyn Source>,
-        output: statsd::Client,
-    ) -> Result<Self, Error> {
-        Self::spawn_with_clock(limits, source, output, Arc::new(SystemClock))
-    }
-    pub fn spawn_with_clock(
-        limits: Limits,
-        source: Arc<dyn Source>,
-        output: statsd::Client,
-        clock: Arc<dyn Clock>,
-    ) -> Result<Self, Error> {
-        limits.validate()?;
-        let shared = Arc::new(Shared {
-            queue: Mutex::new(Queue {
-                commands: VecDeque::new(),
-                info: Info {
-                    running: true,
-                    ..Default::default()
-                },
-                closing: false,
-                woken: false,
-            }),
-            wake: Condvar::new(),
-            changed: watch::channel(()).0,
-            done: watch::channel(false).0,
-            limits,
-            clock,
-        });
-        let client = Client {
-            updates: shared.changed.subscribe(),
-            shared: shared.clone(),
-        };
-        source.watch(Signal(Arc::downgrade(&shared)))?;
-        let state = shared.clone();
-        let thread = thread::Builder::new()
-            .name("ae-metrics-report-owner".into())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(state.clone(), source, output)
-                }));
-                let discarded = {
-                    let mut q = state.lock();
-                    q.info.running = false;
-                    q.closing = true;
-                    let discarded = std::mem::take(&mut q.commands);
-                    if result.is_err() {
-                        q.info.last_error = Some(Error::Panicked);
-                    }
-                    discarded
-                };
-                drop(discarded);
-                state.done.send_replace(true);
-                state.changed.send_replace(());
-            })
-            .map_err(|_| Error::Spawn)?;
-        Ok(Self {
-            client,
-            thread: Some(thread),
-        })
-    }
-    pub fn client(&self) -> Client {
-        self.client.clone()
-    }
-    pub async fn finish(&mut self) {
-        self.client.shutdown();
-        let mut done = self.client.shared.done.subscribe();
-        while !*done.borrow_and_update() {
-            let _ = done.changed().await;
-        }
-        self.join();
-    }
-    fn join(&mut self) {
-        if let Some(join) = self.thread.take() {
-            let _ = join.join();
-        }
-        self.client.shared.lock().info.joined = true;
-        self.client.shared.changed.send_replace(());
-    }
-}
-impl Drop for Owner {
-    fn drop(&mut self) {
-        self.client.shutdown();
-        self.join();
-    }
-}
+
 struct Timer {
     spec: NamedInterval,
     timer: Option<u64>,
@@ -554,6 +529,58 @@ struct Engine {
     info: Info,
 }
 impl Engine {
+    fn recover_manager(&mut self) -> Result<(), Error> {
+        // The old manager's timers are gone, but their native references remain
+        // in the stable tables. Only integer subscription timers are rearmed.
+        for r in self.reporters.values_mut() {
+            for i in &mut r.intervals {
+                i.due = None;
+            }
+        }
+        for s in &mut self.subs {
+            s.due = None;
+        }
+        let names = self.reporters.keys().cloned().collect::<Vec<_>>();
+        let mut removed = Vec::new();
+        let mut removal_casts = Vec::new();
+        for name in names {
+            let r = self.reporters.get_mut(&name).expect("retained reporter");
+            if let Some(mut worker) = r.worker.take() {
+                worker.stop(false);
+                r.previous_joined = true;
+            }
+            r.attempts = r.attempts.saturating_add(1);
+            let mut history = r.history.clone();
+            history.push_front(self.shared.clock.now().unix_microseconds / 1000);
+            history.truncate(10);
+            if timing::exhausted(&history) {
+                removal_casts.push(r.config.module.clone());
+                removed.push(name);
+                continue;
+            }
+            r.history = history;
+            let generation = r.generation.checked_add(1).ok_or(Error::Sequence)?;
+            let worker = callback::Worker::spawn(
+                r.config.options.clone(),
+                self.output.clone(),
+                self.shared.limits,
+                self.shared.clone(),
+            )?;
+            r.generation = generation;
+            r.worker = Some(worker);
+            r.config.enabled = true;
+            self.resubscribe(&name)?;
+        }
+        // init deletes exhausted records before its asynchronous default removal
+        // casts run. Removing an absent record must not purge retained subs.
+        for name in removed {
+            self.reporters.remove(&name);
+        }
+        for module in removal_casts {
+            let _ = self.remove(&module);
+        }
+        Ok(())
+    }
     fn refresh(&mut self, force: bool) -> Result<(), Error> {
         let Some(catalog) =
             self.source
@@ -1139,25 +1166,22 @@ impl Engine {
         q.info.timer_fires = self.info.timer_fires;
         q.info.source_errors = self.info.source_errors;
         q.info.callback_drops = self.info.callback_drops;
-        q.info.last_error = self.info.last_error.clone();
+        if q.info.last_error != Some(Error::RestartLimit) {
+            q.info.last_error = self.info.last_error.clone();
+        }
         drop(q);
         self.shared.changed.send_replace(());
     }
 }
-fn run(shared: Arc<Shared>, source: Arc<dyn Source>, output: statsd::Client) {
-    let mut engine = Engine {
-        shared: shared.clone(),
-        source,
-        output,
-        reporters: BTreeMap::new(),
-        subs: vec![],
-        timer: 0,
-        catalog_revision: None,
-        catalog: BTreeMap::new(),
-        info: Default::default(),
-    };
+fn run(shared: &Arc<Shared>, engine: &mut Engine) {
     let mut previous_timer_turn = false;
     loop {
+        {
+            let q = shared.lock();
+            if q.closing || q.retiring {
+                return;
+            }
+        }
         if let Err(error) = engine.refresh(false) {
             engine.info.source_errors = engine.info.source_errors.saturating_add(1);
             engine.info.last_error = Some(error);
@@ -1167,7 +1191,7 @@ fn run(shared: Arc<Shared>, source: Arc<dyn Source>, output: statsd::Client) {
         let command = {
             let mut q = shared.lock();
             loop {
-                if q.closing {
+                if q.closing || q.retiring {
                     return;
                 }
                 let next = engine.next_due();
@@ -1204,7 +1228,7 @@ fn run(shared: Arc<Shared>, source: Arc<dyn Source>, output: statsd::Client) {
         };
         if let Some(command) = command {
             previous_timer_turn = false;
-            let complete = (command.action)(&mut engine);
+            let complete = (command.action)(engine);
             {
                 let mut q = shared.lock();
                 q.info.completed = q.info.completed.saturating_add(1);

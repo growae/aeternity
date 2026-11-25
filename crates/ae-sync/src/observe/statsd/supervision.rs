@@ -1,4 +1,5 @@
 use super::{Binding, Client, Error as WorkerError, Settings, Worker};
+use crate::observe::supervision as core;
 use crate::{observe::SinkInfo, runtime::restart::Window};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -59,6 +60,22 @@ struct Shared {
     updated: watch::Sender<()>,
     halt: watch::Sender<bool>,
 }
+impl core::Halt for Shared {
+    fn halt(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.halt.send_replace(true);
+        let child = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .clone();
+        if let Some(child) = child {
+            child.client.request_shutdown();
+        }
+        self.updated.send_replace(());
+    }
+}
 pub struct Ticket(oneshot::Receiver<Result<u64, Error>>);
 impl Ticket {
     pub async fn wait(self) -> Result<u64, Error> {
@@ -67,6 +84,7 @@ impl Ticket {
 }
 enum Action {
     Restart(u64),
+    RestartSupervisor(u64),
     Start(u64),
 }
 struct Command {
@@ -186,6 +204,9 @@ impl Handle {
     pub fn start(&self, supervisor_generation: u64) -> Result<Ticket, Error> {
         self.send(Action::Start(supervisor_generation))
     }
+    pub fn restart_supervisor(&self, supervisor_generation: u64) -> Result<Ticket, Error> {
+        self.send(Action::RestartSupervisor(supervisor_generation))
+    }
 }
 fn totals(old: &SinkInfo, mut next: SinkInfo) -> SinkInfo {
     next.open_attempts = next.open_attempts.saturating_add(old.open_attempts);
@@ -216,10 +237,26 @@ pub struct Owner {
     replacement: bool,
     child_budget: Window<3, 10>,
     parent_budget: Window<5, 10>,
+    parent: Option<core::Budget>,
+    parent_replacement: bool,
     clock: Box<dyn Fn() -> u64 + Send>,
     factory: Box<dyn FnMut(Settings) -> Result<Worker, WorkerError> + Send>,
 }
 impl Owner {
+    pub fn prepare_with_parent(
+        settings: Settings,
+        parent: core::Budget,
+    ) -> Result<Self, WorkerError> {
+        let mut owner = Self::prepare(settings)?;
+        parent
+            .bind(core::Group::Logger, owner.handle.shared.clone())
+            .map_err(|e| match e {
+                core::BindError::Exists => WorkerError::Configuration,
+                core::BindError::Exhausted => WorkerError::RestartLimit,
+            })?;
+        owner.parent = Some(parent);
+        Ok(owner)
+    }
     pub fn prepare(settings: Settings) -> Result<Self, WorkerError> {
         settings.validate()?;
         let origin = Instant::now();
@@ -279,6 +316,8 @@ impl Owner {
             replacement: false,
             child_budget: Window::default(),
             parent_budget: Window::default(),
+            parent: None,
+            parent_replacement: false,
             clock,
             factory,
         };
@@ -388,25 +427,8 @@ impl Owner {
             self.status.child_restart_attempts =
                 self.status.child_restart_attempts.saturating_add(1);
             if !self.child_budget.record((self.clock)()) {
-                self.status.parent_restart_attempts =
-                    self.status.parent_restart_attempts.saturating_add(1);
                 self.status.last_error = Some(WorkerError::RestartLimit);
-                self.registered = false;
-                self.replacement = false;
-                if self.parent_budget.record((self.clock)()) {
-                    if let Some(next) = self.status.supervisor_generation.checked_add(1) {
-                        self.status.supervisor_generation = next;
-                        self.child_budget = Window::default();
-                        self.status.phase = Phase::Empty;
-                        self.reply(Err(Error::ChildLimit));
-                    } else {
-                        self.status.phase = Phase::Exhausted;
-                        self.reply(Err(Error::Generation));
-                    }
-                } else {
-                    self.status.phase = Phase::Exhausted;
-                    self.reply(Err(Error::ParentLimit));
-                }
+                self.replace_parent(true);
                 return;
             }
             self.replacement = true;
@@ -423,6 +445,39 @@ impl Owner {
             }
         }
     }
+    fn replace_parent(&mut self, child_exhausted: bool) {
+        self.parent_replacement = false;
+        if self.closed() {
+            self.reply(Err(Error::Closed));
+            return;
+        }
+        self.status.parent_restart_attempts = self.status.parent_restart_attempts.saturating_add(1);
+        self.registered = false;
+        self.replacement = false;
+        let allowed = match &self.parent {
+            Some(parent) => parent.record(core::Child::LoggerSupervisor),
+            None => self.parent_budget.record((self.clock)()),
+        };
+        if allowed {
+            if let Some(next) = self.status.supervisor_generation.checked_add(1) {
+                self.status.supervisor_generation = next;
+                self.child_budget = Window::default();
+                self.status.phase = Phase::Empty;
+                self.reply(if child_exhausted {
+                    Err(Error::ChildLimit)
+                } else {
+                    Ok(next)
+                });
+            } else {
+                self.status.phase = Phase::Exhausted;
+                self.reply(Err(Error::Generation));
+            }
+        } else {
+            self.status.last_error = Some(WorkerError::RestartLimit);
+            self.status.phase = Phase::Exhausted;
+            self.reply(Err(Error::ParentLimit));
+        }
+    }
     pub async fn poll(&mut self) {
         if self.closed() {
             self.finish().await;
@@ -432,6 +487,8 @@ impl Owner {
             self.retire(false).await;
             if self.closed() {
                 self.finish().await;
+            } else if self.parent_replacement {
+                self.replace_parent(false);
             } else if self.registered {
                 self.replace();
             } else {
@@ -512,6 +569,11 @@ impl Owner {
                         Action::Start(_) if self.status.phase != Phase::Empty => {
                             Some(Error::Exists)
                         }
+                        Action::RestartSupervisor(generation)
+                            if generation != self.status.supervisor_generation =>
+                        {
+                            Some(Error::Stale)
+                        }
                         _ => None,
                     }
                 };
@@ -530,6 +592,11 @@ impl Owner {
                             if let Err(error) = self.construct() {
                                 self.initial_failure(error);
                             }
+                        }
+                        Action::RestartSupervisor(_) => {
+                            self.parent_replacement = true;
+                            self.retire(false).await;
+                            self.replace_parent(false);
                         }
                     }
                 }
@@ -553,6 +620,9 @@ impl Owner {
             return;
         }
         self.handle.shutdown();
+        if self.parent.as_ref().is_some_and(|p| p.info().exhausted) {
+            self.status.last_error = Some(WorkerError::RestartLimit);
+        }
         self.retire(true).await;
         self.status.phase = Phase::Stopped;
         self.reply(Err(Error::Closed));

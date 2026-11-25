@@ -586,6 +586,76 @@ fn dispatch_never_silently_reduces_a_future_consensus_schedule_to_genesis() {
 mod metrics_settings;
 
 #[tokio::test]
+async fn metrics_mixed_five_child_recovery_then_exhaustion_joins_the_application() {
+    use ae_sync::observe::{registry, reporter, statsd, supervision::Child};
+    for last in [Child::Admin, Child::Report, Child::LoggerSupervisor] {
+        let lab = Lab::new();
+        let mut prepared = prepare(lab.services(
+            "on_demand",
+            json!({"offline_mode":true}),
+            Default::default(),
+        ));
+        let mut settings = commands(&lab);
+        let metrics = metrics_settings::Metrics::new().await;
+        metrics.configure(&mut prepared, &mut settings);
+        let running = prepared
+            .launch(settings, || Ok(Default::default()))
+            .unwrap();
+        let mut handle = running.handle();
+        ready(&mut handle).await;
+        let client = handle.metrics().unwrap();
+        let registry = client.registry().unwrap();
+        let report = client.reporter().unwrap();
+        let logger = client.supervisor().unwrap();
+        let old = logger.current().unwrap();
+        let producer = handle.commands().unwrap();
+        for manager in [
+            registry::Manager::Admin,
+            registry::Manager::Cache,
+            registry::Manager::Alias,
+        ] {
+            assert_eq!(within(registry.restart(manager, 1).unwrap()).await, Ok(2));
+        }
+        assert_eq!(within(report.restart_manager(1).unwrap()).await, Ok(2));
+        assert!(report.info().manager_previous_joined);
+        assert_eq!(report.reporters().unwrap().await.unwrap()[0].generation, 2);
+        assert_eq!(
+            within(logger.restart_supervisor(1).unwrap().wait()).await,
+            Ok(2)
+        );
+        assert!(old.client.info().joined && old.client.input().unwrap().info().joined);
+        assert_eq!(logger.status().phase, statsd::supervision::Phase::Empty);
+        assert_eq!(registry.info().parent.restart_attempts, 5);
+        assert!(handle.status().running && handle.status().failure.is_none());
+        assert_eq!(handle.commands().unwrap().number, producer.number);
+        match last {
+            Child::Admin => assert_eq!(
+                within(registry.restart(registry::Manager::Admin, 2).unwrap()).await,
+                Err(registry::Error::RestartLimit)
+            ),
+            Child::Report => assert_eq!(
+                within(report.restart_manager(2).unwrap()).await,
+                Err(reporter::Error::RestartLimit)
+            ),
+            Child::LoggerSupervisor => assert_eq!(
+                within(logger.restart_supervisor(2).unwrap().wait()).await,
+                Err(statsd::supervision::Error::ParentLimit)
+            ),
+            _ => unreachable!(),
+        }
+        // No explicit shutdown: the shared parent boundary must stop the root.
+        let exit = within(running.wait()).await.unwrap();
+        assert!(exit.status().joined && exit.status().metrics_error.is_some());
+        assert!(producer.client.status().joined);
+        assert!(report.info().joined && !report.info().running);
+        assert_eq!(logger.status().phase, statsd::supervision::Phase::Stopped);
+        assert!(registry.info().parent.exhausted);
+        assert_eq!(registry.info().parent.restart_attempts, 6);
+        metrics_settings::Metrics::assert_registry_joined(&client);
+    }
+}
+
+#[tokio::test]
 async fn application_metrics_outlive_connection_generations_in_both_pow_families_and_all_modes() {
     for kind in ["pow_cuckoo", "on_demand"] {
         for mode in [

@@ -20,6 +20,7 @@ pub mod report;
 pub mod reporter;
 mod sink;
 pub mod statsd;
+pub mod supervision;
 pub use feed::{Cursor, Delivery, Record, Subscription};
 pub use file::RotatingFile;
 pub use sink::{Info as SinkInfo, Outputs};

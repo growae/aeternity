@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::restart::Window;
+use crate::observe::supervision;
 use std::{
     collections::VecDeque,
     future::Future,
@@ -39,6 +39,7 @@ pub struct ServiceInfo {
     pub pending_bytes: usize,
     pub managers: Vec<ManagerInfo>,
     pub last_error: Option<Error>,
+    pub parent: supervision::Info,
 }
 
 struct Credit {
@@ -137,6 +138,16 @@ struct Parent {
     changed: watch::Sender<()>,
     done: watch::Sender<bool>,
     store: Arc<Store>,
+    budget: supervision::Budget,
+}
+impl supervision::Halt for Parent {
+    fn halt(&self) {
+        let mut s = self.lock();
+        s.info.closing = true;
+        s.info.last_error = Some(Error::RestartLimit);
+        drop(s);
+        self.notify();
+    }
 }
 impl Parent {
     fn lock(&self) -> std::sync::MutexGuard<'_, ParentState> {
@@ -183,6 +194,7 @@ impl Client {
     pub fn info(&self) -> ServiceInfo {
         let state = self.parent.lock();
         let mut info = state.info.clone();
+        info.parent = self.parent.budget.info();
         info.managers = state
             .slots
             .values()
@@ -540,14 +552,20 @@ pub struct Owner {
 }
 impl Owner {
     pub fn spawn(store: Arc<Store>) -> Result<Self, Error> {
+        Self::spawn_with_parent(store, supervision::Budget::default())
+    }
+    pub fn spawn_with_parent(
+        store: Arc<Store>,
+        budget: supervision::Budget,
+    ) -> Result<Self, Error> {
         store.claim()?;
-        let result = Self::start(store.clone());
+        let result = Self::start(store.clone(), budget);
         if result.is_err() {
             store.close();
         }
         result
     }
-    fn start(store: Arc<Store>) -> Result<Self, Error> {
+    fn start(store: Arc<Store>, budget: supervision::Budget) -> Result<Self, Error> {
         let parent = Arc::new(Parent {
             state: Mutex::new(ParentState {
                 info: ServiceInfo {
@@ -561,7 +579,15 @@ impl Owner {
             changed: watch::channel(()).0,
             done: watch::channel(false).0,
             store,
+            budget,
         });
+        parent
+            .budget
+            .bind(supervision::Group::Registry, parent.clone())
+            .map_err(|e| match e {
+                supervision::BindError::Exists => Error::AlreadyRunning,
+                supervision::BindError::Exhausted => Error::RestartLimit,
+            })?;
         let mut workers = BTreeMap::new();
         for manager in MANAGERS {
             let worker = Worker::spawn(&parent, manager, 1)?;
@@ -634,12 +660,14 @@ impl Drop for Owner {
     }
 }
 fn supervise(parent: &Arc<Parent>, workers: &mut BTreeMap<Manager, Worker>) -> Result<(), Error> {
-    let origin = Instant::now();
-    let mut budget = Window::<5, 10>::default();
     loop {
         let mut s = parent.lock();
         if s.info.closing {
-            return Ok(());
+            return if parent.budget.info().exhausted {
+                Err(Error::RestartLimit)
+            } else {
+                Ok(())
+            };
         }
         let restart = s.restarts.pop_front();
         let failed = workers
@@ -666,7 +694,12 @@ fn supervise(parent: &Arc<Parent>, workers: &mut BTreeMap<Manager, Worker>) -> R
         worker.state.stop(true);
         worker.join();
         parent.lock().info.restart_attempts += 1;
-        let result = if !budget.record(origin.elapsed().as_secs()) {
+        let child = match manager {
+            Manager::Admin => supervision::Child::Admin,
+            Manager::Cache => supervision::Child::Cache,
+            Manager::Alias => supervision::Child::Alias,
+        };
+        let result = if !parent.budget.record(child) {
             Err(Error::RestartLimit)
         } else if parent.lock().info.closing {
             Err(Error::Closed)

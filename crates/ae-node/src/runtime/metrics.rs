@@ -79,14 +79,20 @@ pub(super) struct Owner {
 impl Owner {
     pub fn prepare(settings: statsd::Settings, prefix: String) -> Result<Self, observe::Error> {
         let pipeline = settings.pipeline.clone();
-        let worker = statsd::supervision::Owner::prepare(settings)?;
+        let budget = observe::supervision::Budget::default();
+        let worker = if pipeline.is_some() {
+            statsd::supervision::Owner::prepare_with_parent(settings, budget.clone())?
+        } else {
+            statsd::supervision::Owner::prepare(settings)?
+        };
         let (registry, reporter, client) = if pipeline.is_some() {
             let limits = reporter::Limits::default();
             let store = Arc::new(reporter::Store::new(limits).map_err(observe::Error::Reporter)?);
-            let registry =
-                registry::Owner::spawn(store.clone()).map_err(observe::Error::Registry)?;
-            let reporter = reporter::Owner::spawn(limits, store.clone(), worker.client())
-                .map_err(observe::Error::Reporter)?;
+            let registry = registry::Owner::spawn_with_parent(store.clone(), budget.clone())
+                .map_err(observe::Error::Registry)?;
+            let reporter =
+                reporter::Owner::spawn_with_parent(limits, store.clone(), worker.client(), budget)
+                    .map_err(observe::Error::Reporter)?;
             let client = worker
                 .client()
                 .with_reporter(store, reporter.client())
@@ -323,7 +329,7 @@ async fn run(
         }
         if let Some(owner) = &reporter {
             let info = owner.client().info();
-            if !info.running && !prepared_stop {
+            if !info.running && !info.recovering && !prepared_stop {
                 state.send_modify(|s| {
                     s.error = Some(observe::Error::Reporter(
                         info.last_error.unwrap_or(reporter::Error::Closed),
