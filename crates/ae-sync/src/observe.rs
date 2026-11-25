@@ -15,6 +15,7 @@ mod gc;
 pub mod metrics;
 mod peers;
 mod sink;
+pub mod statsd;
 pub use feed::{Cursor, Delivery, Record, Subscription};
 pub use file::RotatingFile;
 pub use sink::{Info as SinkInfo, Outputs};
@@ -22,6 +23,7 @@ pub use sink::{Info as SinkInfo, Outputs};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub interval: Duration,
+    pub statsd: Option<statsd::Config>,
     pub sample_timeout: Duration,
     pub peer_count_interval: Option<Duration>,
     pub records: usize,
@@ -35,6 +37,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(10),
+            statsd: None,
             sample_timeout: Duration::from_secs(5),
             peer_count_interval: Some(Duration::from_secs(300)),
             records: 1024,
@@ -48,6 +51,9 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
+        if let Some(statsd) = &self.statsd {
+            statsd.validate()?;
+        }
         if self.interval.is_zero()
             || self
                 .peer_count_interval
@@ -115,6 +121,7 @@ pub struct Sources {
 #[derive(Debug, Clone, Default)]
 pub struct Status {
     pub running: bool,
+    pub ready: bool,
     pub joined: bool,
     pub events: u64,
     pub gc_events: u64,
@@ -182,6 +189,7 @@ pub struct Service {
     reads: blocking::Pool,
     log: Option<sink::Worker>,
     statsd: Option<sink::Worker>,
+    exporter: Option<statsd::Client>,
 }
 pub fn create(
     sources: Sources,
@@ -229,11 +237,17 @@ pub(crate) fn create_bound(
     gc.after(&gc_cursor, 1).map_err(Error::Gc)?;
     let reads =
         blocking::Pool::named("ae-observer-read", 1, 1, 4096).map_err(|_| Error::Configuration)?;
+    let mut outputs = outputs;
+    let exporter = outputs.metrics.take();
+    if exporter.is_some() && (outputs.statsd.is_some() || config.statsd.is_some()) {
+        return Err(Error::Configuration);
+    }
     let (log, statsd) = sink::Worker::outputs(outputs, &config)?;
     let ring = Arc::new(Mutex::new(feed::Ring::new()));
     let (stop, stopped) = watch::channel(false);
     let current = Status {
         running: true,
+        ready: statsd.is_none(),
         ..Default::default()
     };
     let (status, view) = watch::channel(current.clone());
@@ -261,6 +275,7 @@ pub(crate) fn create_bound(
             reads,
             log,
             statsd,
+            exporter,
         },
     ))
 }
@@ -271,6 +286,15 @@ impl Service {
         self.current.evicted = ring.evicted;
         self.current.log = self.log.as_ref().map(sink::Worker::info);
         self.current.statsd = self.statsd.as_ref().map(sink::Worker::info);
+        self.current.ready = self.current.running
+            && self
+                .current
+                .statsd
+                .as_ref()
+                .is_none_or(|s| s.ready && s.running);
+        if let Some(exporter) = &self.exporter {
+            self.current.statsd = Some(exporter.info());
+        }
         self.status.send_replace(self.current.clone());
     }
     fn record(&mut self, category: &'static str, data: Value) {
@@ -400,11 +424,15 @@ impl Service {
                 }
             }
         }
-        if !sent.metrics.is_empty()
-            && let Some(statsd) = &self.statsd
-        {
+        if !sent.metrics.is_empty() && (self.statsd.is_some() || self.exporter.is_some()) {
             match sent.datagrams(&self.config.prefix) {
-                Ok(lines) => statsd.submit(sink::Batch::Metrics(lines)),
+                Ok(lines) => {
+                    if let Some(statsd) = &self.statsd {
+                        statsd.submit(sink::Batch::Metrics(lines));
+                    } else if let Some(exporter) = &self.exporter {
+                        exporter.submit(lines);
+                    }
+                }
                 Err(error) => {
                     self.current.sample_errors = self.current.sample_errors.saturating_add(1);
                     self.current.last_error = Some(error);
@@ -420,6 +448,15 @@ impl Service {
         loop {
             if *self.stopped.borrow() {
                 break;
+            }
+            if let Some(statsd) = &self.statsd {
+                let info = statsd.info();
+                if !info.running {
+                    self.current.last_error = Some(Error::Io(
+                        info.last_error.unwrap_or(std::io::ErrorKind::Other),
+                    ));
+                    break;
+                }
             }
             if self.routing.as_ref().is_some_and(|r| r.is_closed()) {
                 self.current.last_error = Some(Error::RoutingClosed);
@@ -440,6 +477,7 @@ impl Service {
             tokio::select! {
                 _ = self.stopped.changed() => break,
                 _ = interval.tick() => self.sample(),
+                _ = async { self.statsd.as_mut().expect("enabled statsd").changed().await }, if self.statsd.is_some() => (),
                 _ = peers::wait(next_peer_count) => {
                     next_peer_count = None;
                     self.count_peers();

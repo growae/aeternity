@@ -2,7 +2,7 @@ use super::*;
 use std::{
     collections::VecDeque,
     io::{self, Write},
-    net::{SocketAddr, UdpSocket},
+    net::SocketAddr,
     sync::Condvar,
     thread,
 };
@@ -12,10 +12,17 @@ pub struct Outputs {
     pub log: Option<Box<dyn Write + Send>>,
     // Explicit opt-in; port zero disables transmission as in aec_metrics.
     pub statsd: Option<SocketAddr>,
+    pub metrics: Option<statsd::Client>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Info {
     pub running: bool,
+    pub ready: bool,
+    pub joined: bool,
+    pub connected: bool,
+    pub target: Option<SocketAddr>,
+    pub open_attempts: u64,
+    pub skipped: u64,
     pub outstanding: usize,
     pub retained_bytes: usize,
     pub accepted: u64,
@@ -39,43 +46,17 @@ impl Batch {
 }
 enum Destination {
     Log(Box<dyn Write + Send>),
-    Udp {
-        target: SocketAddr,
-        socket: Option<UdpSocket>,
-    },
+    Udp(statsd::Udp),
 }
 impl Destination {
-    fn write(&mut self, batch: &Batch) -> io::Result<()> {
+    fn write(&mut self, batch: &Batch) -> io::Result<bool> {
         match (self, batch) {
-            (Self::Log(w), Batch::Log(record)) => w.write_all(record.json_line()),
-            (Self::Udp { target, socket }, Batch::Metrics(lines)) => {
-                if socket.is_none() {
-                    let bind: SocketAddr = if target.is_ipv4() {
-                        "0.0.0.0:0"
-                    } else {
-                        "[::]:0"
-                    }
-                    .parse()
-                    .unwrap();
-                    let opened = UdpSocket::bind(bind)?;
-                    opened.set_nonblocking(true)?;
-                    *socket = Some(opened);
-                }
-                for line in lines {
-                    match socket.as_ref().unwrap().send_to(line, *target) {
-                        Ok(n) if n == line.len() => (),
-                        Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
-                        Err(e) => {
-                            *socket = None;
-                            return Err(e);
-                        }
-                    }
-                }
-                Ok(())
-            }
+            (Self::Log(w), Batch::Log(record)) => w.write_all(record.json_line()).map(|()| true),
+            (Self::Udp(udp), Batch::Metrics(lines)) => udp.write(lines),
             _ => Err(io::ErrorKind::InvalidInput.into()),
         }
     }
+
     fn flush(&mut self) -> io::Result<()> {
         if let Self::Log(w) = self {
             w.flush()
@@ -84,10 +65,25 @@ impl Destination {
         }
     }
 }
+fn connect(udp: &mut statsd::Udp, shared: &Shared) {
+    let result = udp.connect();
+    let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    if udp.address.is_some_and(|a| a.port() != 0) {
+        s.info.open_attempts = s.info.open_attempts.saturating_add(1);
+    }
+    s.info.target = udp.address;
+    s.info.connected = udp.connected();
+    if let Err(error) = result {
+        s.info.failed = s.info.failed.saturating_add(1);
+        s.info.last_error = Some(error.kind());
+    }
+    shared.done.send_replace(false);
+}
 struct State {
     info: Info,
     queue: VecDeque<Batch>,
     stop: bool,
+    started: bool,
 }
 struct Shared {
     state: Mutex<State>,
@@ -99,6 +95,7 @@ impl Drop for Finished {
     fn drop(&mut self) {
         let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         s.info.running = false;
+        s.info.connected = false;
         s.info.dropped = s.info.dropped.saturating_add(s.queue.len() as u64);
         s.queue.clear();
         s.info.outstanding = 0;
@@ -113,11 +110,20 @@ impl Drop for Finished {
 pub(super) struct Worker {
     shared: Arc<Shared>,
     join: Option<thread::JoinHandle<()>>,
+    updates: watch::Receiver<bool>,
     count: usize,
     bytes: usize,
 }
 impl Worker {
-    fn spawn(mut destination: Destination, config: &Config, name: &str) -> Result<Self, Error> {
+    fn spawn(destination: Destination, config: &Config, name: &str) -> Result<Self, Error> {
+        Self::prepared(destination, config, name, true)
+    }
+    fn prepared(
+        mut destination: Destination,
+        config: &Config,
+        name: &str,
+        started: bool,
+    ) -> Result<Self, Error> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 info: Info {
@@ -126,37 +132,102 @@ impl Worker {
                 },
                 queue: VecDeque::new(),
                 stop: false,
+                started,
             }),
             wake: Condvar::new(),
             done: watch::channel(false).0,
         });
+        let updates = shared.done.subscribe();
         let owned = shared.clone();
         let join = thread::Builder::new()
             .name(name.into())
             .spawn(move || {
                 let _finished = Finished(owned.clone());
-                loop {
-                    let batch = {
+                {
+                    let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
+                    while !s.started && !s.stop {
+                        s = owned.wake.wait(s).unwrap_or_else(|e| e.into_inner());
+                    }
+                    if s.stop && !(s.started && matches!(&destination, Destination::Log(_))) {
+                        return;
+                    }
+                }
+                if let Destination::Udp(udp) = &mut destination {
+                    if let Err(error) = udp.resolve() {
                         let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
-                        while s.queue.is_empty() && !s.stop {
-                            s = owned.wake.wait(s).unwrap_or_else(|e| e.into_inner());
-                        }
-                        match s.queue.pop_front() {
-                            Some(batch) => batch,
-                            None => break,
+                        s.info.failed += 1;
+                        s.info.last_error = Some(error.kind());
+                        return;
+                    }
+                    if owned.state.lock().unwrap_or_else(|e| e.into_inner()).stop {
+                        return;
+                    }
+                    connect(udp, &owned);
+                }
+                {
+                    owned
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .info
+                        .ready = true;
+                    owned.done.send_replace(false);
+                }
+                loop {
+                    let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if !s.stop
+                        && let Destination::Udp(udp) = &mut destination
+                        && udp
+                            .next
+                            .is_some_and(|next| next <= std::time::Instant::now())
+                    {
+                        drop(s);
+                        connect(udp, &owned);
+                        // Zero is a valid native delay. Yield between failed
+                        // opens without changing it to an invented backoff.
+                        thread::yield_now();
+                        s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
+                    }
+                    let batch = match s.queue.pop_front() {
+                        Some(batch) => batch,
+                        None if s.stop => break,
+                        None => {
+                            let next = match &destination {
+                                Destination::Udp(u) => u.next,
+                                _ => None,
+                            };
+                            if let Some(next) = next {
+                                drop(
+                                    owned
+                                        .wake
+                                        .wait_timeout(
+                                            s,
+                                            next.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            ),
+                                        )
+                                        .unwrap_or_else(|e| e.into_inner()),
+                                );
+                            } else {
+                                drop(owned.wake.wait(s).unwrap_or_else(|e| e.into_inner()));
+                            }
+                            continue;
                         }
                     };
+                    drop(s);
                     let result = destination.write(&batch);
                     let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
                     s.info.outstanding -= 1;
                     s.info.retained_bytes -= batch.bytes();
                     match result {
-                        Ok(()) => s.info.written = s.info.written.saturating_add(1),
+                        Ok(true) => s.info.written = s.info.written.saturating_add(1),
+                        Ok(false) => s.info.skipped = s.info.skipped.saturating_add(1),
                         Err(e) => {
                             s.info.failed = s.info.failed.saturating_add(1);
                             s.info.last_error = Some(e.kind());
                         }
                     }
+                    owned.done.send_replace(false);
                 }
                 if let Err(e) = destination.flush() {
                     let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -168,6 +239,7 @@ impl Worker {
         Ok(Self {
             shared,
             join: Some(join),
+            updates,
             count: config.sink_records,
             bytes: config.sink_bytes,
         })
@@ -176,19 +248,27 @@ impl Worker {
         outputs: Outputs,
         config: &Config,
     ) -> Result<(Option<Self>, Option<Self>), Error> {
+        if outputs.statsd.is_some() && config.statsd.is_some() {
+            return Err(Error::Configuration);
+        }
         let log = outputs
             .log
             .map(|writer| Self::spawn(Destination::Log(writer), config, "ae-json-log"))
             .transpose()?;
-        let udp = outputs
+        let target = config
             .statsd
-            .filter(|a| a.port() != 0)
+            .clone()
+            .map(statsd::Target::Configured)
+            .or_else(|| {
+                outputs
+                    .statsd
+                    .filter(|a| a.port() != 0)
+                    .map(statsd::Target::Address)
+            });
+        let udp = target
             .map(|target| {
                 Self::spawn(
-                    Destination::Udp {
-                        target,
-                        socket: None,
-                    },
+                    Destination::Udp(statsd::Udp::new(target)),
                     config,
                     "ae-statsd",
                 )
@@ -196,22 +276,37 @@ impl Worker {
             .transpose()?;
         Ok((log, udp))
     }
-    pub fn submit(&self, batch: Batch) {
-        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        let bytes = batch.bytes();
-        if !s.info.running
-            || s.stop
-            || s.info.outstanding == self.count
-            || bytes > self.bytes.saturating_sub(s.info.retained_bytes)
-        {
-            s.info.dropped = s.info.dropped.saturating_add(1);
-            return;
-        }
-        s.info.accepted = s.info.accepted.saturating_add(1);
-        s.info.outstanding += 1;
-        s.info.retained_bytes += bytes;
-        s.queue.push_back(batch);
+    pub fn metrics(config: &Config, started: bool) -> Result<Self, Error> {
+        config.validate()?;
+        let target = config.statsd.clone().ok_or(Error::Configuration)?;
+        Self::prepared(
+            Destination::Udp(statsd::Udp::new(statsd::Target::Configured(target))),
+            config,
+            "ae-statsd",
+            started,
+        )
+    }
+    pub fn activate(&self) {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .started = true;
         self.shared.wake.notify_one();
+    }
+    pub fn client(&self) -> Client {
+        Client {
+            shared: self.shared.clone(),
+            updates: self.shared.done.subscribe(),
+            count: self.count,
+            bytes: self.bytes,
+        }
+    }
+    pub async fn changed(&mut self) {
+        let _ = self.updates.changed().await;
+    }
+    pub fn submit(&self, batch: Batch) {
+        self.client().submit(batch);
     }
     pub fn info(&self) -> Info {
         self.shared
@@ -243,13 +338,76 @@ impl Worker {
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
+            self.shared
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .info
+                .joined = true;
+            self.shared.done.send_replace(true);
         }
     }
     pub fn abort(&mut self) {
         self.stop(false);
         if let Some(join) = self.join.take() {
             let _ = join.join();
+            self.shared
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .info
+                .joined = true;
+            self.shared.done.send_replace(true);
         }
+    }
+}
+#[derive(Clone)]
+pub(super) struct Client {
+    shared: Arc<Shared>,
+    updates: watch::Receiver<bool>,
+    count: usize,
+    bytes: usize,
+}
+impl Client {
+    pub fn stop(&self) {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop = true;
+        self.shared.wake.notify_one();
+    }
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+    pub fn submit(&self, batch: Batch) -> bool {
+        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = batch.bytes();
+        if !s.info.running
+            || s.stop
+            || s.info.outstanding == self.count
+            || bytes > self.bytes.saturating_sub(s.info.retained_bytes)
+        {
+            s.info.dropped = s.info.dropped.saturating_add(1);
+            return false;
+        }
+        s.info.accepted = s.info.accepted.saturating_add(1);
+        s.info.outstanding += 1;
+        s.info.retained_bytes += bytes;
+        s.queue.push_back(batch);
+        self.shared.wake.notify_one();
+        true
+    }
+    pub fn info(&self) -> Info {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .info
+            .clone()
+    }
+    pub async fn changed(&mut self) {
+        let _ = self.updates.changed().await;
     }
 }
 impl Drop for Worker {
@@ -257,3 +415,6 @@ impl Drop for Worker {
         self.abort();
     }
 }
+
+#[cfg(test)]
+mod tests;

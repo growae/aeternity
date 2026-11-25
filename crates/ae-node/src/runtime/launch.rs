@@ -64,6 +64,29 @@ impl Prepared {
                 settings,
             }));
         }
+        let metrics_config = self.1.clone();
+        let mut application = match self.1.clone().map(metrics::Owner::prepare).transpose() {
+            Ok(owner) => owner,
+            Err(error) => {
+                return Err(Box::new(StartError {
+                    error: Error::Metrics(error),
+                    prepared: self,
+                    settings,
+                }));
+            }
+        };
+        let exporter = application.as_ref().map(|m| m.view().client);
+        let mut outputs = outputs;
+        let outputs = move || {
+            let mut out = outputs()?;
+            if let Some(client) = &exporter {
+                if out.statsd.is_some() || out.metrics.is_some() {
+                    return Err(observe::Error::Configuration);
+                }
+                out.metrics = Some(client.clone());
+            }
+            Ok(out)
+        };
         let running = match (self.0, settings) {
             (PreparedInner::Pow(p), Settings::Cuckoo(s)) => {
                 match pow::launch(*p, s.config.clone(), s.clocks.clone(), outputs) {
@@ -71,7 +94,10 @@ impl Prepared {
                     Err(e) => {
                         return Err(Box::new(StartError {
                             error: Error::Pow(Box::new(e.error)),
-                            prepared: Prepared(PreparedInner::Pow(Box::new(e.prepared))),
+                            prepared: Prepared(
+                                PreparedInner::Pow(Box::new(e.prepared)),
+                                metrics_config,
+                            ),
                             settings: Settings::Cuckoo(s),
                         }));
                     }
@@ -83,7 +109,10 @@ impl Prepared {
                     Err(e) => {
                         return Err(Box::new(StartError {
                             error: Error::Pow(Box::new(e.error)),
-                            prepared: Prepared(PreparedInner::Pow(Box::new(e.prepared))),
+                            prepared: Prepared(
+                                PreparedInner::Pow(Box::new(e.prepared)),
+                                metrics_config,
+                            ),
                             settings: Settings::OnDemand(s),
                         }));
                     }
@@ -122,7 +151,10 @@ impl Prepared {
                         } = e.inputs;
                         return Err(Box::new(StartError {
                             error: Error::Hyperchain(Box::new(e.error)),
-                            prepared: Prepared(PreparedInner::Hyperchain(Box::new(prepared))),
+                            prepared: Prepared(
+                                PreparedInner::Hyperchain(Box::new(prepared)),
+                                metrics_config,
+                            ),
                             settings: Settings::Hyperchain(Box::new(Hyperchain {
                                 config,
                                 runtime,
@@ -137,9 +169,15 @@ impl Prepared {
             }
             _ => unreachable!("checked family and prepared identity"),
         };
-        Ok(Running {
+        let mut running = Running {
             inner: running,
+            metrics: None,
             notice_next: Arc::new(AtomicBool::new(false)),
-        })
+        };
+        if let Some(application) = &mut application {
+            application.bind(running.handle());
+        }
+        running.metrics = application;
+        Ok(running)
     }
 }

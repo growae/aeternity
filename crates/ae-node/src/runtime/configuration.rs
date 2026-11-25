@@ -69,6 +69,34 @@ impl Settings {
     }
 }
 impl Prepared {
+    pub fn configure_metrics(
+        &mut self,
+        resolved: &Resolved<'_>,
+        settings: &mut Settings,
+    ) -> Result<(), crate::configuration::metrics::Error> {
+        use crate::configuration::metrics::{Error, Metrics};
+        if self.family() != settings.family() {
+            return Err(Error::Family);
+        }
+        let metrics = Metrics::resolve(resolved)?;
+        let (routing, observer) = match settings {
+            Settings::Cuckoo(s) => (
+                &mut s.config.workers.routing,
+                &mut s.config.connections.observer,
+            ),
+            Settings::OnDemand(s) => (
+                &mut s.config.workers.routing,
+                &mut s.config.connections.observer,
+            ),
+            Settings::Hyperchain(s) => (
+                &mut s.config.workers.routing,
+                &mut s.config.connections.observer,
+            ),
+        };
+        self.1 = Some(metrics.apply(routing, observer)?);
+        Ok(())
+    }
+
     pub fn configure_optional_network(
         &self,
         resolved: &Resolved<'_>,

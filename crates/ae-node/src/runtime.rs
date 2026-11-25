@@ -22,6 +22,7 @@ use std::sync::{
 };
 mod configuration;
 mod launch;
+mod metrics;
 pub use launch::{Cuckoo, Hyperchain, OnDemand, Settings, StartError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +87,7 @@ enum PreparedInner {
     Pow(Box<configured_pow::Prepared>),
     Hyperchain(Box<hc::Prepared>),
 }
-pub struct Prepared(PreparedInner);
+pub struct Prepared(PreparedInner, Option<observe::statsd::Settings>);
 impl Prepared {
     pub fn new(open: configured::Open, config: Preparation) -> Result<Self, Box<PrepareFailure>> {
         // Opened already enforces this at the durable boundary. Preserve the
@@ -119,7 +120,7 @@ impl Prepared {
                     .rules
                     .unwrap_or_else(|| open.pow_rules(p.micro_cycle_ms, p.body));
                 configured_pow::Prepared::try_new(open, rules, p.importer, p.snapshots)
-                    .map(|p| Self(PreparedInner::Pow(Box::new(p))))
+                    .map(|p| Self(PreparedInner::Pow(Box::new(p)), None))
                     .map_err(|f| {
                         Box::new(PrepareFailure {
                             error: PrepareError::Pow(f.error),
@@ -128,7 +129,7 @@ impl Prepared {
                     })
             }
             Family::Hyperchain => hc::Prepared::new(open, config.hyperchain)
-                .map(|p| Self(PreparedInner::Hyperchain(Box::new(p))))
+                .map(|p| Self(PreparedInner::Hyperchain(Box::new(p)), None))
                 .map_err(|f| {
                     Box::new(PrepareFailure {
                         error: PrepareError::Hyperchain(f.error),
@@ -173,6 +174,7 @@ pub enum Error {
         requested: Family,
     },
     UnsupportedControl,
+    Metrics(observe::Error),
     Pow(Box<pow::Error>),
     Hyperchain(Box<hyperchain::Error>),
 }
@@ -185,6 +187,8 @@ pub enum Details {
 #[derive(Debug, Clone)]
 pub struct Status {
     pub family: Family,
+    pub metrics: Option<observe::SinkInfo>,
+    pub metrics_error: Option<observe::Error>,
     pub running: bool,
     pub ready: bool,
     pub joined: bool,
@@ -195,6 +199,8 @@ impl Status {
     fn pow(status: pow::Status, family: Family) -> Self {
         Self {
             family,
+            metrics: None,
+            metrics_error: None,
             running: status.running,
             ready: status.ready,
             joined: status.joined,
@@ -212,6 +218,8 @@ impl Status {
     fn hyperchain(status: hyperchain::Status) -> Self {
         Self {
             family: Family::Hyperchain,
+            metrics: None,
+            metrics_error: None,
             running: status.running,
             ready: status.ready,
             joined: status.joined,
@@ -230,6 +238,11 @@ pub enum Output {
     HyperchainProduction(conductor::runtime::supervision::Notice),
 }
 pub enum Exit {
+    Application {
+        inner: Box<Exit>,
+        metrics: observe::SinkInfo,
+        error: Option<observe::Error>,
+    },
     Cuckoo(Box<pow::Exit>),
     OnDemand(Box<pow::Exit>),
     Hyperchain(Box<hyperchain::Exit<Otp26>>),
@@ -237,6 +250,19 @@ pub enum Exit {
 impl Exit {
     pub fn status(&self) -> Status {
         match self {
+            Self::Application {
+                inner,
+                metrics,
+                error,
+            } => {
+                let mut status = inner.status();
+                status.joined &= metrics.joined;
+                status.metrics = Some(metrics.clone());
+                if let Some(error) = error {
+                    status.metrics_error = Some(error.clone());
+                }
+                status
+            }
             Self::Cuckoo(e) => Status::pow(e.status.clone(), Family::Cuckoo),
             Self::OnDemand(e) => Status::pow(e.status.clone(), Family::OnDemand),
             Self::Hyperchain(e) => Status::hyperchain(e.status.clone()),
@@ -244,6 +270,7 @@ impl Exit {
     }
     pub fn configured(&self) -> Option<&configured::Open> {
         match self {
+            Self::Application { inner, .. } => inner.configured(),
             Self::Cuckoo(e) | Self::OnDemand(e) => e
                 .services
                 .as_ref()
@@ -262,32 +289,47 @@ enum HandleInner {
 #[derive(Clone)]
 pub struct Handle {
     inner: HandleInner,
+    metrics: Option<metrics::View>,
     notice_next: Arc<AtomicBool>,
 }
 impl Handle {
     pub fn status(&self) -> Status {
-        match &self.inner {
+        let status = match &self.inner {
             HandleInner::Cuckoo(h) => Status::pow(h.status(), Family::Cuckoo),
             HandleInner::OnDemand(h) => Status::pow(h.status(), Family::OnDemand),
             HandleInner::Hyperchain(h) => Status::hyperchain(h.status()),
+        };
+        match &self.metrics {
+            Some(metrics) => metrics.apply(status),
+            None => status,
         }
     }
+    pub fn metrics(&self) -> Option<observe::statsd::Client> {
+        self.metrics.as_ref().map(|m| m.client.clone())
+    }
     pub async fn changed(&mut self) -> Result<Status, Error> {
-        match &mut self.inner {
-            HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => {
-                h.changed()
-                    .await
-                    .map_err(|error| Error::Pow(Box::new(error)))?;
+        let changed = async {
+            match &mut self.inner {
+                HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => {
+                    h.changed()
+                        .await
+                        .map_err(|error| Error::Pow(Box::new(error)))?;
+                }
+                HandleInner::Hyperchain(h) => {
+                    h.changed()
+                        .await
+                        .map_err(|error| Error::Hyperchain(Box::new(error)))?;
+                }
             }
-            HandleInner::Hyperchain(h) => {
-                h.changed()
-                    .await
-                    .map_err(|error| Error::Hyperchain(Box::new(error)))?;
-            }
-        }
+            Ok::<_, Error>(())
+        };
+        tokio::select! { result = changed => result?, _ = async { self.metrics.as_mut().expect("configured metrics").changed().await }, if self.metrics.is_some() => () }
         Ok(self.status())
     }
     pub fn request_shutdown(&self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.stop();
+        }
         match &self.inner {
             HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => h.request_shutdown(),
             HandleInner::Hyperchain(h) => h.request_shutdown(),
@@ -356,11 +398,18 @@ impl Handle {
         }
     }
     pub fn take_exit(&self) -> Option<Exit> {
-        match &self.inner {
+        if self.metrics.as_ref().is_some_and(|m| !m.done()) {
+            return None;
+        }
+        let exit = match &self.inner {
             HandleInner::Cuckoo(h) => h.take_exit().map(|e| Exit::Cuckoo(Box::new(e))),
             HandleInner::OnDemand(h) => h.take_exit().map(|e| Exit::OnDemand(Box::new(e))),
             HandleInner::Hyperchain(h) => h.take_exit().map(|e| Exit::Hyperchain(Box::new(e))),
-        }
+        }?;
+        Some(match &self.metrics {
+            Some(m) => m.exit(exit),
+            None => exit,
+        })
     }
 }
 enum RunningInner {
@@ -370,6 +419,7 @@ enum RunningInner {
 }
 pub struct Running {
     inner: RunningInner,
+    metrics: Option<metrics::Owner>,
     notice_next: Arc<AtomicBool>,
 }
 impl Running {
@@ -381,10 +431,12 @@ impl Running {
                 RunningInner::Hyperchain(r) => HandleInner::Hyperchain(r.handle()),
             },
             notice_next: self.notice_next.clone(),
+            metrics: self.metrics.as_ref().map(metrics::Owner::view),
         }
     }
     pub async fn wait(self) -> Result<Exit, Error> {
-        match self.inner {
+        let mut metrics = self.metrics;
+        let exit = match self.inner {
             RunningInner::Cuckoo(r) => r
                 .wait()
                 .await
@@ -400,7 +452,14 @@ impl Running {
                 .await
                 .map(|e| Exit::Hyperchain(Box::new(e)))
                 .map_err(|error| Error::Hyperchain(Box::new(error))),
+        };
+        if let Some(metrics) = &mut metrics {
+            metrics.finish().await;
         }
+        exit.map(|e| match &metrics {
+            Some(m) => m.view().exit(e),
+            None => e,
+        })
     }
     pub async fn shutdown(self) -> Result<Exit, Error> {
         self.handle().request_shutdown();

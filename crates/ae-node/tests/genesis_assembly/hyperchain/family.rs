@@ -402,3 +402,33 @@ async fn dispatch_hyperchain_failures_retry_with_the_same_bound_chain_and_drop_r
     };
     clean(e);
 }
+
+#[path = "../../common/metrics_settings.rs"]
+mod metrics_settings;
+
+#[tokio::test]
+async fn application_metrics_outlive_hyperchain_connections_in_all_modes() {
+    let parent = Parent::start();
+    for mode in [
+        json!({}),
+        json!({"dev_mode":true}),
+        json!({"offline_mode":true}),
+        json!({"maintenance_mode":true}),
+    ] {
+        let normal = mode == json!({});
+        let lab = Hc::new(8, mode, &parent);
+        let mut p = prepare(&lab, Default::default());
+        let clock = Clock::new();
+        let mut s = settings(&lab, &p, Arc::new(move |_| Ok(clock.clone())));
+        let metrics = metrics_settings::Metrics::new().await;
+        metrics.configure(&mut p, &mut s);
+        let running = p.launch(s, || Ok(Default::default())).unwrap();
+        let mut handle = running.handle();
+        ready(&mut handle).await;
+        let client = metrics.verify(&handle, normal).await;
+        let exit = running.shutdown().await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        assert!(client.info().joined && !client.info().running);
+        assert!(exit.status().metrics.unwrap().joined);
+    }
+}

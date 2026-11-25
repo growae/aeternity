@@ -581,3 +581,123 @@ fn dispatch_never_silently_reduces_a_future_consensus_schedule_to_genesis() {
     ));
     assert!(!lab.0.join("unsupported").exists());
 }
+
+#[path = "../common/metrics_settings.rs"]
+mod metrics_settings;
+
+#[tokio::test]
+async fn application_metrics_outlive_connection_generations_in_both_pow_families_and_all_modes() {
+    for kind in ["pow_cuckoo", "on_demand"] {
+        for mode in [
+            json!({}),
+            json!({"dev_mode":true}),
+            json!({"offline_mode":true}),
+            json!({"maintenance_mode":true}),
+        ] {
+            let normal = mode == json!({});
+            let lab = Lab::new();
+            let mut p = prepare(lab.services(kind, mode, Default::default()));
+            let mut s = if kind == "on_demand" {
+                commands(&lab)
+            } else {
+                cuckoo(&lab)
+            };
+            let metrics = metrics_settings::Metrics::new().await;
+            metrics.configure(&mut p, &mut s);
+            let running = p.launch(s, || Ok(Default::default())).unwrap();
+            let mut handle = running.handle();
+            ready(&mut handle).await;
+            let client = metrics.verify(&handle, normal).await;
+            let exit = running.shutdown().await.unwrap();
+            assert!(exit.status().joined && exit.status().failure.is_none());
+            assert!(client.info().joined && !client.info().running);
+            assert!(exit.status().metrics.unwrap().joined);
+        }
+    }
+}
+#[tokio::test]
+async fn metrics_resolution_failure_including_port_zero_keeps_the_actual_application_running() {
+    for port in [0, 8125] {
+        let lab = Lab::new();
+        let mut p = prepare(lab.services(
+            "on_demand",
+            json!({"offline_mode":true}),
+            Default::default(),
+        ));
+        let mut s = commands(&lab);
+        let cfg = Configuration::from_value(json!({"metrics":{"host":"bad\u{0}host","port":port}}))
+            .unwrap();
+        let ctx = Context::new(Directories {
+            home: "release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        p.configure_metrics(&cfg.resolve(&ctx).unwrap(), &mut s)
+            .unwrap();
+        let running = p.launch(s, || Ok(Default::default())).unwrap();
+        let mut handle = running.handle();
+        let client = handle.metrics().unwrap();
+        ready(&mut handle).await;
+        within(async {
+            while handle.status().metrics_error.is_none() || !client.info().joined {
+                handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert!(
+            handle.status().ready && handle.status().running && handle.status().failure.is_none()
+        );
+        assert!(!client.info().ready);
+        assert_eq!(client.info().open_attempts, 0);
+        let exit = running.shutdown().await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        assert!(exit.status().metrics_error.is_some());
+    }
+}
+
+#[tokio::test]
+async fn metrics_owner_recovers_failed_launch_and_drop_does_not_wait_for_a_stalled_root_executor() {
+    let lab = Lab::new();
+    let mut p = prepare(lab.services(
+        "on_demand",
+        json!({"offline_mode":true}),
+        Default::default(),
+    ));
+    let mut s = commands(&lab);
+    let metrics = metrics_settings::Metrics::new().await;
+    metrics.configure(&mut p, &mut s);
+    if let node::Settings::OnDemand(s) = &mut s {
+        s.config.poll = Duration::ZERO;
+    }
+    let error = match p.launch(s, || Ok(Default::default())) {
+        Ok(_) => panic!("invalid root accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error.error, node::Error::Pow(_)));
+    let mut s = error.settings;
+    if let node::Settings::OnDemand(s) = &mut s {
+        s.config.poll = Duration::from_millis(2);
+    }
+    let running = error.prepared.launch(s, || Ok(Default::default())).unwrap();
+    let mut h = running.handle();
+    ready(&mut h).await;
+    let client = h.metrics().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(running);
+        let _ = tx.send(());
+    });
+    // Deliberately prevent this current-thread Tokio executor from advancing
+    // the root while the other thread drops the application owner.
+    let returned = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+    within(async {
+        while !h.status().joined {
+            h.changed().await.unwrap();
+        }
+    })
+    .await;
+    dropper.join().unwrap();
+    assert!(returned, "Drop waited for the stalled family executor");
+    assert!(client.info().joined && !client.info().running);
+}

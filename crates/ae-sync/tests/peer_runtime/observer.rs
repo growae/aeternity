@@ -155,6 +155,7 @@ async fn peer_count_log_has_its_own_timer_and_uses_current_registry_counts_and_m
             observe::Outputs {
                 log: Some(Box::new(log.clone())),
                 statsd: None,
+                metrics: None,
             },
             observe::Config {
                 interval: Duration::from_secs(30),
@@ -224,6 +225,7 @@ async fn diagnostic_overflow_never_blocks_encrypted_requests_and_statsd_uses_liv
         observe::Outputs {
             log: Some(Box::new(log.clone())),
             statsd: Some(udp.local_addr().unwrap()),
+            metrics: None,
         },
         compact(),
     )
@@ -327,6 +329,7 @@ async fn blocked_log_counts_executing_job_and_udp_and_peers_keep_working() {
         observe::Outputs {
             log: Some(Box::new(Blocked(gate.clone()))),
             statsd: Some(udp.local_addr().unwrap()),
+            metrics: None,
         },
         compact(),
     )
@@ -372,6 +375,7 @@ async fn sink_errors_and_panics_are_observable_without_terminating_peers() {
             observe::Outputs {
                 log: Some(Box::new(Broken(panic))),
                 statsd: Some("127.0.0.1:0".parse().unwrap()),
+                metrics: None,
             },
             compact(),
         )
@@ -516,6 +520,7 @@ async fn aborted_observer_closes_subscriptions_and_releases_owned_workers() {
         observe::Outputs {
             log: Some(Box::new(log.clone())),
             statsd: None,
+            metrics: None,
         },
         compact(),
     )
@@ -598,6 +603,7 @@ async fn observer_consumes_actual_gc_events_and_reports_history_gaps_with_progre
             observe::Outputs {
                 log: Some(Box::new(log.clone())),
                 statsd: None,
+                metrics: None,
             },
             observe::Config {
                 records: 32,
@@ -688,6 +694,7 @@ async fn metrics_routing_filters_real_outputs_and_preserves_snapshots_when_owner
         observe::Outputs {
             log: Some(Box::new(log.clone())),
             statsd: Some(udp.local_addr().unwrap()),
+            metrics: None,
         },
         observe::Config {
             records: 128,

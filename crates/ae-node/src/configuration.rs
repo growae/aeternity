@@ -9,6 +9,7 @@ pub mod consensus;
 pub mod discovery;
 pub mod execution;
 mod files;
+pub mod metrics;
 pub mod network;
 pub mod presets;
 pub mod protocols;

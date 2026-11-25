@@ -607,7 +607,10 @@ where
                                 failure = Some(error);
                                 break;
                             }
-                            if !self.current.ready && generation.network.status().ready {
+                            if !self.current.ready
+                                && generation.network.status().ready
+                                && generation.observer.status().ready
+                            {
                                 if let Some(listener) = &self.upnp_listener {
                                     listener.publish(
                                         generation.network.status().listening,
@@ -624,6 +627,7 @@ where
                                 _ = self.stopped.changed() => break,
                                 result = group.next() => { failure = Some(result); break; },
                                 _ = generation.network.changed(), if !self.current.ready => (),
+                                _ = generation.observer.changed(), if !self.current.ready => (),
                                 _ = health.tick() => (),
                             }
                         }
