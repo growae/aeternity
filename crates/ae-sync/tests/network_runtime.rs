@@ -1,3 +1,37 @@
+fn metrics(
+    node: &Node,
+) -> (
+    ae_sync::observe::registry::Owner,
+    std::sync::Arc<ae_sync::observe::registry::Store>,
+    ae_chain::instrumentation::Binding,
+) {
+    use ae_sync::observe::registry::{Owner, Store, predefined::Feed};
+    let store = std::sync::Arc::new(Store::new(Default::default()).unwrap());
+    let owner = Owner::spawn(store.clone()).unwrap();
+    let feed = Feed::install(store.clone()).unwrap();
+    let binding = node.db.instrumentation().bind(feed).unwrap();
+    (owner, store, binding)
+}
+fn assert_pings(store: &ae_sync::observe::registry::Store, success: u64, failure: u64) {
+    use ae_sync::{
+        observe::{
+            registry::{Reading, Value, predefined},
+            reporter::Points,
+        },
+        routing::Part,
+    };
+    for (suffix, n) in [
+        ("peers.ping.success", success),
+        ("peers.ping.failure", failure),
+    ] {
+        assert_eq!(
+            store
+                .get_value(&predefined::name(suffix), &Points::One(Part::atom("value")))
+                .unwrap(),
+            Reading::Values(vec![(Part::atom("value"), Value::Integer(n.into()))])
+        );
+    }
+}
 mod common;
 #[path = "network_runtime/listener.rs"]
 mod listener;
@@ -602,6 +636,7 @@ async fn inbound_temporary_and_blocked_first_ping_retire_only_after_their_respon
 #[tokio::test]
 async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_closing() {
     let node = Node::new();
+    let (_metrics, store, _binding) = metrics(&node);
     let (local, remote) = identities();
     let mut c = config();
     c.registry.policy.maximum_outbound = 1;
@@ -703,6 +738,7 @@ async fn dial_resolves_stored_host_and_completed_ping_error_reschedules_without_
         s.counts.pings_completed == 1 && s.counts.pings_failed == 1
     })
     .await;
+    assert_pings(&store, 1, 1);
     let exit = stop(&h, task).await;
     let registry = exit.registry.unwrap();
     let discovered = registry.policy().pool().find(learned.id).unwrap();
@@ -795,6 +831,7 @@ async fn full_application_queue_retains_ping_but_delete_prunes_it_and_closes_soc
 async fn abandoned_or_expired_ping_closes_exact_driver_and_late_reply_is_rejected() {
     for expired in [false, true] {
         let node = Node::new();
+        let (_metrics, store, _binding) = metrics(&node);
         let (local, remote) = identities();
         let mut c = config();
         c.registry.policy.maximum_outbound = 1;
@@ -815,6 +852,7 @@ async fn abandoned_or_expired_ping_closes_exact_driver_and_late_reply_is_rejecte
         }
         status(&mut h, |s| s.counts.pings_failed == 1).await;
         stop(&h, task).await;
+        assert_pings(&store, 0, 1);
         within(remote_task).await.unwrap();
     }
 }

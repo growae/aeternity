@@ -148,7 +148,7 @@ impl Engine {
         }
         Ok(())
     }
-    fn resolve(&mut self, key: &Key) -> Result<Destinations, Error> {
+    pub(super) fn resolve(&mut self, key: &Key) -> Result<Destinations, Error> {
         if let Some(value) = self.cached(key)? {
             return Ok(Some(value));
         }

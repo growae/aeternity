@@ -118,7 +118,7 @@ impl Handle {
             .clone()
     }
     pub fn client(&self) -> Client {
-        Client(Binding::Managed(self.clone()), None, None, None)
+        Client(Binding::Managed(self.clone()), None, None, None, None)
     }
     pub fn shutdown(&self) {
         self.shared.closed.store(true, Ordering::Release);

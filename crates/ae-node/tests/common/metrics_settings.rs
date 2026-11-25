@@ -29,6 +29,8 @@ impl Write for Log {
 impl Metrics {
     pub fn assert_registry_joined(client: &statsd::Client) {
         let registry = client.registry().unwrap();
+        assert!(client.predefined().is_some());
+        assert_eq!(client.predefined().unwrap().info().rejected, 0);
         let info = registry.info();
         assert!(info.joined && !info.running);
         assert!(info.managers.iter().all(|m| m.joined && !m.running));
@@ -87,6 +89,9 @@ impl Metrics {
         );
         let registry = client.registry().unwrap();
         let histogram = vec![ae_sync::routing::Part::atom("application-histogram")];
+        assert!(client.predefined().is_some());
+        assert_eq!(client.predefined().unwrap().info().rejected, 0);
+        assert_eq!(client.store().unwrap().histogram_usage().workers, 8);
         registry
             .create_histogram(
                 &histogram,
@@ -159,7 +164,7 @@ impl Metrics {
                 Value::Integer(17.into())
             )])
         );
-        assert_eq!(client.store().unwrap().histogram_usage().workers, 1);
+        assert_eq!(client.store().unwrap().histogram_usage().workers, 9);
         assert_eq!(unchanged.generation, first.generation);
         assert_eq!(
             client.supervisor().unwrap().status().supervisor_generation,
@@ -207,7 +212,9 @@ impl Metrics {
         assert!(
             std::str::from_utf8(&line)
                 .unwrap()
-                .starts_with("ae.epoch.aecore.chain.height.value:")
+                .starts_with("ae.epoch.aecore.chain.height.value:"),
+            "unexpected report: {:?}",
+            String::from_utf8_lossy(&line)
         );
         let workers = if let Some(pow) = h.pow() {
             pow.workers().unwrap()
@@ -259,6 +266,10 @@ impl Metrics {
         assert!(Arc::ptr_eq(
             &client.store().unwrap(),
             &h.metrics().unwrap().store().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &client.predefined().unwrap(),
+            &h.metrics().unwrap().predefined().unwrap()
         ));
         assert_eq!(
             registry

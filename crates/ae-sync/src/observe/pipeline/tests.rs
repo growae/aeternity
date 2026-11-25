@@ -212,9 +212,26 @@ async fn callback_failure_and_abnormal_input_exit_replace_the_entire_owned_logge
     owner.finish().await;
 }
 #[tokio::test]
-async fn cached_routes_survive_withdrawn_worker_without_restarting_logger_or_socket() {
+async fn retained_routes_and_uncached_rules_survive_withdrawn_worker_without_restarting_logger_or_socket()
+ {
     let node = crate::test_support::Node::new();
-    let routing = routing::Owner::new(routing::Setup::default()).unwrap();
+    let routing = routing::Owner::new(routing::Setup {
+        config: routing::Config {
+            rules: vec![routing::Rule {
+                name: b"ae.**".to_vec(),
+                actions: b"none".to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        entries: vec![routing::Entry {
+            name: key("uncached").name,
+            kind: "gauge".into(),
+            enabled: true,
+        }],
+        ..Default::default()
+    })
+    .unwrap();
     let worker = routing::Worker::spawn(routing.store()).unwrap();
     let old = worker.client();
     old.add(key("cached"), routing::Destination::Send)
@@ -247,6 +264,18 @@ async fn cached_routes_survive_withdrawn_worker_without_restarting_logger_or_soc
     let (line, same_source) = packet(&socket).await;
     assert_eq!(line, b"ae.pipeline.cached.value:2|g");
     assert_eq!(source, same_source);
+    let before = routing.store().cells().unwrap();
+    assert!(routing.store().cached(&key("uncached")).unwrap().is_none());
+    client.report(event("uncached", 7)).unwrap();
+    client.report(event("unregistered", 8)).unwrap();
+    let (line, same_source) = packet(&socket).await;
+    assert_eq!(line, b"ae.pipeline.unregistered.value:8|g");
+    assert_eq!(source, same_source);
+    assert_eq!(routing.store().cells().unwrap(), before);
+    assert!(matches!(
+        old.destinations(key("uncached")),
+        Err(routing::Error::Stopped)
+    ));
     let worker = routing::Worker::spawn(routing.store()).unwrap();
     publisher.install(worker.client(), 2);
     client.report(event("cached", 3)).unwrap();

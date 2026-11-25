@@ -614,7 +614,7 @@ async fn metrics_mixed_five_child_recovery_then_exhaustion_joins_the_application
         registry
             .update(&histogram, &registry::Value::Integer(23.into()))
             .unwrap();
-        assert_eq!(client.store().unwrap().histogram_usage().workers, 1);
+        assert_eq!(client.store().unwrap().histogram_usage().workers, 9);
         let report = client.reporter().unwrap();
         let logger = client.supervisor().unwrap();
         let old = logger.current().unwrap();

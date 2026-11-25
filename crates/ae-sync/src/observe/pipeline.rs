@@ -28,20 +28,21 @@ impl Routing {
                 )
             }
         };
-        // Native ETS lookups survive routing-server replacement. Inspect the
-        // retained table even while its worker is withdrawn; only a cache miss
-        // requires an admitted operation on the exact available generation.
         if let Some(destinations) = client.cached(&key).map_err(Error::Routing)? {
             return Ok(Some(destinations));
         }
-        if !available {
-            return Err(Error::RoutingClosed);
+        if available {
+            match client
+                .destinations(key.clone())
+                .and_then(|ticket| ticket.blocking_wait())
+            {
+                Ok(destinations) => return Ok(destinations),
+                // Withdrawal can race the snapshot or an admitted lookup.
+                Err(routing::Error::Stopped | routing::Error::Closed) => (),
+                Err(error) => return Err(Error::Routing(error)),
+            }
         }
-        client
-            .destinations(key)
-            .map_err(Error::Routing)?
-            .blocking_wait()
-            .map_err(Error::Routing)
+        client.retained_destinations(&key).map_err(Error::Routing)
     }
 }
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;

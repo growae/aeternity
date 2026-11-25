@@ -97,6 +97,10 @@ impl Metrics {
         output.validate().map_err(Error::Output)?;
         let mut setup = routing.clone().unwrap_or_default();
         setup.config.rules = self.rules.clone();
+        for entry in observe::registry::predefined::entries() {
+            setup.entries.retain(|old| old.name != entry.name);
+            setup.entries.push(entry);
+        }
         routing::Engine::new(
             setup.config.clone(),
             setup.entries.clone(),

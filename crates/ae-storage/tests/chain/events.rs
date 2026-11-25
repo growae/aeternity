@@ -1,6 +1,19 @@
 use super::*;
 use ae_chain::publication::{Effect, Origin, Propagation};
 use ae_storage::events::{self, Config};
+#[derive(Default)]
+struct Observations(std::sync::Mutex<Vec<ae_chain::instrumentation::Event>>);
+impl ae_chain::instrumentation::Sink for Observations {
+    fn event(&self, event: ae_chain::instrumentation::Event) {
+        self.0.lock().unwrap().push(event);
+    }
+    fn start(
+        &self,
+        _: ae_chain::instrumentation::Stage,
+    ) -> Option<Box<dyn ae_chain::instrumentation::Span>> {
+        None
+    }
+}
 fn insert(db: &Database, block: &Block, origin: ledger::Origin) -> ae_storage::Committed {
     let network = profile(Network::Mainnet);
     db.commit(
@@ -30,12 +43,26 @@ fn committed_event_payloads_preserve_real_execution_and_original_origin_rules() 
     ] {
         let dir = Temp::new();
         let db = Database::open(&dir.0, identity(Network::Mainnet)).unwrap();
+        let observations = std::sync::Arc::new(Observations::default());
+        let _binding = db.instrumentation().bind(observations.clone()).unwrap();
         bootstrap(&db, Network::Mainnet);
+        assert!(observations.0.lock().unwrap().is_empty());
         let reader = db.events();
         let mut cursor = reader.cursor();
         let mut tx_events = 0;
         for block in blocks(Network::Mainnet) {
             let receipt = insert(&db, &block, input);
+            let mut expected = vec![];
+            if output == Origin::Created && matches!(&block, Block::Key(_)) {
+                expected.push(ae_chain::instrumentation::Event::BlockCreated);
+            }
+            if receipt.change().old_tip != Some(receipt.change().new_tip) {
+                expected.push(ae_chain::instrumentation::Event::TopChanged);
+            }
+            assert_eq!(
+                std::mem::take(&mut *observations.0.lock().unwrap()),
+                expected
+            );
             let batch = reader.after(&cursor, 1).unwrap();
             assert_eq!(batch.records.len(), 1);
             let record = &batch.records[0];
@@ -133,12 +160,18 @@ fn source_overflow_and_oversized_records_report_exact_gaps_without_rejecting_com
             Config { records: 1, bytes },
         )
         .unwrap();
+        let observations = std::sync::Arc::new(Observations::default());
+        let _binding = db.instrumentation().bind(observations.clone()).unwrap();
         bootstrap(&db, Network::Mainnet);
         let reader = db.events();
         let cursor = reader.cursor();
         let all = blocks(Network::Mainnet);
         insert(&db, &all[0], ledger::Origin::Gossip);
         let receipt = insert(&db, &all[1], ledger::Origin::Gossip);
+        assert_eq!(
+            *observations.0.lock().unwrap(),
+            vec![ae_chain::instrumentation::Event::TopChanged; 2]
+        );
         let events::Error::Gap { missed, resume } = reader.after(&cursor, 10).unwrap_err() else {
             panic!()
         };

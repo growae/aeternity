@@ -216,8 +216,19 @@ pub struct Client(
     Option<std::sync::Arc<super::reporter::Store>>,
     Option<super::reporter::Client>,
     Option<super::registry::Client>,
+    Option<std::sync::Arc<super::registry::predefined::Feed>>,
 );
 impl Client {
+    pub fn with_predefined(
+        mut self,
+        feed: std::sync::Arc<super::registry::predefined::Feed>,
+    ) -> Self {
+        self.4 = Some(feed);
+        self
+    }
+    pub fn predefined(&self) -> Option<std::sync::Arc<super::registry::predefined::Feed>> {
+        self.4.clone()
+    }
     pub fn with_registry(mut self, registry: super::registry::Client) -> Self {
         self.3 = Some(registry);
         self
@@ -319,7 +330,7 @@ impl Worker {
         self.0.activate();
     }
     pub fn client(&self) -> Client {
-        Client(Binding::Direct(self.0.client()), None, None, None)
+        Client(Binding::Direct(self.0.client()), None, None, None, None)
     }
     pub async fn finish(&mut self) {
         self.0.finish().await;

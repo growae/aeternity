@@ -262,6 +262,14 @@ impl Service {
                     return Ok(());
                 };
                 let processed = outcome.as_mut().and_then(|result| result.processed.take());
+                self.instrumentation.counter(
+                    if outcome.as_ref().is_some_and(|r| r.success) {
+                        ae_chain::instrumentation::Counter::PingSuccess
+                    } else {
+                        ae_chain::instrumentation::Counter::PingFailure
+                    },
+                    1,
+                );
                 let command = if let Some(result) = outcome {
                     let count = if result.success {
                         &mut self.current.counts.pings_completed

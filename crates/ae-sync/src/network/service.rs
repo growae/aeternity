@@ -37,6 +37,7 @@ pub struct Exit {
 }
 pub struct Service {
     config: Config,
+    instrumentation: ae_chain::instrumentation::Publisher,
     sockets: transport::Sockets,
     pool: pool::Handle,
     pool_run: Option<PoolFuture>,
@@ -72,6 +73,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         config: Config,
+        instrumentation: ae_chain::instrumentation::Publisher,
         worker: registry::worker::Worker,
         resolver: resolver::Resolver,
         sockets: transport::Sockets,
@@ -87,6 +89,7 @@ impl Service {
         let client = worker.client();
         Self {
             config,
+            instrumentation,
             sockets,
             pool,
             pool_run: Some(Box::pin(pool_service.run())),

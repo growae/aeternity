@@ -77,7 +77,11 @@ pub(super) struct Owner {
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Owner {
-    pub fn prepare(settings: statsd::Settings, prefix: String) -> Result<Self, observe::Error> {
+    pub fn prepare(
+        settings: statsd::Settings,
+        prefix: String,
+        instrumentation: &ae_chain::instrumentation::Publisher,
+    ) -> Result<Self, observe::Error> {
         let pipeline = settings.pipeline.clone();
         let budget = observe::supervision::Budget::default();
         let worker = if pipeline.is_some() {
@@ -85,21 +89,27 @@ impl Owner {
         } else {
             statsd::supervision::Owner::prepare(settings)?
         };
-        let (registry, reporter, client) = if pipeline.is_some() {
+        let (registry, reporter, client, binding) = if pipeline.is_some() {
             let limits = reporter::Limits::default();
             let store = Arc::new(reporter::Store::new(limits).map_err(observe::Error::Reporter)?);
             let registry = registry::Owner::spawn_with_parent(store.clone(), budget.clone())
                 .map_err(observe::Error::Registry)?;
+            let feed = registry::predefined::Feed::install(store.clone())
+                .map_err(observe::Error::Registry)?;
+            let binding = instrumentation
+                .bind(feed.clone())
+                .map_err(|_| observe::Error::Configuration)?;
             let reporter =
                 reporter::Owner::spawn_with_parent(limits, store.clone(), worker.client(), budget)
                     .map_err(observe::Error::Reporter)?;
             let client = worker
                 .client()
                 .with_reporter(store, reporter.client())
-                .with_registry(registry.client());
-            (Some(registry), Some(reporter), client)
+                .with_registry(registry.client())
+                .with_predefined(feed);
+            (Some(registry), Some(reporter), client, Some(binding))
         } else {
-            (None, None, worker.client())
+            (None, None, worker.client(), None)
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -125,6 +135,7 @@ impl Owner {
                             stopping: requested,
                             pipeline,
                             prefix,
+                            binding,
                         },
                         reporter,
                         registry,
@@ -195,6 +206,7 @@ struct Control<'a> {
     stopping: watch::Receiver<bool>,
     pipeline: Option<observe::pipeline::Config>,
     prefix: String,
+    binding: Option<ae_chain::instrumentation::Binding>,
 }
 async fn run(
     mut worker: statsd::supervision::Owner,
@@ -210,12 +222,14 @@ async fn run(
         mut stopping,
         pipeline,
         prefix,
+        binding,
     } = control;
     let Ok(parent) = parent.await else {
         if let Some(reporter) = &mut reporter {
             reporter.finish().await;
         }
         worker.finish().await;
+        drop(binding);
         if let Some(registry) = &mut registry {
             registry.finish().await;
         }
@@ -350,6 +364,7 @@ async fn run(
         owner.finish().await;
     }
     worker.finish().await;
+    drop(binding);
     if let Some(registry) = &mut registry {
         registry.finish().await;
     }

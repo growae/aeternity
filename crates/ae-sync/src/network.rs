@@ -553,6 +553,7 @@ pub(crate) async fn create_bound(
     let resolver = resolver::Resolver::start(config.resolver)?;
     let sockets = transport::Sockets::new(identity, network, config.transport)?;
     let database = Arc::downgrade(&db);
+    let instrumentation = db.instrumentation().clone();
     let (peers, incoming, pool_service) = pool::create_bound(db, admission, config.pool)?;
     let (commands, receiver) = mpsc::channel(config.commands);
     let (published, events) = mpsc::channel(config.events);
@@ -586,6 +587,7 @@ pub(crate) async fn create_bound(
     };
     let service = Service::new(
         config,
+        instrumentation,
         worker,
         resolver,
         sockets,

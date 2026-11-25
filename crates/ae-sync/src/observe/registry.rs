@@ -10,6 +10,7 @@ use std::sync::Arc;
 mod cache;
 pub mod histogram;
 mod native_histogram;
+pub mod predefined;
 mod scalar;
 mod service;
 use crate::routing::Entry;
@@ -132,6 +133,9 @@ impl Store {
         Ok(bytes)
     }
     pub fn put(&self, metrics: Vec<Metric>) -> Result<(), StoreError> {
+        self.put_frame(metrics, false)
+    }
+    fn put_frame(&self, metrics: Vec<Metric>, predefined: bool) -> Result<(), StoreError> {
         let _control = self.control();
         if metrics.len() > self.limits.subscriptions {
             return Err(StoreError::Limit);
@@ -156,7 +160,37 @@ impl Store {
         s.open().map_err(as_reporter)?;
         let mut total = s.bytes;
         let mut count = s.entries.len();
+        let mut gauges = BTreeMap::new();
         for (m, bytes) in &checked {
+            if predefined && let Some(kind) = predefined::sampled_kind(&m.entry.name) {
+                let old = s
+                    .entries
+                    .get(&m.entry.name)
+                    .ok_or(StoreError::Configuration)?;
+                let scalar = old.scalar.as_ref().ok_or(StoreError::Configuration)?;
+                if scalar.kind != kind
+                    || m.values.len() != 1
+                    || m.values[0].0 != Part::atom("value")
+                {
+                    return Err(StoreError::Configuration);
+                }
+                if kind == Kind::Gauge && s.enabled && old.metric.entry.enabled {
+                    let value = match &m.values[0].1 {
+                        report::Value::Integer(n) => Value::Integer(n.clone()),
+                        report::Value::Float(n) => Value::Float(*n),
+                        _ => return Err(StoreError::Configuration),
+                    };
+                    let bytes = old.bytes
+                        - scalar
+                            .value
+                            .bytes(self.limits.report)
+                            .map_err(as_reporter)?
+                        + value.bytes(self.limits.report).map_err(as_reporter)?;
+                    total = total - old.bytes + bytes;
+                    gauges.insert(m.entry.name.clone(), (value, bytes));
+                }
+                continue;
+            }
             if let Some(old) = s.entries.get(&m.entry.name) {
                 if old.scalar.is_some() || old.histogram.is_some() {
                     return Err(StoreError::Configuration);
@@ -173,6 +207,17 @@ impl Store {
         let next = s.revision.checked_add(1).ok_or(StoreError::Sequence)?;
         let mut changed = false;
         for (metric, bytes) in checked {
+            if predefined && predefined::sampled_kind(&metric.entry.name).is_some() {
+                if let Some((value, bytes)) = gauges.remove(&metric.entry.name) {
+                    let old = s
+                        .entries
+                        .get_mut(&metric.entry.name)
+                        .expect("frame checked");
+                    old.scalar.as_mut().expect("gauge checked").value = value;
+                    old.bytes = bytes;
+                }
+                continue;
+            }
             let version = s
                 .entries
                 .get(&metric.entry.name)
@@ -229,6 +274,13 @@ impl Store {
         Ok(())
     }
     pub fn publish(&self, snapshot: &super::metrics::Snapshot) -> Result<(), StoreError> {
+        self.publish_frame(snapshot, false)
+    }
+    fn publish_frame(
+        &self,
+        snapshot: &super::metrics::Snapshot,
+        predefined: bool,
+    ) -> Result<(), StoreError> {
         if snapshot.metrics.len() > self.limits.subscriptions {
             return Err(StoreError::Limit);
         }
@@ -260,7 +312,7 @@ impl Store {
                 .values
                 .push((key.datapoint, value));
         }
-        self.put(entries.into_values().collect())
+        self.put_frame(entries.into_values().collect(), predefined)
     }
 }
 fn selected(

@@ -129,6 +129,20 @@ impl Client {
     pub(crate) fn cached(&self, key: &Key) -> Result<Destinations, Error> {
         self.store.cached(key)
     }
+    pub(crate) fn retained_destinations(&self, key: &Key) -> Result<Destinations, Error> {
+        let mut snapshot = {
+            let table = self.store.lock();
+            let engine = table.engine.as_ref().ok_or(Error::Closed)?;
+            if let Some(destinations) = engine.cached(key)? {
+                return Ok(Some(destinations));
+            }
+            engine.clone()
+        };
+        // A read-only rule lookup belongs to the retained owner, including
+        // while its command worker is withdrawn. Resolve misses on a bounded
+        // snapshot; stale clients still cannot mutate a replacement's table.
+        snapshot.resolve(key)
+    }
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
     }

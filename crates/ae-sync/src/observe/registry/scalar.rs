@@ -131,8 +131,8 @@ pub(super) struct Mapping {
     bytes: usize,
 }
 pub(super) struct Scalar {
-    kind: Kind,
-    value: Value,
+    pub(super) kind: Kind,
+    pub(super) value: Value,
     timestamp: i128,
 }
 pub(super) fn defaults() -> Vec<Part> {

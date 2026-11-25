@@ -59,6 +59,7 @@ pub struct Database {
     pow_group_owner: Mutex<std::sync::Weak<()>>,
     events: events::Source,
     gc_events: gc::events::Source,
+    instrumentation: ae_chain::instrumentation::Publisher,
     #[cfg(test)]
     gc_write_failure: std::sync::atomic::AtomicU8,
     #[cfg(test)]
@@ -87,6 +88,9 @@ fn write_options() -> WriteOptions {
     o
 }
 impl Database {
+    pub fn instrumentation(&self) -> &ae_chain::instrumentation::Publisher {
+        &self.instrumentation
+    }
     pub fn open(path: impl AsRef<Path>, identity: Identity) -> Result<Self, Error> {
         Self::open_with_config(path, identity, ReadConfig::default())
     }
@@ -236,6 +240,7 @@ impl Database {
             .transpose()?
             .unwrap_or_default();
         let result = Self {
+            instrumentation: Default::default(),
             db,
             identity,
             writer: Mutex::new(Default::default()),
@@ -573,7 +578,31 @@ impl Database {
             );
         }
         self.events.publish(&update, publication);
+        self.observe_commit(&update);
         Ok(Committed { update })
+    }
+    fn observe_commit(&self, update: &Update) {
+        use ae_chain::{
+            instrumentation::Event,
+            publication::{Kind, Origin},
+        };
+        let context = update.publication();
+        let Some(block) = context.block else {
+            return;
+        };
+        // The native mining interval listens to key block_created only, not
+        // micro_block_created. Feed after acknowledged commit even if the
+        // bounded publication ring could not retain this notification.
+        if context.origin == Origin::Created && block.kind == Kind::Key {
+            self.instrumentation.event(Event::BlockCreated);
+        }
+        if matches!(
+            context.origin,
+            Origin::Created | Origin::Received | Origin::Synced
+        ) && update.change().old_tip != Some(update.change().new_tip)
+        {
+            self.instrumentation.event(Event::TopChanged);
+        }
     }
     fn write_commit(&self, batch: WriteBatch) -> Result<(), Error> {
         #[cfg(test)]

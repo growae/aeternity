@@ -397,7 +397,11 @@ impl Service {
             }
         };
         if let Some(store) = self.exporter.as_ref().and_then(statsd::Client::store) {
-            if let Err(error) = store.publish(&sample.metrics) {
+            let result = match self.exporter.as_ref().and_then(statsd::Client::predefined) {
+                Some(feed) => feed.publish(&sample.metrics),
+                None => store.publish(&sample.metrics),
+            };
+            if let Err(error) = result {
                 self.current.sample_errors = self.current.sample_errors.saturating_add(1);
                 self.current.last_error = Some(Error::Reporter(error));
             }

@@ -74,7 +74,13 @@ impl Prepared {
         let mut application = match self
             .1
             .clone()
-            .map(|s| metrics::Owner::prepare(s, prefix))
+            .map(|s| {
+                metrics::Owner::prepare(
+                    s,
+                    prefix,
+                    self.configured().chain().database().instrumentation(),
+                )
+            })
             .transpose()
         {
             Ok(owner) => owner,
