@@ -18,17 +18,18 @@ struct State {
 pub(super) struct View {
     pub client: statsd::Client,
     closing: Arc<AtomicBool>,
+    stopping: watch::Sender<bool>,
     state: watch::Receiver<State>,
 }
 impl View {
     pub fn stop(&self) {
         self.closing.store(true, Ordering::Release);
-        self.client.request_shutdown();
+        self.stopping.send_replace(true);
     }
     pub fn apply(&self, mut status: Status) -> Status {
         let info = self.client.info();
         let state = self.state.borrow();
-        status.ready &= info.ready || !info.running;
+        status.ready &= !self.closing.load(Ordering::Acquire) && (info.ready || !info.running);
         status.joined &= info.joined && state.done;
         status.running |= !state.done;
         if let Some(error) = &state.error {
@@ -60,6 +61,7 @@ pub(super) struct Owner {
 }
 impl Owner {
     pub fn prepare(settings: statsd::Settings) -> Result<Self, observe::Error> {
+        let pipeline = settings.pipeline.clone();
         let worker = statsd::supervision::Owner::prepare(settings)?;
         let client = worker.client();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -71,11 +73,14 @@ impl Owner {
         let (state, view) = watch::channel(State::default());
         let closing = Arc::new(AtomicBool::new(false));
         let stopped = closing.clone();
+        let (stopping, requested) = watch::channel(false);
         let thread = thread::Builder::new()
             .name("ae-application-metrics".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runtime.block_on(run(worker, parent, &state, stopped, abandoned))
+                    runtime.block_on(run(
+                        worker, parent, &state, stopped, abandoned, requested, pipeline,
+                    ))
                 }));
                 state.send_modify(|s| {
                     if result.is_err() {
@@ -89,6 +94,7 @@ impl Owner {
             view: View {
                 client,
                 closing,
+                stopping,
                 state: view,
             },
             parent: None,
@@ -138,6 +144,8 @@ async fn run(
     state: &watch::Sender<State>,
     closing: Arc<AtomicBool>,
     mut abandoned: watch::Receiver<bool>,
+    mut stopping: watch::Receiver<bool>,
+    pipeline: Option<observe::pipeline::Config>,
 ) {
     let Ok(parent) = parent.await else {
         worker.finish().await;
@@ -145,14 +153,48 @@ async fn run(
     };
     let mut parent = parent;
     let mut activated = false;
+    let mut prepared_stop = false;
     loop {
         let root = parent.status();
         if !root.running || *abandoned.borrow() {
             break;
         }
         if root.ready && !activated && !closing.load(Ordering::Acquire) {
+            if let Some(config) = &pipeline {
+                let routing = if let Some(pow) = parent.pow() {
+                    pow.workers().and_then(|w| w.bindings().routing)
+                } else {
+                    parent
+                        .hyperchain()
+                        .and_then(|h| h.workers())
+                        .and_then(|w| w.bindings().routing)
+                };
+                config.set_routing(routing.map(observe::pipeline::Routing::Managed));
+            }
             worker.activate();
             activated = true;
+        }
+        if closing.load(Ordering::Acquire) && !prepared_stop {
+            prepared_stop = true;
+            if activated && let Some(input) = worker.client().input() {
+                let result = match input.prepare_stop() {
+                    Ok(ticket) => {
+                        tokio::time::timeout(std::time::Duration::from_secs(5), ticket.wait())
+                            .await
+                            .map_err(|_| observe::Error::Timeout)
+                            .and_then(|r| r.map_err(observe::Error::Pipeline))
+                    }
+                    Err(observe::pipeline::Error::Closed) => Ok(()),
+                    Err(e) => Err(observe::Error::Pipeline(e)),
+                };
+                if let Err(error) = result {
+                    state.send_modify(|s| s.error = Some(error));
+                }
+            }
+            // Keep routing and all family workers alive through the input /
+            // filter acknowledgement. Final logger retirement joins resources.
+            parent.request_shutdown();
+            worker.client().request_shutdown();
         }
         worker.poll().await;
         let error = worker.handle().status().last_error;
@@ -161,7 +203,7 @@ async fn run(
             // The supervision handle also exposes an exhausted parent boundary.
             state.send_modify(|s| s.error = error);
         }
-        tokio::select! { _ = abandoned.changed() => break, _ = parent.changed() => (), _ = worker.changed() => () }
+        tokio::select! { _ = abandoned.changed() => break, _ = parent.changed() => (), _ = worker.changed() => (), _ = stopping.changed(), if !prepared_stop => () }
     }
     worker.finish().await;
 }

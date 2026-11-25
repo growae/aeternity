@@ -53,6 +53,7 @@ struct State {
     retired: SinkInfo,
 }
 struct Shared {
+    pipeline: bool,
     state: Mutex<State>,
     closed: AtomicBool,
     updated: watch::Sender<()>,
@@ -79,6 +80,9 @@ pub struct Handle {
     commands: mpsc::Sender<Command>,
 }
 impl Handle {
+    pub(super) fn is_pipeline(&self) -> bool {
+        self.shared.pipeline
+    }
     pub fn status(&self) -> Status {
         self.shared
             .state
@@ -141,6 +145,25 @@ impl Handle {
         }
         s.retired.dropped = s.retired.dropped.saturating_add(1);
         false
+    }
+    pub(super) fn report(
+        &self,
+        event: crate::observe::report::Event,
+    ) -> Result<(), crate::observe::pipeline::Error> {
+        let s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.shared.closed.load(Ordering::Acquire)
+            || !matches!(
+                s.status.phase,
+                Phase::Prepared | Phase::Starting | Phase::Running
+            )
+        {
+            return Err(crate::observe::pipeline::Error::Closed);
+        }
+        s.child
+            .as_ref()
+            .ok_or(crate::observe::pipeline::Error::Closed)?
+            .client
+            .report(event)
     }
     fn send(&self, action: Action) -> Result<Ticket, Error> {
         if self.shared.closed.load(Ordering::Acquire) {
@@ -225,6 +248,7 @@ impl Owner {
         let (updated, updates) = watch::channel(());
         let (tx, commands) = mpsc::channel(1);
         let shared = Arc::new(Shared {
+            pipeline: settings.pipeline.is_some(),
             state: Mutex::new(State {
                 status: status.clone(),
                 child: None,
@@ -422,7 +446,8 @@ impl Owner {
             return;
         }
         if let Some(worker) = &self.worker {
-            let info = worker.client().info();
+            let client = worker.client();
+            let info = client.info();
             if info.ready {
                 self.registered = true;
                 if self.replacement {
@@ -434,9 +459,17 @@ impl Owner {
             }
             if !info.running {
                 if info.panicked || info.last_error.is_some() {
-                    self.status.last_error = Some(WorkerError::Io(
-                        info.last_error.unwrap_or(std::io::ErrorKind::Other),
-                    ));
+                    self.status.last_error = Some(
+                        client
+                            .input()
+                            .and_then(|input| input.info().last_error)
+                            .map(WorkerError::Pipeline)
+                            .unwrap_or_else(|| {
+                                WorkerError::Io(
+                                    info.last_error.unwrap_or(std::io::ErrorKind::Other),
+                                )
+                            }),
+                    );
                 }
                 self.retire(false).await;
                 if self.closed() {

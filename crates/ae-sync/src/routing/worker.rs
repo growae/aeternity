@@ -126,6 +126,9 @@ pub struct Client {
     store: Store,
 }
 impl Client {
+    pub(crate) fn cached(&self, key: &Key) -> Result<Destinations, Error> {
+        self.store.cached(key)
+    }
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
     }

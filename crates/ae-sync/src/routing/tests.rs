@@ -9,6 +9,16 @@ fn fixture() -> Value {
 fn part(value: &Value) -> Part {
     if let Some(a) = value.get("atom") {
         Part::atom(a.as_str().unwrap())
+    } else if let Some(b) = value.get("binary") {
+        Part::Binary(hex::decode(b.as_str().unwrap()).unwrap())
+    } else if let Some(s) = value.get("list") {
+        Part::List(
+            s.as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_u64().unwrap() as u32)
+                .collect(),
+        )
     } else {
         Part::Integer(value["integer"].as_str().unwrap().parse().unwrap())
     }
@@ -41,6 +51,8 @@ fn json_part(p: &Part) -> Value {
     match p {
         Part::Atom(a) => json!({"atom":a}),
         Part::Integer(n) => json!({"integer":n.to_string()}),
+        Part::List(s) => json!({"list":s}),
+        Part::Binary(s) => json!({"binary":hex::encode(s)}),
     }
 }
 fn json_entry(e: &Entry) -> Value {
@@ -99,6 +111,42 @@ fn key(value: &Value) -> Key {
         name: value["name"].as_array().unwrap().iter().map(part).collect(),
         datapoint: part(&value["datapoint"]),
     }
+}
+#[test]
+fn original_typed_keys_keep_atom_binary_charlist_and_integer_routes_independent() {
+    let native: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/erlang_metrics_typed_routing.json"
+    ))
+    .unwrap();
+    let mut engine = Engine::new(Default::default(), vec![], standard_atoms()).unwrap();
+    let check = |engine: &mut Engine, rows: &Value| {
+        for row in rows.as_array().unwrap() {
+            assert_eq!(
+                json!(engine.destinations(&key(&row["key"])).unwrap()),
+                row["result"],
+                "{row}"
+            );
+        }
+    };
+    check(&mut engine, &native["before"]);
+    for row in native["adds"].as_array().unwrap() {
+        engine.add(key(&row["key"]), Destination::Send).unwrap();
+        check(&mut engine, &row["lookups"]);
+    }
+    for row in native["deletes"].as_array().unwrap() {
+        assert!(engine.delete(&key(&row["key"]), Destination::Send).unwrap());
+        check(&mut engine, &row["lookups"]);
+    }
+    engine
+        .add(
+            Key {
+                name: vec![Part::atom("ae"), Part::Binary(b"fallback".to_vec())],
+                datapoint: Part::atom("default"),
+            },
+            Destination::Log,
+        )
+        .unwrap();
+    check(&mut engine, &native["fallback"]);
 }
 #[test]
 fn lazy_defaults_manual_overrides_reload_and_removed_metrics_match_original_server() {

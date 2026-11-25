@@ -69,6 +69,18 @@ impl Settings {
     }
 }
 impl Prepared {
+    pub fn configure_metrics_log(
+        &mut self,
+        writer: Option<Box<dyn std::io::Write + Send>>,
+    ) -> Result<(), crate::configuration::metrics::Error> {
+        let pipeline = self
+            .1
+            .as_ref()
+            .and_then(|s| s.pipeline.as_ref())
+            .ok_or(crate::configuration::metrics::Error::NotConfigured)?;
+        pipeline.set_log(writer);
+        Ok(())
+    }
     pub fn configure_metrics(
         &mut self,
         resolved: &Resolved<'_>,

@@ -6,15 +6,31 @@ use ae_node::{
     runtime,
 };
 use ae_sync::{observe::statsd, runtime::workers};
-use std::time::Duration;
+use std::{
+    io::{self, Write},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::net::UdpSocket;
 pub struct Metrics {
     receiver: UdpSocket,
+    log: Arc<Mutex<Vec<u8>>>,
+}
+struct Log(Arc<Mutex<Vec<u8>>>);
+impl Write for Log {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 impl Metrics {
     pub async fn new() -> Self {
         Self {
             receiver: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            log: Default::default(),
         }
     }
     pub fn configure(&self, p: &mut runtime::Prepared, s: &mut runtime::Settings) {
@@ -26,6 +42,8 @@ impl Metrics {
         })
         .unwrap();
         p.configure_metrics(&config.resolve(&ctx).unwrap(), s)
+            .unwrap();
+        p.configure_metrics_log(Some(Box::new(Log(self.log.clone()))))
             .unwrap();
     }
     async fn receive(&self) -> (Vec<u8>, std::net::SocketAddr) {
@@ -43,8 +61,29 @@ impl Metrics {
         assert_eq!(client.info().open_attempts, 1);
         if !normal {
             assert!(h.connections().is_none());
-            assert!(client.submit(vec![b"application:42|g".to_vec()]));
-            assert_eq!(self.receive().await.0, b"application:42|g");
+            client
+                .report(
+                    ae_sync::observe::metrics::Metric {
+                        name: "application.value",
+                        value: ae_sync::observe::metrics::Number::Integer(42),
+                    }
+                    .report("", Default::default())
+                    .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(self.receive().await.0, b"application.value:42|g");
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !self
+                    .log
+                    .lock()
+                    .unwrap()
+                    .ends_with(b"application.value:42|g\n")
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
             return client;
         }
         let mut connections = h.connections().unwrap();
@@ -133,6 +172,7 @@ impl Metrics {
             Ok(old.number + 1)
         );
         assert!(old.client.info().joined && !old.client.info().running);
+        assert!(old.client.input().unwrap().info().joined);
         assert_eq!(
             supervisor.status().phase,
             statsd::supervision::Phase::Running
@@ -142,8 +182,17 @@ impl Metrics {
         assert_eq!(supervisor.status().supervisor_generation, 1);
         assert_eq!(stable.info().open_attempts, 2);
         assert!(h.status().ready && h.status().failure.is_none());
-        let marker = format!("logger-generation:{}|g", old.number + 1).into_bytes();
-        assert!(stable.submit(vec![marker.clone()]));
+        let marker = format!("logger-generation.value:{}|g", old.number + 1).into_bytes();
+        stable
+            .report(
+                ae_sync::observe::metrics::Metric {
+                    name: "logger-generation.value",
+                    value: ae_sync::observe::metrics::Number::Integer((old.number + 1).into()),
+                }
+                .report("", Default::default())
+                .unwrap(),
+            )
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if self.receive().await.0 == marker {

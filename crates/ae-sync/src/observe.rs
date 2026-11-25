@@ -14,6 +14,8 @@ mod file;
 mod gc;
 pub mod metrics;
 mod peers;
+pub mod pipeline;
+pub mod report;
 mod sink;
 pub mod statsd;
 pub use feed::{Cursor, Delivery, Record, Subscription};
@@ -101,6 +103,8 @@ pub enum Error {
     Sample,
     Timeout,
     RestartLimit,
+    Report(report::Error),
+    Pipeline(pipeline::Error),
     Io(std::io::ErrorKind),
 }
 impl std::fmt::Display for Error {
@@ -387,6 +391,20 @@ impl Service {
                 None
             }
         };
+        if let Some(exporter) = &self.exporter
+            && exporter.is_pipeline()
+        {
+            for metric in &sample.metrics.metrics {
+                let result = metric
+                    .report(&self.config.prefix, report::Limits::default())
+                    .map_err(Error::Report)
+                    .and_then(|event| exporter.report(event).map_err(Error::Pipeline));
+                if let Err(error) = result {
+                    self.current.sample_errors = self.current.sample_errors.saturating_add(1);
+                    self.current.last_error = Some(error);
+                }
+            }
+        }
         let route=|routes:Option<crate::routing::Routes>|->Result<(metrics::Snapshot,metrics::Snapshot),Error>{
             match routes {Some(routes)=>Ok((sample.metrics.filtered(&routes,"log")?,sample.metrics.filtered(&routes,"send")?)),None=>Ok((sample.metrics.clone(),sample.metrics.clone()))}
         };
@@ -425,7 +443,9 @@ impl Service {
                 }
             }
         }
-        if !sent.metrics.is_empty() && (self.statsd.is_some() || self.exporter.is_some()) {
+        if !sent.metrics.is_empty()
+            && (self.statsd.is_some() || self.exporter.as_ref().is_some_and(|e| !e.is_pipeline()))
+        {
             match sent.datagrams(&self.config.prefix) {
                 Ok(lines) => {
                     if let Some(statsd) = &self.statsd {

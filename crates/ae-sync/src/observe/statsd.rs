@@ -175,6 +175,7 @@ pub struct Settings {
     pub target: Config,
     pub records: usize,
     pub bytes: usize,
+    pub pipeline: Option<super::pipeline::Config>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -182,6 +183,7 @@ impl Default for Settings {
             target: Default::default(),
             records: 128,
             bytes: 1 << 20,
+            pipeline: None,
         }
     }
 }
@@ -196,7 +198,11 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
-        self.sink().validate()
+        self.sink().validate()?;
+        if let Some(p) = &self.pipeline {
+            p.limits.validate().map_err(|_| Error::Configuration)?;
+        }
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -207,6 +213,27 @@ enum Binding {
 #[derive(Clone)]
 pub struct Client(Binding);
 impl Client {
+    pub fn is_pipeline(&self) -> bool {
+        match &self.0 {
+            Binding::Direct(c) => c.input().is_some(),
+            Binding::Managed(h) => h.is_pipeline(),
+        }
+    }
+    pub fn input(&self) -> Option<super::pipeline::Input> {
+        match &self.0 {
+            Binding::Direct(c) => c.input(),
+            Binding::Managed(h) => h.current().and_then(|g| g.client.input()),
+        }
+    }
+    pub fn report(&self, event: super::report::Event) -> Result<(), super::pipeline::Error> {
+        match &self.0 {
+            Binding::Direct(c) => c
+                .input()
+                .ok_or(super::pipeline::Error::Closed)?
+                .report(event),
+            Binding::Managed(h) => h.report(event),
+        }
+    }
     pub fn supervisor(&self) -> Option<supervision::Handle> {
         match &self.0 {
             Binding::Managed(h) => Some(h.clone()),
@@ -248,10 +275,18 @@ impl Client {
 pub struct Worker(super::sink::Worker);
 impl Worker {
     pub fn spawn(settings: Settings) -> Result<Self, Error> {
-        super::sink::Worker::metrics(&settings.sink(), true).map(Self)
+        let worker = Self::prepare(settings)?;
+        worker.activate();
+        Ok(worker)
     }
     pub fn prepare(settings: Settings) -> Result<Self, Error> {
-        super::sink::Worker::metrics(&settings.sink(), false).map(Self)
+        settings.validate()?;
+        match &settings.pipeline {
+            Some(pipeline) => {
+                super::sink::Worker::pipeline(&settings.sink(), pipeline.clone()).map(Self)
+            }
+            None => super::sink::Worker::metrics(&settings.sink(), false).map(Self),
+        }
     }
     pub fn activate(&self) {
         self.0.activate();

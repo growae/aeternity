@@ -46,6 +46,21 @@ fn original_erlang_numeric_statsd_lines() {
             row["line"].as_str().unwrap().as_bytes(),
             "{row}"
         );
+        let metric = metrics::Metric {
+            name: match row["name"].as_str().unwrap() {
+                "ae.epoch.aecore.sync.progress.value" => "ae.epoch.aecore.sync.progress.value",
+                "node-1.ae.rust.peers.7.value" => "node-1.ae.rust.peers.7.value",
+                _ => panic!("unknown native metric"),
+            },
+            value,
+        };
+        let mut report = metric.report("", Default::default()).unwrap();
+        report.kind = row["type"].as_str().unwrap().into();
+        assert_eq!(
+            report.line(Default::default()).unwrap(),
+            row["line"].as_str().unwrap().as_bytes(),
+            "typed report {row}"
+        );
     }
 }
 #[test]

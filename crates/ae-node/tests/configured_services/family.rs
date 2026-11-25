@@ -761,3 +761,99 @@ async fn metrics_supervisor_recreation_leaves_an_empty_slot_and_preserves_the_fa
     assert!(exit.status().joined && exit.status().failure.is_none());
     assert!(client.info().joined && !client.info().running);
 }
+
+#[tokio::test]
+async fn graceful_metrics_stop_keeps_routing_alive_until_queued_output_is_disabled() {
+    struct BlockingLog {
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+    impl std::io::Write for BlockingLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+                let _ = self.release.recv();
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Release(std::sync::mpsc::Sender<()>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let lab = Lab::new();
+    let mut prepared = prepare(lab.services(
+        "on_demand",
+        json!({"offline_mode":true}),
+        Default::default(),
+    ));
+    let mut settings = commands(&lab);
+    let metrics = metrics_settings::Metrics::new().await;
+    metrics.configure(&mut prepared, &mut settings);
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let bytes = Arc::new(std::sync::Mutex::new(vec![]));
+    prepared
+        .configure_metrics_log(Some(Box::new(BlockingLog {
+            entered: Some(entered),
+            release: held,
+            bytes: bytes.clone(),
+        })))
+        .unwrap();
+    let running = prepared
+        .launch(settings, || Ok(Default::default()))
+        .unwrap();
+    // Release blocked I/O before dropping the application, even on assertion failure.
+    let release = Release(release);
+    let mut handle = running.handle();
+    ready(&mut handle).await;
+    let client = handle.metrics().unwrap();
+    let input = client.input().unwrap();
+    let workers = handle.pow().unwrap().workers().unwrap();
+    let routing = workers.bindings().routing.unwrap().current().unwrap();
+    let metric = ae_sync::observe::metrics::Metric {
+        name: "shutdown.value",
+        value: ae_sync::observe::metrics::Number::Integer(1),
+    };
+    client
+        .report(metric.report("", Default::default()).unwrap())
+        .unwrap();
+    within(waiting).await.unwrap();
+    client
+        .report(metric.report("", Default::default()).unwrap())
+        .unwrap();
+    handle.request_shutdown();
+    within(async {
+        while input.info().accepting {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(!handle.status().ready && !handle.status().joined);
+    assert!(handle.pow().unwrap().status().running);
+    assert!(routing.info().running && routing.info().accepting);
+    assert_eq!(
+        within(routing.destinations(metric.routing().1).unwrap())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!input.info().disabled && !client.info().joined);
+    drop(release);
+    let exit = within(running.wait()).await.unwrap();
+    assert!(exit.status().joined && exit.status().failure.is_none());
+    assert!(exit.status().metrics_error.is_none());
+    assert!(input.info().joined && input.info().disabled && client.info().joined);
+    assert!(!routing.info().running);
+    assert_eq!(
+        *bytes.lock().unwrap(),
+        b"shutdown.value:1|g\nshutdown.value:1|g\n"
+    );
+}

@@ -119,6 +119,26 @@ pub struct Metric {
     pub value: Number,
 }
 impl Metric {
+    pub fn report(
+        &self,
+        prefix: &str,
+        limits: super::report::Limits,
+    ) -> Result<super::report::Event, super::report::Error> {
+        use super::report::{Extra, Options, Value};
+        let value = match &self.value {
+            Number::Integer(n) => Value::Integer((*n).into()),
+            Number::Unsigned(n) => Value::Integer(num_bigint::BigInt::from_bytes_be(
+                num_bigint::Sign::Plus,
+                n.as_bytes(),
+            )),
+            Number::Float(n) => Value::Float(*n),
+        };
+        Options {
+            prefix: crate::routing::Part::List(prefix.chars().map(u32::from).collect()),
+            ..Default::default()
+        }
+        .event(self.routing().1, value, Extra::Undefined, limits)
+    }
     pub fn routing(&self) -> (crate::routing::Entry, crate::routing::Key) {
         use crate::routing::{Entry, Key, Part};
         let (name, datapoint) = self.name.rsplit_once('.').unwrap_or(("", self.name));

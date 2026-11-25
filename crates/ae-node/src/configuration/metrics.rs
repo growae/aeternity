@@ -14,6 +14,7 @@ pub enum Error {
     Routing(routing::Error),
     Output(observe::Error),
     Family,
+    NotConfigured,
 }
 impl From<resolution::Error> for Error {
     fn from(e: resolution::Error) -> Self {
@@ -91,6 +92,7 @@ impl Metrics {
             },
             records: observer.sink_records,
             bytes: observer.sink_bytes,
+            pipeline: Some(observe::pipeline::Config::default()),
         };
         output.validate().map_err(Error::Output)?;
         let mut setup = routing.clone().unwrap_or_default();

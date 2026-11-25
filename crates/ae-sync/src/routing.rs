@@ -13,6 +13,8 @@ pub use state::Engine;
 pub enum Part {
     Integer(BigInt),
     Atom(String),
+    List(Vec<u32>),
+    Binary(Vec<u8>),
 }
 impl Part {
     pub fn atom(value: impl Into<String>) -> Self {
@@ -22,6 +24,8 @@ impl Part {
         32 + match self {
             Self::Integer(n) => n.to_signed_bytes_be().len(),
             Self::Atom(s) => s.len(),
+            Self::List(s) => s.len().saturating_mul(4),
+            Self::Binary(s) => s.len(),
         }
     }
 }
@@ -106,6 +110,8 @@ impl Limits {
             || name.iter().any(|p| match p {
                 Part::Atom(a) => a.chars().count() > 255,
                 Part::Integer(n) => n.bits() > self.text as u64 * 8,
+                Part::List(s) => s.len() > self.text,
+                Part::Binary(s) => s.len() > self.text,
             })
         {
             Err(Error::Limit)

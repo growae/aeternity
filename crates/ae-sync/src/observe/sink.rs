@@ -35,33 +35,59 @@ pub struct Info {
 pub(super) enum Batch {
     Log(Arc<Record>),
     Metrics(Vec<Vec<u8>>),
+    Report(Box<report::Event>, usize),
 }
 impl Batch {
     fn bytes(&self) -> usize {
         64 + match self {
             Self::Log(r) => r.json_line().len(),
             Self::Metrics(m) => m.iter().map(|v| v.len() + 32).sum(),
+            Self::Report(_, bytes) => *bytes,
         }
     }
 }
 enum Destination {
     Log(Box<dyn Write + Send>),
     Udp(statsd::Udp),
+    Pipeline(super::pipeline::Output),
 }
 impl Destination {
-    fn write(&mut self, batch: &Batch) -> io::Result<bool> {
+    fn udp(&mut self) -> Option<&mut statsd::Udp> {
+        match self {
+            Self::Udp(u) => Some(u),
+            Self::Pipeline(p) if !p.disabled => Some(&mut p.udp),
+            _ => None,
+        }
+    }
+    fn failed(&self) -> bool {
+        matches!(self, Self::Pipeline(p) if p.failed)
+    }
+    fn disable(&mut self, control: super::pipeline::Disable) {
+        if let Self::Pipeline(p) = self {
+            p.disable(control);
+        }
+    }
+    fn write(&mut self, batch: Batch) -> io::Result<bool> {
         match (self, batch) {
             (Self::Log(w), Batch::Log(record)) => w.write_all(record.json_line()).map(|()| true),
-            (Self::Udp(udp), Batch::Metrics(lines)) => udp.write(lines),
+            (Self::Udp(udp), Batch::Metrics(lines)) => udp.write(&lines),
+            (Self::Pipeline(p), Batch::Report(event, _)) => p.write(&event),
+            (Self::Pipeline(p), Batch::Metrics(lines)) => {
+                if p.disabled {
+                    Ok(false)
+                } else {
+                    p.udp.write(&lines)
+                }
+            }
             _ => Err(io::ErrorKind::InvalidInput.into()),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Self::Log(w) = self {
-            w.flush()
-        } else {
-            Ok(())
+        match self {
+            Self::Log(w) => w.flush(),
+            Self::Pipeline(p) => p.flush(),
+            _ => Ok(()),
         }
     }
 }
@@ -84,6 +110,8 @@ struct State {
     queue: VecDeque<Batch>,
     stop: bool,
     started: bool,
+    disabled: bool,
+    control: Option<super::pipeline::Disable>,
     #[cfg(test)]
     panic: bool,
 }
@@ -100,6 +128,7 @@ impl Drop for Finished {
         s.info.connected = false;
         s.info.dropped = s.info.dropped.saturating_add(s.queue.len() as u64);
         s.queue.clear();
+        s.control.take();
         s.info.outstanding = 0;
         s.info.retained_bytes = 0;
         if thread::panicking() {
@@ -115,16 +144,26 @@ pub(super) struct Worker {
     updates: watch::Receiver<bool>,
     count: usize,
     bytes: usize,
+    input: Option<super::pipeline::Owner>,
 }
 impl Worker {
     fn spawn(destination: Destination, config: &Config, name: &str) -> Result<Self, Error> {
         Self::prepared(destination, config, name, true)
     }
     fn prepared(
+        destination: Destination,
+        config: &Config,
+        name: &str,
+        started: bool,
+    ) -> Result<Self, Error> {
+        Self::prepare_inner(destination, config, name, started, None)
+    }
+    fn prepare_inner(
         mut destination: Destination,
         config: &Config,
         name: &str,
         started: bool,
+        input: Option<super::pipeline::Owner>,
     ) -> Result<Self, Error> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -135,6 +174,8 @@ impl Worker {
                 queue: VecDeque::new(),
                 stop: false,
                 started,
+                disabled: false,
+                control: None,
                 #[cfg(test)]
                 panic: false,
             }),
@@ -156,7 +197,7 @@ impl Worker {
                         return;
                     }
                 }
-                if let Destination::Udp(udp) = &mut destination {
+                if let Some(udp) = destination.udp() {
                     if let Err(error) = udp.resolve() {
                         let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
                         s.info.failed += 1;
@@ -185,7 +226,7 @@ impl Worker {
                         panic!("controlled metrics worker panic");
                     }
                     if !s.stop
-                        && let Destination::Udp(udp) = &mut destination
+                        && let Some(udp) = destination.udp()
                         && udp
                             .next
                             .is_some_and(|next| next <= std::time::Instant::now())
@@ -199,12 +240,16 @@ impl Worker {
                     }
                     let batch = match s.queue.pop_front() {
                         Some(batch) => batch,
+                        None if s.control.is_some() => {
+                            let control = s.control.take().expect("pending disable");
+                            drop(s);
+                            destination.disable(control);
+                            owned.done.send_replace(false);
+                            continue;
+                        }
                         None if s.stop => break,
                         None => {
-                            let next = match &destination {
-                                Destination::Udp(u) => u.next,
-                                _ => None,
-                            };
+                            let next = destination.udp().and_then(|u| u.next);
                             if let Some(next) = next {
                                 drop(
                                     owned
@@ -224,10 +269,11 @@ impl Worker {
                         }
                     };
                     drop(s);
-                    let result = destination.write(&batch);
+                    let bytes = batch.bytes();
+                    let result = destination.write(batch);
                     let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
                     s.info.outstanding -= 1;
-                    s.info.retained_bytes -= batch.bytes();
+                    s.info.retained_bytes -= bytes;
                     match result {
                         Ok(true) => s.info.written = s.info.written.saturating_add(1),
                         Ok(false) => s.info.skipped = s.info.skipped.saturating_add(1),
@@ -237,6 +283,9 @@ impl Worker {
                         }
                     }
                     owned.done.send_replace(false);
+                    if destination.failed() {
+                        break;
+                    }
                 }
                 if let Err(e) = destination.flush() {
                     let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -245,13 +294,20 @@ impl Worker {
                 }
             })
             .map_err(|e| Error::Io(e.kind()))?;
-        Ok(Self {
+        let worker = Self {
             shared,
             join: Some(join),
             updates,
             count: config.sink_records,
             bytes: config.sink_bytes,
-        })
+            input,
+        };
+        if let Some(input) = &worker.input {
+            let mut client = worker.client();
+            client.input = None;
+            input.spawn(client).map_err(|e| Error::Io(e.kind()))?;
+        }
+        Ok(worker)
     }
     pub fn outputs(
         outputs: Outputs,
@@ -295,6 +351,26 @@ impl Worker {
             started,
         )
     }
+    pub fn pipeline(config: &Config, pipeline: super::pipeline::Config) -> Result<Self, Error> {
+        config.validate()?;
+        pipeline
+            .limits
+            .validate()
+            .map_err(|_| Error::Configuration)?;
+        let input =
+            super::pipeline::Owner::prepare(&pipeline, config.sink_records, config.sink_bytes);
+        let udp = statsd::Udp::new(statsd::Target::Configured(
+            config.statsd.clone().ok_or(Error::Configuration)?,
+        ));
+        let output = super::pipeline::Output::new(pipeline, udp, &input);
+        Self::prepare_inner(
+            Destination::Pipeline(output),
+            config,
+            "ae-metrics-logger",
+            false,
+            Some(input),
+        )
+    }
     #[cfg(test)]
     pub fn metrics_with_backend(
         config: &Config,
@@ -325,6 +401,7 @@ impl Worker {
             updates: self.shared.done.subscribe(),
             count: self.count,
             bytes: self.bytes,
+            input: self.input.as_ref().map(super::pipeline::Owner::input),
         }
     }
     pub async fn changed(&mut self) {
@@ -345,6 +422,7 @@ impl Worker {
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         s.stop = true;
         if !drain {
+            s.control.take();
             while let Some(batch) = s.queue.pop_front() {
                 s.info.outstanding -= 1;
                 s.info.retained_bytes -= batch.bytes();
@@ -354,6 +432,9 @@ impl Worker {
         self.shared.wake.notify_one();
     }
     pub async fn finish(&mut self) {
+        if let Some(input) = &self.input {
+            input.finish(false).await;
+        }
         self.stop(true);
         let mut done = self.shared.done.subscribe();
         while !*done.borrow_and_update() {
@@ -373,6 +454,9 @@ impl Worker {
         }
     }
     pub fn abort(&mut self) {
+        if let Some(input) = &self.input {
+            input.abort();
+        }
         self.stop(false);
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -392,8 +476,36 @@ pub(super) struct Client {
     updates: watch::Receiver<bool>,
     count: usize,
     bytes: usize,
+    input: Option<super::pipeline::Input>,
 }
 impl Client {
+    pub fn input_updated(&self) {
+        self.shared.done.send_modify(|_| ());
+    }
+    pub fn input_failed(&self) {
+        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.info.last_error = Some(io::ErrorKind::Other);
+        s.stop = true;
+        while let Some(batch) = s.queue.pop_front() {
+            s.info.outstanding -= 1;
+            s.info.retained_bytes -= batch.bytes();
+            s.info.dropped = s.info.dropped.saturating_add(1);
+        }
+        s.control.take();
+        self.shared.wake.notify_one();
+    }
+    pub fn input(&self) -> Option<super::pipeline::Input> {
+        self.input.clone()
+    }
+    pub fn disable(&self, control: super::pipeline::Disable) {
+        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.info.running || s.stop || s.disabled {
+            return;
+        }
+        s.disabled = true;
+        s.control = Some(control);
+        self.shared.wake.notify_one();
+    }
     #[cfg(test)]
     pub fn panic_for_test(&self) {
         self.shared.state.lock().unwrap().panic = true;
@@ -415,6 +527,7 @@ impl Client {
         let bytes = batch.bytes();
         if !s.info.running
             || s.stop
+            || s.disabled
             || s.info.outstanding == self.count
             || bytes > self.bytes.saturating_sub(s.info.retained_bytes)
         {
