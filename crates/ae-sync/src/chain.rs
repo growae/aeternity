@@ -29,6 +29,7 @@ pub use download::Download;
 pub mod generation;
 pub mod hyperchain;
 mod import;
+pub mod on_demand;
 pub mod packing;
 mod policy;
 pub mod pow;
@@ -471,6 +472,9 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     // generation insertion. Successful light reconstruction alone is not admission.
     pub fn import_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
         self.import_block_with_origin(bytes, now_ms, ledger::Origin::Gossip)
+    }
+    pub fn import_synced_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
+        self.import_block_with_origin(bytes, now_ms, ledger::Origin::Sync)
     }
     pub fn import_created_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
         self.import_block_with_origin(bytes, now_ms, ledger::Origin::Created)

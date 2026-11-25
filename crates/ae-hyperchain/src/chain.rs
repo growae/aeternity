@@ -295,6 +295,7 @@ pub fn decode_finalize(v: &Value) -> Result<FinalizeInfo, Native> {
 pub struct Reader<A, C, O, S = Selected<A, C>> {
     pub selected: S,
     pub profile: Arc<Profile<O>>,
+    execution: Option<Arc<transactions::owned::Owned<O>>>,
     // Keep the tree types explicit even for a backend whose snapshot resolves
     // them lazily. This private field is supplied by the constructor.
     marker: std::marker::PhantomData<fn() -> (A, C)>,
@@ -306,18 +307,27 @@ impl<A, C, O, S> Reader<A, C, O, S> {
         Self {
             selected,
             profile,
+            execution: None,
             marker: std::marker::PhantomData,
         }
+    }
+    // Candidate owners can retain every explicit transaction/VM limit while
+    // the captured view still supplies network forks, history and environment.
+    pub fn with_owned_execution(mut self, execution: Arc<transactions::owned::Owned<O>>) -> Self {
+        self.execution = Some(execution);
+        self
     }
 }
 impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
     Reader<A, C, O, S>
 {
     pub fn pin(&self) -> PinResult<A, C, O, S::Snapshot> {
-        Ok(Reader::new(
+        let mut reader = Reader::new(
             source::Pinned(self.selected.capture()?),
             self.profile.clone(),
-        ))
+        );
+        reader.execution = self.execution.clone();
+        Ok(reader)
     }
     pub fn view(&self, env: &RunEnv<A, C>) -> Result<Arc<View<A, C>>, Error<A, C>> {
         if let RunEnv::View(view) = env {
@@ -375,6 +385,34 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
         f: impl FnOnce(&transactions::Config<'_, O>) -> T,
     ) -> T {
         let p = &self.profile;
+        if let Some(owned) = &self.execution {
+            return owned.with_config(|base| {
+                let original = base.fate.expect("Owned retains both VMs");
+                let vm = contracts::fate::Config {
+                    context: original.context,
+                    order: original.order,
+                    overrides: original.overrides,
+                    environment: &view.environment,
+                    history: view.history.clone(),
+                    auth_tx: None,
+                    metering_floor: original.metering_floor,
+                    diagnostic_profile: original.diagnostic_profile,
+                };
+                f(&transactions::Config {
+                    network: &p.network,
+                    consensus: base.consensus,
+                    fate: Some(&vm),
+                    aevm: view.aevm.as_ref(),
+                    signature_limits: base.signature_limits,
+                    channel_limits: base.channel_limits,
+                    channel_state_atoms: base.channel_state_atoms,
+                    oracle_limits: base.oracle_limits,
+                    fate_limits: base.fate_limits,
+                    maximum_fate_steps: base.maximum_fate_steps,
+                    aevm_limits: base.aevm_limits,
+                })
+            });
+        }
         let vm = contracts::fate::Config {
             context: &p.context,
             order: &p.order,
