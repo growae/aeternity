@@ -19,6 +19,8 @@ use std::{
 };
 #[path = "../../ae-sync/tests/common/ledger_fixtures.rs"]
 mod execution_fixture;
+#[path = "common/execution_profile.rs"]
+mod startup_profile;
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -555,6 +557,33 @@ fn configured_hyperchain_genesis_matches_original_contract_roots_and_reopens() {
         let reopened = load().open(&path, Default::default()).unwrap();
         assert_eq!(reopened.database().view().unwrap().status(), status);
         assert_eq!(reopened.identity(), &identity);
+        drop(reopened);
+        let specification = startup_profile::specification(&data["profile"]);
+        let configured = ae_node::bootstrap::configured::Prepared::load(
+            &cfg.resolve(&ctx).unwrap(),
+            Some(b"ae_hc_reference"),
+            &tmp.0,
+            &initial,
+            &specification,
+            Default::default(),
+            &6_000_000.into(),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(configured.genesis().trees().roots().hash().0),
+            expected["state_root"]
+        );
+        let profile_hash = configured.execution().fingerprint();
+        let configured = configured
+            .open(tmp.0.join("configured-db"), Default::default())
+            .unwrap();
+        assert_eq!(
+            configured.chain().identity().execution_profile,
+            profile_hash
+        );
+        drop(configured);
         assert_eq!(
             hex::encode(initial.roots().hash().0),
             row["initial"]["state_root"]

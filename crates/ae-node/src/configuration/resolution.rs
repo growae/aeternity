@@ -307,6 +307,9 @@ impl Configuration {
     }
 }
 impl Resolved<'_> {
+    pub fn expand_value(&self, application: &str, value: &Value) -> Result<Value, Error> {
+        self.context.expand(application, value)
+    }
     pub fn data_directory(&self, application: &str) -> Result<PathBuf, Error> {
         if application.is_empty() || application.contains(['/', '\\', '\0']) {
             return Err(Error::Directory);

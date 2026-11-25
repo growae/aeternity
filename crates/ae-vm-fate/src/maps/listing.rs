@@ -19,26 +19,42 @@ pub struct Listing<'a> {
     pub remaining_limits: Limits,
 }
 impl Overrides {
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = (&Value, &Value)> {
+        self.entries.iter()
+    }
     pub fn from_encoded<'a>(
         pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
         mut limits: Limits,
     ) -> Result<Self, Error> {
-        let mut entries = BTreeMap::new();
+        let mut result = Self::default();
         for (key, value) in pairs {
-            let mut decode = |bytes: &[u8]| {
-                let (value, rest, nodes) = encoding::decode_one_counted(bytes, limits)?;
-                if !rest.is_empty() {
-                    return Err(Error::TrailingBytes);
-                }
-                limits.max_nodes -= nodes;
-                limits.max_bytes -= bytes.len();
-                Ok(value)
-            };
-            let key = decode(key)?;
-            let value = decode(value)?;
-            entries.insert(key, value);
+            result.insert_encoded(key, value, &mut limits)?;
         }
-        Ok(Self { entries })
+        Ok(result)
+    }
+    // Decode in source order with one aggregate budget. A failed entry leaves
+    // both the table and the caller's remaining budget unchanged.
+    pub fn insert_encoded(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        limits: &mut Limits,
+    ) -> Result<(), Error> {
+        let mut remaining = *limits;
+        let mut decode = |bytes: &[u8]| {
+            let (value, rest, nodes) = encoding::decode_one_counted(bytes, remaining)?;
+            if !rest.is_empty() {
+                return Err(Error::TrailingBytes);
+            }
+            remaining.max_nodes -= nodes;
+            remaining.max_bytes -= bytes.len();
+            Ok(value)
+        };
+        let key = decode(key)?;
+        let value = decode(value)?;
+        self.entries.insert(key, value);
+        *limits = remaining;
+        Ok(())
     }
     pub fn list<'a>(
         &'a self,

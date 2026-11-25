@@ -3,8 +3,10 @@
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, fmt};
 
+pub mod auxiliary;
 pub mod chain;
 pub mod consensus;
+pub mod execution;
 mod files;
 pub mod presets;
 pub mod protocols;

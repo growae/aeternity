@@ -7,6 +7,7 @@ use ae_storage::Database;
 use ae_types::Hash256;
 use std::{fmt, path::Path, sync::Arc};
 
+pub mod configured;
 pub mod genesis;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
