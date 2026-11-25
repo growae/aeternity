@@ -92,6 +92,7 @@ pub enum Error {
     Panicked,
     AlreadyRunning,
     RestartLimit,
+    Arithmetic,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reading {

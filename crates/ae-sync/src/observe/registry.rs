@@ -8,6 +8,7 @@ use crate::routing::{Name, Part};
 use reporter::Error as StoreError;
 use std::sync::Arc;
 mod cache;
+pub mod histogram;
 mod scalar;
 mod service;
 use crate::routing::Entry;
