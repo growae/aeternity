@@ -66,6 +66,17 @@ impl Metrics {
             first.intervals[0].interval.period,
             ae_sync::observe::reporter::Period::Milliseconds(10_000)
         );
+        let registry = client.store().unwrap();
+        let scalar = vec![ae_sync::routing::Part::atom("application-counter")];
+        registry
+            .create(&scalar, ae_sync::observe::registry::Kind::Counter, true)
+            .unwrap();
+        registry
+            .update(
+                &scalar,
+                &ae_sync::observe::registry::Value::Integer(9.into()),
+            )
+            .unwrap();
         if !normal {
             assert!(h.connections().is_none());
             client
@@ -161,6 +172,18 @@ impl Metrics {
             &client.store().unwrap(),
             &h.metrics().unwrap().store().unwrap()
         ));
+        assert_eq!(
+            registry
+                .get_value(
+                    &scalar,
+                    &ae_sync::observe::reporter::Points::One(ae_sync::routing::Part::atom("value"))
+                )
+                .unwrap(),
+            ae_sync::observe::registry::Reading::Values(vec![(
+                ae_sync::routing::Part::atom("value"),
+                ae_sync::observe::registry::Value::Integer(9.into())
+            )])
+        );
         let (next, source) = self.receive().await;
         assert!(
             std::str::from_utf8(&next)
@@ -187,6 +210,17 @@ impl Metrics {
         let old = supervisor.current().unwrap();
         let reporter = stable.reporter().unwrap();
         let before = reporter.reporters().unwrap().await.unwrap().remove(0);
+        let registry = stable.store().unwrap();
+        let scalar = vec![ae_sync::routing::Part::atom("logger-counter")];
+        registry
+            .create(&scalar, ae_sync::observe::registry::Kind::Counter, true)
+            .unwrap();
+        registry
+            .update(
+                &scalar,
+                &ae_sync::observe::registry::Value::Integer(12.into()),
+            )
+            .unwrap();
         let connection = h.connections().map(|c| c.status().generation);
         let ticket = supervisor.restart(old.number).unwrap();
         assert_eq!(
@@ -208,6 +242,19 @@ impl Metrics {
         let after = reporter.reporters().unwrap().await.unwrap().remove(0);
         assert_eq!(after.generation, before.generation);
         assert!(after.alive);
+        assert_eq!(
+            registry
+                .get_value(
+                    &scalar,
+                    &ae_sync::observe::reporter::Points::One(ae_sync::routing::Part::atom("value"))
+                )
+                .unwrap(),
+            ae_sync::observe::registry::Reading::Values(vec![(
+                ae_sync::routing::Part::atom("value"),
+                ae_sync::observe::registry::Value::Integer(12.into())
+            )])
+        );
+
         assert!(h.status().ready && h.status().failure.is_none());
         let marker = format!("logger-generation.value:{}|g", old.number + 1).into_bytes();
         stable

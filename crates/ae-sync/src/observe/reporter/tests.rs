@@ -1162,3 +1162,78 @@ async fn zero_interval_preserves_control_progress_and_store_batch_rejection_is_a
     owner.finish().await;
     logger.finish().await;
 }
+
+#[tokio::test]
+async fn live_scalar_registry_controls_feed_static_subscriptions_and_survive_reporter_replacement()
+{
+    use crate::observe::registry::{Kind, Value};
+    let limits = Limits::default();
+    let clock = Arc::new(TestClock::new());
+    let store = Arc::new(Store::with_clock(limits, clock.clone()).unwrap());
+    let (mut owner, mut logger, socket) = setup(limits, store.clone(), clock).await;
+    let c = owner.client();
+    let mut config = Config::default();
+    config.intervals[0].period = Period::Manual;
+    within(c.add(config).unwrap()).await.unwrap();
+    within(c.subscribe_application(name()).unwrap())
+        .await
+        .unwrap();
+    let n = vec![Part::atom("ae"), Part::atom("epoch"), Part::atom("scalar")];
+    store.create(&n, Kind::Counter, true).unwrap();
+    store.update(&n, &Value::Integer(42.into())).unwrap();
+    within(async {
+        loop {
+            if !c.subscriptions(name()).unwrap().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(packet(&socket).await, b"ae.epoch.scalar.value:42|g");
+    store.set_enabled(&n, false).unwrap();
+    store.update(&n, &Value::Integer(999.into())).unwrap();
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    none(&socket).await;
+    store.set_enabled(&n, true).unwrap();
+    let old = reporter(&c).await;
+    within(c.restart(name(), old.generation).unwrap())
+        .await
+        .unwrap();
+    within(async {
+        while reporter(&c).await.generation == old.generation {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(reporter(&c).await.previous_joined);
+    store.update(&n, &Value::Integer((-2).into())).unwrap();
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(packet(&socket).await, b"ae.epoch.scalar.value:40|g");
+    store.reset(&n).unwrap();
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(packet(&socket).await, b"ae.epoch.scalar.value:0|g");
+    store.remove(&n).unwrap();
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    none(&socket).await;
+    store.create(&n, Kind::Gauge, true).unwrap();
+    store.update(&n, &Value::Atom("retained".into())).unwrap();
+    within(c.trigger(name(), "default".into()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(packet(&socket).await, b"ae.epoch.scalar.value:\0|g");
+    owner.finish().await;
+    logger.finish().await;
+    assert!(c.info().joined && logger.client().info().joined);
+}

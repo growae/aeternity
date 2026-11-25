@@ -15,6 +15,7 @@ mod gc;
 pub mod metrics;
 mod peers;
 pub mod pipeline;
+pub mod registry;
 pub mod report;
 pub mod reporter;
 mod sink;

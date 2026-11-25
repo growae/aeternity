@@ -6,12 +6,11 @@ use std::time::Duration;
 mod callback;
 mod order;
 mod service;
-mod store;
 mod timing;
+pub use super::registry::{Metric, Store};
 pub use service::{
     Client, Info, IntervalInfo, Owner, ReporterInfo, Signal, SubscriptionInfo, Ticket,
 };
-pub use store::{Metric, Store};
 pub use timing::{Clock, SystemClock, Time};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +143,20 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    fn validate(self) -> Result<(), Error> {
+    pub(super) fn points(self, points: &Points) -> Result<(), Error> {
+        let p = match points {
+            Points::One(p) => std::slice::from_ref(p),
+            Points::Many(p) => p,
+        };
+        if p.len() > self.report.parts {
+            return Err(Error::Limit);
+        }
+        for point in p {
+            self.report.part(point).map_err(Error::Report)?;
+        }
+        Ok(())
+    }
+    pub(super) fn validate(self) -> Result<(), Error> {
         self.report.validate().map_err(Error::Report)?;
         if self.requests == 0
             || self.requests > 65_536
@@ -167,7 +179,7 @@ impl Limits {
         }
         Ok(())
     }
-    fn atom(self, s: &str) -> Result<usize, Error> {
+    pub(super) fn atom(self, s: &str) -> Result<usize, Error> {
         if s.len() > 1020 || s.chars().count() > 255 {
             return Err(Error::Limit);
         }
