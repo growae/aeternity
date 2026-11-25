@@ -608,6 +608,7 @@ async fn application_metrics_outlive_connection_generations_in_both_pow_families
             let mut handle = running.handle();
             ready(&mut handle).await;
             let client = metrics.verify(&handle, normal).await;
+            metrics.replace_logger(&handle).await;
             let exit = running.shutdown().await.unwrap();
             assert!(exit.status().joined && exit.status().failure.is_none());
             assert!(client.info().joined && !client.info().running);
@@ -699,5 +700,64 @@ async fn metrics_owner_recovers_failed_launch_and_drop_does_not_wait_for_a_stall
     .await;
     dropper.join().unwrap();
     assert!(returned, "Drop waited for the stalled family executor");
+    assert!(client.info().joined && !client.info().running);
+}
+
+#[tokio::test]
+async fn metrics_supervisor_recreation_leaves_an_empty_slot_and_preserves_the_family() {
+    use ae_sync::observe::statsd::supervision::{Error, Phase};
+    let lab = Lab::new();
+    let mut prepared = prepare(lab.services(
+        "on_demand",
+        json!({"offline_mode":true}),
+        Default::default(),
+    ));
+    let mut settings = commands(&lab);
+    let metrics = metrics_settings::Metrics::new().await;
+    metrics.configure(&mut prepared, &mut settings);
+    let running = prepared
+        .launch(settings, || Ok(Default::default()))
+        .unwrap();
+    let mut handle = running.handle();
+    ready(&mut handle).await;
+    let client = handle.metrics().unwrap();
+    let supervisor = client.supervisor().unwrap();
+    let routing_generation = handle
+        .pow()
+        .unwrap()
+        .workers()
+        .unwrap()
+        .status()
+        .routing_generation;
+    for _ in 0..3 {
+        let old = supervisor.current().unwrap();
+        let ticket = supervisor.restart(old.number).unwrap();
+        assert_eq!(within(ticket.wait()).await, Ok(old.number + 1));
+        assert!(old.client.info().joined);
+    }
+    let last = supervisor.current().unwrap();
+    let ticket = supervisor.restart(last.number).unwrap();
+    assert_eq!(within(ticket.wait()).await, Err(Error::ChildLimit));
+    assert!(last.client.info().joined);
+    assert_eq!(supervisor.status().phase, Phase::Empty);
+    assert_eq!(supervisor.status().supervisor_generation, 2);
+    assert!(supervisor.current().is_none());
+    assert!(!client.submit(vec![b"no-logger:0|g".to_vec()]));
+    assert!(handle.status().ready && handle.status().running && handle.status().failure.is_none());
+    assert_eq!(
+        handle
+            .pow()
+            .unwrap()
+            .workers()
+            .unwrap()
+            .status()
+            .routing_generation,
+        routing_generation
+    );
+    let ticket = supervisor.start(2).unwrap();
+    assert_eq!(within(ticket.wait()).await, Ok(last.number + 1));
+    assert!(client.same_owner(&handle.metrics().unwrap()));
+    let exit = running.shutdown().await.unwrap();
+    assert!(exit.status().joined && exit.status().failure.is_none());
     assert!(client.info().joined && !client.info().running);
 }

@@ -1,4 +1,5 @@
 use super::Error;
+pub mod supervision;
 use std::{
     io,
     net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket},
@@ -199,22 +200,49 @@ impl Settings {
     }
 }
 #[derive(Clone)]
-pub struct Client(super::sink::Client);
+enum Binding {
+    Direct(super::sink::Client),
+    Managed(supervision::Handle),
+}
+#[derive(Clone)]
+pub struct Client(Binding);
 impl Client {
+    pub fn supervisor(&self) -> Option<supervision::Handle> {
+        match &self.0 {
+            Binding::Managed(h) => Some(h.clone()),
+            _ => None,
+        }
+    }
     pub fn request_shutdown(&self) {
-        self.0.stop();
+        match &self.0 {
+            Binding::Direct(c) => c.stop(),
+            Binding::Managed(h) => h.shutdown(),
+        }
     }
     pub fn info(&self) -> super::SinkInfo {
-        self.0.info()
+        match &self.0 {
+            Binding::Direct(c) => c.info(),
+            Binding::Managed(h) => h.info(),
+        }
     }
     pub async fn changed(&mut self) {
-        self.0.changed().await;
+        match &mut self.0 {
+            Binding::Direct(c) => c.changed().await,
+            Binding::Managed(h) => h.changed().await,
+        }
     }
     pub fn submit(&self, lines: Vec<Vec<u8>>) -> bool {
-        self.0.submit(super::sink::Batch::Metrics(lines))
+        match &self.0 {
+            Binding::Direct(c) => c.submit(super::sink::Batch::Metrics(lines)),
+            Binding::Managed(h) => h.submit(lines),
+        }
     }
     pub fn same_owner(&self, other: &Self) -> bool {
-        self.0.same_owner(&other.0)
+        match (&self.0, &other.0) {
+            (Binding::Direct(a), Binding::Direct(b)) => a.same_owner(b),
+            (Binding::Managed(a), Binding::Managed(b)) => a.same_owner(b),
+            _ => false,
+        }
     }
 }
 pub struct Worker(super::sink::Worker);
@@ -229,7 +257,7 @@ impl Worker {
         self.0.activate();
     }
     pub fn client(&self) -> Client {
-        Client(self.0.client())
+        Client(Binding::Direct(self.0.client()))
     }
     pub async fn finish(&mut self) {
         self.0.finish().await;

@@ -84,6 +84,8 @@ struct State {
     queue: VecDeque<Batch>,
     stop: bool,
     started: bool,
+    #[cfg(test)]
+    panic: bool,
 }
 struct Shared {
     state: Mutex<State>,
@@ -133,6 +135,8 @@ impl Worker {
                 queue: VecDeque::new(),
                 stop: false,
                 started,
+                #[cfg(test)]
+                panic: false,
             }),
             wake: Condvar::new(),
             done: watch::channel(false).0,
@@ -175,6 +179,11 @@ impl Worker {
                 }
                 loop {
                     let mut s = owned.state.lock().unwrap_or_else(|e| e.into_inner());
+                    #[cfg(test)]
+                    if s.panic {
+                        drop(s);
+                        panic!("controlled metrics worker panic");
+                    }
                     if !s.stop
                         && let Destination::Udp(udp) = &mut destination
                         && udp
@@ -286,6 +295,22 @@ impl Worker {
             started,
         )
     }
+    #[cfg(test)]
+    pub fn metrics_with_backend(
+        config: &Config,
+        backend: Box<dyn statsd::Backend>,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        Self::prepared(
+            Destination::Udp(statsd::Udp::with_backend(
+                statsd::Target::Configured(config.statsd.clone().ok_or(Error::Configuration)?),
+                backend,
+            )),
+            config,
+            "ae-statsd-test",
+            false,
+        )
+    }
     pub fn activate(&self) {
         self.shared
             .state
@@ -316,7 +341,7 @@ impl Worker {
             .info
             .clone()
     }
-    fn stop(&self, drain: bool) {
+    pub(super) fn stop(&self, drain: bool) {
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         s.stop = true;
         if !drain {
@@ -369,6 +394,11 @@ pub(super) struct Client {
     bytes: usize,
 }
 impl Client {
+    #[cfg(test)]
+    pub fn panic_for_test(&self) {
+        self.shared.state.lock().unwrap().panic = true;
+        self.shared.wake.notify_one();
+    }
     pub fn stop(&self) {
         self.shared
             .state

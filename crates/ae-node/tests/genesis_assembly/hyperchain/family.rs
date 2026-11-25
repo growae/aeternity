@@ -426,6 +426,7 @@ async fn application_metrics_outlive_hyperchain_connections_in_all_modes() {
         let mut handle = running.handle();
         ready(&mut handle).await;
         let client = metrics.verify(&handle, normal).await;
+        metrics.replace_logger(&handle).await;
         let exit = running.shutdown().await.unwrap();
         assert!(exit.status().joined && exit.status().failure.is_none());
         assert!(client.info().joined && !client.info().running);

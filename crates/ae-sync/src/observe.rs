@@ -100,6 +100,7 @@ pub enum Error {
     Routing(crate::routing::Error),
     Sample,
     Timeout,
+    RestartLimit,
     Io(std::io::ErrorKind),
 }
 impl std::fmt::Display for Error {

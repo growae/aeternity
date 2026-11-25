@@ -60,7 +60,7 @@ pub(super) struct Owner {
 }
 impl Owner {
     pub fn prepare(settings: statsd::Settings) -> Result<Self, observe::Error> {
-        let worker = statsd::Worker::prepare(settings)?;
+        let worker = statsd::supervision::Owner::prepare(settings)?;
         let client = worker.client();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -133,7 +133,7 @@ impl Drop for Owner {
     }
 }
 async fn run(
-    mut worker: statsd::Worker,
+    mut worker: statsd::supervision::Owner,
     parent: oneshot::Receiver<Handle>,
     state: &watch::Sender<State>,
     closing: Arc<AtomicBool>,
@@ -144,9 +144,7 @@ async fn run(
         return;
     };
     let mut parent = parent;
-    let mut client = worker.client();
     let mut activated = false;
-    let mut retired = false;
     loop {
         let root = parent.status();
         if !root.running || *abandoned.borrow() {
@@ -156,21 +154,14 @@ async fn run(
             worker.activate();
             activated = true;
         }
-        let info = client.info();
-        if !info.running && !retired {
-            if !closing.load(Ordering::Acquire) {
-                state.send_modify(|s| {
-                    s.error = Some(observe::Error::Io(
-                        info.last_error.unwrap_or(std::io::ErrorKind::Other),
-                    ))
-                });
-            }
-            // start_reporters logs a logger initialization error and still
-            // starts the reporter. Diagnostic failure does not stop the node.
-            worker.finish().await;
-            retired = true;
+        worker.poll().await;
+        let error = worker.handle().status().last_error;
+        if error.is_some() && state.borrow().error != error {
+            // Logger startup/recovery is independent of the family root.
+            // The supervision handle also exposes an exhausted parent boundary.
+            state.send_modify(|s| s.error = error);
         }
-        tokio::select! { _ = abandoned.changed() => break, _ = parent.changed() => (), _ = client.changed() => () }
+        tokio::select! { _ = abandoned.changed() => break, _ = parent.changed() => (), _ = worker.changed() => () }
     }
     worker.finish().await;
 }

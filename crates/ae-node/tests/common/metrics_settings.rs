@@ -112,4 +112,46 @@ impl Metrics {
         assert!(client.info().running);
         client
     }
+    pub async fn replace_logger(&self, h: &runtime::Handle) {
+        let mut ready = h.clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready.status().ready {
+                ready.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let stable = h.metrics().unwrap();
+        let supervisor = stable.supervisor().unwrap();
+        let old = supervisor.current().unwrap();
+        let connection = h.connections().map(|c| c.status().generation);
+        let ticket = supervisor.restart(old.number).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+                .await
+                .unwrap(),
+            Ok(old.number + 1)
+        );
+        assert!(old.client.info().joined && !old.client.info().running);
+        assert_eq!(
+            supervisor.status().phase,
+            statsd::supervision::Phase::Running
+        );
+        assert!(stable.same_owner(&h.metrics().unwrap()));
+        assert_eq!(h.connections().map(|c| c.status().generation), connection);
+        assert_eq!(supervisor.status().supervisor_generation, 1);
+        assert_eq!(stable.info().open_attempts, 2);
+        assert!(h.status().ready && h.status().failure.is_none());
+        let marker = format!("logger-generation:{}|g", old.number + 1).into_bytes();
+        assert!(stable.submit(vec![marker.clone()]));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.receive().await.0 == marker {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
 }
