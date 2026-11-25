@@ -15,6 +15,7 @@ serde_json.workspace = true
 ae-chain.workspace = true
 ae-mempool.workspace = true
 ae-types.workspace = true
+ae-protocol.workspace = true
 ae-stratum.workspace = true
 ae-sync.workspace = true
 ae-storage.workspace = true
@@ -32,7 +33,6 @@ num-bigint.workspace = true
 
 [dev-dependencies]
 ae-hyperchain.workspace = true
-ae-protocol.workspace = true
 hex.workspace = true
 
 [lints]

@@ -3,7 +3,10 @@
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, fmt};
 
+pub mod chain;
+pub mod consensus;
 mod files;
+pub mod protocols;
 pub mod resolution;
 mod schema;
 mod yaml;
