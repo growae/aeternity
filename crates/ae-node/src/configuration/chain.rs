@@ -6,7 +6,7 @@ use super::{
 };
 use ae_chain::repository::Identity;
 use ae_codec::headers::{CommonHeader, Header, KeyHeader};
-use ae_protocol::NetworkProfile;
+use ae_protocol::{ConsensusAlgorithm, NetworkProfile};
 use ae_types::Hash256;
 use std::fmt;
 
@@ -123,11 +123,17 @@ impl Settings {
         {
             return Err(Error::Genesis);
         }
-        Ok(Identity::for_consensus(
+        let algorithm = match self.consensus.genesis().kind() {
+            Kind::PowCuckoo => ConsensusAlgorithm::Cuckoo,
+            Kind::OnDemand => ConsensusAlgorithm::OnDemand,
+            Kind::Hyperchain => ConsensusAlgorithm::Hyperchain,
+            Kind::Unknown => unreachable!("checked consensus"),
+        };
+        Ok(Identity::for_algorithm(
             &self.profile,
             hash,
             execution_profile,
-            self.consensus.family(),
+            algorithm,
         ))
     }
 }

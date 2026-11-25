@@ -24,6 +24,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
     Target(TargetError),
 }
 pub struct Candidate<A = MemoryStore, C = MemoryStore> {
+    on_demand: bool,
     temporary: KeyHeader,
     prepared: super::Prepared<A, C>,
     final_info: Option<[u8; 4]>,
@@ -34,7 +35,13 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
         key: &KeyHeader,
         network: &ae_protocol::NetworkProfile,
         input: Input,
+        algorithm: ae_protocol::ConsensusAlgorithm,
     ) -> Result<KeyHeader, Error<A, C>> {
+        let target = match algorithm {
+            ae_protocol::ConsensusAlgorithm::Cuckoo => HIGHEST_TARGET.0,
+            ae_protocol::ConsensusAlgorithm::OnDemand => ae_consensus::on_demand::TAG,
+            ae_protocol::ConsensusAlgorithm::Hyperchain => return Err(Error::WrongConsensus),
+        };
         let previous_hash = previous.hash().map_err(Error::Encoding)?;
         let key_hash = Header::Key(key.clone()).hash().map_err(Error::Encoding)?;
         if key.common.height != previous.common().height
@@ -63,7 +70,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
             },
             miner: input.miner.0,
             beneficiary: input.beneficiary.0,
-            target: HIGHEST_TARGET.0,
+            target,
             seal: [0; 42],
             nonce: 0,
             time: input.calculation_time,
@@ -80,6 +87,27 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
         rules: &Rules,
         input: Input,
     ) -> Result<Self, Error<A, C>> {
+        Self::prepare_inner(trees, parent, history, execution, rules, input, false)
+    }
+    pub fn prepare_on_demand<O: MapOrder>(
+        trees: &Trees<A, C>,
+        parent: &Parent<'_>,
+        history: &rewards::History,
+        execution: &transactions::Config<'_, O>,
+        rules: &Rules,
+        input: Input,
+    ) -> Result<Self, Error<A, C>> {
+        Self::prepare_inner(trees, parent, history, execution, rules, input, true)
+    }
+    fn prepare_inner<O: MapOrder>(
+        trees: &Trees<A, C>,
+        parent: &Parent<'_>,
+        history: &rewards::History,
+        execution: &transactions::Config<'_, O>,
+        rules: &Rules,
+        input: Input,
+        on_demand: bool,
+    ) -> Result<Self, Error<A, C>> {
         if execution.consensus != ConsensusType::Pow {
             return Err(Error::WrongConsensus);
         }
@@ -88,7 +116,12 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
         if trees.roots().hash().0 != previous.common().state_hash {
             return Err(Error::Parent);
         }
-        let temporary = Self::template(previous, key, execution.network, input)?;
+        let algorithm = if on_demand {
+            ae_protocol::ConsensusAlgorithm::OnDemand
+        } else {
+            ae_protocol::ConsensusAlgorithm::Cuckoo
+        };
+        let temporary = Self::template(previous, key, execution.network, input, algorithm)?;
         let height = temporary.common.height;
         // calculate_state_for_new_keyblock resets generation fees and fraud
         // when its immediate parent is a key; gas fees in calls still close.
@@ -106,7 +139,12 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
             },
             reported_fraud: matches!(previous, Header::Micro(_)) && parent.reported_fraud,
         };
-        let prepared = super::prepare(trees, &temporary, &parent, history, execution, rules)
+        let prepare = if on_demand {
+            super::prepare_on_demand
+        } else {
+            super::prepare
+        };
+        let prepared = prepare(trees, &temporary, &parent, history, execution, rules)
             .map_err(|e| Error::Transition(Box::new(e)))?;
         let final_info = execution
             .network
@@ -115,6 +153,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
             .map(u32::to_be_bytes)
             .or(temporary.info);
         Ok(Self {
+            on_demand,
             temporary,
             prepared,
             final_info,
@@ -139,7 +178,15 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
             return Err(Error::Encoding(HeaderError::VersionInfo));
         }
         let n = DIFFICULTY_WINDOW + 1;
-        header.target = if header.common.height <= n as u64 {
+        header.target = if self.on_demand {
+            if !adjustment.is_empty() {
+                return Err(Error::Adjustment {
+                    expected: 0,
+                    actual: adjustment.len(),
+                });
+            }
+            ae_consensus::on_demand::TAG
+        } else if header.common.height <= n as u64 {
             initial_target.0
         } else {
             if adjustment.len() != n {

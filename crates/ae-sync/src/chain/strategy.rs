@@ -3,6 +3,7 @@ use ae_codec::headers::Header;
 use ae_protocol::NetworkProfile;
 
 pub(super) struct Pow<O> {
+    pub algorithm: ae_protocol::ConsensusAlgorithm,
     pub execution: Owned<O>,
     pub rules: Rules,
 }
@@ -52,11 +53,14 @@ impl<O: MapOrder> Strategy<O> {
             Self::Pow(pow) => {
                 let mut rules = pow.rules.admission.clone();
                 rules.now_ms = now_ms;
-                ae_chain::admission::validate_pow(block, network, previous, &rules).map_err(|e| {
-                    Error::Validation {
-                        operational: e.is_operational(),
-                        reason: format!("{e:?}"),
-                    }
+                let validate = if pow.algorithm == ae_protocol::ConsensusAlgorithm::OnDemand {
+                    ae_chain::admission::validate_on_demand
+                } else {
+                    ae_chain::admission::validate_pow
+                };
+                validate(block, network, previous, &rules).map_err(|e| Error::Validation {
+                    operational: e.is_operational(),
+                    reason: format!("{e:?}"),
                 })
             }
             Self::Hyperchain(hc) => {

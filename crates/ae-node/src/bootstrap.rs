@@ -1,8 +1,5 @@
 // Durable genesis publication, after pure startup configuration is fixed.
-use crate::configuration::{
-    chain::{self, Settings},
-    consensus::Kind,
-};
+use crate::configuration::chain::{self, Settings};
 use ae_chain::repository::{self as repository, Identity, ReadConfig, ledger};
 use ae_codec::headers::KeyHeader;
 use ae_state::Trees;
@@ -15,7 +12,6 @@ pub enum Error {
     Configuration(chain::Error),
     Repository(repository::Error),
     Genesis,
-    UnsupportedOnDemand,
     UnsupportedSchedule,
 }
 impl fmt::Display for Error {
@@ -51,9 +47,6 @@ impl Opened {
         execution_profile: Hash256,
         mut config: Config,
     ) -> Result<Self, Error> {
-        if settings.consensus().genesis().kind() == Kind::OnDemand {
-            return Err(Error::UnsupportedOnDemand);
-        }
         // The current ledger is bound to one consensus family. Preserve native
         // schedule parsing, but do not silently start without transition dispatch.
         if settings.consensus().entries().len() != 1 {

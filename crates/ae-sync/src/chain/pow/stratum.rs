@@ -36,7 +36,8 @@ impl Prepared {
         let prepared = result.map_err(Error::Preparation)?;
         let calculation_time = calculation_time.ok_or(Error::Binding)?;
         let final_time = final_time.ok_or(Error::Binding)?;
-        if prepared.header.common.previous_hash != request.parent.0
+        if prepared.state.value.view.identity().algorithm != ae_protocol::ConsensusAlgorithm::Cuckoo
+            || prepared.header.common.previous_hash != request.parent.0
             || prepared.header.miner != request.miner.0
             || prepared.header.beneficiary != request.beneficiary.0
             || prepared.state.value.candidate.temporary().time != calculation_time
@@ -112,7 +113,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
         now_ms: u64,
         strictly_follow_top: bool,
     ) -> Result<Admission, chain::Error> {
-        if self.consensus() != ae_protocol::ConsensusType::Pow {
+        if self.algorithm() != ae_protocol::ConsensusAlgorithm::Cuckoo {
             return Err(chain::Error::WrongConsensus);
         }
         let ticket = if strictly_follow_top {

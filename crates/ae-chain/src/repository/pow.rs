@@ -5,7 +5,7 @@ use super::{Identity, Read, Status, View};
 use crate::{block::Block, hyperchain::candidate};
 use ae_codec::headers::Header;
 use ae_hyperchain::chain;
-use ae_protocol::ConsensusType;
+use ae_protocol::{ConsensusAlgorithm, ConsensusType};
 use ae_trie::Overlay;
 use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
@@ -104,7 +104,12 @@ pub fn micro<S: Read, O: MapOrder + Clone>(
         .discovered_proof(Hash256(key.common.previous_key_hash))
         .map_err(repository)?
         .map(Box::new);
-    let candidate = candidate::Micro::begin_pow(
+    let begin = if view.identity().algorithm == ConsensusAlgorithm::OnDemand {
+        candidate::Micro::begin_on_demand
+    } else {
+        candidate::Micro::begin_pow
+    };
+    let candidate = begin(
         candidate::PowParent {
             header: &header,
             key: &key,

@@ -26,6 +26,23 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Micro<A, C> {
         configured_gas_limit: &ae_types::Unsigned,
         start: PowStart,
     ) -> Result<Self, Error<Infallible, A, C>> {
+        Self::begin_pow_family(parent, reader, configured_gas_limit, start, false)
+    }
+    pub fn begin_on_demand<O: MapOrder, S: chain::Source<A, C>>(
+        parent: PowParent<'_, A, C>,
+        reader: &chain::Reader<A, C, O, S>,
+        configured_gas_limit: &ae_types::Unsigned,
+        start: PowStart,
+    ) -> Result<Self, Error<Infallible, A, C>> {
+        Self::begin_pow_family(parent, reader, configured_gas_limit, start, true)
+    }
+    fn begin_pow_family<O: MapOrder, S: chain::Source<A, C>>(
+        parent: PowParent<'_, A, C>,
+        reader: &chain::Reader<A, C, O, S>,
+        configured_gas_limit: &ae_types::Unsigned,
+        start: PowStart,
+        on_demand: bool,
+    ) -> Result<Self, Error<Infallible, A, C>> {
         let key = parent.key;
         let key_hash = Header::Key(key.clone())
             .hash()
@@ -66,21 +83,30 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Micro<A, C> {
         // pre-transform is the identity: no HC contract effects are applied.
         reader
             .with_execution(parent.view, |config| {
-                crate::execution::with_block_environment(
-                    config,
-                    key,
-                    time,
-                    key_hash.0,
-                    &gas_limit,
-                    |execution| {
-                        view.environment = execution
-                            .fate
-                            .expect("reader FATE configuration")
-                            .environment
-                            .clone();
-                        view.aevm = execution.aevm.cloned();
-                    },
-                )
+                let apply = |execution: &ae_execution::transactions::Config<'_, O>| {
+                    view.environment = execution
+                        .fate
+                        .expect("reader FATE configuration")
+                        .environment
+                        .clone();
+                    view.aevm = execution.aevm.cloned();
+                };
+                if on_demand {
+                    crate::execution::with_block_environment_difficulty(
+                        config,
+                        key,
+                        time,
+                        key_hash.0,
+                        &gas_limit,
+                        ae_consensus::on_demand::TAG.into(),
+                        apply,
+                    );
+                    Ok(())
+                } else {
+                    crate::execution::with_block_environment(
+                        config, key, time, key_hash.0, &gas_limit, apply,
+                    )
+                }
             })
             .map_err(Error::ParentDifficulty)?;
         view.context = ae_execution::Context::transaction(

@@ -5,7 +5,7 @@ use crate::{execution, key as key_execution, rewards};
 use ae_codec::headers::{Header, KeyHeader};
 use ae_consensus::target::Target;
 use ae_execution::transactions::{self, batch};
-use ae_protocol::ConsensusType;
+use ae_protocol::{ConsensusAlgorithm, ConsensusType};
 use ae_trie::MemoryStore;
 use ae_vm_fate::maps::MapOrder;
 #[path = "ledger/hyperchain.rs"]
@@ -375,16 +375,32 @@ pub fn bootstrap<S: Read>(
             entry.map_err(Error::from)?;
         }
     }
-    let difficulty = match view.identity.consensus {
-        ConsensusType::Pow => Target(header.target)
+    let difficulty = match view.identity.algorithm {
+        ConsensusAlgorithm::Cuckoo => Target(header.target)
             .difficulty()
             .map_err(|_| InsertError::WrongGenesis)?,
-        ConsensusType::Pos => {
+        ConsensusAlgorithm::Hyperchain => {
             if header.target != 0
                 || header.miner != [0; 32]
                 || header.beneficiary != [0; 32]
                 || header.seal != [0; 42]
                 || header.nonce != 0
+                || header.info.is_some()
+                || header.common.previous_key_hash != [0; 32]
+                || header.common.previous_hash != ae_state::genesis::CONTRIBUTORS_MESSAGES_HASH
+            {
+                return Err(InsertError::WrongGenesis);
+            }
+            0.into()
+        }
+        ConsensusAlgorithm::OnDemand => {
+            if header.target != ae_consensus::on_demand::TAG
+                || header.common.version != 1
+                || header.miner != [0; 32]
+                || header.beneficiary != [0; 32]
+                || header.seal != [0; 42]
+                || header.nonce != 0
+                || header.time != 0
                 || header.info.is_some()
                 || header.common.previous_key_hash != [0; 32]
                 || header.common.previous_hash != ae_state::genesis::CONTRIBUTORS_MESSAGES_HASH
@@ -691,6 +707,7 @@ pub fn prepare<S: Read, O: MapOrder>(
     if config.consensus != ConsensusType::Pow || view.identity.consensus != ConsensusType::Pow {
         return Err(InsertError::WrongConsensus);
     }
+    let on_demand = view.identity.algorithm == ConsensusAlgorithm::OnDemand;
     if !view.identity.matches(config.network) || view.identity.genesis != rules.genesis_hash {
         return Err(Error::Identity.into());
     }
@@ -732,7 +749,7 @@ pub fn prepare<S: Read, O: MapOrder>(
     let input_record = view.require_record(parent_hash)?;
     let parent_is_key = matches!(previous, Header::Key(_));
     let mut recent = vec![];
-    let needed = if matches!(block, Block::Micro(_)) {
+    let needed = if on_demand || matches!(block, Block::Micro(_)) {
         0
     } else if header.common().height > 18 {
         18
@@ -751,7 +768,8 @@ pub fn prepare<S: Read, O: MapOrder>(
         recent.push(k);
     }
     recent.reverse();
-    let older = if matches!(block,Block::Micro(m) if m.proof.is_some())
+    let older = if !on_demand
+        && matches!(block,Block::Micro(m) if m.proof.is_some())
         && parent_is_key
         && previous_key.common.height > 0
     {
@@ -794,7 +812,12 @@ pub fn prepare<S: Read, O: MapOrder>(
         |config| -> Result<_, InsertError<S>> {
             Ok(match block {
                 Block::Micro(m) => {
-                    let r = execution::pow_micro(m, &mut state, &parent, config, &rules.admission)
+                    let execute = if on_demand {
+                        execution::on_demand_micro
+                    } else {
+                        execution::pow_micro
+                    };
+                    let r = execute(m, &mut state, &parent, config, &rules.admission)
                         .map_err(|e| InsertError::Micro(Box::new(e)))?;
                     (
                         rewards::unsigned(r.fees().clone()),
@@ -810,7 +833,12 @@ pub fn prepare<S: Read, O: MapOrder>(
                         rules.reward_delay,
                         limits.history,
                     )?;
-                    let r = key_execution::pow_key(k, &mut state, &parent, &history, config, rules)
+                    let execute = if on_demand {
+                        key_execution::on_demand_key
+                    } else {
+                        key_execution::pow_key
+                    };
+                    let r = execute(k, &mut state, &parent, &history, config, rules)
                         .map_err(|e| InsertError::Key(Box::new(e)))?;
                     (
                         r.closed_generation_fees().clone(),
@@ -822,6 +850,9 @@ pub fn prepare<S: Read, O: MapOrder>(
         },
     )?;
     let difficulty = match block {
+        Block::Key(_) if on_demand => input_record
+            .difficulty
+            .add(&u64::from(ae_consensus::on_demand::TAG).into()),
         Block::Key(k) => input_record.difficulty.add(
             &Target(k.target)
                 .difficulty()

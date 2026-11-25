@@ -157,6 +157,58 @@ fn validate_pow_parts(
     known_previous: Option<&Header>,
     rules: &PowRules,
 ) -> Result<(), PowError> {
+    validate_parts(
+        header,
+        micro,
+        network,
+        known_previous,
+        rules,
+        ae_consensus::headers::validate_standalone,
+    )
+}
+pub fn validate_on_demand(
+    block: &Block,
+    network: &NetworkProfile,
+    known_previous: Option<&Header>,
+    rules: &PowRules,
+) -> Result<(), PowError> {
+    let header = block.header();
+    let micro = match block {
+        Block::Micro(m) => Some(m),
+        _ => None,
+    };
+    validate_parts(
+        &header,
+        micro,
+        network,
+        known_previous,
+        rules,
+        ae_consensus::on_demand::validate_standalone,
+    )
+}
+pub fn validate_on_demand_micro(
+    block: &MicroBlock,
+    network: &NetworkProfile,
+    known_previous: Option<&Header>,
+    rules: &PowRules,
+) -> Result<(), PowError> {
+    validate_parts(
+        &Header::Micro(block.header.clone()),
+        Some(block),
+        network,
+        known_previous,
+        rules,
+        ae_consensus::on_demand::validate_standalone,
+    )
+}
+fn validate_parts(
+    header: &Header,
+    micro: Option<&MicroBlock>,
+    network: &NetworkProfile,
+    known_previous: Option<&Header>,
+    rules: &PowRules,
+    validate: fn(&Header, &NetworkProfile, u64) -> Result<(), ae_consensus::headers::Error>,
+) -> Result<(), PowError> {
     network
         .validate_version(header.common().height, header.common().version)
         .map_err(|e| PowError::Header(e.into()))?;
@@ -174,8 +226,7 @@ fn validate_pow_parts(
             ));
         }
     }
-    ae_consensus::headers::validate_standalone(header, network, rules.now_ms)
-        .map_err(PowError::Header)?;
+    validate(header, network, rules.now_ms).map_err(PowError::Header)?;
     if let Some(m) = micro {
         let gas_limit = network
             .fixed_block_gas_limit()

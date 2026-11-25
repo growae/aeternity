@@ -70,6 +70,10 @@ fn durable_genesis_reopen_preserves_state_and_revision_for_both_families() {
     for (value, family) in [
         (json!({}), ConsensusType::Pow),
         (
+            json!({"chain":{"consensus":{"0":{"type":"on_demand"}}}}),
+            ConsensusType::Pow,
+        ),
+        (
             json!({"chain":{"consensus":{"0":{"type":"hyperchain","config":{"genesis_start_time":1000}}},"hard_forks":{"7":0}}}),
             ConsensusType::Pos,
         ),
@@ -112,7 +116,7 @@ fn durable_genesis_reopen_preserves_state_and_revision_for_both_families() {
             }
         );
     }
-    println!("Node bootstrap: two durable consensus-family genesis publications and reopens");
+    println!("Node bootstrap: three durable consensus-algorithm genesis publications and reopens");
 }
 #[test]
 fn identity_mismatch_never_replaces_an_existing_chain() {
@@ -158,7 +162,6 @@ fn identity_mismatch_never_replaces_an_existing_chain() {
 fn unsupported_dispatch_and_bad_public_genesis_fail_before_creating_a_database() {
     let trees = trees();
     for (s, expected) in [
-        (settings(json!({}), b"ae_dev"), Error::UnsupportedOnDemand),
         (
             settings(
                 json!({"chain":{"consensus":{"0":{"type":"pow_cuckoo"},"10":{"type":"hyperchain"}}}}),

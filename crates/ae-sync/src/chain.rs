@@ -250,6 +250,11 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         let strategy::Strategy::Pow(profile) = &self.context.strategy else {
             return Err(Error::Binding);
         };
+        // This owner prepares Cuckoo CPU/Stratum work. On-demand callers use
+        // the algorithm-aware candidate builder without a Cuckoo worker.
+        if profile.algorithm != ae_protocol::ConsensusAlgorithm::Cuckoo {
+            return Err(Error::Binding);
+        }
         let identity = self
             .database()
             .view()
@@ -295,6 +300,12 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
             ae_codec::headers::HeaderMode::Hyperchain => ConsensusType::Pos,
         }
     }
+    pub(crate) fn algorithm(&self) -> ae_protocol::ConsensusAlgorithm {
+        match &self.context.strategy {
+            strategy::Strategy::Pow(profile) => profile.algorithm,
+            strategy::Strategy::Hyperchain(_) => ae_protocol::ConsensusAlgorithm::Hyperchain,
+        }
+    }
     pub(crate) fn stop_owned(&self) {
         if self.owns_shutdown {
             self.stop();
@@ -315,28 +326,39 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     pub fn new(
         db: Arc<Database>,
         execution: Owned<O>,
-        rules: Rules,
+        mut rules: Rules,
         config: Config,
     ) -> Result<Self, Error> {
         if execution.consensus() != ConsensusType::Pow {
             return Err(Error::WrongConsensus);
         }
-        {
+        let algorithm = {
             let view = db.view()?;
             if !view.identity().matches(execution.network())
                 || view.identity().genesis != rules.genesis_hash
             {
                 return Err(Error::Storage(repository::Error::Identity));
             }
-            if view.config().mode != ae_codec::headers::HeaderMode::ProofOfWork
+            if view.identity().consensus != ConsensusType::Pow
+                || view.config().mode != ae_codec::headers::HeaderMode::ProofOfWork
                 || view.status().tip.is_none()
             {
                 return Err(Error::Configuration);
             }
+            view.identity().algorithm
+        };
+        // On-demand's dirty_validate_key_hash_at_height callback accepts all
+        // hashes. Its generic linkage and protocol checks still run normally.
+        if algorithm == ae_protocol::ConsensusAlgorithm::OnDemand {
+            rules.checkpoints.clear();
         }
         Self::with_strategy(
             db,
-            strategy::Strategy::Pow(Box::new(strategy::Pow { execution, rules })),
+            strategy::Strategy::Pow(Box::new(strategy::Pow {
+                algorithm,
+                execution,
+                rules,
+            })),
             config,
         )
     }

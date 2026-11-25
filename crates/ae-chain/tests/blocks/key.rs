@@ -1,6 +1,8 @@
 use super::*;
 use ae_chain::{key as transition, rewards};
 use ae_types::Hash256;
+#[path = "key/on_demand.rs"]
+mod on_demand;
 static KEY: LazyLock<J> =
     LazyLock::new(|| unpack_fixture(include_str!("../fixtures/erlang_key_transition.json")));
 fn unsigned(v: &J) -> Unsigned {

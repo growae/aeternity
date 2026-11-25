@@ -2,7 +2,7 @@
 // their original encodings; this database is not an Erlang/Mnesia directory.
 use crate::{block::Block, fraud};
 use ae_crypto::blake2b_256;
-use ae_protocol::{ConsensusType, NetworkProfile};
+use ae_protocol::{ConsensusAlgorithm, ConsensusType, NetworkProfile};
 use ae_state::{
     StateRoots, Trees, accounts::Accounts, calls::Calls, channels::Channels, contracts::Contracts,
     names::Names, oracles::Oracles,
@@ -123,6 +123,7 @@ pub trait Read: NodeReader + Clone {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    pub algorithm: ConsensusAlgorithm,
     pub consensus: ConsensusType,
     pub network: Vec<u8>,
     pub genesis: Hash256,
@@ -139,8 +140,25 @@ impl Identity {
         execution_profile: Hash256,
         consensus: ConsensusType,
     ) -> Self {
+        Self::for_algorithm(
+            network,
+            genesis,
+            execution_profile,
+            match consensus {
+                ConsensusType::Pow => ConsensusAlgorithm::Cuckoo,
+                ConsensusType::Pos => ConsensusAlgorithm::Hyperchain,
+            },
+        )
+    }
+    pub fn for_algorithm(
+        network: &NetworkProfile,
+        genesis: Hash256,
+        execution_profile: Hash256,
+        algorithm: ConsensusAlgorithm,
+    ) -> Self {
         Self {
-            consensus,
+            algorithm,
+            consensus: algorithm.family(),
             network: network.network_id().into(),
             genesis,
             protocols: protocols(network),
@@ -151,11 +169,20 @@ impl Identity {
         self.network == network.network_id() && self.protocols == protocols(network)
     }
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_version(21)
+        // Existing NG/HC writer capabilities and stable bindings are unchanged.
+        // Version 22 explicitly identifies on-demand; older binaries reject it.
+        self.encode_version(if self.algorithm == ConsensusAlgorithm::OnDemand {
+            22
+        } else {
+            21
+        })
     }
     // Archive ownership was introduced with version 7. Bind the identity
     // fields using that stable layout, independently of writer capabilities.
     pub fn binding(&self) -> Vec<u8> {
+        if self.algorithm == ConsensusAlgorithm::OnDemand {
+            return self.encode_version(22);
+        }
         match self.consensus {
             ConsensusType::Pow => self.encode_version(7),
             ConsensusType::Pos => self.encode_version(10),
@@ -181,16 +208,32 @@ impl Identity {
                 ConsensusType::Pos => 1,
             }));
         }
+        if version >= 22 {
+            fields.push(number(match self.algorithm {
+                ConsensusAlgorithm::Cuckoo => 0,
+                ConsensusAlgorithm::OnDemand => 1,
+                ConsensusAlgorithm::Hyperchain => 2,
+            }));
+        }
         list(fields).encode()
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let v = decode(bytes)?;
         let all = items(&v)?;
         let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
-        if !matches!(version, 1..=21) {
+        if !matches!(version, 1..=22) {
             return Err(Error::Corrupt("schema version"));
         }
-        let a = fields(&v, if version >= 10 { 6 } else { 5 })?;
+        let a = fields(
+            &v,
+            if version >= 22 {
+                7
+            } else if version >= 10 {
+                6
+            } else {
+                5
+            },
+        )?;
         let consensus = if version < 10 {
             ConsensusType::Pow
         } else {
@@ -204,7 +247,22 @@ impl Identity {
         if network.is_empty() || network.len() > 1024 {
             return Err(Error::Identity);
         }
+        let algorithm = if version == 22 {
+            if consensus != ConsensusType::Pow
+                || integer(&a[6])? != 1
+                || matches!(network.as_slice(), b"ae_mainnet" | b"ae_uat")
+            {
+                return Err(Error::Corrupt("identity algorithm"));
+            }
+            ConsensusAlgorithm::OnDemand
+        } else {
+            match consensus {
+                ConsensusType::Pow => ConsensusAlgorithm::Cuckoo,
+                ConsensusType::Pos => ConsensusAlgorithm::Hyperchain,
+            }
+        };
         let id = Self {
+            algorithm,
             consensus,
             network,
             genesis: hash(&a[2])?,

@@ -6,7 +6,7 @@ use crate::block::Block;
 use ae_codec::headers::Header;
 use ae_execution::{Context, contracts};
 use ae_hyperchain::chain::{self, LookupError, source};
-use ae_protocol::{ConsensusType, NetworkProfile, Protocol};
+use ae_protocol::{ConsensusAlgorithm, ConsensusType, NetworkProfile, Protocol};
 use ae_trie::{Overlay, OverlayLimits};
 use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
@@ -137,9 +137,10 @@ impl<S: Read> Snapshot<S> {
         };
         let history =
             Arc::new(vm_history(view, &key, self.config.maximum_history_headers).map_err(backend)?);
-        let (consensus, difficulty) = match view.identity().consensus {
-            ConsensusType::Pos => (Consensus::Pos, BigInt::from(key.target)),
-            ConsensusType::Pow => {
+        let (consensus, difficulty) = match view.identity().algorithm {
+            ConsensusAlgorithm::Hyperchain => (Consensus::Pos, BigInt::from(key.target)),
+            ConsensusAlgorithm::OnDemand => (Consensus::Pow, ae_consensus::on_demand::TAG.into()),
+            ConsensusAlgorithm::Cuckoo => {
                 let difficulty = ae_consensus::target::Target(key.target)
                     .difficulty()
                     .map_err(|_| backend(Error::Corrupt("PoW key target")))?;

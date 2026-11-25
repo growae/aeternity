@@ -144,6 +144,43 @@ pub fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     execution: &transactions::Config<'_, O>,
     rules: &Rules,
 ) -> Result<Prepared<A, C>, Error<A, C>> {
+    prepare_inner(trees, header, parent, history, execution, rules, false)
+}
+pub fn prepare_on_demand<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    trees: &Trees<A, C>,
+    header: &KeyHeader,
+    parent: &Parent<'_>,
+    history: &rewards::History,
+    execution: &transactions::Config<'_, O>,
+    rules: &Rules,
+) -> Result<Prepared<A, C>, Error<A, C>> {
+    let key_hash = Header::Key(header.clone())
+        .hash()
+        .map_err(Error::Encoding)?
+        .0;
+    let gas = execution
+        .network
+        .fixed_block_gas_limit()
+        .map_or_else(|| rules.admission.configured_gas_limit.clone(), Into::into);
+    crate::execution::with_block_environment_difficulty(
+        execution,
+        header,
+        header.time,
+        key_hash,
+        &gas,
+        ae_consensus::on_demand::TAG.into(),
+        |execution| prepare_inner(trees, header, parent, history, execution, rules, true),
+    )
+}
+fn prepare_inner<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    trees: &Trees<A, C>,
+    header: &KeyHeader,
+    parent: &Parent<'_>,
+    history: &rewards::History,
+    execution: &transactions::Config<'_, O>,
+    rules: &Rules,
+    in_environment: bool,
+) -> Result<Prepared<A, C>, Error<A, C>> {
     if execution.consensus != ConsensusType::Pow {
         return Err(Error::WrongConsensus);
     }
@@ -161,7 +198,12 @@ pub fn prepare<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             .fixed_block_gas_limit()
             .map_or_else(|| rules.admission.configured_gas_limit.clone(), Into::into),
     );
-    let base = pre_transform(
+    let transform = if in_environment {
+        pre_transform_in_environment
+    } else {
+        pre_transform
+    };
+    let base = transform(
         trees,
         header,
         parent,
@@ -352,22 +394,57 @@ pub fn pow_key<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     execution: &transactions::Config<'_, O>,
     rules: &Rules,
 ) -> Result<Executed, Error<A, C>> {
+    execute_key(header, trees, parent, history, execution, rules, false)
+}
+pub fn on_demand_key<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    header: &KeyHeader,
+    trees: &mut Trees<A, C>,
+    parent: &Parent<'_>,
+    history: &rewards::History,
+    execution: &transactions::Config<'_, O>,
+    rules: &Rules,
+) -> Result<Executed, Error<A, C>> {
+    execute_key(header, trees, parent, history, execution, rules, true)
+}
+fn execute_key<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    header: &KeyHeader,
+    trees: &mut Trees<A, C>,
+    parent: &Parent<'_>,
+    history: &rewards::History,
+    execution: &transactions::Config<'_, O>,
+    rules: &Rules,
+    on_demand: bool,
+) -> Result<Executed, Error<A, C>> {
     if execution.consensus != ConsensusType::Pow {
         return Err(Error::WrongConsensus);
     }
     let block = Block::Key(header.clone());
-    admission::validate_pow(
+    let validate = if on_demand {
+        admission::validate_on_demand
+    } else {
+        admission::validate_pow
+    };
+    validate(
         &block,
         execution.network,
         Some(parent.headers.previous),
         &rules.admission,
     )
     .map_err(Error::Admission)?;
-    headers::validate_context(&block.header(), &parent.headers, &rules.checkpoints)
-        .map_err(Error::Header)?;
+    if on_demand {
+        headers::validate_linkage(&block.header(), &parent.headers).map_err(Error::Header)?;
+    } else {
+        headers::validate_context(&block.header(), &parent.headers, &rules.checkpoints)
+            .map_err(Error::Header)?;
+    }
     if trees.roots().hash().0 != parent.headers.previous.common().state_hash {
         return Err(Error::ParentState);
     }
+    let prepare = if on_demand {
+        prepare_on_demand
+    } else {
+        prepare
+    };
     let prepared = prepare(trees, header, parent, history, execution, rules)?;
     let actual = prepared.trees.roots().hash();
     let expected = Hash256(header.common.state_hash);

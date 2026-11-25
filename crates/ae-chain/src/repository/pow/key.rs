@@ -7,7 +7,7 @@ use crate::{
 use ae_codec::headers::{Header, KeyHeader};
 use ae_consensus::target::{DIFFICULTY_WINDOW, Target};
 use ae_execution::transactions;
-use ae_protocol::ConsensusType;
+use ae_protocol::{ConsensusAlgorithm, ConsensusType};
 use ae_trie::{Overlay, OverlayLimits};
 use ae_types::Hash256;
 use ae_vm_fate::maps::MapOrder;
@@ -40,6 +40,8 @@ pub enum Error<S> {
 }
 pub struct Prepared<S> {
     pub candidate: candidate::Candidate<Overlay<S>, Overlay<S>>,
+    // Retain the exact bounded ancestry supplied to both historical VMs.
+    pub history: Arc<ae_execution::chain_history::Snapshot>,
     pub view: View<S>,
     pub status: Status,
     pub source_id: u64,
@@ -93,7 +95,9 @@ pub fn prepare<S: Read, O: MapOrder>(
         .map_err(repository)?;
     // The original builder looks up target history before calculating state.
     let mut adjustment = Vec::new();
-    if previous.common().height >= (DIFFICULTY_WINDOW + 1) as u64 {
+    if expected.algorithm == ConsensusAlgorithm::Cuckoo
+        && previous.common().height >= (DIFFICULTY_WINDOW + 1) as u64
+    {
         if limits.history < DIFFICULTY_WINDOW + 1 {
             return Err(Error::AdjustmentHistory(repo::Error::ResourceLimit));
         }
@@ -116,6 +120,7 @@ pub fn prepare<S: Read, O: MapOrder>(
         &key,
         &network,
         input.production,
+        expected.algorithm,
     )
     .map_err(Error::Candidate)?;
     let state = view
@@ -140,10 +145,29 @@ pub fn prepare<S: Read, O: MapOrder>(
         fees: crate::rewards::number(&record.fees),
         reported_fraud: record.fraud,
     };
-    let candidate = repo::history::with_history(execution, vm_history, &network, |config| {
-        candidate::Candidate::prepare(&state, &parent, &history, config, rules, input.production)
-    })
-    .map_err(Error::Candidate)?;
+    let candidate =
+        repo::history::with_history(execution, vm_history.clone(), &network, |config| {
+            if expected.algorithm == ConsensusAlgorithm::OnDemand {
+                candidate::Candidate::prepare_on_demand(
+                    &state,
+                    &parent,
+                    &history,
+                    config,
+                    rules,
+                    input.production,
+                )
+            } else {
+                candidate::Candidate::prepare(
+                    &state,
+                    &parent,
+                    &history,
+                    config,
+                    rules,
+                    input.production,
+                )
+            }
+        })
+        .map_err(Error::Candidate)?;
     let initial_target = Target(
         ledger::require_key(view, expected.genesis)
             .map_err(repository)?
@@ -151,6 +175,7 @@ pub fn prepare<S: Read, O: MapOrder>(
     );
     Ok(Prepared {
         candidate,
+        history: vm_history,
         view: view.clone(),
         status: view.status(),
         source_id: view.source().source_id(),

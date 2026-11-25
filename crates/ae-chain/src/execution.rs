@@ -103,20 +103,50 @@ pub fn pow_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     config: &transactions::Config<'_, O>,
     rules: &Rules,
 ) -> Result<ExecutedMicro, Error<A, C>> {
+    micro(block, trees, parent, config, rules, false)
+}
+pub fn on_demand_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    block: &MicroBlock,
+    trees: &mut Trees<A, C>,
+    parent: &Parent<'_>,
+    config: &transactions::Config<'_, O>,
+    rules: &Rules,
+) -> Result<ExecutedMicro, Error<A, C>> {
+    micro(block, trees, parent, config, rules, true)
+}
+fn micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    block: &MicroBlock,
+    trees: &mut Trees<A, C>,
+    parent: &Parent<'_>,
+    config: &transactions::Config<'_, O>,
+    rules: &Rules,
+    on_demand: bool,
+) -> Result<ExecutedMicro, Error<A, C>> {
     if config.consensus != ConsensusType::Pow {
         return Err(Error::WrongConsensus);
     }
     let header = Header::Micro(block.header.clone());
-    admission::validate_pow_micro(block, config.network, Some(parent.headers.previous), rules)
+    let validate = if on_demand {
+        admission::validate_on_demand_micro
+    } else {
+        admission::validate_pow_micro
+    };
+    validate(block, config.network, Some(parent.headers.previous), rules)
         .map_err(Error::Admission)?;
-    headers::validate_context_with_cycle(
-        &header,
-        &parent.headers,
-        &Default::default(),
-        rules.micro_cycle_ms,
-    )
-    .map_err(Error::Header)?;
-    if let Some(proof) = &block.proof {
+    if on_demand {
+        headers::validate_linkage(&header, &parent.headers).map_err(Error::Header)?;
+    } else {
+        headers::validate_context_with_cycle(
+            &header,
+            &parent.headers,
+            &Default::default(),
+            rules.micro_cycle_ms,
+        )
+        .map_err(Error::Header)?;
+    }
+    if let Some(proof) = &block.proof
+        && !on_demand
+    {
         let key = if matches!(parent.headers.previous, Header::Micro(_)) {
             parent.headers.previous_key.miner
         } else {
@@ -148,23 +178,36 @@ pub fn pow_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .fixed_block_gas_limit()
         .map_or_else(|| rules.configured_gas_limit.clone(), BigInt::from);
     let mut next = trees.clone();
-    let result = with_block_environment(
-        config,
-        key,
-        block.header.time,
-        block.header.common.previous_key_hash,
-        &gas_limit,
-        |config| {
-            batch::apply_micro(
-                &block.transactions,
-                &mut next,
-                &context,
-                config,
-                gas_limit.clone(),
-                parent.fees.clone(),
-            )
-        },
-    )
+    let apply = |config: &transactions::Config<'_, O>| {
+        batch::apply_micro(
+            &block.transactions,
+            &mut next,
+            &context,
+            config,
+            gas_limit.clone(),
+            parent.fees.clone(),
+        )
+    };
+    let result = if on_demand {
+        Ok(with_block_environment_difficulty(
+            config,
+            key,
+            block.header.time,
+            block.header.common.previous_key_hash,
+            &gas_limit,
+            ae_consensus::on_demand::TAG.into(),
+            apply,
+        ))
+    } else {
+        with_block_environment(
+            config,
+            key,
+            block.header.time,
+            block.header.common.previous_key_hash,
+            &gas_limit,
+            apply,
+        )
+    }
     .map_err(Error::ParentDifficulty)?
     .map_err(Error::Transactions)?;
     let actual = next.roots().hash();
@@ -201,6 +244,19 @@ pub(crate) fn with_block_environment<O: MapOrder, R>(
         }
         ConsensusType::Pos => key.target.into(),
     };
+    Ok(with_block_environment_difficulty(
+        config, key, timestamp, key_hash, gas_limit, difficulty, f,
+    ))
+}
+pub(crate) fn with_block_environment_difficulty<O: MapOrder, R>(
+    config: &transactions::Config<'_, O>,
+    key: &KeyHeader,
+    timestamp: u64,
+    key_hash: [u8; 32],
+    gas_limit: &BigInt,
+    difficulty: BigInt,
+    f: impl FnOnce(&transactions::Config<'_, O>) -> R,
+) -> R {
     let fate_context = config.fate.map(|f| {
         let mut c = f.context.clone();
         c.in_auth = false;
@@ -258,5 +314,5 @@ pub(crate) fn with_block_environment<O: MapOrder, R>(
         maximum_fate_steps: config.maximum_fate_steps,
         aevm_limits: config.aevm_limits,
     };
-    Ok(f(&config))
+    f(&config)
 }

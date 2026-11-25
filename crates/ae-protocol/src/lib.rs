@@ -17,6 +17,23 @@ pub enum ConsensusType {
     Pos,
 }
 
+// The native family alone does not identify the validity rules: on-demand
+// reports pow, but has its own target, difficulty and validation callbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsensusAlgorithm {
+    Cuckoo,
+    OnDemand,
+    Hyperchain,
+}
+impl ConsensusAlgorithm {
+    pub const fn family(self) -> ConsensusType {
+        match self {
+            Self::Cuckoo | Self::OnDemand => ConsensusType::Pow,
+            Self::Hyperchain => ConsensusType::Pos,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 pub enum Protocol {

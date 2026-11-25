@@ -119,36 +119,8 @@ pub fn validate_context_with_cycle(
     checkpoints: &Checkpoints,
     micro_cycle_ms: u64,
 ) -> Result<(), Error> {
+    validate_linkage(header, ctx)?;
     let common = header.common();
-    if common.previous_hash != ctx.previous.hash()?.0 {
-        return Err(Error::PreviousHash);
-    }
-    let key_hash = Header::Key(ctx.previous_key.clone()).hash()?;
-    if common.previous_key_hash != key_hash.0 {
-        return Err(Error::PreviousKeyHash);
-    }
-    match ctx.previous {
-        Header::Key(_) if common.previous_hash != key_hash.0 => return Err(Error::PreviousKeyHash),
-        Header::Micro(m)
-            if m.common.previous_key_hash != key_hash.0
-                || m.common.height != ctx.previous_key.common.height =>
-        {
-            return Err(Error::PreviousKeyHash);
-        }
-        _ => {}
-    }
-    let expected_height = match header {
-        Header::Key(_) => ctx
-            .previous
-            .common()
-            .height
-            .checked_add(1)
-            .ok_or(Error::Height)?,
-        Header::Micro(_) => ctx.previous.common().height,
-    };
-    if common.height != expected_height {
-        return Err(Error::Height);
-    }
     match header {
         Header::Micro(m) => {
             let interval = if matches!(ctx.previous, Header::Micro(_)) {
@@ -214,6 +186,42 @@ pub fn validate_context_with_cycle(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+// Generic insertion context checks shared by NG and on-demand. Timing,
+// signatures, checkpoints and target adjustment belong to the algorithm.
+pub fn validate_linkage(header: &Header, ctx: &Context<'_>) -> Result<(), Error> {
+    let common = header.common();
+    if common.previous_hash != ctx.previous.hash()?.0 {
+        return Err(Error::PreviousHash);
+    }
+    let key_hash = Header::Key(ctx.previous_key.clone()).hash()?;
+    if common.previous_key_hash != key_hash.0 {
+        return Err(Error::PreviousKeyHash);
+    }
+    match ctx.previous {
+        Header::Key(_) if common.previous_hash != key_hash.0 => return Err(Error::PreviousKeyHash),
+        Header::Micro(m)
+            if m.common.previous_key_hash != key_hash.0
+                || m.common.height != ctx.previous_key.common.height =>
+        {
+            return Err(Error::PreviousKeyHash);
+        }
+        _ => {}
+    }
+    let expected_height = match header {
+        Header::Key(_) => ctx
+            .previous
+            .common()
+            .height
+            .checked_add(1)
+            .ok_or(Error::Height)?,
+        Header::Micro(_) => ctx.previous.common().height,
+    };
+    if common.height != expected_height {
+        return Err(Error::Height);
     }
     Ok(())
 }
