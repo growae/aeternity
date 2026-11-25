@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ae-hyperchain.workspace = true
 fancy-regex.workspace = true
 zeroize.workspace = true
 rustix.workspace = true
@@ -32,7 +33,6 @@ ae-vm-aevm.workspace = true
 num-bigint.workspace = true
 
 [dev-dependencies]
-ae-hyperchain.workspace = true
 hex.workspace = true
 
 [lints]

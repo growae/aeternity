@@ -307,6 +307,15 @@ impl Configuration {
     }
 }
 impl Resolved<'_> {
+    pub fn data_directory(&self, application: &str) -> Result<PathBuf, Error> {
+        if application.is_empty() || application.contains(['/', '\\', '\0']) {
+            return Err(Error::Directory);
+        }
+        let root = self
+            .context
+            .expand("setup", &Value::String("$DATA_DIR".into()))?;
+        Ok(path(&root)?.join(application))
+    }
     pub fn user_map(&self) -> &Value {
         &self.user
     }

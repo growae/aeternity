@@ -111,6 +111,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
         value: Vec<u8>,
     },
     InvalidAmount,
+    Environment,
 }
 fn number(n: &Unsigned) -> BigInt {
     BigInt::from_bytes_be(Sign::Plus, n.as_bytes())
@@ -348,4 +349,76 @@ pub fn transform<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     .map_err(|e| Error::Consensus(Box::new(e)))?;
     next.calls.prune();
     Ok(next)
+}
+
+// Bind the native pre-publication genesis environment, including the hash of
+// the raw zero-root header. Caller history/authentication must not leak into
+// genesis; every explicit VM, signature, channel and oracle limit is retained.
+pub fn initialize<O: MapOrder>(
+    trees: &Trees,
+    plan: &Plan,
+    raw: &ae_codec::headers::KeyHeader,
+    execution: &transactions::Config<'_, O>,
+    configured_gas_limit: &Unsigned,
+) -> Result<Trees, Error> {
+    use ae_vm_fate::machine::program::remote::context::Consensus;
+    if execution.consensus != ae_protocol::ConsensusType::Pos
+        || raw.common.height != 0
+        || raw.common.state_hash != [0; 32]
+        || raw.target != 0
+    {
+        return Err(Error::Environment);
+    }
+    let protocol = execution.network.protocol_at(0).map_err(Error::Profile)?;
+    if raw.common.version != protocol as u32 {
+        return Err(Error::Environment);
+    }
+    let hash = ae_codec::headers::Header::Key(raw.clone())
+        .hash()
+        .map_err(|_| Error::Environment)?;
+    let history = std::sync::Arc::new(ae_execution::chain_history::Snapshot::default());
+    let original = execution.fate.ok_or(Error::Environment)?;
+    let mut context = original.context.clone();
+    context.in_auth = false;
+    context.on_chain = true;
+    context.reserved_gas = 0.into();
+    let mut environment = original.environment.clone();
+    environment.auth_tx_hash = None;
+    environment.origin = [0; 32];
+    environment.gas_price = 0.into();
+    environment.fee = 0.into();
+    environment.beneficiary = raw.beneficiary;
+    environment.timestamp = raw.time.into();
+    environment.difficulty = 0.into();
+    environment.block_gas_limit = number(&execution.network.block_gas_limit(configured_gas_limit));
+    environment.network_id = execution.network.network_id().into();
+    environment.consensus = Consensus::Pos;
+    environment.key_hash = hash.0;
+    let fate = ae_execution::contracts::fate::Config {
+        context: &context,
+        order: original.order,
+        overrides: original.overrides,
+        environment: &environment,
+        history: history.clone(),
+        auth_tx: None,
+        metering_floor: None,
+        diagnostic_profile: original.diagnostic_profile,
+    };
+    let mut aevm = execution.aevm.ok_or(Error::Environment)?.clone();
+    aevm.network_id = execution.network.network_id().into();
+    aevm.environment.history = history;
+    aevm.environment.genesis_height = 0;
+    aevm.environment.key_hash = hash.0;
+    aevm.environment.beneficiary = AccountPublicKey(raw.beneficiary);
+    aevm.environment.timestamp_ms = raw.time.into();
+    aevm.environment.difficulty = 0.into();
+    aevm.environment.block_gas_limit = environment.block_gas_limit.clone();
+    aevm.environment.auth_tx_hash = None;
+    aevm.event_context = ae_execution::aevm_chain::EventContext::None;
+    let cfg = transactions::Config {
+        fate: Some(&fate),
+        aevm: Some(&aevm),
+        ..*execution
+    };
+    transform(trees, plan, &Context::transaction(0, protocol), &cfg)
 }

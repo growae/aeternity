@@ -1,0 +1,2506 @@
+{
+  "files": {
+    ".genesis/accounts_test.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\": 11}",
+    ".genesis/extra_accounts_test.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\": 12}",
+    ".genesis/contracts_test.json": "{\"contracts\":[],\"calls\":[]}",
+    ".ceres/accounts_test.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\": 61}",
+    ".ceres/extra_accounts_test.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\": 62}",
+    ".ceres/contracts_test.json": "{\"contracts\":[],\"calls\":[]}",
+    "override.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\": 17}",
+    "duplicates.json": "{\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\":1,\"ak_2a1j2Mk9YSmC1gioUq4PWRm3bsv887MbuRVwyv4KaUGoR1eiKi\":-1}",
+    "invalid.json": "{",
+    "scalar.json": "17",
+    "array.json": "[1]",
+    "empty-array.json": "[]",
+    "bad-address.json": "{\"bad\":1}",
+    "empty.json": "{}"
+  },
+  "cases": [
+    {
+      "name": "file-0",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-1",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-2",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-3",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-4",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-5",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-6",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-7",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-8",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-9",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-10",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-11",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-12",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-13",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-14",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-15",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-16",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-17",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-18",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-19",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-20",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-21",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-22",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-23",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-24",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-25",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-26",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-27",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-28",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-29",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-30",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-31",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-32",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-33",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-34",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-35",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-36",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-37",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-38",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-39",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-40",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-41",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-42",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-43",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-44",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-45",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-46",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-47",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-48",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-49",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-50",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-51",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-52",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-53",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-54",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-55",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-56",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-57",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-58",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-59",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-60",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-61",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-62",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-63",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-64",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-65",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-66",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-67",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-68",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-69",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-70",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-71",
+      "protocol": 1,
+      "asset": "extra_accounts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-72",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-73",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-74",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-75",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-76",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-77",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-78",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-79",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-80",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-81",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-82",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-83",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-84",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-85",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-86",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-87",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-88",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-89",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-90",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-91",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-92",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-93",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-94",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-95",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-96",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-97",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-98",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-99",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-100",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-101",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-102",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-103",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-104",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-105",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-106",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-107",
+      "protocol": 1,
+      "asset": "contracts",
+      "fork": {
+        "1": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-108",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-109",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-110",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-111",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-112",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-113",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-114",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-115",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-116",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-117",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-118",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-119",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-120",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-121",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-122",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-123",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-124",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-125",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-126",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-127",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-128",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-129",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-130",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-131",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-132",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-133",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-134",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-135",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-136",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-137",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "accounts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-138",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-139",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-140",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-141",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-142",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-143",
+      "protocol": 6,
+      "asset": "accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-144",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-145",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-146",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-147",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-148",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-149",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-150",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-151",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-152",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-153",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-154",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-155",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-156",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-157",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-158",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-159",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-160",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-161",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-162",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-163",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-164",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-165",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-166",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-167",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-168",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-169",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-170",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-171",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-172",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-173",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "extra_accounts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-174",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-175",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-176",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-177",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-178",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-179",
+      "protocol": 6,
+      "asset": "extra_accounts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-180",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": null,
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-181",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": null,
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-182",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": null,
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-183",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {},
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-184",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {},
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-185",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {},
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-186",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": 0
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-187",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-188",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": 0
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-189",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": -1
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-190",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-191",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": -1
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-192",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-193",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-194",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-195",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-196",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-197",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-198",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-199",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-200",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "$DATA/override.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-201",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-202",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-203",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "missing.json"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-204",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-205",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-206",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": "directory"
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-207",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-208",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-209",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": {
+          "height": 0,
+          "contracts_file": 17
+        }
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-210",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": [],
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-211",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": [],
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-212",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": [],
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-213",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": false
+      },
+      "custom": null,
+      "mode": "read"
+    },
+    {
+      "name": "file-214",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/override.json",
+      "mode": "read"
+    },
+    {
+      "name": "file-215",
+      "protocol": 6,
+      "asset": "contracts",
+      "fork": {
+        "6": false
+      },
+      "custom": "$DATA/missing-custom.json",
+      "mode": "read"
+    },
+    {
+      "name": "decode-override.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "override.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-duplicates.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "duplicates.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-invalid.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "invalid.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-scalar.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "scalar.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-array.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "array.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-empty-array.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "empty-array.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-bad-address.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "bad-address.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "decode-empty.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": {
+        "1": {
+          "height": 0,
+          "accounts_file": "empty.json"
+        }
+      },
+      "custom": null,
+      "mode": "decode"
+    },
+    {
+      "name": "relative-override.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "override.json",
+      "mode": "read"
+    },
+    {
+      "name": "relative-missing-relative.json",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "missing-relative.json",
+      "mode": "read"
+    },
+    {
+      "name": "relative-directory",
+      "protocol": 1,
+      "asset": "accounts",
+      "fork": null,
+      "custom": "directory",
+      "mode": "read"
+    }
+  ]
+}
