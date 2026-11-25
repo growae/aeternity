@@ -846,6 +846,8 @@ async fn graceful_metrics_stop_keeps_routing_alive_until_queued_output_is_disabl
         None
     );
     assert!(!input.info().disabled && !client.info().joined);
+    assert!(client.reporter().unwrap().info().joined);
+    assert!(!client.reporter().unwrap().info().running);
     drop(release);
     let exit = within(running.wait()).await.unwrap();
     assert!(exit.status().joined && exit.status().failure.is_none());

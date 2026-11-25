@@ -49,7 +49,7 @@ impl Metrics {
     async fn receive(&self) -> (Vec<u8>, std::net::SocketAddr) {
         let mut b = [0; 1024];
         let (n, from) =
-            tokio::time::timeout(Duration::from_secs(5), self.receiver.recv_from(&mut b))
+            tokio::time::timeout(Duration::from_secs(12), self.receiver.recv_from(&mut b))
                 .await
                 .unwrap()
                 .unwrap();
@@ -59,6 +59,13 @@ impl Metrics {
         let client = h.metrics().unwrap();
         assert!(client.info().ready && client.info().connected);
         assert_eq!(client.info().open_attempts, 1);
+        let reporter = client.reporter().unwrap();
+        let first = reporter.reporters().unwrap().await.unwrap().remove(0);
+        assert!(first.alive && first.enabled);
+        assert_eq!(
+            first.intervals[0].interval.period,
+            ae_sync::observe::reporter::Period::Milliseconds(10_000)
+        );
         if !normal {
             assert!(h.connections().is_none());
             client
@@ -88,6 +95,15 @@ impl Metrics {
         }
         let mut connections = h.connections().unwrap();
         let mut generation = connections.current().unwrap();
+        let mut immediate = [0; 1024];
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                self.receiver.recv(&mut immediate)
+            )
+            .await
+            .is_err()
+        );
         let (line, from) = self.receive().await;
         assert!(
             std::str::from_utf8(&line)
@@ -139,6 +155,12 @@ impl Metrics {
         while !generation.observer.status().joined {
             generation.observer.changed().await.unwrap();
         }
+        let next_reporter = reporter.reporters().unwrap().await.unwrap().remove(0);
+        assert_eq!(next_reporter.generation, first.generation);
+        assert!(Arc::ptr_eq(
+            &client.store().unwrap(),
+            &h.metrics().unwrap().store().unwrap()
+        ));
         let (next, source) = self.receive().await;
         assert!(
             std::str::from_utf8(&next)
@@ -163,6 +185,8 @@ impl Metrics {
         let stable = h.metrics().unwrap();
         let supervisor = stable.supervisor().unwrap();
         let old = supervisor.current().unwrap();
+        let reporter = stable.reporter().unwrap();
+        let before = reporter.reporters().unwrap().await.unwrap().remove(0);
         let connection = h.connections().map(|c| c.status().generation);
         let ticket = supervisor.restart(old.number).unwrap();
         assert_eq!(
@@ -181,6 +205,9 @@ impl Metrics {
         assert_eq!(h.connections().map(|c| c.status().generation), connection);
         assert_eq!(supervisor.status().supervisor_generation, 1);
         assert_eq!(stable.info().open_attempts, 2);
+        let after = reporter.reporters().unwrap().await.unwrap().remove(0);
+        assert_eq!(after.generation, before.generation);
+        assert!(after.alive);
         assert!(h.status().ready && h.status().failure.is_none());
         let marker = format!("logger-generation.value:{}|g", old.number + 1).into_bytes();
         stable

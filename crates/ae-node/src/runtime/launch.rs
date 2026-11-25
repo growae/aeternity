@@ -65,7 +65,18 @@ impl Prepared {
             }));
         }
         let metrics_config = self.1.clone();
-        let mut application = match self.1.clone().map(metrics::Owner::prepare).transpose() {
+        let prefix = match &settings {
+            Settings::Cuckoo(s) => &s.config.connections.observer.prefix,
+            Settings::OnDemand(s) => &s.config.connections.observer.prefix,
+            Settings::Hyperchain(s) => &s.config.connections.observer.prefix,
+        }
+        .clone();
+        let mut application = match self
+            .1
+            .clone()
+            .map(|s| metrics::Owner::prepare(s, prefix))
+            .transpose()
+        {
             Ok(owner) => owner,
             Err(error) => {
                 return Err(Box::new(StartError {

@@ -58,7 +58,7 @@ impl Limits {
         }
         Ok(32 + s.len())
     }
-    fn part(self, p: &Part) -> Result<usize, Error> {
+    pub(super) fn part(self, p: &Part) -> Result<usize, Error> {
         let n = match p {
             Part::Integer(n) if n.bits() <= self.integer_bits => 32 + n.to_signed_bytes_le().len(),
             Part::Integer(_) => return Err(Error::Limit),
@@ -75,7 +75,7 @@ impl Limits {
             Ok(n)
         }
     }
-    fn name(self, name: &[Part]) -> Result<usize, Error> {
+    pub(super) fn name(self, name: &[Part]) -> Result<usize, Error> {
         if name.len() > self.parts {
             return Err(Error::Limit);
         }
@@ -91,7 +91,7 @@ pub enum Value {
     Other,
 }
 impl Value {
-    fn size(&self, l: Limits) -> Result<usize, Error> {
+    pub(super) fn size(&self, l: Limits) -> Result<usize, Error> {
         match self {
             Self::Integer(n) if n.bits() <= l.integer_bits => {
                 l.size(32 + n.to_signed_bytes_le().len())
@@ -134,7 +134,7 @@ pub enum Extra {
     Other,
 }
 impl Extra {
-    fn size(&self, l: Limits) -> Result<usize, Error> {
+    pub(super) fn size(&self, l: Limits) -> Result<usize, Error> {
         let Self::List(options) = self else {
             return Ok(32);
         };

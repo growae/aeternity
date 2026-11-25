@@ -16,6 +16,7 @@ pub mod metrics;
 mod peers;
 pub mod pipeline;
 pub mod report;
+pub mod reporter;
 mod sink;
 pub mod statsd;
 pub use feed::{Cursor, Delivery, Record, Subscription};
@@ -104,6 +105,7 @@ pub enum Error {
     Timeout,
     RestartLimit,
     Report(report::Error),
+    Reporter(reporter::Error),
     Pipeline(pipeline::Error),
     Io(std::io::ErrorKind),
 }
@@ -391,7 +393,12 @@ impl Service {
                 None
             }
         };
-        if let Some(exporter) = &self.exporter
+        if let Some(store) = self.exporter.as_ref().and_then(statsd::Client::store) {
+            if let Err(error) = store.publish(&sample.metrics) {
+                self.current.sample_errors = self.current.sample_errors.saturating_add(1);
+                self.current.last_error = Some(Error::Reporter(error));
+            }
+        } else if let Some(exporter) = &self.exporter
             && exporter.is_pipeline()
         {
             for metric in &sample.metrics.metrics {

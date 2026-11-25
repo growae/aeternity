@@ -329,7 +329,9 @@ impl Handle {
     pub fn request_shutdown(&self) {
         if let Some(metrics) = &self.metrics {
             metrics.stop();
-            return;
+            if !metrics.done() {
+                return;
+            }
         }
         match &self.inner {
             HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => h.request_shutdown(),

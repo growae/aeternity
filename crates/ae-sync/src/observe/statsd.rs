@@ -211,8 +211,27 @@ enum Binding {
     Managed(supervision::Handle),
 }
 #[derive(Clone)]
-pub struct Client(Binding);
+pub struct Client(
+    Binding,
+    Option<std::sync::Arc<super::reporter::Store>>,
+    Option<super::reporter::Client>,
+);
 impl Client {
+    pub fn with_reporter(
+        mut self,
+        store: std::sync::Arc<super::reporter::Store>,
+        reporter: super::reporter::Client,
+    ) -> Self {
+        self.1 = Some(store);
+        self.2 = Some(reporter);
+        self
+    }
+    pub fn store(&self) -> Option<std::sync::Arc<super::reporter::Store>> {
+        self.1.clone()
+    }
+    pub fn reporter(&self) -> Option<super::reporter::Client> {
+        self.2.clone()
+    }
     pub fn is_pipeline(&self) -> bool {
         match &self.0 {
             Binding::Direct(c) => c.input().is_some(),
@@ -292,7 +311,7 @@ impl Worker {
         self.0.activate();
     }
     pub fn client(&self) -> Client {
-        Client(Binding::Direct(self.0.client()))
+        Client(Binding::Direct(self.0.client()), None, None)
     }
     pub async fn finish(&mut self) {
         self.0.finish().await;
