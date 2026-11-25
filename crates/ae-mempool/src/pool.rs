@@ -189,6 +189,12 @@ pub enum PushOutcome {
         event: Event,
     },
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionEvent {
+    Submit,
+    Ignore,
+    Reject,
+}
 #[derive(Debug, Clone)]
 pub struct Pool {
     active: BTreeMap<Key, Entry>,

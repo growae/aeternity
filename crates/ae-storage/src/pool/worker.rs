@@ -133,6 +133,7 @@ struct Control {
 }
 pub(crate) struct Shared {
     database: std::sync::Weak<Database>,
+    instrumentation: ae_chain::instrumentation::Publisher,
     control: Mutex<Control>,
     changed: Condvar,
     settings: Settings,
@@ -195,6 +196,7 @@ impl Worker {
         let service = Service::start(db.clone(), network, config)?;
         let shared = Arc::new(Shared {
             database: Arc::downgrade(&db),
+            instrumentation: db.instrumentation().clone(),
             control: Mutex::new(Control {
                 info: Info {
                     version: 0,

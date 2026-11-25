@@ -289,9 +289,15 @@ fn malformed_members_and_records_are_reported_without_dropping_membership() {
 fn explicit_gc_signed_ttl_metrics_and_failed_commit_preserve_durable_records() {
     let temp = Temp::new();
     let db = database(&temp);
+    let events = super::metrics::Events::default();
+    let _binding = events.bind(&db);
     let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
     let t = pending();
     service.force_push(t.clone()).unwrap();
+    assert_eq!(
+        events.take(),
+        vec![(ae_chain::instrumentation::Counter::PoolPush, 1)]
+    );
     assert_eq!(service.ttl(t.hash()).unwrap(), 5);
     service.adjust_ttl(10).unwrap();
     assert_eq!(service.ttl(t.hash()).unwrap(), -5);
@@ -308,6 +314,7 @@ fn explicit_gc_signed_ttl_metrics_and_failed_commit_preserve_durable_records() {
     ));
     assert_eq!(service.ttl(t.hash()).unwrap(), -5);
     assert_eq!(service.inspection().maintenance, Maintenance::default());
+    assert!(events.take().is_empty());
     assert_eq!(
         db.pool_view().unwrap().location(t.hash()).unwrap(),
         Location::Pool
@@ -316,6 +323,10 @@ fn explicit_gc_signed_ttl_metrics_and_failed_commit_preserve_durable_records() {
     service.adjust_ttl(10).unwrap();
     assert_eq!(service.collect_at(0, false, 100).unwrap(), vec![t.hash()]);
     assert_eq!(service.inspection().maintenance.gced, 1);
+    assert_eq!(
+        events.take(),
+        vec![(ae_chain::instrumentation::Counter::PoolGarbageCollected, 1)]
+    );
     assert_eq!(
         db.pool_view().unwrap().location(t.hash()).unwrap(),
         Location::Deleted

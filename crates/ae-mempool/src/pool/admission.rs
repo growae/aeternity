@@ -8,15 +8,48 @@ impl Pool {
         options: PushOptions,
         env: &Admission<'_, A, C>,
     ) -> Result<PushOutcome, Error> {
+        self.push_observed(tx, options, env, |_| {})
+    }
+    // The native push counter precedes the insertion call, including insertion
+    // failure. Cached inputs and operational precheck failures emit no event.
+    pub fn push_observed<A: NodeReader, C: NodeReader>(
+        &mut self,
+        tx: Arc<Signed>,
+        options: PushOptions,
+        env: &Admission<'_, A, C>,
+        observe: impl FnOnce(AdmissionEvent),
+    ) -> Result<PushOutcome, Error> {
+        match self.check_push(&tx, options, env) {
+            Ok(None) => Ok(PushOutcome::Cached),
+            Ok(Some((bytes, residency))) => {
+                observe(AdmissionEvent::Submit);
+                self.accept(tx, bytes, residency, options.event)
+            }
+            Err(error) => {
+                if error == Error::AlreadyKnown {
+                    observe(AdmissionEvent::Ignore);
+                } else if !error.is_operational() {
+                    observe(AdmissionEvent::Reject);
+                }
+                Err(error)
+            }
+        }
+    }
+    fn check_push<A: NodeReader, C: NodeReader>(
+        &self,
+        tx: &Signed,
+        options: PushOptions,
+        env: &Admission<'_, A, C>,
+    ) -> Result<Option<(usize, u64)>, Error> {
         let PushOptions {
             event,
             location,
             gossip_cached,
         } = options;
         if event == Event::Received && gossip_cached {
-            return Ok(PushOutcome::Cached);
+            return Ok(None);
         }
-        let bytes = self.encode_size(&tx, env.record)?;
+        let bytes = self.encode_size(tx, env.record)?;
         let mut lookup = |k| {
             env.trees
                 .accounts
@@ -28,13 +61,13 @@ impl Pool {
             Location::Block(_) => return Err(Error::AlreadyAccepted),
             Location::Pool => return Err(Error::AlreadyKnown),
             Location::Deleted if !self.config.allow_reentry => return Err(Error::AlreadyKnown),
-            Location::Deleted => self.residency(&tx, &mut lookup)?,
+            Location::Deleted => self.residency(tx, &mut lookup)?,
             Location::Unknown => {
-                self.validate(&tx, event, env)?;
-                self.residency(&tx, &mut lookup)?
+                self.validate(tx, event, env)?;
+                self.residency(tx, &mut lookup)?
             }
         };
-        self.accept(tx, bytes, residency, event)
+        Ok(Some((bytes, residency)))
     }
     pub fn force_push(
         &mut self,

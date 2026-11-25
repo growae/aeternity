@@ -84,6 +84,11 @@ struct Live {
 struct Plan {
     live: Live,
     writes: repo::Writes,
+    cleanup: Vec<Cleanup>,
+}
+enum Cleanup {
+    Expiry(u64),
+    Origin(usize),
 }
 // One owner serializes transient state; chain commits remain independent.
 // The optional request worker owns this service without exposing its Pool.
@@ -253,6 +258,7 @@ impl Service {
             return Ok(Plan {
                 live: self.live.clone(),
                 writes: Default::default(),
+                cleanup: vec![],
             });
         }
         if current.revision - self.live.chain.revision > self.config.events as u64 {
@@ -282,10 +288,12 @@ impl Service {
             return Ok(Plan {
                 live: restore(stored, &self.config)?,
                 writes: Default::default(),
+                cleanup: vec![],
             });
         }
         let mut live = self.live.clone();
         let mut collected = BTreeSet::new();
+        let mut cleanup = vec![];
         for event in events {
             if event.old_tip != live.chain.tip {
                 return Err(Error::Corrupt("pool event continuity").into());
@@ -310,14 +318,20 @@ impl Service {
                             return Ok(Plan {
                                 live: restore(stored, &self.config)?,
                                 writes: Default::default(),
+                                cleanup: vec![],
                             });
                         }
                         Err(e) => return Err(e.into()),
                     };
                     if key && height > live.height {
+                        let mut candidates = false;
                         let gone = live.pool.collect_expired(height, usize::MAX, |h| {
+                            candidates = true;
                             Ok(live.members.contains(&h))
                         })?;
+                        if candidates {
+                            cleanup.push(Cleanup::Expiry(gone.len() as u64));
+                        }
                         live.maintenance.gced =
                             live.maintenance.gced.saturating_add(gone.len() as u64);
                         for hash in gone {
@@ -375,7 +389,11 @@ impl Service {
                 writes.insert(repo::key(MEMBERS, hash.0), None);
             }
         }
-        Ok(Plan { live, writes })
+        Ok(Plan {
+            live,
+            writes,
+            cleanup,
+        })
     }
     fn finish(
         &mut self,
@@ -390,6 +408,24 @@ impl Service {
             Ok(revision) => {
                 plan.live.revision = revision;
                 self.live = plan.live;
+                // Catch-up cleanup and explicit passes share the same durable
+                // acknowledgement. Rejected plans and recovery emit nothing.
+                use ae_chain::instrumentation::Counter;
+                for observation in plan.cleanup {
+                    match observation {
+                        Cleanup::Expiry(n) => self
+                            .db
+                            .instrumentation()
+                            .counter(Counter::PoolGarbageCollected, n),
+                        Cleanup::Origin(n) => {
+                            for _ in 0..n {
+                                self.db
+                                    .instrumentation()
+                                    .counter(Counter::PoolOriginGarbageCollected, 1);
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }
             Err(e) => {
@@ -437,6 +473,12 @@ impl Service {
         self.submit(tx, Some((event, gossip_cached)), || Ok(()))
     }
     pub fn force_push(&mut self, tx: Arc<Signed>) -> Result<Submission, Failure> {
+        self.db
+            .instrumentation()
+            .counter(ae_chain::instrumentation::Counter::PoolPush, 1);
+        self.force_push_counted(tx)
+    }
+    pub(super) fn force_push_counted(&mut self, tx: Arc<Signed>) -> Result<Submission, Failure> {
         self.submit(tx, None, || Ok(()))
     }
     fn submit(
@@ -445,6 +487,7 @@ impl Service {
         options: Option<(policy::Event, bool)>,
         check: impl FnMut() -> Result<(), Error>,
     ) -> Result<Submission, Failure> {
+        use ae_chain::instrumentation::Counter;
         let db = self.db.clone();
         let stored = db.pool_view()?;
         let mut plan = self.plan(&stored)?;
@@ -457,7 +500,7 @@ impl Service {
         let outcome = if let Some((event, gossip_cached)) = options {
             let (hash, header) = tip(&stored)?;
             let trees = stored.chain.trees(hash, self.config.overlay)?;
-            plan.live.pool.push(
+            plan.live.pool.push_observed(
                 tx.clone(),
                 policy::PushOptions {
                     event,
@@ -472,6 +515,16 @@ impl Service {
                     consensus: self.config.consensus,
                     height: header.common().height,
                     record: stored.chain.config().transaction_record(),
+                },
+                |event| {
+                    db.instrumentation().counter(
+                        match event {
+                            policy::AdmissionEvent::Submit => Counter::PoolPush,
+                            policy::AdmissionEvent::Ignore => Counter::PoolPushIgnore,
+                            policy::AdmissionEvent::Reject => Counter::PoolPushError,
+                        },
+                        1,
+                    );
                 },
             )?
         } else {
@@ -716,15 +769,20 @@ impl Service {
         let mut plan = self.plan(&stored)?;
         let (hash, header) = tip(&stored)?;
         let height = height.unwrap_or(header.common().height);
+        let mut expiry_candidates = false;
+        let mut removable = |h| {
+            expiry_candidates = true;
+            Ok(plan.live.members.contains(&h))
+        };
         let mut gone = if synchronized {
             plan.live
                 .pool
-                .collect_expired(height, limit, |h| Ok(plan.live.members.contains(&h)))?
+                .collect_expired(height, limit, &mut removable)?
         } else {
-            plan.live
-                .pool
-                .collect_at(height, limit, |h| Ok(plan.live.members.contains(&h)))?
+            plan.live.pool.collect_at(height, limit, &mut removable)?
         };
+        let expired = gone.len() as u64;
+        let mut origin_removed = 0;
         plan.live.maintenance.gced = plan.live.maintenance.gced.saturating_add(gone.len() as u64);
         // Empty native origin passes do not read the selected account state.
         if origins && plan.live.pool.origins_len() != 0 {
@@ -733,6 +791,7 @@ impl Service {
                 |k| lookup(&trees.accounts, k),
                 |h| Ok(plan.live.members.contains(&h)),
             )?;
+            origin_removed = removed.len();
             plan.live.maintenance.origin_gced = plan
                 .live
                 .maintenance
@@ -743,6 +802,12 @@ impl Service {
         for hash in &gone {
             plan.live.members.remove(hash);
             plan.writes.insert(repo::key(MEMBERS, hash.0), None);
+        }
+        if expiry_candidates {
+            plan.cleanup.push(Cleanup::Expiry(expired));
+        }
+        if origin_removed != 0 {
+            plan.cleanup.push(Cleanup::Origin(origin_removed));
         }
         self.finish(&stored, plan, || Ok(()))?;
         Ok(gone)

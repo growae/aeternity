@@ -455,6 +455,8 @@ fn automatic_expiry_and_periodic_origin_cleanup_need_no_client_polling() {
     for origins in [false, true] {
         let temp = Temp::new();
         let db = database(&temp);
+        let events = crate::pool::tests::metrics::Events::default();
+        let _binding = events.bind(&db);
         let original = tx();
         let pending = Arc::new(ae_tx::SignedTransaction::new(
             original.transaction().clone(),
@@ -482,6 +484,74 @@ fn automatic_expiry_and_periodic_origin_cleanup_need_no_client_polling() {
             Location::Deleted
         );
         worker.shutdown().unwrap();
+        use ae_chain::instrumentation::Counter;
+        let cleanup = if origins {
+            Counter::PoolOriginGarbageCollected
+        } else {
+            Counter::PoolGarbageCollected
+        };
+        assert_eq!(events.take(), vec![(Counter::PoolPush, 1), (cleanup, 1)]);
+    }
+}
+
+#[test]
+fn forced_push_counts_at_call_entry_and_never_again_when_queued_work_executes() {
+    use ae_chain::instrumentation::Counter;
+    let temp = Temp::new();
+    let db = database(&temp);
+    let events = crate::pool::tests::metrics::Events::default();
+    let _binding = events.bind(&db);
+    let worker = Worker::spawn(
+        db.clone(),
+        NetworkProfile::mainnet(),
+        config(),
+        Settings {
+            requests: 2,
+            ..settings()
+        },
+    )
+    .unwrap();
+    let client = worker.client();
+    let (release, active) = gate(&client);
+    let queued = client.force_push(tx()).unwrap();
+    assert_eq!(events.take(), vec![(Counter::PoolPush, 1)]);
+    assert_eq!(
+        db.pool_view().unwrap().location(tx().hash()).unwrap(),
+        Location::Unknown
+    );
+    assert_eq!(client.force_push(tx()).err(), Some(Error::Saturated));
+    assert_eq!(events.take(), vec![(Counter::PoolPush, 1)]);
+    assert_eq!(
+        client.push(tx(), Event::Created, false).err(),
+        Some(Error::Saturated)
+    );
+    assert!(events.take().is_empty());
+    worker.request_shutdown();
+    assert_eq!(client.force_push(tx()).err(), Some(Error::Stopped));
+    assert_eq!(events.take(), vec![(Counter::PoolPush, 1)]);
+    release.send(()).unwrap();
+    active.wait().unwrap();
+    queued.wait().unwrap();
+    worker.shutdown().unwrap();
+    assert!(events.take().is_empty());
+    assert_eq!(
+        db.pool_view().unwrap().location(tx().hash()).unwrap(),
+        Location::Pool
+    );
+    let native: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ae-mempool/tests/fixtures/erlang_metrics_pool.json"
+    ))
+    .unwrap();
+    let rows: Vec<_> = native["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["label"] == "forced_unavailable")
+        .collect();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert_eq!(row["events"], serde_json::json!([["update", "push", 1]]));
+        assert_eq!(row["result"], "unavailable");
     }
 }
 

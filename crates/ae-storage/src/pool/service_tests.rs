@@ -21,6 +21,8 @@ fn failure_dispatch_uses_original_transaction_type_names() {
 fn admission_faults_do_not_publish_memory_and_ambiguous_writes_require_recovery() {
     let temp = Temp::new();
     let db = database(&temp);
+    let events = crate::pool::tests::metrics::Events::default();
+    let _binding = events.bind(&db);
     let mut service = Service::start(db.clone(), NetworkProfile::mainnet(), config()).unwrap();
     let t = tx();
     let before = service.inspection();
@@ -42,6 +44,10 @@ fn admission_faults_do_not_publish_memory_and_ambiguous_writes_require_recovery(
                 }
             });
             assert_eq!(result, Err(Failure::Repository(error)));
+            assert_eq!(
+                events.take(),
+                vec![(ae_chain::instrumentation::Counter::PoolPush, 1)]
+            );
             assert_eq!(service.inspection(), before);
             assert_eq!(
                 db.pool_view().unwrap().location(t.hash()).unwrap(),
@@ -64,4 +70,23 @@ fn admission_faults_do_not_publish_memory_and_ambiguous_writes_require_recovery(
     assert_eq!(service.refresh(), Err(Failure::RestartRequired));
     service.recover(config()).unwrap();
     assert_eq!(service.peek(1, None, None).unwrap(), vec![t]);
+    assert!(events.take().is_empty());
+}
+
+#[test]
+fn forced_admission_is_counted_before_storage_reads_and_normal_admission_is_not() {
+    use ae_chain::instrumentation::Counter;
+    let temp = Temp::new();
+    let db = database(&temp);
+    let events = crate::pool::tests::metrics::Events::default();
+    let _binding = events.bind(&db);
+    let mut service = Service::start(db, NetworkProfile::mainnet(), config()).unwrap();
+    service.uncertain = true;
+    assert_eq!(
+        service.push(tx(), policy::Event::Created, false),
+        Err(Failure::RestartRequired)
+    );
+    assert!(events.take().is_empty());
+    assert_eq!(service.force_push(tx()), Err(Failure::RestartRequired));
+    assert_eq!(events.take(), vec![(Counter::PoolPush, 1)]);
 }

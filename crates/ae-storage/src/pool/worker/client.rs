@@ -177,10 +177,15 @@ impl Client {
         })
     }
     pub fn force_push(&self, tx: Arc<Signed>) -> Result<Ticket<Submission>, Error> {
+        // The native forced path counts the call before entering the server,
+        // even if queue admission or the server subsequently fails.
+        self.shared
+            .instrumentation
+            .counter(ae_chain::instrumentation::Counter::PoolPush, 1);
         let bytes = self.tx_bytes(&tx)?;
         let shared = Arc::downgrade(&self.shared);
         self.submit(bytes, move |s| {
-            let submission = s.force_push(tx.clone())?;
+            let submission = s.force_push_counted(tx.clone())?;
             let shared = shared
                 .upgrade()
                 .expect("executing worker owns shared state");

@@ -16,6 +16,7 @@ use ae_state::{
 use serde_json::Value as J;
 use std::path::PathBuf;
 mod lifecycle;
+pub(super) mod metrics;
 mod nonce;
 mod recovery;
 pub(super) struct Temp(pub(super) PathBuf);

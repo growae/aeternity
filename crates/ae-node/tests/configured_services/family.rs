@@ -260,11 +260,14 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
     ] {
         let normal = mode == json!({});
         let lab = Lab::new();
-        let p = prepare(lab.services("on_demand", mode.clone(), Default::default()));
+        let mut p = prepare(lab.services("on_demand", mode.clone(), Default::default()));
         assert_eq!(p.family(), node::Family::OnDemand);
         let tx = transfer(p.configured());
         let db = p.configured().chain().database().clone();
-        let running = p.launch(commands(&lab), || Ok(Default::default())).unwrap();
+        let metrics = metrics_settings::Metrics::new().await;
+        let mut settings = commands(&lab);
+        metrics.configure(&mut p, &mut settings);
+        let running = p.launch(settings, || Ok(Default::default())).unwrap();
         let mut h = running.handle();
         ready(&mut h).await;
         assert_eq!(h.connections().is_some(), normal);
@@ -285,6 +288,46 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
             .unwrap()
             .await
             .unwrap();
+        let native = h.metrics().unwrap();
+        let registry = native.registry().unwrap();
+        use ae_sync::observe::registry::{Reading, Value, predefined};
+        let point = ae_sync::routing::Part::atom("value");
+        let points = ae_sync::observe::reporter::Points::One(point.clone());
+        assert_eq!(
+            registry
+                .get_value(&predefined::name("tx_pool.push"), &points)
+                .unwrap(),
+            Reading::Values(vec![(point.clone(), Value::Integer(1.into()))])
+        );
+        assert!(
+            pool.push(tx.clone(), ae_mempool::pool::Event::Created, false)
+                .unwrap()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            registry
+                .get_value(&predefined::name("tx_pool.push.ignore"), &points)
+                .unwrap(),
+            Reading::Values(vec![(point.clone(), Value::Integer(1.into()))])
+        );
+        let bad = Arc::new(ae_tx::SignedTransaction::new(
+            tx.transaction().clone(),
+            vec![],
+        ));
+        assert!(
+            pool.push(bad, ae_mempool::pool::Event::Created, false)
+                .unwrap()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            registry
+                .get_value(&predefined::name("tx_pool.push.error"), &points)
+                .unwrap(),
+            Reading::Values(vec![(point, Value::Integer(1.into()))])
+        );
+        assert_eq!(native.predefined().unwrap().info().rejected, 0);
         let first = c
             .client
             .submit(Command::Blocks {
@@ -308,7 +351,12 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
         let exit = within(running.shutdown()).await.unwrap();
         assert!(exit.status().joined && exit.status().failure.is_none());
         assert!(exit.configured().is_some());
-        let node::Exit::OnDemand(report) = &exit else {
+        metrics_settings::Metrics::assert_registry_joined(&native);
+        let node::Exit::Application { inner, error, .. } = &exit else {
+            panic!("missing metrics application report")
+        };
+        assert!(error.is_none());
+        let node::Exit::OnDemand(report) = inner.as_ref() else {
             panic!("wrong terminal family")
         };
         assert_root_joined(report);

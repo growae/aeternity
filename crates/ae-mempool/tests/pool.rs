@@ -10,6 +10,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, LazyLock},
 };
+#[path = "pool/metrics.rs"]
+mod metrics;
 static DATA: LazyLock<J> =
     LazyLock::new(|| serde_json::from_str(include_str!("fixtures/erlang_pool.json")).unwrap());
 fn tx(v: &J) -> Arc<Signed> {
