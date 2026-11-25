@@ -7,7 +7,10 @@ use ae_p2p::{
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
@@ -49,6 +52,7 @@ struct Shared {
     info: Mutex<Info>,
     limits: Limits,
     enabled: bool,
+    environment: Owner,
     stop: watch::Sender<bool>,
 }
 impl Shared {
@@ -92,6 +96,13 @@ impl Client {
     }
     pub fn enabled(&self) -> bool {
         self.shared.enabled
+    }
+    pub fn configure_network(&self, config: &mut ae_p2p::registry::Config, user: NetworkLimits) {
+        user.apply(
+            config,
+            self.enabled(),
+            self.shared.environment.0.load(Ordering::Acquire),
+        );
     }
     fn submit<T>(
         &self,
@@ -156,30 +167,44 @@ pub struct Worker {
     client: Client,
     thread: Option<JoinHandle<()>>,
 }
+// Application environment side effects outlive an individual analytics child.
+// The worker parent retains this owner across replacements; fresh owners reset
+// the application scope without sharing mutable global process state.
+#[derive(Debug, Clone, Default)]
+pub struct Owner(Arc<AtomicBool>);
+impl Owner {
+    pub fn spawn(&self, config: Config) -> Result<Worker, Error> {
+        Worker::with_environment(config, system_clock(), self.clone())
+    }
+}
+fn system_clock() -> Clock {
+    Arc::new(|| {
+        let time = SystemTime::now();
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_secs()).map_err(|_| Error::Clock),
+            Err(e) => {
+                let d = e.duration();
+                let seconds = d
+                    .as_secs()
+                    .checked_add(u64::from(d.subsec_nanos() != 0))
+                    .ok_or(Error::Clock)?;
+                i64::try_from(seconds)
+                    .ok()
+                    .and_then(i64::checked_neg)
+                    .ok_or(Error::Clock)
+            }
+        }
+    })
+}
 impl Worker {
     pub fn spawn(config: Config) -> Result<Self, Error> {
-        Self::with_clock(
-            config,
-            Arc::new(|| {
-                let time = SystemTime::now();
-                match time.duration_since(UNIX_EPOCH) {
-                    Ok(d) => i64::try_from(d.as_secs()).map_err(|_| Error::Clock),
-                    Err(e) => {
-                        let d = e.duration();
-                        let seconds = d
-                            .as_secs()
-                            .checked_add(u64::from(d.subsec_nanos() != 0))
-                            .ok_or(Error::Clock)?;
-                        i64::try_from(seconds)
-                            .ok()
-                            .and_then(i64::checked_neg)
-                            .ok_or(Error::Clock)
-                    }
-                }
-            }),
-        )
+        Owner::default().spawn(config)
     }
+    #[cfg(test)]
     pub(super) fn with_clock(config: Config, clock: Clock) -> Result<Self, Error> {
+        Self::with_environment(config, clock, Owner::default())
+    }
+    fn with_environment(config: Config, clock: Clock, environment: Owner) -> Result<Self, Error> {
         let engine = Engine::new(config.clone())?;
         let (stop, stopped) = watch::channel(false);
         let shared = Arc::new(Shared {
@@ -190,6 +215,7 @@ impl Worker {
             }),
             limits: config.limits,
             enabled: config.enabled,
+            environment,
             stop,
         });
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -212,6 +238,9 @@ impl Worker {
                             return Err(Error::Spawn);
                         }
                     };
+                    if shared.enabled {
+                        shared.environment.0.store(true, Ordering::Release);
+                    }
                     let _ = ready.send(Ok(()));
                     runtime.block_on(run(engine, shared.clone(), receiver, stopped, clock));
                     Ok(())

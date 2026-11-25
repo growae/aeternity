@@ -8,6 +8,8 @@ use std::{
     net::{IpAddr, SocketAddrV4},
     time::Duration,
 };
+mod optional;
+pub use optional::Optional;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -55,6 +57,7 @@ pub struct Network {
     listener: listener::Config,
     transport: Transport,
     peers: Peers,
+    user_limits: ae_sync::analytics::NetworkLimits,
     ping: ping::Config,
     minimum_ping: u16,
     share_node_info: bool,
@@ -77,6 +80,13 @@ fn flag(value: &Value, name: &'static str) -> Result<bool, Error> {
 fn schema(r: &Resolved<'_>, path: &[&str]) -> Result<Value, Error> {
     r.find(path, &[Strategy::User, Strategy::SchemaDefault])?
         .ok_or(Error::Field("schema default"))
+}
+fn user_limits(r: &Resolved<'_>) -> Result<ae_sync::analytics::NetworkLimits, Error> {
+    let read = |name| r.get(&["sync", name])?.map(|v| size(v, name)).transpose();
+    Ok(ae_sync::analytics::NetworkLimits {
+        inbound: read("max_inbound")?,
+        outbound: read("max_outbound")?,
+    })
 }
 impl Network {
     pub fn resolve(r: &Resolved<'_>) -> Result<Self, Error> {
@@ -246,6 +256,7 @@ impl Network {
                 "log_peer_connection_count_interval",
             )?),
             startup: r.peers()?,
+            user_limits: user_limits(r)?,
         })
     }
     pub fn listen(&self) -> SocketAddrV4 {
@@ -280,6 +291,7 @@ impl Network {
     }
 
     pub fn apply(&self, config: &mut connection::Config) {
+        config.analytics_limits = self.user_limits;
         let network = &mut config.network;
         network.listen = Some(self.listen);
         network.listener = self.listener;

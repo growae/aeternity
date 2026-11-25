@@ -369,6 +369,84 @@ fn worker_restart_resets_ephemeral_state_and_clock_failures_leave_it_unchanged()
 }
 
 #[test]
+fn retained_environment_is_written_by_successful_init_and_fresh_application_owners_are_isolated() {
+    let owner = Owner::default();
+    let mut invalid = Config {
+        enabled: true,
+        ..Default::default()
+    };
+    invalid.limits.requests = 0;
+    assert!(matches!(owner.spawn(invalid), Err(Error::Configuration)));
+    let baseline = || ae_p2p::registry::Config {
+        maximum_inbound: 17,
+        maximum_outbound: 19,
+        ..Default::default()
+    };
+    let disabled = owner.spawn(Default::default()).unwrap();
+    let mut config = baseline();
+    disabled
+        .client()
+        .configure_network(&mut config, Default::default());
+    assert_eq!((config.maximum_inbound, config.maximum_outbound), (17, 19));
+    disabled.shutdown().unwrap();
+    let enabled = owner
+        .spawn(Config {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+    enabled
+        .client()
+        .log(announcement(1, false), None)
+        .unwrap()
+        .blocking_wait()
+        .unwrap();
+    assert_eq!(
+        enabled
+            .client()
+            .snapshot()
+            .unwrap()
+            .blocking_wait()
+            .unwrap()
+            .stats
+            .len(),
+        1
+    );
+    enabled.shutdown().unwrap();
+    let next = owner.spawn(Default::default()).unwrap();
+    let mut config = baseline();
+    next.client().configure_network(
+        &mut config,
+        NetworkLimits {
+            inbound: Some(7),
+            outbound: None,
+        },
+    );
+    assert_eq!(
+        (config.maximum_inbound, config.maximum_outbound),
+        (7, NATIVE_CONNECTION_LIMIT)
+    );
+    assert!(!config.analytics);
+    assert!(
+        next.client()
+            .snapshot()
+            .unwrap()
+            .blocking_wait()
+            .unwrap()
+            .stats
+            .is_empty()
+    );
+    next.shutdown().unwrap();
+    let fresh = Owner::default().spawn(Default::default()).unwrap();
+    let mut config = baseline();
+    fresh
+        .client()
+        .configure_network(&mut config, Default::default());
+    assert_eq!((config.maximum_inbound, config.maximum_outbound), (17, 19));
+    fresh.shutdown().unwrap();
+}
+
+#[test]
 fn native_enabled_direction_limits_preserve_separate_operational_connection_capacity() {
     let mut config = ae_p2p::registry::Config::default();
     let capacity = config.maximum_connections;

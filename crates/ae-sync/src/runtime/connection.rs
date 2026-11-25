@@ -27,6 +27,7 @@ pub struct Inputs<O = Otp26> {
 #[derive(Clone)]
 pub struct Config {
     pub network: network::Config,
+    pub analytics_limits: crate::analytics::NetworkLimits,
     pub gossip: gossip::Config,
     pub peer: peer::Config,
     pub importer: chain::Config,
@@ -40,6 +41,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             network: Default::default(),
+            analytics_limits: Default::default(),
             gossip: Default::default(),
             peer: Default::default(),
             importer: Default::default(),

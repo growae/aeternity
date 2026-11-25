@@ -198,6 +198,7 @@ pub struct Service {
     routing: Option<routing::Worker>,
     routing_owner: Option<routing::Owner>,
     analytics: Option<analytics::Worker>,
+    analytics_owner: analytics::Owner,
     pool_gc: Option<pool_gc::Worker>,
     resilience: Option<resilience::Worker>,
     resilience_owner: Option<resilience::Owner>,
@@ -365,6 +366,7 @@ fn create_inner(
             routing: None,
             routing_owner: None,
             analytics: None,
+            analytics_owner: Default::default(),
             pool_gc: None,
             resilience: None,
             resilience_owner: None,
@@ -484,6 +486,7 @@ impl Service {
         let vote_publications = self.vote_publications.clone();
         let admission_binding = self.admission_binding.clone();
         let routing_store = self.routing_owner.as_ref().map(|o| o.store());
+        let analytics_owner = self.analytics_owner.clone();
         let resilience_source = self
             .resilience_owner
             .as_ref()
@@ -567,14 +570,13 @@ impl Service {
                     child,
                     reason: format!("{e:?}"),
                 }),
-                Child::Analytics => {
-                    analytics::Worker::spawn(config.analytics.ok_or(Error::Missing)?)
-                        .map(Started::Analytics)
-                        .map_err(|e| Error::Start {
-                            child,
-                            reason: format!("{e:?}"),
-                        })
-                }
+                Child::Analytics => analytics_owner
+                    .spawn(config.analytics.ok_or(Error::Missing)?)
+                    .map(Started::Analytics)
+                    .map_err(|e| Error::Start {
+                        child,
+                        reason: format!("{e:?}"),
+                    }),
                 Child::Routing => {
                     let start = || -> Result<Started, routing::Error> {
                         let owner = if routing_store.is_none() {

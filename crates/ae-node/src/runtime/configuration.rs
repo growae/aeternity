@@ -69,6 +69,27 @@ impl Settings {
     }
 }
 impl Prepared {
+    pub fn configure_optional_network(
+        &self,
+        resolved: &Resolved<'_>,
+        settings: &mut Settings,
+    ) -> Result<(), crate::configuration::network::Error> {
+        use crate::configuration::network::{Error, Optional};
+        if self.family() != settings.family() {
+            return Err(Error::Family);
+        }
+        let optional = Optional::resolve(resolved)?;
+        match settings {
+            Settings::Cuckoo(s) => optional.apply(&mut s.config.workers, &mut s.config.connections),
+            Settings::OnDemand(s) => {
+                optional.apply(&mut s.config.workers, &mut s.config.connections)
+            }
+            Settings::Hyperchain(s) => {
+                optional.apply_hyperchain(&mut s.config.workers, &mut s.config.connections)
+            }
+        }
+        Ok(())
+    }
     pub fn configure_discovery(
         &mut self,
         resolved: &Resolved<'_>,

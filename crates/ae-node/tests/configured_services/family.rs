@@ -70,6 +70,7 @@ async fn configured_network_reaches_both_pow_families_and_respects_application_m
         ] {
             let normal = mode == json!({});
             let lab = Lab::new();
+            let optional = network_settings::Services::start().await;
             let mut prepared = prepare(lab.services(kind, mode, Default::default()));
             let database = prepared.configured().chain().database().clone();
             let mut settings = if kind == "on_demand" {
@@ -77,12 +78,13 @@ async fn configured_network_reaches_both_pow_families_and_respects_application_m
             } else {
                 cuckoo(&lab)
             };
-            network_settings::configure(&mut prepared, &mut settings);
+            network_settings::configure(&mut prepared, &mut settings, &optional);
             let running = prepared
                 .launch(settings, || Ok(Default::default()))
                 .unwrap();
             let mut handle = running.handle();
             ready(&mut handle).await;
+            let workers = handle.pow().unwrap().workers().unwrap();
             assert_eq!(handle.connections().is_some(), normal);
             let generation = if normal {
                 let local = handle
@@ -102,9 +104,17 @@ async fn configured_network_reaches_both_pow_families_and_respects_application_m
                     .unwrap()
                     .public_key();
                 Some(
-                    network_settings::verify(handle.connections().unwrap(), &database, local).await,
+                    network_settings::verify(
+                        handle.connections().unwrap(),
+                        &database,
+                        local,
+                        &workers,
+                        &optional,
+                    )
+                    .await,
                 )
             } else {
+                optional.no_listener(&workers).await;
                 None
             };
             let exit = running.shutdown().await.unwrap();
@@ -114,6 +124,7 @@ async fn configured_network_reaches_both_pow_families_and_respects_application_m
                 assert!(generation.observer.status().joined);
                 assert_eq!(generation.network.status().listener.unwrap().active, 0);
             }
+            optional.finish(&workers, normal).await;
         }
     }
 }
@@ -134,6 +145,10 @@ fn configured_network_rejects_wrong_family_before_changing_settings() {
         prepared.configure_network(&cfg.resolve(&context).unwrap(), &mut settings),
         Err(ae_node::configuration::network::Error::Family)
     );
+    assert_eq!(
+        prepared.configure_optional_network(&cfg.resolve(&context).unwrap(), &mut settings),
+        Err(ae_node::configuration::network::Error::Family)
+    );
     let node::Settings::Cuckoo(settings) = settings else {
         unreachable!()
     };
@@ -141,6 +156,29 @@ fn configured_network_rejects_wrong_family_before_changing_settings() {
         settings.config.connections.network.listen.unwrap().port(),
         0
     );
+}
+
+#[tokio::test]
+async fn configured_optional_network_flags_control_actual_pow_workers_and_application_limits() {
+    for kind in ["pow_cuckoo", "on_demand"] {
+        for enabled in [false, true] {
+            let lab = Lab::new();
+            let p = prepare(lab.services(kind, json!({}), Default::default()));
+            let mut settings = if kind == "on_demand" {
+                commands(&lab)
+            } else {
+                cuckoo(&lab)
+            };
+            network_settings::configure_policy_only(&p, &mut settings, enabled);
+            let running = p.launch(settings, || Ok(Default::default())).unwrap();
+            let mut handle = running.handle();
+            ready(&mut handle).await;
+            let analytics = network_settings::verify_policy_only(&handle, enabled).await;
+            let exit = running.shutdown().await.unwrap();
+            assert!(exit.status().joined && exit.status().failure.is_none());
+            assert!(analytics.info().joined);
+        }
+    }
 }
 
 #[tokio::test]

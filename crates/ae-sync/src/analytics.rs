@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, time::Duration};
 mod state;
 mod worker;
 pub use state::{Engine, Snapshot, Value};
-pub use worker::{Client, Info, Ticket, Worker};
+pub use worker::{Client, Info, Owner, Ticket, Worker};
 
 pub const VERSION_AGE_SECONDS: i64 = 3600;
 pub const SWEEP_AGE_SECONDS: i64 = 86400;
@@ -211,9 +211,21 @@ mod tests;
 // Native analytics changes direction limits without reserving capacity. The
 // separately configured total connection/transport/queue quotas still apply.
 pub fn configure_network(config: &mut ae_p2p::registry::Config, enabled: bool) {
-    config.analytics = enabled;
-    if enabled {
-        config.maximum_inbound = NATIVE_CONNECTION_LIMIT;
-        config.maximum_outbound = NATIVE_CONNECTION_LIMIT;
+    NetworkLimits::default().apply(config, enabled, enabled);
+}
+
+// User values still precede the application limits written by analytics init.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetworkLimits {
+    pub inbound: Option<usize>,
+    pub outbound: Option<usize>,
+}
+impl NetworkLimits {
+    fn apply(&self, config: &mut ae_p2p::registry::Config, enabled: bool, initialized: bool) {
+        config.analytics = enabled;
+        if initialized {
+            config.maximum_inbound = self.inbound.unwrap_or(NATIVE_CONNECTION_LIMIT);
+            config.maximum_outbound = self.outbound.unwrap_or(NATIVE_CONNECTION_LIMIT);
+        }
     }
 }

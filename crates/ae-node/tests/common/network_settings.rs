@@ -9,16 +9,107 @@ use ae_p2p::{
     message::{Details, Kind, Message, Value},
     noise, ping, runtime as net,
 };
-use ae_sync::{observe, runtime::connection};
+use ae_sync::{
+    observe,
+    runtime::{connection, workers},
+};
 use std::time::Duration;
+#[path = "optional_services.rs"]
+mod optional_services;
+pub use optional_services::Services;
 
-pub fn configure(prepared: &mut runtime::Prepared, settings: &mut runtime::Settings) {
+pub fn configure_policy_only(
+    prepared: &runtime::Prepared,
+    settings: &mut runtime::Settings,
+    enabled: bool,
+) {
+    let cfg=Configuration::from_value(serde_json::json!({"include_default_peers":false,
+        "sync":{"listen_address":"127.0.0.1","port":0,"peer_analytics":enabled,"upnp_enabled":false}})).unwrap();
+    let mut ctx = Context::new(Directories {
+        home: "release".into(),
+        data: "data".into(),
+        log: "log".into(),
+    })
+    .unwrap();
+    for (key, value) in [
+        ("sync_max_inbound", 17),
+        ("sync_max_outbound", 19),
+        ("sync_max_tcp_probes", 0),
+    ] {
+        ctx.set("aecore".into(), key.into(), serde_json::json!(value))
+            .unwrap();
+    }
+    let upnp = match settings {
+        runtime::Settings::Cuckoo(s) => &mut s.config.workers.upnp,
+        runtime::Settings::OnDemand(s) => &mut s.config.workers.upnp,
+        runtime::Settings::Hyperchain(s) => &mut s.config.workers.upnp,
+    };
+    // An explicitly disabled mapping service must never construct this invalid
+    // runtime configuration or attempt any system gateway discovery.
+    *upnp = Some(ae_sync::upnp::Config {
+        requests: 0,
+        system_gateways: false,
+        ..Default::default()
+    });
+    let resolved = cfg.resolve(&ctx).unwrap();
+    prepared.configure_network(&resolved, settings).unwrap();
+    prepared
+        .configure_optional_network(&resolved, settings)
+        .unwrap();
+}
+
+pub async fn verify_policy_only(
+    handle: &runtime::Handle,
+    enabled: bool,
+) -> ae_sync::analytics::Client {
+    let workers = if let Some(pow) = handle.pow() {
+        pow.workers().unwrap()
+    } else {
+        (*handle.hyperchain().unwrap().workers().unwrap()).clone()
+    };
+    let bindings = workers.bindings();
+    assert!(bindings.upnp.is_none() && workers.status().upnp.is_none());
+    let analytics = bindings.analytics.unwrap().current().unwrap();
+    assert_eq!(analytics.enabled(), enabled);
+    assert!(analytics.info().running);
+    let mut connections = handle.connections().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(mut generation) = connections.current() {
+                while !generation.network.status().ready {
+                    generation.network.changed().await.unwrap();
+                }
+                let metrics = generation.network.metrics().unwrap().wait().await.unwrap();
+                assert_eq!(
+                    (metrics.maximum_inbound, metrics.maximum_outbound),
+                    if enabled {
+                        (1_000_000, 1_000_000)
+                    } else {
+                        (17, 19)
+                    }
+                );
+                assert_eq!(metrics.registry.counts.inbound, 0);
+                break;
+            }
+            connections.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    analytics
+}
+
+pub fn configure(
+    prepared: &mut runtime::Prepared,
+    settings: &mut runtime::Settings,
+    services: &Services,
+) {
     let configuration = Configuration::from_value(serde_json::json!({
         "include_default_peers": false,
         "sync": {"listen_address":"127.0.0.1", "port":0, "external_port":3456,
             "acceptors":3, "max_inbound_hard":2, "max_inbound":7, "max_outbound":0,
             "minimum_ping_version":2, "gossiped_peers_count":4, "ping":{"peer_percentage":67}, "ping_interval":100,
-            "log_peer_connection_count_interval":20}
+            "log_peer_connection_count_interval":20,"peer_analytics":true,"upnp_enabled":true}
     }))
     .unwrap();
     let mut context = Context::new(Directories {
@@ -37,6 +128,15 @@ pub fn configure(prepared: &mut runtime::Prepared, settings: &mut runtime::Setti
     prepared
         .configure_network(&configuration.resolve(&context).unwrap(), settings)
         .unwrap();
+    prepared
+        .configure_optional_network(&configuration.resolve(&context).unwrap(), settings)
+        .unwrap();
+    let upnp = match settings {
+        runtime::Settings::Cuckoo(s) => &mut s.config.workers.upnp,
+        runtime::Settings::OnDemand(s) => &mut s.config.workers.upnp,
+        runtime::Settings::Hyperchain(s) => &mut s.config.workers.upnp,
+    };
+    services.configure(upnp.as_mut().unwrap());
     let discovery = Configuration::from_value(serde_json::json!({
         "sync":{"max_gossip":1,"gossip_allowed_height_from_top":0,
             "peer_pool":{"max_rejections":2,"max_update_lapse":60000,"standby_times":[10,20]}}
@@ -69,8 +169,10 @@ pub async fn verify(
     mut owner: connection::Handle,
     db: &ae_storage::Database,
     local: ae_types::PeerPublicKey,
+    workers: &workers::Handle,
+    services: &Services,
 ) -> connection::Generation {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(20), async {
         let mut retired: Option<connection::Generation> = None;
         for number in 1..=2 {
             let mut generation = loop {
@@ -94,6 +196,9 @@ pub async fn verify(
             assert_eq!((listener.acceptors, listener.maximum_connections), (3, 2));
             assert!(status.listening.unwrap().ip().is_loopback());
             assert_eq!(generation.gossip.status().policy.max_peers, 1);
+            services
+                .mapped(workers, status.listening.unwrap().port(), if number == 1 { 1 } else { 3 })
+                .await;
             let binding = db.view().unwrap().identity().clone();
             let network = noise::Network::new(1, binding.genesis, &binding.network).unwrap();
             let socket = tokio::net::TcpStream::connect(status.listening.unwrap())
@@ -139,9 +244,14 @@ pub async fn verify(
             // uses gossiped_peers_count for the separately scheduled outgoing ping.
             assert_eq!(body.fields()["share"], Value::Integer(0.into()));
             loop {
-                if let Some(net::Event::Message(ping)) = events.recv().await
-                    && ping.message().kind() == Kind::Ping
-                {
+                if let Some(net::Event::Message(ping)) = events.recv().await {
+                    if ping.message().kind() == Kind::GetNodeInfo {
+                        client.send(&node_info()).unwrap().await.unwrap();
+                        continue;
+                    }
+                    if ping.message().kind() != Kind::Ping {
+                        continue;
+                    }
                     assert_eq!(ping.message().fields()["share"], Value::Integer(4.into()));
                     assert_eq!(ping.message().fields()["port"], Value::Integer(3456.into()));
                     client
@@ -151,6 +261,67 @@ pub async fn verify(
                         .unwrap();
                     break;
                 }
+            }
+            let responder = client.clone();
+            let reply = Message::response_ok(&request, Default::default()).unwrap();
+            let drain = tokio::spawn(async move {
+                while let Some(event) = events.recv().await {
+                    if let net::Event::Message(message) = event {
+                        let reply = match message.message().kind() {
+                            Kind::Ping => reply.clone(),
+                            Kind::GetNodeInfo => node_info(),
+                            _ => continue,
+                        };
+                        let Ok(sent) = responder.send(&reply) else {
+                            break;
+                        };
+                        if sent.await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            let analytics = workers.bindings().analytics.unwrap().current().unwrap();
+            loop {
+                let snapshot = analytics.snapshot().unwrap().await.unwrap();
+                if snapshot.pending == 0
+                    && snapshot.stats.values().any(|stat| matches!(&stat.info,
+                        ae_sync::analytics::PeerInfo::Resolved(info) if info.network_id == b"configured-test"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            if number == 1 {
+                let before = workers.status();
+                let mapping = workers.bindings().upnp.unwrap().current().unwrap();
+                workers
+                    .restart(workers::Child::Analytics, before.analytics_generation)
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap();
+                workers
+                    .restart(workers::Child::Upnp, before.upnp_generation)
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap();
+                assert!(analytics.info().joined && mapping.info().joined);
+                assert!(
+                    workers
+                        .bindings()
+                        .analytics
+                        .unwrap()
+                        .current()
+                        .unwrap()
+                        .enabled()
+                );
+                services
+                    .mapped(workers, status.listening.unwrap().port(), 2)
+                    .await;
+                assert_eq!(owner.status().generation, number);
+                assert!(!client.is_closed());
             }
             let metrics = generation.network.metrics().unwrap().wait().await.unwrap();
             assert_eq!((metrics.maximum_inbound, metrics.maximum_outbound), (7, 0));
@@ -169,6 +340,7 @@ pub async fn verify(
             }
             client.shutdown();
             driver.await.unwrap();
+            drain.await.unwrap();
             while generation.network.status().listener.unwrap().active != 0 {
                 generation.network.changed().await.unwrap();
             }
@@ -181,5 +353,17 @@ pub async fn verify(
         unreachable!()
     })
     .await
+    .unwrap()
+}
+
+fn node_info() -> Message {
+    ae_sync::peer::info::response(
+        Some(&ae_sync::peer::info::Metadata::current()),
+        b"configured-test",
+        &1u64.into(),
+        &2u64.into(),
+        Default::default(),
+    )
+    .unwrap()
     .unwrap()
 }

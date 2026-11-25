@@ -71,10 +71,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Group<O> {
         );
         let mut network_config = config.network.clone();
         if let Some(analytics) = dependencies.analytics.as_ref().and_then(|a| a.current()) {
-            crate::analytics::configure_network(
-                &mut network_config.registry.policy,
-                analytics.enabled(),
-            );
+            analytics
+                .configure_network(&mut network_config.registry.policy, config.analytics_limits);
         }
         let (network, scheduled, incoming, service) = network::create_bound(
             db.clone(),

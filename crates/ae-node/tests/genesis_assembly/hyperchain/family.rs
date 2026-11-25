@@ -58,16 +58,18 @@ async fn configured_network_reaches_hyperchain_owner_and_respects_application_mo
     ] {
         let normal = mode == json!({});
         let lab = Hc::new(8, mode, &parent);
+        let optional = network_settings::Services::start().await;
         let mut prepared = prepare(&lab, Default::default());
         let database = prepared.configured().chain().database().clone();
         let clock = Clock::new();
         let mut settings = settings(&lab, &prepared, Arc::new(move |_| Ok(clock.clone())));
-        network_settings::configure(&mut prepared, &mut settings);
+        network_settings::configure(&mut prepared, &mut settings, &optional);
         let running = prepared
             .launch(settings, || Ok(Default::default()))
             .unwrap();
         let mut handle = running.handle();
         ready(&mut handle).await;
+        let workers = handle.hyperchain().unwrap().workers().unwrap();
         assert_eq!(handle.connections().is_some(), normal);
         let generation = if normal {
             let local = handle
@@ -86,8 +88,18 @@ async fn configured_network_reaches_hyperchain_owner_and_respects_application_mo
                 .await
                 .unwrap()
                 .public_key();
-            Some(network_settings::verify(handle.connections().unwrap(), &database, local).await)
+            Some(
+                network_settings::verify(
+                    handle.connections().unwrap(),
+                    &database,
+                    local,
+                    &workers,
+                    &optional,
+                )
+                .await,
+            )
         } else {
+            optional.no_listener(&workers).await;
             None
         };
         let exit = running.shutdown().await.unwrap();
@@ -96,6 +108,27 @@ async fn configured_network_reaches_hyperchain_owner_and_respects_application_mo
             assert!(generation.network.status().joined && generation.observer.status().joined);
             assert_eq!(generation.network.status().listener.unwrap().active, 0);
         }
+        optional.finish(&workers, normal).await;
+    }
+}
+
+#[tokio::test]
+async fn configured_optional_network_flags_control_actual_hyperchain_workers_and_application_limits()
+ {
+    let parent = Parent::start();
+    for enabled in [false, true] {
+        let lab = Hc::new(8, json!({}), &parent);
+        let p = prepare(&lab, Default::default());
+        let clock = Clock::new();
+        let mut settings = settings(&lab, &p, Arc::new(move |_| Ok(clock.clone())));
+        network_settings::configure_policy_only(&p, &mut settings, enabled);
+        let running = p.launch(settings, || Ok(Default::default())).unwrap();
+        let mut handle = running.handle();
+        ready(&mut handle).await;
+        let analytics = network_settings::verify_policy_only(&handle, enabled).await;
+        let exit = running.shutdown().await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        assert!(analytics.info().joined);
     }
 }
 
