@@ -34,7 +34,7 @@ impl Value {
             _ => report::Value::Other,
         }
     }
-    fn bytes(&self, limits: report::Limits) -> Result<usize, Error> {
+    pub(super) fn bytes(&self, limits: report::Limits) -> Result<usize, Error> {
         fn visit(
             v: &Value,
             l: report::Limits,
@@ -85,6 +85,13 @@ pub enum Error {
     InvalidAlias,
     Limit,
     Sequence,
+    Closed,
+    Busy,
+    Stale,
+    Spawn,
+    Panicked,
+    AlreadyRunning,
+    RestartLimit,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reading {
@@ -95,6 +102,7 @@ pub enum Reading {
 pub struct Info {
     pub entry: Entry,
     pub timestamp_ms: i128,
+    pub cache_ms: u64,
     pub datapoints: Option<Vec<Part>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +111,7 @@ pub enum Alias {
     Binary(Vec<u8>),
 }
 impl Alias {
-    fn key(&self, limits: Limits) -> Result<Vec<u8>, Error> {
+    pub(super) fn key(&self, limits: Limits) -> Result<Vec<u8>, Error> {
         match self {
             Self::Atom(a) => {
                 limits.atom(a).map_err(|_| Error::Limit)?;
@@ -126,7 +134,7 @@ pub(super) struct Scalar {
     value: Value,
     timestamp: i128,
 }
-fn defaults() -> Vec<Part> {
+pub(super) fn defaults() -> Vec<Part> {
     vec![Part::atom("value"), Part::atom("ms_since_reset")]
 }
 impl Scalar {
@@ -189,10 +197,10 @@ impl Store {
         // exometer_util:timestamp/0 measures milliseconds from mega-second 1258.
         self.clock.now().unix_microseconds.div_euclid(1000) - 1_258_000_000_000
     }
-    fn scalar_name(&self, name: &Name) -> Result<usize, Error> {
+    pub(super) fn scalar_name(&self, name: &Name) -> Result<usize, Error> {
         self.limits.report.name(name).map_err(|_| Error::Limit)
     }
-    fn scalar_points(&self, points: &Points) -> Result<(), Error> {
+    pub(super) fn scalar_points(&self, points: &Points) -> Result<(), Error> {
         self.limits.points(points).map_err(|_| Error::Limit)
     }
     pub fn create(&self, name: &Name, kind: Kind, enabled: bool) -> Result<(), Error> {
@@ -207,6 +215,7 @@ impl Store {
             .saturating_add(Value::Integer(0.into()).bytes(self.limits.report)?);
         let now = self.timestamp();
         let mut s = self.lock();
+        s.open()?;
         if let Some(old) = s.entries.get(name) {
             return if !ensure {
                 Err(Error::Exists)
@@ -240,6 +249,7 @@ impl Store {
                 }),
                 version,
                 bytes,
+                cache_ms: 0,
             },
         );
         s.bytes += bytes;
@@ -252,6 +262,7 @@ impl Store {
     pub fn update(&self, name: &Name, value: &Value) -> Result<(), Error> {
         self.scalar_name(name)?;
         let mut s = self.lock();
+        s.open()?;
         // The original global gate precedes lookup, even for absent entries.
         if !s.enabled {
             return Ok(());
@@ -285,6 +296,7 @@ impl Store {
         self.scalar_name(name)?;
         let now = self.timestamp();
         let mut s = self.lock();
+        s.open()?;
         if !s.enabled {
             return Ok(());
         }
@@ -310,29 +322,28 @@ impl Store {
     pub fn get_value(&self, name: &Name, points: &Points) -> Result<Reading, Error> {
         self.scalar_name(name)?;
         self.scalar_points(points)?;
-        let now = self.timestamp();
-        let s = self.lock();
-        let stored = s.entries.get(name).ok_or(Error::NotFound)?;
-        if !stored.metric.entry.enabled {
-            return Ok(Reading::Disabled);
-        }
-        let scalar = stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
-        Ok(Reading::Values(scalar.values(points, now, self.limits)?))
+        let time = self.clock.now();
+        let mut s = self.lock();
+        s.open()?;
+        self.scalar_read(&mut s, name, points, time)
     }
     pub fn info(&self, name: &Name) -> Result<Info, Error> {
         self.scalar_name(name)?;
         let s = self.lock();
+        s.open()?;
         let stored = s.entries.get(name).ok_or(Error::NotFound)?;
         let scalar = stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
         Ok(Info {
             entry: stored.metric.entry.clone(),
             timestamp_ms: scalar.timestamp,
+            cache_ms: stored.cache_ms,
             datapoints: stored.metric.entry.enabled.then(defaults),
         })
     }
     pub fn set_enabled(&self, name: &Name, enabled: bool) -> Result<(), Error> {
         self.scalar_name(name)?;
         let mut s = self.lock();
+        s.open()?;
         let stored = s.entries.get(name).ok_or(Error::NotFound)?;
         stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
         if stored.metric.entry.enabled == enabled {
@@ -354,37 +365,49 @@ impl Store {
         }
         Ok(())
     }
-    pub fn set_global_enabled(&self, enabled: bool) -> bool {
-        std::mem::replace(&mut self.lock().enabled, enabled)
+    pub fn set_global_enabled(&self, enabled: bool) -> Result<bool, Error> {
+        let mut s = self.lock();
+        s.open()?;
+        Ok(std::mem::replace(&mut s.enabled, enabled))
     }
     pub fn retained_bytes(&self) -> usize {
         self.lock().bytes
     }
     pub fn find_entries(&self, prefix: &Name) -> Result<Vec<Entry>, Error> {
         self.scalar_name(prefix)?;
-        Ok(self
-            .lock()
-            .entries
+        let s = self.lock();
+        s.open()?;
+        Ok(s.entries
             .iter()
             .filter(|(n, _)| n.starts_with(prefix))
             .map(|(_, e)| e.metric.entry.clone())
             .collect())
     }
+
     pub fn aggregate(&self, prefix: &Name, points: &Points) -> Result<Vec<(Part, BigInt)>, Error> {
         self.scalar_name(prefix)?;
         self.scalar_points(points)?;
-        let now = self.timestamp();
-        let s = self.lock();
-        let mut sums = BTreeMap::<Part, BigInt>::new();
-        for stored in s
+        let time = self.clock.now();
+        let mut s = self.lock();
+        s.open()?;
+        let names: Vec<Name> = s
             .entries
             .values()
             .filter(|m| m.metric.entry.enabled && m.metric.entry.name.starts_with(prefix))
-        {
-            let sample = match selected(stored, points, now, self.limits) {
+            .map(|m| m.metric.entry.name.clone())
+            .collect();
+        let mut sums = BTreeMap::<Part, BigInt>::new();
+        for name in names {
+            let sample = match self.sample_locked(&mut s, &name, points, time) {
                 Ok(sample) => sample,
                 Err(StoreError::InvalidDatapoint) => continue,
-                Err(_) => return Err(Error::Limit),
+                Err(e) => {
+                    return Err(if e == StoreError::Closed {
+                        Error::Closed
+                    } else {
+                        Error::Limit
+                    });
+                }
             };
             for (p, v) in sample.values {
                 if let report::Value::Integer(n) = v {
@@ -408,6 +431,7 @@ impl Store {
             .saturating_add(self.scalar_name(name)?)
             .saturating_add(self.limits.report.part(point).map_err(|_| Error::Limit)?);
         let mut s = self.lock();
+        s.open()?;
         if s.aliases.contains_key(&key) {
             return Err(Error::Exists);
         }
@@ -429,15 +453,17 @@ impl Store {
     }
     pub fn resolve_alias(&self, alias: &Alias) -> Result<Option<(Name, Part)>, Error> {
         let key = alias.key(self.limits)?;
-        Ok(self
-            .lock()
-            .aliases
+        let s = self.lock();
+        s.open()?;
+        Ok(s.aliases
             .get(&key)
             .map(|m| (m.name.clone(), m.point.clone())))
     }
+
     pub fn delete_alias(&self, alias: &Alias) -> Result<(), Error> {
         let key = alias.key(self.limits)?;
         let mut s = self.lock();
+        s.open()?;
         if let Some(m) = s.aliases.remove(&key) {
             s.bytes -= m.bytes;
         }

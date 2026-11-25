@@ -613,6 +613,7 @@ async fn application_metrics_outlive_connection_generations_in_both_pow_families
             assert!(exit.status().joined && exit.status().failure.is_none());
             assert!(client.info().joined && !client.info().running);
             assert!(exit.status().metrics.unwrap().joined);
+            metrics_settings::Metrics::assert_registry_joined(&client);
         }
     }
 }

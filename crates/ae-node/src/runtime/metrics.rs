@@ -1,5 +1,5 @@
 use super::{Exit, Handle, Status};
-use ae_sync::observe::{self, reporter, statsd};
+use ae_sync::observe::{self, registry, reporter, statsd};
 use std::{
     sync::{
         Arc,
@@ -19,6 +19,7 @@ struct State {
 pub(super) struct View {
     pub client: statsd::Client,
     reporter: Option<reporter::Client>,
+    registry: Option<registry::Client>,
     closing: Arc<AtomicBool>,
     stopping: watch::Sender<bool>,
     state: watch::Receiver<State>,
@@ -26,6 +27,9 @@ pub(super) struct View {
 impl View {
     pub fn stop(&self) {
         self.closing.store(true, Ordering::Release);
+        if let Some(registry) = &self.registry {
+            registry.shutdown();
+        }
         self.stopping.send_replace(true);
     }
     pub fn apply(&self, mut status: Status) -> Status {
@@ -36,6 +40,12 @@ impl View {
         if let Some(reporter) = self.client.reporter() {
             status.ready &= reporter.info().running;
             status.joined &= reporter.info().joined;
+        }
+        if let Some(registry) = &self.registry {
+            let info = registry.info();
+            status.ready &=
+                info.running && !info.closing && info.managers.iter().all(|m| m.running);
+            status.joined &= info.joined;
         }
         status.joined &= info.joined && state.done;
         status.running |= !state.done;
@@ -49,7 +59,7 @@ impl View {
         self.state.borrow().done
     }
     pub async fn changed(&mut self) {
-        tokio::select! { _ = self.client.changed() => (), _ = self.state.changed() => (), _ = async { self.reporter.as_mut().expect("configured reporter").changed().await }, if self.reporter.is_some() => () }
+        tokio::select! { _ = self.client.changed() => (), _ = self.state.changed() => (), _ = async { self.reporter.as_mut().expect("configured reporter").changed().await }, if self.reporter.is_some() => (), _ = async { self.registry.as_mut().expect("configured registry").changed().await }, if self.registry.is_some() => () }
     }
     pub fn exit(&self, exit: Exit) -> Exit {
         Exit::Application {
@@ -70,15 +80,20 @@ impl Owner {
     pub fn prepare(settings: statsd::Settings, prefix: String) -> Result<Self, observe::Error> {
         let pipeline = settings.pipeline.clone();
         let worker = statsd::supervision::Owner::prepare(settings)?;
-        let (reporter, client) = if pipeline.is_some() {
+        let (registry, reporter, client) = if pipeline.is_some() {
             let limits = reporter::Limits::default();
             let store = Arc::new(reporter::Store::new(limits).map_err(observe::Error::Reporter)?);
+            let registry =
+                registry::Owner::spawn(store.clone()).map_err(observe::Error::Registry)?;
             let reporter = reporter::Owner::spawn(limits, store.clone(), worker.client())
                 .map_err(observe::Error::Reporter)?;
-            let client = worker.client().with_reporter(store, reporter.client());
-            (Some(reporter), client)
+            let client = worker
+                .client()
+                .with_reporter(store, reporter.client())
+                .with_registry(registry.client());
+            (Some(registry), Some(reporter), client)
         } else {
-            (None, worker.client())
+            (None, None, worker.client())
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -106,6 +121,7 @@ impl Owner {
                             prefix,
                         },
                         reporter,
+                        registry,
                     ))
                 }));
                 state.send_modify(|s| {
@@ -119,6 +135,7 @@ impl Owner {
         Ok(Self {
             view: View {
                 reporter: client.reporter(),
+                registry: client.registry(),
                 client,
                 closing,
                 stopping,
@@ -178,6 +195,7 @@ async fn run(
     parent: oneshot::Receiver<Handle>,
     control: Control<'_>,
     mut reporter: Option<reporter::Owner>,
+    mut registry: Option<registry::Owner>,
 ) {
     let Control {
         state,
@@ -192,6 +210,9 @@ async fn run(
             reporter.finish().await;
         }
         worker.finish().await;
+        if let Some(registry) = &mut registry {
+            registry.finish().await;
+        }
         return;
     };
     struct Root(Handle);
@@ -205,6 +226,7 @@ async fn run(
     let mut activated = false;
     let mut prepared_stop = false;
     let mut report_client = reporter.as_ref().map(|r| r.client());
+    let mut registry_client = registry.as_ref().map(|r| r.client());
     loop {
         let root = parent.status();
         if !root.running || *abandoned.borrow() {
@@ -249,8 +271,22 @@ async fn run(
             activated = true;
             state.send_modify(|s| s.ready = true);
         }
+        if let Some(registry) = &registry_client {
+            let info = registry.info();
+            if !info.running && !prepared_stop && !closing.load(Ordering::Acquire) {
+                state.send_modify(|s| {
+                    s.error = Some(observe::Error::Registry(
+                        info.last_error.unwrap_or(registry::Error::Closed),
+                    ))
+                });
+                closing.store(true, Ordering::Release);
+            }
+        }
         if closing.load(Ordering::Acquire) && !prepared_stop {
             prepared_stop = true;
+            if let Some(registry) = &registry_client {
+                registry.shutdown();
+            }
             if let Some(owner) = &mut reporter {
                 if activated {
                     let result = match owner.client().enable("aec_metrics_main".into(), false) {
@@ -302,10 +338,13 @@ async fn run(
             // The supervision handle also exposes an exhausted parent boundary.
             state.send_modify(|s| s.error = error);
         }
-        tokio::select! { _ = async { report_client.as_mut().expect("configured reporter").changed().await }, if report_client.is_some() && !prepared_stop => (), _ = abandoned.changed() => break, _ = parent.changed() => (), _ = worker.changed() => (), _ = stopping.changed(), if !prepared_stop => () }
+        tokio::select! { _ = async { report_client.as_mut().expect("configured reporter").changed().await }, if report_client.is_some() && !prepared_stop => (), _ = async { registry_client.as_mut().expect("configured registry").changed().await }, if registry_client.is_some() && !prepared_stop => (), _ = abandoned.changed() => break, _ = parent.changed() => (), _ = worker.changed() => (), _ = stopping.changed(), if !prepared_stop => () }
     }
     if let Some(owner) = &mut reporter {
         owner.finish().await;
     }
     worker.finish().await;
+    if let Some(registry) = &mut registry {
+        registry.finish().await;
+    }
 }

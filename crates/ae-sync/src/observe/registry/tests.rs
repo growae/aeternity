@@ -418,7 +418,7 @@ fn original_global_gate_status_errors_and_alias_key_controls_match() {
             "ensure_disabled_ignores_options" => outcome(store.ensure(&n, Kind::Counter, true)),
             "update" => outcome(store.update(&n, &integer(9))),
             "global_disable" | "global_enable" => {
-                json!({"result":atom(if store.set_global_enabled(id=="global_enable") {"enabled"} else {"disabled"})})
+                json!({"result":atom(if store.set_global_enabled(id=="global_enable").unwrap() {"enabled"} else {"disabled"})})
             }
             "global_update_missing" => {
                 outcome(store.update(&name("missing"), &Value::Atom("foo".into())))

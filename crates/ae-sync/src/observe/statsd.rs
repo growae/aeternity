@@ -215,8 +215,16 @@ pub struct Client(
     Binding,
     Option<std::sync::Arc<super::reporter::Store>>,
     Option<super::reporter::Client>,
+    Option<super::registry::Client>,
 );
 impl Client {
+    pub fn with_registry(mut self, registry: super::registry::Client) -> Self {
+        self.3 = Some(registry);
+        self
+    }
+    pub fn registry(&self) -> Option<super::registry::Client> {
+        self.3.clone()
+    }
     pub fn with_reporter(
         mut self,
         store: std::sync::Arc<super::reporter::Store>,
@@ -311,7 +319,7 @@ impl Worker {
         self.0.activate();
     }
     pub fn client(&self) -> Client {
-        Client(Binding::Direct(self.0.client()), None, None)
+        Client(Binding::Direct(self.0.client()), None, None, None)
     }
     pub async fn finish(&mut self) {
         self.0.finish().await;

@@ -27,6 +27,21 @@ impl Write for Log {
     }
 }
 impl Metrics {
+    pub fn assert_registry_joined(client: &statsd::Client) {
+        let registry = client.registry().unwrap();
+        let info = registry.info();
+        assert!(info.joined && !info.running);
+        assert!(info.managers.iter().all(|m| m.joined && !m.running));
+        assert_eq!(client.store().unwrap().retained_bytes(), 0);
+        assert_eq!(
+            registry.find_entries(&vec![]),
+            Err(ae_sync::observe::registry::Error::Closed)
+        );
+        assert_eq!(
+            client.store().unwrap().find_entries(&vec![]),
+            Err(ae_sync::observe::registry::Error::Closed)
+        );
+    }
     pub async fn new() -> Self {
         Self {
             receiver: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
@@ -66,10 +81,12 @@ impl Metrics {
             first.intervals[0].interval.period,
             ae_sync::observe::reporter::Period::Milliseconds(10_000)
         );
-        let registry = client.store().unwrap();
+        let registry = client.registry().unwrap();
         let scalar = vec![ae_sync::routing::Part::atom("application-counter")];
         registry
             .create(&scalar, ae_sync::observe::registry::Kind::Counter, true)
+            .unwrap()
+            .await
             .unwrap();
         registry
             .update(
@@ -77,6 +94,45 @@ impl Metrics {
                 &ae_sync::observe::registry::Value::Integer(9.into()),
             )
             .unwrap();
+        use ae_sync::observe::registry::{Alias, Manager, Reading, Value};
+        let point = ae_sync::routing::Part::atom("value");
+        let points = ae_sync::observe::reporter::Points::One(point.clone());
+        let alias = Alias::Atom("application-counter".into());
+        registry
+            .add_alias(&alias, &scalar, &point)
+            .unwrap()
+            .await
+            .unwrap();
+        registry.set_cache(&scalar, 60_000).unwrap();
+        assert_eq!(
+            registry.get_value(&scalar, &points).unwrap(),
+            Reading::Values(vec![(point.clone(), Value::Integer(9.into()))])
+        );
+        registry.barrier(Manager::Cache).unwrap().await.unwrap();
+        let cached = registry.cache_info(&scalar, &point).unwrap().unwrap();
+        for manager in [Manager::Admin, Manager::Cache, Manager::Alias] {
+            assert_eq!(registry.restart(manager, 1).unwrap().await, Ok(2));
+        }
+        let after = registry.cache_info(&scalar, &point).unwrap().unwrap();
+        assert_eq!(cached.sequence, after.sequence);
+        assert_ne!(cached.timer, after.timer);
+        assert_eq!(
+            registry.alias_value(&alias).unwrap(),
+            Reading::Values(vec![(point, Value::Integer(9.into()))])
+        );
+        assert!(
+            registry
+                .info()
+                .managers
+                .iter()
+                .all(|m| m.running && m.previous_joined)
+        );
+        let unchanged = reporter.reporters().unwrap().await.unwrap().remove(0);
+        assert_eq!(unchanged.generation, first.generation);
+        assert_eq!(
+            client.supervisor().unwrap().status().supervisor_generation,
+            1
+        );
         if !normal {
             assert!(h.connections().is_none());
             client
@@ -210,10 +266,12 @@ impl Metrics {
         let old = supervisor.current().unwrap();
         let reporter = stable.reporter().unwrap();
         let before = reporter.reporters().unwrap().await.unwrap().remove(0);
-        let registry = stable.store().unwrap();
+        let registry = stable.registry().unwrap();
         let scalar = vec![ae_sync::routing::Part::atom("logger-counter")];
         registry
             .create(&scalar, ae_sync::observe::registry::Kind::Counter, true)
+            .unwrap()
+            .await
             .unwrap();
         registry
             .update(

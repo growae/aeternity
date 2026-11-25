@@ -107,6 +107,7 @@ pub enum Error {
     RestartLimit,
     Report(report::Error),
     Reporter(reporter::Error),
+    Registry(registry::Error),
     Pipeline(pipeline::Error),
     Io(std::io::ErrorKind),
 }

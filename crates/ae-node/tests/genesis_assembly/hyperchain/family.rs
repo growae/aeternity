@@ -431,5 +431,6 @@ async fn application_metrics_outlive_hyperchain_connections_in_all_modes() {
         assert!(exit.status().joined && exit.status().failure.is_none());
         assert!(client.info().joined && !client.info().running);
         assert!(exit.status().metrics.unwrap().joined);
+        metrics_settings::Metrics::assert_registry_joined(&client);
     }
 }

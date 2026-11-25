@@ -7,10 +7,14 @@ use super::{
 use crate::routing::{Name, Part};
 use reporter::Error as StoreError;
 use std::sync::Arc;
+mod cache;
 mod scalar;
+mod service;
 use crate::routing::Entry;
+pub use cache::CacheInfo;
 use scalar::Scalar;
 pub use scalar::{Alias, Error, Info, Kind, Reading, Value};
+pub use service::{Client, Manager, ManagerInfo, Owner, ServiceInfo, Ticket};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Mutex,
@@ -26,6 +30,7 @@ struct Stored {
     scalar: Option<Scalar>,
     version: u64,
     bytes: usize,
+    cache_ms: u64,
 }
 struct State {
     entries: BTreeMap<Name, Stored>,
@@ -34,6 +39,13 @@ struct State {
     signals: Vec<Signal>,
     enabled: bool,
     aliases: BTreeMap<Vec<u8>, scalar::Mapping>,
+    cache: BTreeMap<(Name, Part), cache::Cached>,
+    cache_bytes: usize,
+    cache_sequence: u64,
+    timer_sequence: u64,
+    cache_signal: Option<service::Signal>,
+    owned: bool,
+    closed: bool,
 }
 // Stable value storage is independent of connection, logger and reporter
 // generations. Publishing a coherent observer snapshot never reports it early.
@@ -56,6 +68,13 @@ impl Store {
                 signals: vec![],
                 enabled: true,
                 aliases: BTreeMap::new(),
+                cache: BTreeMap::new(),
+                cache_bytes: 0,
+                cache_sequence: 0,
+                timer_sequence: 0,
+                cache_signal: None,
+                owned: false,
+                closed: false,
             }),
             limits,
             clock,
@@ -112,6 +131,7 @@ impl Store {
             checked.push((m.clone(), bytes));
         }
         let mut s = self.lock();
+        s.open().map_err(as_reporter)?;
         let mut total = s.bytes;
         let mut count = s.entries.len();
         for (m, bytes) in &checked {
@@ -153,6 +173,7 @@ impl Store {
                 Stored {
                     metric,
                     scalar: None,
+                    cache_ms: 0,
                     version,
                     bytes,
                 },
@@ -169,7 +190,9 @@ impl Store {
     }
     pub fn remove(&self, name: &Name) -> Result<(), StoreError> {
         let mut s = self.lock();
+        s.open().map_err(as_reporter)?;
         let next = s.revision.checked_add(1).ok_or(StoreError::Sequence)?;
+        s.clear_cache_name(name);
         let old = s.entries.remove(name).ok_or(StoreError::NotFound)?;
         s.bytes -= old.bytes;
         s.revision = next;
@@ -252,11 +275,12 @@ fn selected(
 }
 impl Source for Store {
     fn valid(&self, metric: &Selector, points: &Points) -> Result<bool, StoreError> {
+        let now = self.timestamp();
+        let s = self.lock();
+        s.open().map_err(as_reporter)?;
         let Selector::Metric(name) = metric else {
             return Ok(true);
         };
-        let now = self.timestamp();
-        let s = self.lock();
         self.limits.points(points)?;
         Ok(s.entries.get(name).is_some_and(|m| {
             m.metric.entry.enabled
@@ -285,22 +309,31 @@ impl Source for Store {
         }))
     }
     fn read(&self, metric: &Selector, points: &Points) -> Result<Vec<Sample>, StoreError> {
-        let now = self.timestamp();
+        let time = self.clock.now();
         self.limits.points(points)?;
-        let s = self.lock();
-        let entries: Box<dyn Iterator<Item = &Stored> + '_> = match metric {
-            Selector::Metric(name) => Box::new(s.entries.get(name).into_iter()),
-            Selector::Find(prefix) => Box::new(
-                s.entries
-                    .iter()
-                    .filter(|(n, _)| n.starts_with(prefix))
-                    .map(|(_, m)| m),
-            ),
+        let mut s = self.lock();
+        s.open().map_err(as_reporter)?;
+        let names: Vec<Name> = match metric {
+            Selector::Metric(name) => s
+                .entries
+                .contains_key(name)
+                .then(|| name.clone())
+                .into_iter()
+                .collect(),
+            Selector::Find(prefix) => s
+                .entries
+                .keys()
+                .filter(|n| n.starts_with(prefix))
+                .cloned()
+                .collect(),
         };
         let mut result = Vec::new();
         let mut bytes = 32usize;
-        for m in entries.filter(|m| m.metric.entry.enabled) {
-            let sample = match selected(m, points, now, self.limits) {
+        for name in names {
+            if !s.entries[&name].metric.entry.enabled {
+                continue;
+            }
+            let sample = match self.sample_locked(&mut s, &name, points, time) {
                 Ok(sample) => sample,
                 Err(StoreError::InvalidDatapoint) => continue,
                 Err(e) => return Err(e),
@@ -325,6 +358,7 @@ impl Source for Store {
     }
     fn catalog(&self, after: Option<u64>) -> Result<Option<Catalog>, StoreError> {
         let s = self.lock();
+        s.open().map_err(as_reporter)?;
         Ok((after != Some(s.revision)).then(|| Catalog {
             revision: s.revision,
             entries: s
@@ -336,6 +370,7 @@ impl Source for Store {
     }
     fn watch(&self, signal: Signal) -> Result<(), StoreError> {
         let mut s = self.lock();
+        s.open().map_err(as_reporter)?;
         s.signals.retain(|w| !w.closed());
         if s.signals.len() >= self.limits.reporters {
             return Err(StoreError::Limit);
@@ -347,3 +382,22 @@ impl Source for Store {
 
 #[cfg(test)]
 mod tests;
+
+fn as_reporter(error: Error) -> StoreError {
+    match error {
+        Error::Closed => StoreError::Closed,
+        Error::Sequence => StoreError::Sequence,
+        Error::Limit => StoreError::Limit,
+        Error::NotFound => StoreError::NotFound,
+        _ => StoreError::Source,
+    }
+}
+impl State {
+    fn open(&self) -> Result<(), Error> {
+        if self.closed {
+            Err(Error::Closed)
+        } else {
+            Ok(())
+        }
+    }
+}
