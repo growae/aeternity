@@ -13,6 +13,8 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
+#[path = "hyperchain/family.rs"]
+mod family;
 #[path = "hyperchain/parent.rs"]
 mod parent;
 use parent::Parent;

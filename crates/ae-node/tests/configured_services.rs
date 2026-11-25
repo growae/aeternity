@@ -996,5 +996,7 @@ async fn configured_importer_activation_rejects_unready_or_foreign_worker_owner(
     services.stop_and_join().await;
 }
 
+#[path = "configured_services/family.rs"]
+mod family;
 #[path = "configured_services/on_demand.rs"]
 mod on_demand_root;

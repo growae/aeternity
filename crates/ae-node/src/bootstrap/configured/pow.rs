@@ -87,6 +87,17 @@ pub struct Prepared {
     rules: Rules,
     open: Open,
 }
+pub struct PreparationError {
+    pub error: Error,
+    pub open: Open,
+}
+impl std::fmt::Debug for PreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PowPreparationError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 impl Open {
     // Public-network fork/reward behavior stays in the existing chain engine.
     // Any explicit custom reward/fork policy remains the enclosing caller's input.
@@ -114,6 +125,14 @@ impl Prepared {
         importer: chain::Config,
         snapshots: snapshots::Config,
     ) -> Result<Self, Error> {
+        Self::try_new(open, rules, importer, snapshots).map_err(|failure| failure.error)
+    }
+    pub fn try_new(
+        open: Open,
+        rules: Rules,
+        importer: chain::Config,
+        snapshots: snapshots::Config,
+    ) -> Result<Self, Box<PreparationError>> {
         let expected = open.pow_rules(rules.admission.micro_cycle_ms, rules.admission.body_limits);
         if !matches!(
             open.chain().identity().algorithm,
@@ -123,13 +142,27 @@ impl Prepared {
             || rules.checkpoints != expected.checkpoints
             || rules.admission.configured_gas_limit != expected.admission.configured_gas_limit
         {
-            return Err(Error::Binding);
+            return Err(Box::new(PreparationError {
+                error: Error::Binding,
+                open,
+            }));
         }
         if rules.admission.micro_cycle_ms > 86_400_000 {
-            return Err(Error::Configuration);
+            return Err(Box::new(PreparationError {
+                error: Error::Configuration,
+                open,
+            }));
         }
         let db = open.chain().database();
-        let snapshots = snapshots::Owner::start(db.clone(), snapshots).map_err(Error::Snapshots)?;
+        let snapshots = match snapshots::Owner::start(db.clone(), snapshots) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return Err(Box::new(PreparationError {
+                    error: Error::Snapshots(error),
+                    open,
+                }));
+            }
+        };
         let execution = Arc::new(open.execution().execution().clone());
         Ok(Self {
             importer_config: importer,
@@ -141,6 +174,9 @@ impl Prepared {
     }
     pub fn configured(&self) -> &Open {
         &self.open
+    }
+    pub fn into_open(self) -> Open {
+        self.open
     }
     pub fn rules(&self) -> &Rules {
         &self.rules
