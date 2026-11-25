@@ -69,6 +69,29 @@ impl Settings {
     }
 }
 impl Prepared {
+    pub fn configure_discovery(
+        &mut self,
+        resolved: &Resolved<'_>,
+        settings: &mut Settings,
+    ) -> Result<(), crate::configuration::discovery::Error> {
+        use crate::configuration::discovery::{Discovery, Error};
+        if self.family() != settings.family() {
+            return Err(Error::Family);
+        }
+        let discovery = Discovery::resolve(resolved)?;
+        match settings {
+            Settings::Cuckoo(s) => discovery.apply(&mut s.config.connections)?,
+            Settings::OnDemand(s) => discovery.apply(&mut s.config.connections)?,
+            Settings::Hyperchain(s) => {
+                discovery.apply(&mut s.config.connections)?;
+                s.runtime.admission.ledger.policy.gossip_depth = discovery.gossip_depth();
+            }
+        }
+        if let super::PreparedInner::Pow(prepared) = &mut self.0 {
+            prepared.set_gossip_depth(discovery.gossip_depth());
+        }
+        Ok(())
+    }
     pub fn configure_network(
         &self,
         resolved: &Resolved<'_>,

@@ -175,6 +175,9 @@ impl Prepared {
     pub fn configured(&self) -> &Open {
         &self.open
     }
+    pub(crate) fn set_gossip_depth(&mut self, depth: u64) {
+        self.importer_config.ledger.policy.gossip_depth = depth;
+    }
     pub fn into_open(self) -> Open {
         self.open
     }

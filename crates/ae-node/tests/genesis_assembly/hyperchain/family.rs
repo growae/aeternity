@@ -58,11 +58,11 @@ async fn configured_network_reaches_hyperchain_owner_and_respects_application_mo
     ] {
         let normal = mode == json!({});
         let lab = Hc::new(8, mode, &parent);
-        let prepared = prepare(&lab, Default::default());
+        let mut prepared = prepare(&lab, Default::default());
         let database = prepared.configured().chain().database().clone();
         let clock = Clock::new();
         let mut settings = settings(&lab, &prepared, Arc::new(move |_| Ok(clock.clone())));
-        network_settings::configure(&prepared, &mut settings);
+        network_settings::configure(&mut prepared, &mut settings);
         let running = prepared
             .launch(settings, || Ok(Default::default()))
             .unwrap();

@@ -436,7 +436,7 @@ fn invalid_commands_do_not_change_peer_state_or_advance_the_clock() {
 }
 #[test]
 fn selection_probability_preserves_native_integer_threshold_and_fallback() {
-    for probability in [0.0, 1.0] {
+    for probability in [0.0, 1.0, 1.5] {
         let mut s = Pool::with_seed(
             Config {
                 verified_probability: probability,
@@ -457,7 +457,7 @@ fn selection_probability_preserves_native_integer_threshold_and_fallback() {
             verified += usize::from(p.trusted);
             s.release(now, p.id).unwrap();
         }
-        if probability == 1.0 {
+        if probability >= 1.0 {
             assert_eq!(verified, 10000);
         } else {
             assert!(
@@ -488,7 +488,7 @@ fn invalid_configuration_is_bounded_before_entropy_or_allocation() {
             ..Default::default()
         },
         Config {
-            verified_probability: 1.1,
+            verified_probability: -0.1,
             ..Default::default()
         },
         Config {

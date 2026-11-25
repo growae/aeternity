@@ -142,17 +142,9 @@ impl Network {
             return Err(Error::Range("resolver_backoff_times"));
         }
         let unblock = r
-            .find(
-                &[],
-                &[
-                    Strategy::Application {
-                        app: "aecore",
-                        key: "peer_unblock_interval",
-                    },
-                    Strategy::Value(&json!(900000)),
-                ],
-            )?
-            .ok_or(Error::Field("peer_unblock_interval"))?;
+            .raw_application("aecore", "peer_unblock_interval")
+            .cloned()
+            .unwrap_or_else(|| json!(900000));
         let peers = Peers {
             ping_interval: number(
                 &read("ping_interval", "ping_interval", json!(120000))?,

@@ -86,7 +86,7 @@ impl Default for Config {
     }
 }
 impl Config {
-    fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         for n in [self.verified_buckets, self.unverified_buckets] {
             if n == 0 || n > 65_536 {
                 return Err(Error::Configuration);
@@ -114,7 +114,8 @@ impl Config {
             || !self.eviction_skew.is_finite()
             || self.eviction_skew <= 0.0
             || !self.verified_probability.is_finite()
-            || !(0.0..=1.0).contains(&self.verified_probability)
+            || self.verified_probability < 0.0
+            || !(self.verified_probability * 1000.0).is_finite()
             || self.maximum_update_lapse == 0
             || self.maximum_rejections == 0
             || self.standby_times.is_empty()

@@ -85,6 +85,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Sources<O> {
             ),
             Ledger::Borrowed(importer) => {
                 importer.check_open()?;
+                if importer.gossip_depth() != config.ledger.policy.gossip_depth {
+                    return Err(chain::Error::Configuration);
+                }
                 Ok(importer.shared())
             }
         }

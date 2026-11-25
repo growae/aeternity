@@ -4,6 +4,8 @@ use ae_sync::chain::on_demand::control::{Command, Kind};
 
 #[path = "family/core.rs"]
 mod core;
+#[path = "family/discovery.rs"]
+mod discovery;
 #[path = "../common/network_settings.rs"]
 mod network_settings;
 
@@ -68,14 +70,14 @@ async fn configured_network_reaches_both_pow_families_and_respects_application_m
         ] {
             let normal = mode == json!({});
             let lab = Lab::new();
-            let prepared = prepare(lab.services(kind, mode, Default::default()));
+            let mut prepared = prepare(lab.services(kind, mode, Default::default()));
             let database = prepared.configured().chain().database().clone();
             let mut settings = if kind == "on_demand" {
                 commands(&lab)
             } else {
                 cuckoo(&lab)
             };
-            network_settings::configure(&prepared, &mut settings);
+            network_settings::configure(&mut prepared, &mut settings);
             let running = prepared
                 .launch(settings, || Ok(Default::default()))
                 .unwrap();
@@ -272,19 +274,29 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
             panic!("wrong terminal family")
         };
         assert_root_joined(report);
-        assert!(!report.retained.is_empty());
-        assert!(
-            unread
-                .wait()
-                .await
-                .unwrap()
-                .result
-                .as_ref()
-                .unwrap()
-                .command
-                .result
-                .is_ok()
-        );
+        let unread = unread.wait().await.unwrap();
+        // Shutdown can precede the root's next output collection. The joined
+        // child then retains its completions directly in the terminal report.
+        // Both accepted commands must be retained exactly once across owners.
+        let held: Vec<_> = report
+            .retained
+            .iter()
+            .filter_map(|output| match output {
+                root::Output::Command { completion, .. } => Some(completion),
+                _ => None,
+            })
+            .chain(&report.commands.as_ref().unwrap().as_ref().unwrap().outputs)
+            .collect();
+        assert_eq!(held.len(), 2);
+        for receipt in [&first, &unread] {
+            assert_eq!(
+                held.iter()
+                    .filter(|held| Arc::ptr_eq(held, receipt))
+                    .count(),
+                1
+            );
+        }
+        assert!(unread.result.as_ref().unwrap().command.result.is_ok());
         assert!(h.take_exit().is_none());
         drop((first, c, pool, h, exit, db));
         assert_eq!(

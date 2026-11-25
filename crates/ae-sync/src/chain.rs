@@ -292,6 +292,9 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     pub(crate) fn database(&self) -> &Arc<Database> {
         &self.context.db
     }
+    pub(crate) fn gossip_depth(&self) -> u64 {
+        self.context.config.ledger.policy.gossip_depth
+    }
     pub(crate) fn network(&self) -> &ae_protocol::NetworkProfile {
         self.context.strategy.network()
     }

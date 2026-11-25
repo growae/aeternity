@@ -12,7 +12,7 @@ use ae_p2p::{
 use ae_sync::{observe, runtime::connection};
 use std::time::Duration;
 
-pub fn configure(prepared: &runtime::Prepared, settings: &mut runtime::Settings) {
+pub fn configure(prepared: &mut runtime::Prepared, settings: &mut runtime::Settings) {
     let configuration = Configuration::from_value(serde_json::json!({
         "include_default_peers": false,
         "sync": {"listen_address":"127.0.0.1", "port":0, "external_port":3456,
@@ -36,6 +36,21 @@ pub fn configure(prepared: &runtime::Prepared, settings: &mut runtime::Settings)
         .unwrap();
     prepared
         .configure_network(&configuration.resolve(&context).unwrap(), settings)
+        .unwrap();
+    let discovery = Configuration::from_value(serde_json::json!({
+        "sync":{"max_gossip":1,"gossip_allowed_height_from_top":0,
+            "peer_pool":{"max_rejections":2,"max_update_lapse":60000,"standby_times":[10,20]}}
+    }))
+    .unwrap();
+    context
+        .set(
+            "aecore".into(),
+            "peer_pool".into(),
+            serde_json::json!({"max_rejections":3}),
+        )
+        .unwrap();
+    prepared
+        .configure_discovery(&discovery.resolve(&context).unwrap(), settings)
         .unwrap();
     let config = match settings {
         runtime::Settings::Cuckoo(s) => &mut s.config.connections,
@@ -78,6 +93,7 @@ pub async fn verify(
             let listener = status.listener.unwrap();
             assert_eq!((listener.acceptors, listener.maximum_connections), (3, 2));
             assert!(status.listening.unwrap().ip().is_loopback());
+            assert_eq!(generation.gossip.status().policy.max_peers, 1);
             let binding = db.view().unwrap().identity().clone();
             let network = noise::Network::new(1, binding.genesis, &binding.network).unwrap();
             let socket = tokio::net::TcpStream::connect(status.listening.unwrap())

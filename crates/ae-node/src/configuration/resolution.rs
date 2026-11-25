@@ -307,6 +307,13 @@ impl Configuration {
     }
 }
 impl Resolved<'_> {
+    // application:get_env/2 does not apply setup's variable expansion.
+    pub(crate) fn raw_application(&self, app: &str, key: &str) -> Option<&Value> {
+        self.context
+            .applications
+            .get(app)
+            .and_then(|values| values.get(key))
+    }
     pub fn expand_value(&self, application: &str, value: &Value) -> Result<Value, Error> {
         self.context.expand(application, value)
     }
