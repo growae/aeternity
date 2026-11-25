@@ -230,7 +230,7 @@ async fn produce(h: &root::Handle<Otp26>, clock: &Clock, count: usize) {
                 Output::Attempt(a) => {
                     keys += usize::from(matches!(a.outcome, production::Outcome::Produced { .. }))
                 }
-                Output::Stopped(_) => (),
+                Output::Stopped(_) | Output::SessionReplaced { .. } => (),
                 o => panic!("{o:?}"),
             }
         }
@@ -780,4 +780,228 @@ async fn driver_panic_retains_service_shutdown_and_does_not_claim_a_receipt() {
     assert!(report.pool.is_ok() && report.connector_joined && report.owner.errors.is_empty());
     assert!(exit.status.workers.unwrap().joined && exit.status.connections.unwrap().joined);
     assert!(!pool.info().accepting);
+}
+
+#[tokio::test]
+async fn supervised_driver_replacement_keeps_importer_keys_pool_and_encrypted_peers() {
+    use producer::supervision::Notice;
+    let node = Node::new(1);
+    let peer = Node::new(1);
+    let clock = Clock::new();
+    let clocks = clock.clone();
+    let first = Arc::new(AtomicBool::new(false));
+    let fail = first.clone();
+    let input = inputs(&node, fixed(124), |_| {});
+    let importer = input.conductor.importer();
+    let pool = input.conductor.pool();
+    let keys = input.conductor.preset_key_binding();
+    let old_key = keys.current().unwrap();
+    let running = root::launch_supervised(
+        input,
+        config(),
+        move |generation| {
+            Ok(Clock {
+                now: clocks.now.clone(),
+                fail: if generation == 1 {
+                    fail.clone()
+                } else {
+                    Arc::new(AtomicBool::new(false))
+                },
+            })
+        },
+        || Ok(Default::default()),
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e.error));
+    let mut h = running.handle();
+    ready(&mut h).await;
+    produce(&h, &clock, 2).await;
+    let previous = h.connections().unwrap().current().unwrap();
+    first.store(true, Ordering::Release);
+    let mut retired = 0;
+    within(async {
+        loop {
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            if let Some(notice) = h.try_production_notice() {
+                match notice {
+                    Notice::Retired(report) => {
+                        assert!(report.exit.is_ok());
+                        assert_eq!(report.failure, Some(conductor::Error::Time));
+                        retired += 1;
+                    }
+                    Notice::Restarted { generation: 2 } => break,
+                    n => panic!("{n:?}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    ready(&mut h).await;
+    assert_eq!(retired, 1);
+    assert!(Arc::ptr_eq(&importer, &h.importer().unwrap()));
+    assert!(old_key.same_worker(&keys.current().unwrap()) && pool.info().accepting);
+    assert!(previous.peer.status().running && previous.network.status().running);
+    assert_eq!(h.status().producer.unwrap().consensus.attempts, 0);
+    let other = launch(inputs(&peer, fixed(125), |_| {}), config(), Clock::new());
+    let mut p = other.handle();
+    ready(&mut p).await;
+    link(&p, &h, noise::Identity::from_secret([124; 32]).public_key()).await;
+    produce(&h, &clock, 2).await;
+    within(async {
+        while node.db.view().unwrap().status().tip != peer.db.view().unwrap().status().tip {
+            assert!(h.status().failure.is_none() && p.status().failure.is_none());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let exit = within(running.shutdown()).await.unwrap();
+    clean(&exit);
+    assert!(exit.status.failure.is_none());
+    let group = exit.production.unwrap();
+    assert_eq!(group.status.attempts, 1);
+    assert!(group.driver.unwrap().exit.is_ok());
+    assert!(!pool.info().accepting);
+    clean(&within(other.shutdown()).await.unwrap());
+}
+
+#[tokio::test]
+async fn supervised_restart_exhaustion_reaches_the_zero_restart_root_with_all_reports() {
+    use producer::supervision::{Error, Notice};
+    let node = Node::new(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let running = root::launch_supervised(
+        inputs(&node, fixed(126), |_| {}),
+        config(),
+        move |_| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            let clock = Clock::new();
+            clock.fail.store(true, Ordering::Release);
+            Ok(clock)
+        },
+        || Ok(Default::default()),
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e.error));
+    let exit = within(running.wait()).await.unwrap();
+    clean(&exit);
+    assert_eq!(
+        exit.status.failure,
+        Some(root::Error::Production(Error::RestartLimit))
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 6);
+    assert_eq!(exit.production.as_ref().unwrap().status.attempts, 6);
+    let retired: Vec<_> = exit
+        .production_notices
+        .iter()
+        .filter_map(|n| match n {
+            Notice::Retired(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retired.len(), 6);
+    for (i, report) in retired.iter().enumerate() {
+        assert_eq!(report.generation, i as u64 + 1);
+        assert_eq!(report.failure, Some(conductor::Error::Time));
+    }
+    assert!(exit.producer.unwrap().unwrap().pool.is_ok());
+}
+
+#[tokio::test]
+async fn unread_supervision_notices_bound_replacement_and_survive_shutdown() {
+    use producer::supervision::Notice;
+    let node = Node::new(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let mut cfg = config();
+    cfg.outputs = 1;
+    cfg.producer.outputs = 1;
+    let running = root::launch_supervised(
+        inputs(&node, fixed(127), |_| {}),
+        cfg,
+        move |_| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            let clock = Clock::new();
+            clock.fail.store(true, Ordering::Release);
+            Ok(clock)
+        },
+        || Ok(Default::default()),
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e.error));
+    let h = running.handle();
+    within(async {
+        while !h
+            .status()
+            .production
+            .is_some_and(|p| p.generation == 2 && p.pending_notice)
+        {
+            assert!(h.status().failure.is_none());
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+    let exit = within(running.shutdown()).await.unwrap();
+    clean(&exit);
+    assert!(matches!(
+        exit.production_notices.as_slice(),
+        [Notice::Retired(_)]
+    ));
+    let report = exit.production.unwrap();
+    assert!(matches!(
+        report.pending,
+        Some(Notice::Restarted { generation: 2 })
+    ));
+    assert_eq!(report.driver.unwrap().failure, Some(conductor::Error::Time));
+    assert!(exit.producer.unwrap().unwrap().pool.is_ok());
+}
+
+#[tokio::test]
+async fn shutdown_during_replacement_constructor_keeps_workers_live_and_joins_the_result() {
+    let node = Node::new(1);
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let guard = Release(release.clone());
+    let seen = entered.clone();
+    let running = root::launch_supervised(
+        inputs(&node, fixed(128), |_| {}),
+        config(),
+        move |generation| {
+            let clock = Clock::new();
+            if generation == 1 {
+                clock.fail.store(true, Ordering::Release);
+            } else {
+                seen.store(true, Ordering::Release);
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            Ok(clock)
+        },
+        || Ok(Default::default()),
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e.error));
+    let h = running.handle();
+    within(async {
+        while !entered.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(h.workers().unwrap().status().ready);
+    assert!(h.connections().unwrap().status().ready);
+    h.request_shutdown();
+    drop(guard);
+    let exit = within(running.wait()).await.unwrap();
+    clean(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert!(exit.production.unwrap().driver.unwrap().exit.is_ok());
 }

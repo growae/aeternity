@@ -896,3 +896,205 @@ async fn configured_hyperchain_shutdown_joins_pending_parent_entropy_acquisition
         "Configured Hyperchain entropy: later-epoch key preparation requests missing parent data through a joined worker; shutdown cancels pending acquisition without changing selected state and the exact database reopens"
     );
 }
+
+#[tokio::test]
+async fn configured_supervision_retires_parent_acquisition_and_keeps_execution_limits() {
+    use producer::supervision::Notice;
+    use std::sync::atomic::Ordering;
+    struct Failing(Clock, Arc<AtomicBool>);
+    impl producer::Clock for Failing {
+        fn now(&self) -> Result<(u64, Instant), conductor::Error> {
+            if self.1.load(Ordering::Acquire) {
+                Err(conductor::Error::Time)
+            } else {
+                producer::Clock::now(&self.0)
+            }
+        }
+    }
+    for restricted in [false, true] {
+        let parent = Parent::start();
+        parent.deny(6);
+        let lab = Hc::new(8, json!({"dev_mode":true}), &parent);
+        let mut resources = Resources::default();
+        if restricted {
+            resources.signatures.max_encoded_bytes = 0;
+        }
+        let p = lab.prepared(resources, "chain");
+        let tx = transaction(&p);
+        let db = p.configured().chain().database().clone();
+        let clock = Clock::new();
+        let clocks = clock.clone();
+        let first = Arc::new(AtomicBool::new(false));
+        let fail = first.clone();
+        let running = root::launch_configured_supervised(
+            lab.inputs(p),
+            lab.root_config(),
+            move |generation| {
+                Ok(Failing(
+                    clocks.clone(),
+                    if generation == 1 {
+                        fail.clone()
+                    } else {
+                        Arc::new(AtomicBool::new(false))
+                    },
+                ))
+            },
+            || Ok(Default::default()),
+        )
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        let mut h = running.handle();
+        ready(&mut h).await;
+        let importer = h.importer().unwrap();
+        let workers = h.workers().unwrap();
+        let pool = workers.bindings().admission.current().unwrap().client;
+        h.start_production().unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !parent.requests.lock().unwrap().contains(&6) {
+                assert!(h.status().failure.is_none(), "{:?}", h.status());
+                clock.tick(&h);
+                while h.try_output().is_some() {}
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = db.view().unwrap().status();
+        first.store(true, Ordering::Release);
+        let mut notices = vec![];
+        let mut outputs = vec![];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert!(h.status().failure.is_none(), "{:?}", h.status());
+                while let Some(o) = h.try_output() {
+                    outputs.push(o);
+                }
+                if let Some(n) = h.try_production_notice() {
+                    let done = matches!(n, Notice::Restarted { generation: 2 });
+                    notices.push(n);
+                    if done {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        ready(&mut h).await;
+        assert!(matches!(
+            notices.as_slice(),
+            [Notice::Retired(_), Notice::Restarted { generation: 2 }]
+        ));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, conductor::Output::Stopped(_)))
+        );
+        assert_eq!(db.view().unwrap().status(), before);
+        assert!(Arc::ptr_eq(&importer, &h.importer().unwrap()));
+        assert!(pool.same_worker(&workers.bindings().admission.current().unwrap().client));
+        assert!(!h.status().producer.unwrap().producing);
+        parent.deny(-1);
+        pool.push(tx.clone(), ae_mempool::pool::Event::Created, false)
+            .unwrap()
+            .await
+            .unwrap();
+        let exit = if restricted {
+            h.start_production().unwrap();
+            tokio::time::timeout(Duration::from_secs(20), running.wait())
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            drop(produce(&h, &clock, 2).await);
+            running.shutdown().await.unwrap()
+        };
+        clean(&exit);
+        assert_eq!(exit.production.as_ref().unwrap().status.attempts, 1);
+        assert_eq!(
+            db.view().unwrap().location(tx.hash()).unwrap().is_some(),
+            !restricted
+        );
+        if restricted {
+            // Closing the failed producer also closes borrowed admission.
+            // The root may observe that worker departure first; the joined
+            // producer receipt retains the authoritative execution failure.
+            let failure = exit
+                .producer
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .status
+                .failure
+                .as_ref()
+                .unwrap();
+            assert!(exit.status.failure.is_some());
+            assert!(
+                format!("{failure:?}").contains("Signature(ResourceLimit)"),
+                "{failure:?}",
+            );
+            assert_eq!(db.view().unwrap().status(), before);
+            assert!(
+                ae_storage::pool::Stored::load(db.view().unwrap())
+                    .unwrap()
+                    .members(10)
+                    .unwrap()
+                    .contains(&tx.hash())
+            );
+        } else {
+            assert!(exit.status.failure.is_none());
+        }
+        let status = db.view().unwrap().status();
+        drop((outputs, notices, exit, h, importer, workers, pool, db));
+        assert_eq!(
+            lab.prepared(Default::default(), "chain")
+                .configured()
+                .chain()
+                .database()
+                .view()
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    println!(
+        "Supervised Hyperchain root: pending parent entropy retires before fresh production; one importer, pool, configured execution limits and exact durable reopen survive replacement"
+    );
+}
+
+#[tokio::test]
+async fn configured_supervision_initial_factory_failure_retains_opened_chain() {
+    let parent = Parent::start();
+    let lab = Hc::new(8, json!({"dev_mode":true}), &parent);
+    let p = lab.prepared(Default::default(), "chain");
+    let identity = p.configured().chain().identity().clone();
+    let running = root::launch_configured_supervised(
+        lab.inputs(p),
+        lab.root_config(),
+        |_| Err::<Clock, _>("injected initial factory error".into()),
+        || Ok(Default::default()),
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e.error));
+    let exit = running.wait().await.unwrap();
+    clean(&exit);
+    assert_eq!(
+        exit.status.failure,
+        Some(root::Error::ProducerSpawn(
+            "injected initial factory error".into()
+        ))
+    );
+    assert_eq!(
+        exit.configured.as_ref().unwrap().chain().identity(),
+        &identity
+    );
+    assert!(exit.production.is_none());
+    drop(exit);
+    assert_eq!(
+        lab.prepared(Default::default(), "chain")
+            .configured()
+            .chain()
+            .identity(),
+        &identity
+    );
+}

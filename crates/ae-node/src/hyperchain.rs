@@ -10,12 +10,14 @@ use ae_sync::{
     runtime::{connection, workers},
 };
 use ae_vm_fate::maps::MapOrder;
+use producer::supervision as production;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
+mod driving;
 
 pub enum Identity {
     Fixed(Arc<noise::Identity>),
@@ -77,6 +79,7 @@ pub enum Error {
     Workers(workers::Error),
     Connections(connection::Error),
     Producer(conductor::Error),
+    Production(production::Error),
     ProducerSpawn(String),
     ProducerCleanup,
     ChildStopped(Child),
@@ -93,12 +96,15 @@ pub struct Status {
     pub workers: Option<workers::Status>,
     pub connections: Option<connection::Status>,
     pub producer: Option<conductor::Status>,
+    pub production: Option<production::Status>,
 }
 pub struct Exit<O> {
     pub configured: Option<configured::Open>,
     pub status: Status,
     pub producer: Option<Result<conductor::Shutdown<O>, Error>>,
     pub retained: Vec<Output>,
+    pub production: Option<production::Report>,
+    pub production_notices: Vec<production::Notice>,
 }
 struct Controls<O> {
     importer: Option<Arc<ae_sync::chain::Importer<O>>>,
@@ -111,6 +117,7 @@ struct Shared<O> {
     published: watch::Sender<Status>,
     controls: Mutex<Controls<O>>,
     outputs: Mutex<VecDeque<Output>>,
+    notices: Mutex<VecDeque<production::Notice>>,
     exit: Mutex<Option<Exit<O>>>,
 }
 pub struct Handle<O>(Arc<Shared<O>>, watch::Receiver<Status>);
@@ -164,9 +171,23 @@ impl<O> Handle<O> {
     pub fn take_exit(&self) -> Option<Exit<O>> {
         self.0.exit.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
+    pub fn try_production_notice(&self) -> Option<production::Notice> {
+        self.0
+            .notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
     fn control(&self, start: bool) -> Result<(), Error> {
         if *self.0.stop.borrow() || !self.status().running {
             return Err(Error::Closed);
+        }
+        if self
+            .status()
+            .production
+            .is_some_and(|p| p.phase != production::Phase::Running)
+        {
+            return Err(Error::Producer(conductor::Error::Backpressured));
         }
         let control = self.0.controls.lock().unwrap_or_else(|e| e.into_inner());
         let p = control.producer.as_ref().ok_or(Error::NotReady)?;
@@ -249,7 +270,7 @@ struct Owner<O: MapOrder + Clone + Send + Sync + 'static> {
     status: Status,
     config: Config,
     conductor: Option<Conductor<O>>,
-    producer: Option<producer::Runtime<O>>,
+    producer: Option<driving::Runtime<O>>,
     worker: Option<workers::hyperchain::Handle<O>>,
     worker_task: Option<JoinHandle<workers::Status>>,
     connection: Option<connection::Handle>,
@@ -277,7 +298,33 @@ where
             network: true,
         },
         config,
-        clock,
+        driving::Input::Single(Box::new(clock)),
+        outputs,
+    ))
+}
+pub fn launch_supervised<O, F>(
+    inputs: Inputs<O>,
+    config: Config,
+    clocks: impl production::Factory,
+    outputs: F,
+) -> Result<Running<O>, Box<StartError<O>>>
+where
+    O: MapOrder + Clone + Send + Sync + 'static,
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    if let Some(error) = validate(&config) {
+        return Err(Box::new(StartError { error, inputs }));
+    }
+    Ok(spawn(
+        Startup {
+            conductor: Some(inputs.conductor),
+            activate: None,
+            cache: inputs.cache,
+            identity: inputs.identity,
+            network: true,
+        },
+        config,
+        driving::Input::Supervised(Box::new(clocks)),
         outputs,
     ))
 }
@@ -299,6 +346,38 @@ pub fn launch_configured<F>(
     inputs: ConfiguredInputs,
     config: Config,
     clock: impl producer::Clock,
+    outputs: F,
+) -> Result<Running<ae_vm_fate::maps::order::Otp26>, Box<ConfiguredStartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    configured_launch(
+        inputs,
+        config,
+        driving::Input::Single(Box::new(clock)),
+        outputs,
+    )
+}
+pub fn launch_configured_supervised<F>(
+    inputs: ConfiguredInputs,
+    config: Config,
+    clocks: impl production::Factory,
+    outputs: F,
+) -> Result<Running<ae_vm_fate::maps::order::Otp26>, Box<ConfiguredStartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    configured_launch(
+        inputs,
+        config,
+        driving::Input::Supervised(Box::new(clocks)),
+        outputs,
+    )
+}
+fn configured_launch<F>(
+    inputs: ConfiguredInputs,
+    config: Config,
+    clock: driving::Input,
     outputs: F,
 ) -> Result<Running<ae_vm_fate::maps::order::Otp26>, Box<ConfiguredStartError>>
 where
@@ -342,12 +421,7 @@ where
         outputs,
     ))
 }
-fn spawn<O, F>(
-    inputs: Startup<O>,
-    config: Config,
-    clock: impl producer::Clock,
-    outputs: F,
-) -> Running<O>
+fn spawn<O, F>(inputs: Startup<O>, config: Config, clock: driving::Input, outputs: F) -> Running<O>
 where
     O: MapOrder + Clone + Send + Sync + 'static,
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
@@ -361,6 +435,7 @@ where
         workers: None,
         connections: None,
         producer: inputs.conductor.as_ref().map(Conductor::status),
+        production: None,
     };
     let (published, observed) = watch::channel(status.clone());
     let (stop, stopped) = watch::channel(false);
@@ -374,6 +449,7 @@ where
             workers: None,
         }),
         outputs: Mutex::new(VecDeque::new()),
+        notices: Mutex::new(VecDeque::new()),
         exit: Mutex::new(None),
     });
     let handle = Handle(shared.clone(), observed);
@@ -419,11 +495,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
             self.status.connections = Some(c.status());
         }
         if let Some(p) = &self.producer {
-            self.status.producer = Some(p.handle().status());
+            self.status.producer = Some(p.status());
+            self.status.production = p.production_status();
         }
         if self.status.phase == Phase::Running {
             self.status.ready = self.status.workers.as_ref().is_some_and(|s| s.ready)
-                && (!self.network || self.status.connections.as_ref().is_some_and(|s| s.ready));
+                && (!self.network || self.status.connections.as_ref().is_some_and(|s| s.ready))
+                && self
+                    .status
+                    .production
+                    .as_ref()
+                    .is_none_or(|p| p.phase == production::Phase::Running);
         }
         self.shared.published.send_replace(self.status.clone());
     }
@@ -450,7 +532,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         &mut self,
         cache: CacheController,
         identity: Identity,
-        clock: impl producer::Clock,
+        clock: driving::Input,
         outputs: F,
     ) -> Result<(), Error>
     where
@@ -587,7 +669,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         self.startup_check(end)?;
         self.phase(Phase::Producer);
         let conductor = self.conductor.take().expect("conductor");
-        match producer::Runtime::spawn(conductor, clock, self.config.producer) {
+        let settings = self.config.producer;
+        match tokio::task::spawn_blocking(move || {
+            driving::Runtime::spawn(conductor, clock, settings)
+        })
+        .await
+        .map_err(|_| Error::ChildTask(Child::Producer))?
+        {
             Ok(runtime) => {
                 self.shared
                     .controls
@@ -602,6 +690,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                 return Err(Error::ProducerSpawn(error));
             }
         }
+        self.startup_check(end)?;
         self.status.ready = true;
         self.phase(Phase::Running);
         Ok(())
@@ -646,14 +735,28 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                     return Err(Error::ChildStopped(Child::Connections));
                 }
             }
-            let p = self.producer.as_ref().expect("running producer");
-            let status = p.handle().status();
-            if let Some(e) = status.failure {
-                return Err(Error::Producer(e));
+            if self
+                .producer
+                .as_ref()
+                .expect("running producer")
+                .constructs_clock()
+            {
+                let mut p = self.producer.take().expect("running producer");
+                // Constructor completion is accepted work. Await and retain
+                // its result even when shutdown arrives; never detach it or
+                // block the independent async workers on a factory call.
+                let (runtime, result) = tokio::task::spawn_blocking(move || {
+                    let result = p.poll();
+                    (p, result)
+                })
+                .await
+                .map_err(|_| Error::ChildTask(Child::Producer))?;
+                self.producer = Some(runtime);
+                result?;
+            } else {
+                self.producer.as_mut().expect("running producer").poll()?;
             }
-            if p.is_finished() {
-                return Err(Error::ChildStopped(Child::Producer));
-            }
+            let p = self.producer.as_mut().expect("running producer");
             {
                 let mut out = self
                     .shared
@@ -663,6 +766,18 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                 while out.len() < self.config.outputs {
                     let Some(o) = p.try_output() else { break };
                     out.push_back(o);
+                }
+            }
+            {
+                let mut notices = self
+                    .shared
+                    .notices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if notices.len() < self.config.outputs
+                    && let Some(n) = p.take_notice()
+                {
+                    notices.push_back(n);
                 }
             }
             self.publish();
@@ -721,9 +836,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         let producer = (runtime.is_some() || conductor.is_some()).then(|| {
             tokio::task::spawn_blocking(move || {
                 if let Some(p) = runtime {
-                    p.shutdown().map_err(|_| Error::ChildTask(Child::Producer))
+                    p.shutdown()
                 } else {
-                    Ok(conductor.expect("unstarted conductor").shutdown())
+                    (Ok(conductor.expect("unstarted conductor").shutdown()), None)
                 }
             })
         });
@@ -744,14 +859,35 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
                 }
             }
         }
-        let report = match producer {
-            Some(producer) => Some(
-                producer
+        let (report, production) = match producer {
+            Some(producer) => {
+                let (result, group) = producer
                     .await
-                    .unwrap_or(Err(Error::ChildTask(Child::Producer))),
-            ),
-            None => None,
+                    .unwrap_or((Err(Error::ChildTask(Child::Producer)), None));
+                (Some(result), group)
+            }
+            None => (None, None),
         };
+        if let Some(group) = &production {
+            self.status.production = Some(group.status.clone());
+            if let Some(error) = &group.status.failure {
+                self.status
+                    .failure
+                    .get_or_insert(Error::Production(error.clone()));
+            }
+            if let Some(driver) = &group.driver {
+                if driver.exit.is_err() {
+                    joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::Producer));
+                } else if let Some(error) = &driver.failure {
+                    self.status
+                        .failure
+                        .get_or_insert(Error::Producer(error.clone()));
+                }
+            }
+        }
         match &report {
             Some(Ok(s)) => {
                 self.status.producer = Some(s.status.clone());
@@ -805,6 +941,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
             producer: report,
             retained,
             configured: self.configured.take(),
+            production,
+            production_notices: self
+                .shared
+                .notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect(),
         });
         self.shared.published.send_replace(self.status.clone());
     }

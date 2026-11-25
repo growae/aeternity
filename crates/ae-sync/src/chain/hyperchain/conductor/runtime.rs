@@ -6,6 +6,7 @@ use std::{
 };
 mod driver;
 mod receipt;
+pub mod supervision;
 #[cfg(test)]
 mod tests;
 pub use driver::{Driver, DriverReport};
@@ -17,6 +18,11 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub trait Clock: Send + 'static {
     fn now(&self) -> Result<(u64, Instant), Error>;
+}
+impl<T: Clock + ?Sized> Clock for Box<T> {
+    fn now(&self) -> Result<(u64, Instant), Error> {
+        (**self).now()
+    }
 }
 pub struct SystemClock;
 impl Clock for SystemClock {
