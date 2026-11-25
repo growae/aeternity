@@ -70,6 +70,12 @@ impl Budget {
     pub fn usage(&self) -> Usage {
         *self.0.usage.lock().unwrap_or_else(|e| e.into_inner())
     }
+    pub(in crate::observe::registry) fn validate_policy(
+        &self,
+        policy: &Policy,
+    ) -> Result<(), Error> {
+        policy.validate(self.0.limits.history)
+    }
     fn admit(&self, bytes: usize) -> Result<Arc<Credit>, Error> {
         let mut u = self.0.usage.lock().unwrap_or_else(|e| e.into_inner());
         if u.pending >= self.0.limits.requests
@@ -171,7 +177,26 @@ impl<T> Future for Ticket<T> {
 }
 impl<T> Ticket<T> {
     pub fn blocking_wait(self) -> Result<T, Error> {
-        self.receiver.blocking_recv().unwrap_or(Err(Error::Closed))
+        struct WakeThread(thread::Thread);
+        impl std::task::Wake for WakeThread {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        // The work runs on dedicated OS threads, independent of any caller's
+        // async runtime. Synchronous registry reads can safely wait here too.
+        let waker = std::task::Waker::from(Arc::new(WakeThread(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut ticket = Box::pin(self);
+        loop {
+            match ticket.as_mut().poll(&mut context) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => thread::park(),
+            }
+        }
     }
 }
 #[derive(Debug, Clone, Default)]
@@ -196,6 +221,7 @@ struct Task {
 struct Queue {
     tasks: VecDeque<Task>,
     info: Info,
+    next_config: Config,
 }
 struct Shared {
     queue: Mutex<Queue>,
@@ -224,6 +250,25 @@ pub struct Client {
     updates: watch::Receiver<()>,
 }
 impl Client {
+    #[cfg(test)]
+    pub(in crate::observe::registry) fn test_work(
+        &self,
+        action: impl FnOnce() + Send + 'static,
+    ) -> Result<Ticket<()>, Error> {
+        self.call(128, move |_, _, _| {
+            action();
+            Ok(())
+        })
+    }
+    pub fn configure_next(&self, config: Config) -> Result<(), Error> {
+        config.validate(self.shared.budget.values())?;
+        let mut q = self.shared.lock();
+        if q.info.closing {
+            return Err(Error::Closed);
+        }
+        q.next_config = config;
+        Ok(())
+    }
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
     }
@@ -317,6 +362,15 @@ impl Owner {
         budget: Budget,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, Error> {
+        Self::spawn_notified(config, policy, budget, clock, None)
+    }
+    pub(in crate::observe::registry) fn spawn_notified(
+        config: Config,
+        policy: Policy,
+        budget: Budget,
+        clock: Arc<dyn Clock>,
+        terminal: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Self, Error> {
         config.validate(budget.values())?;
         policy.validate(budget.0.limits.history)?;
         let policy = policy.clone();
@@ -325,6 +379,7 @@ impl Owner {
             queue: Mutex::new(Queue {
                 tasks: VecDeque::new(),
                 info: Info::default(),
+                next_config: config,
             }),
             wake: Condvar::new(),
             changed: watch::channel(()).0,
@@ -341,7 +396,7 @@ impl Owner {
             .name("ae-metric-probe-owner".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    supervise(&shared, config, policy, ready)
+                    supervise(&shared, policy, ready)
                 }))
                 .unwrap_or(Err(Error::Panicked));
                 let discarded = {
@@ -358,6 +413,9 @@ impl Owner {
                 drop(permit);
                 shared.done.send_replace(true);
                 shared.changed.send_replace(());
+                if let Some(terminal) = terminal {
+                    terminal();
+                }
             })
             .map_err(|_| Error::Spawn)?;
         let mut owner = Self {
@@ -423,7 +481,6 @@ impl Drop for Worker {
 }
 fn supervise(
     shared: &Arc<Shared>,
-    config: Config,
     policy: Policy,
     ready: std::sync::mpsc::SyncSender<Result<(), Error>>,
 ) -> Result<(), Error> {
@@ -437,6 +494,7 @@ fn supervise(
         q.info.generation = q.info.generation.checked_add(1).ok_or(Error::Sequence)?;
         q.info.running = true;
         q.info.recovering = false;
+        let config = q.next_config;
         drop(q);
         let s = shared.clone();
         let thread = match thread::Builder::new()

@@ -102,8 +102,8 @@ pub enum Reading {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
     pub entry: Entry,
-    pub timestamp_ms: i128,
-    pub cache_ms: u64,
+    pub timestamp_ms: Option<i128>,
+    pub cache_ms: Option<u64>,
     pub datapoints: Option<Vec<Part>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +211,7 @@ impl Store {
         self.register(name, kind, enabled, true)
     }
     fn register(&self, name: &Name, kind: Kind, enabled: bool, ensure: bool) -> Result<(), Error> {
+        let _control = self.control();
         let bytes = 256usize
             .saturating_add(self.scalar_name(name)?.saturating_mul(2))
             .saturating_add(Value::Integer(0.into()).bytes(self.limits.report)?);
@@ -235,6 +236,8 @@ impl Store {
         s.entries.insert(
             name.clone(),
             Stored {
+                histogram: None,
+                read_epoch: 0,
                 metric: Metric {
                     entry: Entry {
                         name: name.clone(),
@@ -272,6 +275,10 @@ impl Store {
         if !stored.metric.entry.enabled {
             return Ok(());
         }
+        if let Some(histogram) = &stored.histogram {
+            drop(histogram.client()?.update(value)?);
+            return Ok(());
+        }
         let scalar = stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
         value.bytes(self.limits.report)?;
         let value = match (&scalar.kind, &scalar.value, value) {
@@ -305,6 +312,16 @@ impl Store {
         if !stored.metric.entry.enabled {
             return Ok(());
         }
+        if let Some(histogram) = &stored.histogram {
+            let client = histogram.client()?;
+            let epoch = stored.read_epoch.checked_add(1).ok_or(Error::Sequence)?;
+            drop(client.reset()?);
+            s.entries.get_mut(name).expect("entry locked").read_epoch = epoch;
+            for point in histogram::datapoints() {
+                s.clear_cache_point(name, &point);
+            }
+            return Ok(());
+        }
         let scalar = stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
         let old = scalar.value.bytes(self.limits.report)?;
         let value = Value::Integer(0.into());
@@ -326,6 +343,10 @@ impl Store {
         let time = self.clock.now();
         let mut s = self.lock();
         s.open()?;
+        if s.entries.get(name).is_some_and(|e| e.histogram.is_some()) {
+            drop(s);
+            return self.histogram_read(name, points, time);
+        }
         self.scalar_read(&mut s, name, points, time)
     }
     pub fn info(&self, name: &Name) -> Result<Info, Error> {
@@ -333,19 +354,36 @@ impl Store {
         let s = self.lock();
         s.open()?;
         let stored = s.entries.get(name).ok_or(Error::NotFound)?;
-        let scalar = stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
+        let (timestamp_ms, datapoints) = if let Some(scalar) = &stored.scalar {
+            (Some(scalar.timestamp), defaults())
+        } else if stored.histogram.is_some() {
+            (None, histogram::datapoints())
+        } else {
+            return Err(Error::SampledEntry);
+        };
         Ok(Info {
             entry: stored.metric.entry.clone(),
-            timestamp_ms: scalar.timestamp,
-            cache_ms: stored.cache_ms,
-            datapoints: stored.metric.entry.enabled.then(defaults),
+            timestamp_ms: timestamp_ms.filter(|_| stored.metric.entry.enabled),
+            cache_ms: stored.metric.entry.enabled.then_some(stored.cache_ms),
+            datapoints: stored.metric.entry.enabled.then_some(datapoints),
         })
     }
     pub fn set_enabled(&self, name: &Name, enabled: bool) -> Result<(), Error> {
+        let _control = self.control();
         self.scalar_name(name)?;
         let mut s = self.lock();
         s.open()?;
         let stored = s.entries.get(name).ok_or(Error::NotFound)?;
+        if stored.histogram.is_some() {
+            drop(s);
+            return self.histogram_settings_locked(
+                name,
+                HistogramSettings {
+                    enabled: Some(enabled),
+                    ..Default::default()
+                },
+            );
+        }
         stored.scalar.as_ref().ok_or(Error::SampledEntry)?;
         if stored.metric.entry.enabled == enabled {
             // exometer:setopts has a case_clause for already-enabled scalars;
@@ -388,28 +426,17 @@ impl Store {
     pub fn aggregate(&self, prefix: &Name, points: &Points) -> Result<Vec<(Part, BigInt)>, Error> {
         self.scalar_name(prefix)?;
         self.scalar_points(points)?;
-        let time = self.clock.now();
-        let mut s = self.lock();
-        s.open()?;
-        let names: Vec<Name> = s
-            .entries
-            .values()
-            .filter(|m| m.metric.entry.enabled && m.metric.entry.name.starts_with(prefix))
-            .map(|m| m.metric.entry.name.clone())
-            .collect();
-        let mut sums = BTreeMap::<Part, BigInt>::new();
-        for name in names {
-            let sample = match self.sample_locked(&mut s, &name, points, time) {
-                Ok(sample) => sample,
-                Err(StoreError::InvalidDatapoint) => continue,
-                Err(e) => {
-                    return Err(if e == StoreError::Closed {
-                        Error::Closed
-                    } else {
-                        Error::Limit
-                    });
+        let samples = self
+            .read(&Selector::Find(prefix.clone()), points)
+            .map_err(|e| {
+                if e == StoreError::Closed {
+                    Error::Closed
+                } else {
+                    Error::Limit
                 }
-            };
+            })?;
+        let mut sums = BTreeMap::<Part, BigInt>::new();
+        for sample in samples {
             for (p, v) in sample.values {
                 if let report::Value::Integer(n) = v {
                     let sum = sums.entry(p).or_default();

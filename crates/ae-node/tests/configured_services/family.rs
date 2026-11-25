@@ -605,6 +605,16 @@ async fn metrics_mixed_five_child_recovery_then_exhaustion_joins_the_application
         ready(&mut handle).await;
         let client = handle.metrics().unwrap();
         let registry = client.registry().unwrap();
+        let histogram = vec![ae_sync::routing::Part::atom("exhaustion-histogram")];
+        registry
+            .create_histogram(&histogram, &registry::HistogramOptions::default())
+            .unwrap()
+            .await
+            .unwrap();
+        registry
+            .update(&histogram, &registry::Value::Integer(23.into()))
+            .unwrap();
+        assert_eq!(client.store().unwrap().histogram_usage().workers, 1);
         let report = client.reporter().unwrap();
         let logger = client.supervisor().unwrap();
         let old = logger.current().unwrap();

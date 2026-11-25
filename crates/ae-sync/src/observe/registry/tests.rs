@@ -524,5 +524,5 @@ fn scalar_read_expansion_is_bounded_and_backward_clock_age_is_signed() {
             .unwrap(),
         Reading::Values(vec![(Part::atom("ms_since_reset"), integer(-1000))])
     );
-    assert_eq!(store.info(&n).unwrap().timestamp_ms, 2000);
+    assert_eq!(store.info(&n).unwrap().timestamp_ms, Some(2000));
 }

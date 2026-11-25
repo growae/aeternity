@@ -283,6 +283,58 @@ impl Client {
             })
         })
     }
+    pub fn create_histogram(
+        &self,
+        name: &Name,
+        options: &HistogramOptions,
+    ) -> Result<Ticket<()>, Error> {
+        self.register_histogram(name, options, false)
+    }
+    pub fn ensure_histogram(
+        &self,
+        name: &Name,
+        options: &HistogramOptions,
+    ) -> Result<Ticket<()>, Error> {
+        self.register_histogram(name, options, true)
+    }
+    fn register_histogram(
+        &self,
+        name: &Name,
+        options: &HistogramOptions,
+        ensure: bool,
+    ) -> Result<Ticket<()>, Error> {
+        self.parent
+            .store
+            .probe_budget
+            .validate_policy(&options.policy)?;
+        let bytes = 256usize
+            .saturating_add(self.parent.store.scalar_name(name)?)
+            .saturating_add(options.policy.0.len().saturating_mul(64));
+        let name = name.clone();
+        let options = options.clone();
+        self.call(Manager::Admin, bytes, move |store| {
+            if ensure {
+                store.ensure_histogram(&name, &options)
+            } else {
+                store.create_histogram(&name, &options)
+            }
+        })
+    }
+    pub fn set_histogram(&self, name: &Name, settings: HistogramSettings) -> Result<(), Error> {
+        self.open()?;
+        self.parent.store.set_histogram(name, settings)
+    }
+    pub fn histogram_options(&self, name: &Name) -> Result<HistogramOptions, Error> {
+        self.open()?;
+        self.parent.store.histogram_options(name)
+    }
+    pub fn histogram_probe_info(
+        &self,
+        name: &Name,
+    ) -> Result<Option<histogram::probe::Info>, Error> {
+        self.open()?;
+        self.parent.store.histogram_probe_info(name)
+    }
     pub fn add_alias(&self, alias: &Alias, name: &Name, point: &Part) -> Result<Ticket<()>, Error> {
         let store = &self.parent.store;
         let key = alias.key(store.limits)?;
@@ -452,6 +504,9 @@ impl Worker {
                                 store.clock.now(),
                             )?;
                         }
+                        if manager == Manager::Admin {
+                            store.histogram_turn(Some(Signal(Arc::downgrade(&child))))?;
+                        }
                         let _ = ready.send(());
                         worker_loop(&store, &child, manager)
                     },
@@ -501,6 +556,9 @@ impl Drop for Worker {
 }
 fn worker_loop(store: &Store, state: &Arc<WorkerState>, manager: Manager) -> Result<(), Error> {
     loop {
+        if manager == Manager::Admin {
+            store.histogram_turn(None)?;
+        }
         let time = store.clock.now();
         let due = if manager == Manager::Cache {
             store.cache_turn(None, false, time)?

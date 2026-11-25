@@ -9,10 +9,12 @@ use reporter::Error as StoreError;
 use std::sync::Arc;
 mod cache;
 pub mod histogram;
+mod native_histogram;
 mod scalar;
 mod service;
 use crate::routing::Entry;
 pub use cache::CacheInfo;
+pub use native_histogram::{HistogramOptions, HistogramSettings};
 use scalar::Scalar;
 pub use scalar::{Alias, Error, Info, Kind, Reading, Value};
 pub use service::{Client, Manager, ManagerInfo, Owner, ServiceInfo, Ticket};
@@ -29,6 +31,8 @@ pub struct Metric {
 struct Stored {
     metric: Metric,
     scalar: Option<Scalar>,
+    histogram: Option<native_histogram::Registered>,
+    read_epoch: u64,
     version: u64,
     bytes: usize,
     cache_ms: u64,
@@ -52,6 +56,9 @@ struct State {
 // generations. Publishing a coherent observer snapshot never reports it early.
 pub struct Store {
     state: Mutex<State>,
+    control: Mutex<()>,
+    probe_budget: histogram::probe::Budget,
+    probe_signal: Arc<Mutex<Option<service::Signal>>>,
     limits: Limits,
     clock: Arc<dyn Clock>,
 }
@@ -62,6 +69,16 @@ impl Store {
     pub fn with_clock(limits: Limits, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         limits.validate()?;
         Ok(Self {
+            control: Mutex::new(()),
+            probe_budget: histogram::probe::Budget::new(histogram::probe::Limits {
+                values: limits,
+                requests: limits.requests,
+                pending_bytes: limits.pending_bytes,
+                retained_bytes: limits.retained_bytes,
+                ..Default::default()
+            })
+            .map_err(as_reporter)?,
+            probe_signal: Arc::new(Mutex::new(None)),
             state: Mutex::new(State {
                 entries: BTreeMap::new(),
                 revision: 0,
@@ -83,6 +100,9 @@ impl Store {
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn control(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.control.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn size(&self, m: &Metric) -> Result<usize, StoreError> {
         let l = self.limits;
@@ -112,6 +132,7 @@ impl Store {
         Ok(bytes)
     }
     pub fn put(&self, metrics: Vec<Metric>) -> Result<(), StoreError> {
+        let _control = self.control();
         if metrics.len() > self.limits.subscriptions {
             return Err(StoreError::Limit);
         }
@@ -137,7 +158,7 @@ impl Store {
         let mut count = s.entries.len();
         for (m, bytes) in &checked {
             if let Some(old) = s.entries.get(&m.entry.name) {
-                if old.scalar.is_some() {
+                if old.scalar.is_some() || old.histogram.is_some() {
                     return Err(StoreError::Configuration);
                 }
                 total -= old.bytes;
@@ -174,6 +195,8 @@ impl Store {
                 Stored {
                     metric,
                     scalar: None,
+                    histogram: None,
+                    read_epoch: 0,
                     cache_ms: 0,
                     version,
                     bytes,
@@ -190,6 +213,7 @@ impl Store {
         Ok(())
     }
     pub fn remove(&self, name: &Name) -> Result<(), StoreError> {
+        let _control = self.control();
         let mut s = self.lock();
         s.open().map_err(as_reporter)?;
         let next = s.revision.checked_add(1).ok_or(StoreError::Sequence)?;
@@ -200,6 +224,8 @@ impl Store {
         for signal in &s.signals {
             signal.notify();
         }
+        drop(s);
+        drop(old);
         Ok(())
     }
     pub fn publish(&self, snapshot: &super::metrics::Snapshot) -> Result<(), StoreError> {
@@ -285,7 +311,7 @@ impl Source for Store {
         self.limits.points(points)?;
         Ok(s.entries.get(name).is_some_and(|m| {
             m.metric.entry.enabled
-                && if m.scalar.is_some() {
+                && if m.scalar.is_some() || m.histogram.is_some() {
                     if *points == Points::default_points() {
                         true
                     } else {
@@ -293,7 +319,11 @@ impl Source for Store {
                             Points::One(p) => std::slice::from_ref(p),
                             Points::Many(v) => v,
                         };
-                        let mut available = vec![Part::atom("value"), Part::atom("ms_since_reset")];
+                        let mut available = if m.histogram.is_some() {
+                            histogram::datapoints()
+                        } else {
+                            scalar::defaults()
+                        };
                         !requested.is_empty()
                             && requested.iter().all(|p| {
                                 if let Some(i) = available.iter().position(|a| a == p) {
@@ -328,17 +358,8 @@ impl Source for Store {
                 .cloned()
                 .collect(),
         };
-        let mut result = Vec::new();
         let mut bytes = 32usize;
-        for name in names {
-            if !s.entries[&name].metric.entry.enabled {
-                continue;
-            }
-            let sample = match self.sample_locked(&mut s, &name, points, time) {
-                Ok(sample) => sample,
-                Err(StoreError::InvalidDatapoint) => continue,
-                Err(e) => return Err(e),
-            };
+        let mut reserve = |sample: &Sample| -> Result<(), StoreError> {
             bytes = bytes.saturating_add(
                 self.limits
                     .report
@@ -351,8 +372,51 @@ impl Source for Store {
                     .saturating_add(v.size(self.limits.report).map_err(StoreError::Report)?);
             }
             if bytes > self.limits.retained_bytes {
-                return Err(StoreError::Limit);
+                Err(StoreError::Limit)
+            } else {
+                Ok(())
             }
+        };
+        let mut plan = Vec::new();
+        // Capture sampled frames and scalars under one lock, preserving coherent
+        // publication even if histogram work below blocks on another thread.
+        for name in names {
+            let entry = &s.entries[&name];
+            if !entry.metric.entry.enabled {
+                continue;
+            }
+            let sample = if entry.histogram.is_some() {
+                None
+            } else {
+                match self.sample_locked(&mut s, &name, points, time) {
+                    Ok(sample) => {
+                        reserve(&sample)?;
+                        Some(sample)
+                    }
+                    Err(StoreError::InvalidDatapoint) => continue,
+                    Err(e) => return Err(e),
+                }
+            };
+            plan.push((name, sample));
+        }
+        drop(s);
+        let mut result = Vec::with_capacity(plan.len());
+        for (name, sample) in plan {
+            let sample = match sample {
+                Some(sample) => sample,
+                None => match self.histogram_read(&name, points, time) {
+                    Ok(Reading::Values(values)) => {
+                        let sample = Sample {
+                            metric: name,
+                            values: values.into_iter().map(|(p, v)| (p, v.report())).collect(),
+                        };
+                        reserve(&sample)?;
+                        sample
+                    }
+                    Ok(Reading::Disabled) | Err(Error::NotFound) => continue,
+                    Err(e) => return Err(as_reporter(e)),
+                },
+            };
             result.push(sample);
         }
         Ok(result)

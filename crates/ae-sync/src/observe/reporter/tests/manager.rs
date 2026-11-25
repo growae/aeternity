@@ -83,6 +83,65 @@ struct Core {
     budget: Budget,
     socket: UdpSocket,
 }
+
+#[tokio::test]
+async fn registered_histogram_reports_through_actual_logger_across_disable_and_recovery() {
+    let mut core = Core::new(Limits::default()).await;
+    let registry = core.registry.client();
+    let metric = ["ae", "epoch", "histogram"].map(Part::atom).to_vec();
+    registry
+        .create_histogram(&metric, &registry::HistogramOptions::default())
+        .unwrap()
+        .await
+        .unwrap();
+    registry
+        .update(&metric, &registry::Value::Integer(17.into()))
+        .unwrap();
+    let c = core.reporter.client();
+    c.add(Config {
+        intervals: vec![NamedInterval {
+            name: "default".into(),
+            period: Period::Manual,
+            delay_ms: 0,
+        }],
+        ..Default::default()
+    })
+    .unwrap()
+    .await
+    .unwrap();
+    c.subscribe(
+        Subscription {
+            reporter: name(),
+            metric: Selector::Metric(metric.clone()),
+            points: Points::One(Part::atom("mean")),
+            retry: true,
+            extra: report::Extra::List(vec![]),
+        },
+        Interval::Named("default".into()),
+    )
+    .unwrap()
+    .await
+    .unwrap();
+    c.trigger(name(), "default".into()).unwrap().await.unwrap();
+    assert_eq!(packet(&core.socket).await, b"ae.epoch.histogram.mean:17|g");
+    registry.set_enabled(&metric, false).unwrap();
+    c.trigger(name(), "default".into()).unwrap().await.unwrap();
+    none(&core.socket).await;
+    registry.set_enabled(&metric, true).unwrap();
+    c.trigger(name(), "default".into()).unwrap().await.unwrap();
+    assert_eq!(packet(&core.socket).await, b"ae.epoch.histogram.mean:0|g");
+    registry
+        .update(&metric, &registry::Value::Integer(29.into()))
+        .unwrap();
+    c.restart_manager(1).unwrap().await.unwrap();
+    c.trigger(name(), "default".into()).unwrap().await.unwrap();
+    assert_eq!(packet(&core.socket).await, b"ae.epoch.histogram.mean:29|g");
+    core.finish().await;
+    assert_eq!(
+        core.store.histogram_usage(),
+        registry::histogram::probe::Usage::default()
+    );
+}
 impl Core {
     async fn new(limits: Limits) -> Self {
         Self::source(limits, |s| s).await

@@ -16,6 +16,12 @@ pub(super) struct Cached {
     bytes: usize,
 }
 impl State {
+    pub(super) fn clear_cache_point(&mut self, name: &Name, point: &Part) {
+        if let Some(old) = self.cache.remove(&(name.clone(), point.clone())) {
+            self.bytes -= old.bytes;
+            self.cache_bytes -= old.bytes;
+        }
+    }
     pub(super) fn clear_cache_name(&mut self, name: &Name) {
         let mut removed = 0;
         self.cache.retain(|(n, _), value| {
@@ -41,15 +47,28 @@ impl Store {
         Ok(())
     }
     pub(super) fn close(&self) {
+        let _control = self.control();
         let mut s = self.lock();
         s.closed = true;
         s.enabled = false;
+        let owners: Vec<_> = s
+            .entries
+            .values_mut()
+            .filter_map(|e| e.histogram.as_mut()?.owner.take())
+            .collect();
+        for owner in &owners {
+            owner.client().shutdown();
+        }
+        drop(s);
+        drop(owners);
+        let mut s = self.lock();
         s.entries.clear();
         s.aliases.clear();
         s.cache.clear();
         s.bytes = 0;
         s.cache_bytes = 0;
         s.cache_signal = None;
+        *self.probe_signal.lock().unwrap_or_else(|e| e.into_inner()) = None;
         for signal in &s.signals {
             signal.notify();
         }
@@ -63,7 +82,10 @@ impl Store {
         if !entry.metric.entry.enabled {
             return Err(Error::Disabled);
         }
-        entry.scalar.as_ref().ok_or(Error::SampledEntry)?;
+        if entry.scalar.is_none() && entry.histogram.is_none() {
+            return Err(Error::SampledEntry);
+        }
+        entry.read_epoch = entry.read_epoch.checked_add(1).ok_or(Error::Sequence)?;
         // cache=0 bypasses the cache; it does not remove retained datapoints.
         entry.cache_ms = ttl_ms;
         Ok(())
@@ -141,6 +163,9 @@ impl Store {
         self.scalar_name(name)?;
         let mut s = self.lock();
         s.open()?;
+        if let Some(entry) = s.entries.get_mut(name) {
+            entry.read_epoch = entry.read_epoch.checked_add(1).ok_or(Error::Sequence)?;
+        }
         if let Some(point) = point {
             self.limits.report.part(point).map_err(|_| Error::Limit)?;
             if let Some(old) = s.cache.remove(&(name.clone(), point.clone())) {
@@ -188,6 +213,17 @@ impl Store {
             .cloned()
             .collect();
         let fresh = scalar.values(&Points::Many(missing), timestamp(time), self.limits)?;
+        self.cache_fill(s, name, requested, fresh, ttl_ms, time)
+    }
+    pub(super) fn cache_fill(
+        &self,
+        s: &mut State,
+        name: &Name,
+        requested: &[Part],
+        fresh: Vec<(Part, Value)>,
+        ttl_ms: u64,
+        time: Time,
+    ) -> Result<Reading, Error> {
         let mut result = Vec::with_capacity(requested.len());
         let mut response_bytes = 32usize;
         for point in requested {
@@ -196,7 +232,7 @@ impl Store {
                 .get(&(name.clone(), point.clone()))
                 .map(|c| &c.value)
                 .or_else(|| fresh.iter().find(|(p, _)| p == point).map(|(_, v)| v))
-                .expect("requested scalar datapoint");
+                .ok_or(Error::Stale)?;
             response_bytes = response_bytes
                 .saturating_add(self.limits.report.part(point).map_err(|_| Error::Limit)?)
                 .saturating_add(value.bytes(self.limits.report)?);
@@ -210,6 +246,9 @@ impl Store {
         let mut inserts = BTreeMap::new();
         let mut bytes = 0usize;
         for (point, value) in fresh {
+            if s.cache.contains_key(&(name.clone(), point.clone())) {
+                continue;
+            }
             let entry_bytes = self.cache_bytes(name, &point, &value)?;
             if inserts.insert(point, (value, entry_bytes)).is_none() {
                 bytes = bytes.saturating_add(entry_bytes);
@@ -266,10 +305,7 @@ impl Store {
             .scalar_read(s, name, points, time)
             .map_err(as_reporter)?
         else {
-            return Ok(Sample {
-                metric: name.clone(),
-                values: vec![],
-            });
+            return Err(StoreError::InvalidDatapoint);
         };
         Ok(Sample {
             metric: name.clone(),
@@ -346,7 +382,7 @@ impl Store {
 fn timestamp(time: Time) -> i128 {
     time.unix_microseconds.div_euclid(1000) - 1_258_000_000_000
 }
-fn ttl(ttl: u64) -> Result<(), Error> {
+pub(super) fn ttl(ttl: u64) -> Result<(), Error> {
     if ttl > u32::MAX as u64 {
         Err(Error::Limit)
     } else {

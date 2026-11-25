@@ -34,6 +34,10 @@ impl Metrics {
         assert!(info.managers.iter().all(|m| m.joined && !m.running));
         assert_eq!(client.store().unwrap().retained_bytes(), 0);
         assert_eq!(
+            client.store().unwrap().histogram_usage(),
+            ae_sync::observe::registry::histogram::probe::Usage::default()
+        );
+        assert_eq!(
             registry.find_entries(&vec![]),
             Err(ae_sync::observe::registry::Error::Closed)
         );
@@ -82,6 +86,21 @@ impl Metrics {
             ae_sync::observe::reporter::Period::Milliseconds(10_000)
         );
         let registry = client.registry().unwrap();
+        let histogram = vec![ae_sync::routing::Part::atom("application-histogram")];
+        registry
+            .create_histogram(
+                &histogram,
+                &ae_sync::observe::registry::HistogramOptions::default(),
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        registry
+            .update(
+                &histogram,
+                &ae_sync::observe::registry::Value::Integer(17.into()),
+            )
+            .unwrap();
         let scalar = vec![ae_sync::routing::Part::atom("application-counter")];
         registry
             .create(&scalar, ae_sync::observe::registry::Kind::Counter, true)
@@ -128,6 +147,19 @@ impl Metrics {
                 .all(|m| m.running && m.previous_joined)
         );
         let unchanged = reporter.reporters().unwrap().await.unwrap().remove(0);
+        assert_eq!(
+            registry
+                .get_value(
+                    &histogram,
+                    &ae_sync::observe::reporter::Points::One(ae_sync::routing::Part::atom("mean"))
+                )
+                .unwrap(),
+            Reading::Values(vec![(
+                ae_sync::routing::Part::atom("mean"),
+                Value::Integer(17.into())
+            )])
+        );
+        assert_eq!(client.store().unwrap().histogram_usage().workers, 1);
         assert_eq!(unchanged.generation, first.generation);
         assert_eq!(
             client.supervisor().unwrap().status().supervisor_generation,
