@@ -1,8 +1,5 @@
 use super::{Error, Header, Limits, Source, Stats};
-use crate::{
-    block::Block,
-    repository::{self as repo, Read, Record, Roots, View, point},
-};
+use crate::repository::{self as repo, Read, Record, Roots, View, point};
 use ae_codec::{headers::Header as StoredHeader, rlp};
 use ae_protocol::Protocol;
 use ae_state::{
@@ -13,7 +10,8 @@ use ae_types::Hash256;
 use num_bigint::BigInt;
 
 // Aggregate read/work limits do not describe retained output size. A runtime
-// adapter must additionally reserve memory for one decoded block and response.
+// adapter must additionally reserve the block envelope, one decoded transaction,
+// transient codec/state allocations and the retained response.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadLimits {
     pub reads: point::Limits,
@@ -60,10 +58,11 @@ impl<S: Read> Reader<S> {
         &self,
         hash: Hash256,
         protocol: u32,
-        checkpoint: impl FnMut() -> Result<(), Error>,
+        mut checkpoint: impl FnMut() -> Result<(), Error>,
     ) -> Result<Stats, Error> {
         // Native evaluates both accessors even if either returns missing.
-        let block = self.view.block(hash)?;
+        let block = self.view.stream_block(hash, &mut checkpoint)?;
+        checkpoint()?;
         let bytes = self.view.source().get(&repo::key(repo::RECORDS, hash.0))?;
         let trees = bytes
             .map(|bytes| {
@@ -84,21 +83,23 @@ impl<S: Read> Reader<S> {
         let (Some(block), Some(trees)) = (block, trees) else {
             return Err(Error::MissingState(hash));
         };
-        let Block::Micro(block) = block else {
+        let StoredHeader::Micro(header) = block.header() else {
             return Err(Error::InvalidObject);
         };
-        if block.header.common.version != protocol {
+        if header.common.version != protocol {
             return Err(Error::InvalidObject);
         }
-        Stats::transactions(
-            &block.transactions,
-            &block.header.common.height.into(),
-            Protocol::try_from(protocol).map_err(|_| Error::InvalidObject)?,
-            &trees,
-            &self.block_gas_limit,
-            self.limits.observations,
-            checkpoint,
-        )
+        let protocol = Protocol::try_from(protocol).map_err(|_| Error::InvalidObject)?;
+        let height = header.common.height.into();
+        let mut stats = Stats {
+            total: self.block_gas_limit.clone(),
+            ..Default::default()
+        };
+        stats.check(self.limits.observations)?;
+        block.for_each(&mut checkpoint, |tx| {
+            stats.transaction(tx, &height, protocol, &trees, self.limits.observations)
+        })?;
+        Ok(stats)
     }
 }
 impl<S: Read> Source for Reader<S> {

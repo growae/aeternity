@@ -152,23 +152,33 @@ impl Stats {
         stats.check(limits)?;
         for signed in transactions {
             checkpoint()?;
-            let tx = signed.transaction().view();
-            let pricing = tx.pricing(height, protocol);
-            let used = if protocol < Protocol::Ceres {
-                pricing.gas_limit
-            } else {
-                accounting::used_gas(tx, height, protocol, trees)?
-            };
-            stats.add(
-                Self {
-                    minimum: Some(pricing.minimum_gas_price),
-                    used,
-                    total: BigInt::ZERO,
-                },
-                limits,
-            )?;
+            stats.transaction(signed, height, protocol, trees, limits)?;
         }
         Ok(stats)
+    }
+    fn transaction<A: NodeReader, C: NodeReader>(
+        &mut self,
+        signed: &SignedTransaction<Transaction>,
+        height: &Unsigned,
+        protocol: Protocol,
+        trees: &Trees<A, C>,
+        limits: Limits,
+    ) -> Result<(), Error> {
+        let tx = signed.transaction().view();
+        let pricing = tx.pricing(height, protocol);
+        let used = if protocol < Protocol::Ceres {
+            pricing.gas_limit
+        } else {
+            accounting::used_gas(tx, height, protocol, trees)?
+        };
+        self.add(
+            Self {
+                minimum: Some(pricing.minimum_gas_price),
+                used,
+                total: BigInt::ZERO,
+            },
+            limits,
+        )
     }
 }
 

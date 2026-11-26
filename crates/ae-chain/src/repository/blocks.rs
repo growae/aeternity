@@ -3,6 +3,7 @@ use crate::block::MicroBlock;
 use ae_codec::headers::Header;
 
 mod header;
+mod stream;
 pub(super) use header::decode as header;
 
 const MAGIC: &[u8] = b"\0aeblock\x01";

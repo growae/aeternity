@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    block::MicroBlock,
+    block::{Block, MicroBlock},
     repository::{Identity, Status},
 };
 use ae_codec::headers::{CommonHeader, MicroHeader};
@@ -160,38 +160,74 @@ fn reader(db: Memory) -> Reader<Memory> {
     )
     .unwrap()
 }
+fn modernize(db: &mut Memory, hash: Hash256) {
+    use ae_trie::Value as V;
+    let block = View::load(db.clone())
+        .unwrap()
+        .block(hash)
+        .unwrap()
+        .unwrap();
+    let (hashes, proof) = match &block {
+        Block::Micro(b) => (
+            b.transactions
+                .iter()
+                .map(|t| V::Bytes(t.hash().0.to_vec()))
+                .collect(),
+            b.proof
+                .as_ref()
+                .map(|p| p.encode().unwrap())
+                .unwrap_or_default(),
+        ),
+        Block::Key(_) => (vec![], vec![]),
+    };
+    let mut bytes = b"\0aeblock\x01".to_vec();
+    bytes.extend(
+        V::List(vec![
+            V::Bytes(block.header().encode().unwrap()),
+            V::List(hashes),
+            V::Bytes(proof),
+        ])
+        .encode(),
+    );
+    db.put(repo::key(repo::BLOCKS, hash.0), bytes);
+}
 #[test]
 fn original_micro_statistics_use_historical_pricing_and_resulting_call_state() {
     let f = fixture();
     assert_eq!(f["rows"].as_array().unwrap().len(), 224);
     for r in f["rows"].as_array().unwrap() {
-        let (db, hash) = database(r);
-        let mut read = reader(db);
-        assert_eq!(read.tip(), Some(hash));
-        let header = read.header(hash).unwrap().unwrap();
-        assert!(header.micro);
-        assert_eq!(header.time, 42);
-        let result = read.uncached_stats(hash, header.protocol, || Ok(()));
-        if r["result"]["kind"] == "ok" {
-            let got = result.unwrap();
-            let want = &r["result"]["value"];
-            assert_eq!(
-                got.minimum,
-                (!want["minimum"].is_null()).then(|| number(&want["minimum"])),
-                "{r}"
-            );
-            assert_eq!(got.used, number(&want["used"]), "{r}");
-            assert_eq!(got.total, number(&want["total"]), "{r}");
-        } else {
-            assert!(
-                matches!(
-                    result,
-                    Err(Error::Accounting(
-                        ae_execution::transactions::accounting::Error::MissingCall { .. }
-                    ))
-                ),
-                "{r}: {result:?}"
-            );
+        for modern in [false, true] {
+            let (mut db, hash) = database(r);
+            if modern {
+                modernize(&mut db, hash);
+            }
+            let mut read = reader(db);
+            assert_eq!(read.tip(), Some(hash));
+            let header = read.header(hash).unwrap().unwrap();
+            assert!(header.micro);
+            assert_eq!(header.time, 42);
+            let result = read.uncached_stats(hash, header.protocol, || Ok(()));
+            if r["result"]["kind"] == "ok" {
+                let got = result.unwrap();
+                let want = &r["result"]["value"];
+                assert_eq!(
+                    got.minimum,
+                    (!want["minimum"].is_null()).then(|| number(&want["minimum"])),
+                    "{r}"
+                );
+                assert_eq!(got.used, number(&want["used"]), "{r}");
+                assert_eq!(got.total, number(&want["total"]), "{r}");
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Accounting(
+                            ae_execution::transactions::accounting::Error::MissingCall { .. }
+                        ))
+                    ),
+                    "{r}: {result:?}"
+                );
+            }
         }
     }
     for r in f["missing"].as_array().unwrap() {
@@ -323,4 +359,317 @@ fn empty_and_pre_ceres_observations_still_load_all_state_roots() {
             ));
         }
     }
+}
+
+#[test]
+fn streamed_blocks_validate_transactions_before_reading_missing_state() {
+    let f = fixture();
+    let r = f["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["protocol"] == 6 && r["name"] == "mixed")
+        .unwrap();
+    for modern in [false, true] {
+        for corrupt in [false, true] {
+            let (mut db, h) = database(r);
+            let block = View::load(db.clone()).unwrap().block(h).unwrap().unwrap();
+            let Block::Micro(b) = block else {
+                unreachable!()
+            };
+            let last = repo::key(repo::TRANSACTIONS, b.transactions.last().unwrap().hash().0);
+            if modern {
+                modernize(&mut db, h);
+            }
+            db.remove(&repo::key(repo::RECORDS, h.0));
+            if corrupt {
+                db.put(last.clone(), vec![0]);
+            } else {
+                db.remove(&last);
+            }
+            let read = reader(db.clone());
+            db.trace.borrow_mut().clear();
+            assert!(matches!(
+                read.uncached_stats(h, 6, || Ok(())),
+                Err(Error::Backend(_))
+            ));
+            let trace = db.trace.borrow();
+            assert!(trace.contains(&last));
+            assert!(!trace.contains(&repo::key(repo::RECORDS, h.0)));
+        }
+        let (mut db, h) = database(r);
+        if modern {
+            modernize(&mut db, h);
+        }
+        let read = reader(db.clone());
+        db.trace.borrow_mut().clear();
+        assert!(matches!(
+            read.uncached_stats(h, 6, || Err(Error::Backend(repo::Error::PolicyClosed))),
+            Err(Error::Backend(repo::Error::PolicyClosed))
+        ));
+        assert!(db.trace.borrow().is_empty());
+    }
+}
+
+// Repeated authenticated transaction references make a small wire block with
+// substantial per-transaction stored metadata. This is a query-record fixture,
+// not a claim that the artificial duplicate-transaction block is admissible.
+fn metadata_block(modern: bool) -> (Memory, Hash256, Vec<u8>, usize) {
+    let f = fixture();
+    let r = f["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["protocol"] == 5 && r["name"] == "call")
+        .unwrap();
+    let (mut db, h) = database(r);
+    let Block::Micro(mut b) = View::load(db.clone()).unwrap().block(h).unwrap().unwrap() else {
+        unreachable!()
+    };
+    let signed = b.transactions[0].clone();
+    let ae_tx::TransactionLeaf::Contract(c) = signed.transaction().leaf() else {
+        unreachable!()
+    };
+    let mut c = c.clone();
+    c.set_call_context([9; 32], vec![ae_types::Unsigned::from(u64::MAX); 8192])
+        .unwrap();
+    let stored = SignedTransaction::new(
+        Transaction::new(ae_tx::TransactionLeaf::Contract(c)),
+        vec![],
+    );
+    assert_eq!(stored.encode(), signed.encode());
+    let record = ae_tx::storage::encode(&stored, Default::default()).unwrap();
+    assert!(record.len() > signed.encode().len() * 100);
+    let txkey = repo::key(repo::TRANSACTIONS, signed.hash().0);
+    db.put(txkey.clone(), record.clone());
+    b.transactions = vec![signed; 32];
+    db.put(
+        repo::key(repo::BLOCKS, h.0),
+        Block::Micro(b).encode().unwrap(),
+    );
+    if modern {
+        modernize(&mut db, h);
+    }
+    (db, h, txkey, record.len())
+}
+
+#[test]
+fn streamed_metadata_accounting_uses_two_metered_passes_and_can_cancel_between_transactions() {
+    let f = fixture();
+    let native = &f["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["protocol"] == 5 && r["name"] == "call")
+        .unwrap()["result"]["value"];
+    for modern in [false, true] {
+        let (db, h, txkey, record_bytes) = metadata_block(modern);
+        let view = View::load(db.clone()).unwrap();
+        let block = view
+            .stream_block(h, &mut || Ok::<_, repo::Error>(()))
+            .unwrap()
+            .unwrap();
+        let mut seen = 0;
+        block
+            .for_each(&mut || Ok::<_, repo::Error>(()), |signed| {
+                let ae_tx::TransactionLeaf::Contract(c) = signed.transaction().leaf() else {
+                    panic!("contract metadata lost")
+                };
+                assert_eq!(c.call_origin(), [9; 32]);
+                assert_eq!(c.call_stack().len(), 8192);
+                seen += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, 32);
+        let read = reader(db.clone());
+        db.trace.borrow_mut().clear();
+        db.copied.set(0);
+        let stats = read.uncached_stats(h, 5, || Ok(())).unwrap();
+        assert_eq!(stats.minimum, Some(number(&native["minimum"])));
+        assert_eq!(stats.used, number(&native["used"]) * BigInt::from(32));
+        assert_eq!(stats.total, number(&native["total"]));
+        let trace = db.trace.borrow();
+        let state = trace
+            .iter()
+            .position(|k| *k == repo::key(repo::RECORDS, h.0))
+            .unwrap();
+        assert_eq!(trace[..state].iter().filter(|k| **k == txkey).count(), 32);
+        assert_eq!(trace[state..].iter().filter(|k| **k == txkey).count(), 32);
+        assert!(db.copied.get() >= 64 * record_bytes);
+        drop(trace);
+        db.trace.borrow_mut().clear();
+        assert!(matches!(
+            read.uncached_stats(h, 5, || {
+                let trace = db.trace.borrow();
+                if trace.iter().filter(|k| **k == txkey).count() >= 35 {
+                    Err(Error::Backend(repo::Error::PolicyClosed))
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(Error::Backend(repo::Error::PolicyClosed))
+        ));
+        assert_eq!(
+            db.trace.borrow().iter().filter(|k| **k == txkey).count(),
+            35
+        );
+
+        // Both passes consume the same aggregate read credit. The first pass
+        // and root reads fit; accounting cannot get a fresh unmetered budget.
+        let first_pass = db.data[repo::IDENTITY].len()
+            + db.data[repo::STATUS].len()
+            + db.data[&repo::key(repo::BLOCKS, h.0)].len()
+            + 32 * record_bytes
+            + db.data[&repo::key(repo::RECORDS, h.0)].len();
+        let limit = first_pass + (32 << 10);
+        db.trace.borrow_mut().clear();
+        db.copied.set(0);
+        let limited = Reader::new(
+            &view,
+            6_000_000.into(),
+            ReadLimits {
+                reads: point::Limits {
+                    read_bytes: limit,
+                    ..ReadLimits::default().reads
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            limited.uncached_stats(h, 5, || Ok(())),
+            Err(Error::ResourceLimit)
+        ));
+        assert!(db.trace.borrow().contains(&repo::key(repo::RECORDS, h.0)));
+        assert!(db.copied.get() <= limit);
+        let config = repo::ReadConfig {
+            max_transaction_record_bytes: record_bytes - 1,
+            ..Default::default()
+        };
+        let view = View::load_with_config(db.clone(), config).unwrap();
+        db.copied.set(0);
+        let limited = Reader::new(&view, 6_000_000.into(), Default::default()).unwrap();
+        assert!(matches!(
+            limited.uncached_stats(h, 5, || Ok(())),
+            Err(Error::ResourceLimit)
+        ));
+        assert!(db.copied.get() < record_bytes);
+    }
+}
+
+#[test]
+fn streamed_modern_records_enforce_canonical_transport_size_and_identity() {
+    let (mut db, h, _, _) = metadata_block(true);
+    let view = View::load(db.clone()).unwrap();
+    let wire = view.block(h).unwrap().unwrap().encode().unwrap();
+    assert!(wire.len() > db.data[&repo::key(repo::BLOCKS, h.0)].len());
+    for limit in [wire.len() - 1, wire.len()] {
+        let view = View::load_with_config(
+            db.clone(),
+            repo::ReadConfig {
+                max_block_bytes: limit,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let full = view.block(h);
+        let streamed = view.stream_block(h, &mut || Ok::<_, repo::Error>(()));
+        assert_eq!(full.is_ok(), streamed.is_ok());
+        assert_eq!(streamed.is_ok(), limit == wire.len());
+    }
+    let wrong = Hash256([7; 32]);
+    db.put(
+        repo::key(repo::BLOCKS, wrong.0),
+        db.data[&repo::key(repo::BLOCKS, h.0)].clone(),
+    );
+    let view = View::load(db.clone()).unwrap();
+    assert!(matches!(
+        view.stream_block(wrong, &mut || Ok::<_, repo::Error>(())),
+        Err(repo::Error::Corrupt("block identity"))
+    ));
+    let mut bytes = db.data[&repo::key(repo::BLOCKS, h.0)].clone();
+    bytes[b"\0aeblock".len()] = 2;
+    db.put(repo::key(repo::BLOCKS, h.0), bytes);
+    let view = View::load(db).unwrap();
+    assert!(matches!(
+        view.stream_block(h, &mut || Ok::<_, repo::Error>(())),
+        Err(repo::Error::Corrupt("block record version"))
+    ));
+}
+
+#[test]
+fn streamed_proofs_and_noncanonical_envelopes_are_validated_before_state() {
+    use ae_trie::Value as V;
+    let f = fixture();
+    let r = f["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["protocol"] == 6 && r["name"] == "empty")
+        .unwrap();
+    for modern in [false, true] {
+        let (mut db, h) = database(r);
+        let Block::Micro(mut block) = View::load(db.clone()).unwrap().block(h).unwrap().unwrap()
+        else {
+            unreachable!()
+        };
+        let mut second = block.header.clone();
+        second.time += 1;
+        block.proof = Some(Box::new(crate::fraud::Proof {
+            first: StoredHeader::Micro(block.header.clone()),
+            second: StoredHeader::Micro(second),
+            public_key: vec![1; 32],
+        }));
+        let raw_header = StoredHeader::Micro(block.header.clone()).encode().unwrap();
+        db.put(
+            repo::key(repo::BLOCKS, h.0),
+            Block::Micro(block).encode().unwrap(),
+        );
+        if modern {
+            modernize(&mut db, h);
+        }
+        assert!(reader(db.clone()).stats(h, 6).is_ok());
+        let bytes = &db.data[&repo::key(repo::BLOCKS, h.0)];
+        let prefix = if modern {
+            b"\0aeblock\x01".to_vec()
+        } else {
+            raw_header
+        };
+        let V::List(mut fields) = V::from_rlp(&rlp::decode(&bytes[prefix.len()..]).unwrap()) else {
+            unreachable!()
+        };
+        if modern {
+            fields[2] = V::Bytes(vec![0xc0]);
+        } else {
+            fields[3] = V::List(vec![V::Bytes(vec![])]);
+        }
+        let mut corrupt = prefix;
+        corrupt.extend(V::List(fields).encode());
+        db.put(repo::key(repo::BLOCKS, h.0), corrupt);
+        db.remove(&repo::key(repo::RECORDS, h.0));
+        let mut read = reader(db.clone());
+        db.trace.borrow_mut().clear();
+        assert!(matches!(
+            read.stats(h, 6),
+            Err(Error::Backend(repo::Error::Corrupt(_)))
+        ));
+        assert!(!db.trace.borrow().contains(&repo::key(repo::RECORDS, h.0)));
+    }
+    // Native RLP accepts a long-form length for this short list. Database
+    // canonical round-trip validation must reject it, as View.block does.
+    let (mut db, h) = database(r);
+    let bytes = &db.data[&repo::key(repo::BLOCKS, h.0)];
+    let (header, body) =
+        StoredHeader::decode_partial(bytes, ae_codec::headers::HeaderMode::ProofOfWork).unwrap();
+    assert_eq!(body, [0xc4, 101, 6, 0xc0, 0xc0]);
+    let mut noncanonical = header.encode().unwrap();
+    noncanonical.extend([0xf8, 4, 101, 6, 0xc0, 0xc0]);
+    db.put(repo::key(repo::BLOCKS, h.0), noncanonical);
+    let view = View::load(db).unwrap();
+    assert!(matches!(view.block(h), Err(repo::Error::Corrupt(_))));
+    assert!(matches!(
+        view.stream_block(h, &mut || Ok::<_, repo::Error>(())),
+        Err(repo::Error::Corrupt(_))
+    ));
 }
