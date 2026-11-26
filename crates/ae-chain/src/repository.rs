@@ -16,6 +16,7 @@ mod decoding;
 pub mod execution;
 mod history;
 pub mod hyperchain;
+pub mod point;
 pub mod pow;
 pub mod retention;
 pub mod rollback;

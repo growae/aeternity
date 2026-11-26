@@ -6,8 +6,14 @@ use crate::{
 use ae_codec::headers::{CommonHeader, KeyHeader};
 use ae_protocol::NetworkProfile;
 use ae_state::{StateRoots, accounts::Accounts, calls::Calls};
+use ae_trie::NodeReader;
 use ae_types::Id;
-use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 #[derive(Clone, Default)]
 struct Memory {
