@@ -5,6 +5,8 @@ mod accounts;
 mod contracts;
 #[path = "http/info.rs"]
 mod info;
+#[path = "http/oracles.rs"]
+mod oracles;
 #[path = "http/post.rs"]
 mod post;
 use ae_node::http::{Config, Error};

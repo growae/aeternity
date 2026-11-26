@@ -5,6 +5,7 @@ use ae_storage::events::{Cursor, Reader};
 pub mod accounts;
 pub mod blocks;
 pub mod contracts;
+pub mod oracles;
 pub mod transactions;
 
 pub(super) struct Height {

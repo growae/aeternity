@@ -317,6 +317,113 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 65535
+    },
+    "OracleQuery": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedValue"
+        },
+        "sender_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "sender_nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "oracle_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "query": {
+          "type": "string"
+        },
+        "response": {
+          "type": "string"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "response_ttl": {
+          "$ref": "#/definitions/TTL"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        }
+      },
+      "required": [
+        "id",
+        "sender_id",
+        "sender_nonce",
+        "oracle_id",
+        "query",
+        "response",
+        "ttl",
+        "response_ttl",
+        "fee"
+      ]
+    },
+    "TTL": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "delta",
+            "block"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "OracleQueries": {
+      "type": "object",
+      "properties": {
+        "oracle_queries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OracleQuery"
+          }
+        }
+      },
+      "required": [
+        "oracle_queries"
+      ]
+    },
+    "RegisteredOracle": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "query_format": {
+          "type": "string"
+        },
+        "response_format": {
+          "type": "string"
+        },
+        "query_fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        }
+      },
+      "required": [
+        "id",
+        "query_format",
+        "response_format",
+        "query_fee",
+        "ttl",
+        "abi_version"
+      ]
     }
   },
   "operations": {
@@ -360,6 +467,15 @@
     },
     "GetContractPoI": {
       "$ref": "#/definitions/PoI"
+    },
+    "GetOracleByPubkey": {
+      "$ref": "#/definitions/RegisteredOracle"
+    },
+    "GetOracleQueriesByPubkey": {
+      "$ref": "#/definitions/OracleQueries"
+    },
+    "GetOracleQueryByPubkeyAndQueryId": {
+      "$ref": "#/definitions/OracleQuery"
     }
   }
 }

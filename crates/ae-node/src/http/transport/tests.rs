@@ -455,6 +455,9 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         "GetContract",
         "GetContractCode",
         "GetContractPoI",
+        "GetOracleByPubkey",
+        "GetOracleQueriesByPubkey",
+        "GetOracleQueryByPubkeyAndQueryId",
         "GetTopBlock",
         "GetTopHeader",
         "GetCurrentGeneration",
@@ -481,13 +484,13 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 29);
+    assert_eq!(implemented.len(), 32);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        56
+        62
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;
@@ -652,4 +655,123 @@ fn original_cowboy_queries_match_supported_operations_and_error_headers() {
         count += 1;
     }
     assert_eq!(count, 260);
+}
+
+#[test]
+fn original_oracle_http_wrapper_matches_all_parameters_schemas_versions_and_error_headers() {
+    use super::super::oracles::Selection;
+    use ae_state::oracles::QueryFilter;
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_oracle_schema.json"
+    ))
+    .unwrap();
+    let inputs = f["inputs"].as_array().unwrap();
+    let rows = f["schema"].as_array().unwrap();
+    assert_eq!(inputs.len(), 716);
+    assert_eq!(rows.len(), 8592);
+    let config = Config {
+        groups: ["oracle".into()].into(),
+        ..Default::default()
+    };
+    for row in rows {
+        let input = &inputs[row["id"].as_u64().unwrap() as usize];
+        let v3 = row["module"] == "oas_endpoints";
+        let suffix = match input["operation"].as_str().unwrap() {
+            "GetOracleByPubkey" => String::new(),
+            "GetOracleQueriesByPubkey" => "/queries".into(),
+            _ => format!(
+                "/queries/{}",
+                input["bindings"]["query-id"].as_str().unwrap()
+            ),
+        };
+        let base = input["query_base"].as_str().unwrap();
+        let q = row["query"]["query"].as_str().unwrap();
+        let request = Request {
+            method: "GET".into(),
+            path: format!(
+                "/{}/oracles/{}{}",
+                if v3 { "v3" } else { "v2" },
+                input["bindings"]["pubkey"].as_str().unwrap(),
+                suffix
+            ),
+            query: if base.is_empty() {
+                q.into()
+            } else {
+                format!("{base}&{q}")
+            },
+            headers: Headers::from([("origin".into(), "https://client.example".into())]),
+        };
+        let planned = plan(&request, &config);
+        assert_eq!(
+            usize::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap() as usize,
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            request.query
+        );
+        if let Ok((Operation::Oracles { operation, .. }, strings)) = &planned {
+            let mut params = json!({"pubkey":super::super::text::binary(&operation.key)});
+            if v3 {
+                params["int-as-string"] = json!(strings);
+            }
+            match &operation.selection {
+                Selection::Metadata => (),
+                Selection::Query(id) => params["query-id"] = json!(super::super::text::binary(id)),
+                Selection::Queries {
+                    cursor,
+                    filter,
+                    limit,
+                } => {
+                    params["from"] = match cursor {
+                        None => json!("undefined"),
+                        Some(None) => json!(true),
+                        Some(Some(v)) => json!(super::super::text::binary(v)),
+                    };
+                    params["limit"] = json!(limit);
+                    params["type"] = json!(match filter {
+                        QueryFilter::All => "all",
+                        QueryFilter::Open => "open",
+                        QueryFilter::Closed => "closed",
+                    });
+                }
+            }
+            assert_eq!(params, row["logic_params"], "{}", request.query);
+        }
+        let code = input["code"].as_u64().unwrap() as u16;
+        let controlled = if code == 200 {
+            Ok(input["body"].clone())
+        } else {
+            Err(Response::json(code, input["body"].clone()))
+        };
+        let mut response = super::dispatch(planned, controlled);
+        response.stamp(&config, &request.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            u64::from(response.status),
+            expected["code"].as_u64().unwrap(),
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            request.query
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(response.body.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                expected["body"],
+                "{} {} {}",
+                row["id"],
+                row["module"],
+                request.query
+            );
+        }
+        for name in ["access-control-allow-origin", "x-ae-height"] {
+            assert_eq!(
+                response.headers.get(name).map(String::as_str),
+                expected["headers"][name].as_str()
+            );
+        }
+    }
 }

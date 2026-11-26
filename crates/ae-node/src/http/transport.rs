@@ -315,6 +315,9 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if let Operation::Accounts { operation, v3 } = &mut operation {
         operation.validate(*v3, &request.query)?;
     }
+    if let Operation::Oracles { operation, .. } = &mut operation {
+        operation.validate(&request.query)?;
+    }
     Ok((operation, strings))
 }
 pub(super) fn dispatch(
@@ -322,6 +325,9 @@ pub(super) fn dispatch(
     result: Result<serde_json::Value, Response>,
 ) -> Response {
     match (plan, result) {
+        (Ok((Operation::Oracles { operation, v3 }, strings)), Ok(body)) => {
+            super::oracles::finish(&operation, body, v3, strings)
+        }
         (Ok((Operation::Contracts { operation, v3 }, strings)), Ok(body)) => {
             super::contracts::finish(&operation, body, v3, strings)
         }
@@ -415,6 +421,25 @@ pub(super) async fn exchange(
     let mut pending_candidate = None;
     let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::Oracles { operation, v3 }, strings)) => {
+            match super::oracles::query(
+                &parent,
+                &config,
+                captured.as_ref(),
+                operation,
+                *v3,
+                *strings,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::Contracts { operation, v3 }, strings)) => {
             match super::contracts::query(
                 &parent,
