@@ -54,6 +54,38 @@ pub(crate) fn plan(db: &Database) -> Update {
 }
 
 #[test]
+fn bounded_snapshot_reads_check_value_size_and_keep_snapshot_identity() {
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity()).unwrap();
+    let mut batch = WriteBatch::default();
+    batch.put(b"header-read-test", [7; 1024]);
+    db.db.write_opt(batch, &write_options()).unwrap();
+    let view = db.view().unwrap();
+    assert_eq!(view.source().get_bounded(b"missing", 0).unwrap(), None);
+    assert_eq!(
+        view.source().get_bounded(b"header-read-test", 1023),
+        Err(Error::ResourceLimit)
+    );
+    let mut batch = WriteBatch::default();
+    batch.put(b"header-read-test", [8; 2]);
+    db.db.write_opt(batch, &write_options()).unwrap();
+    assert_eq!(
+        view.source()
+            .get_bounded(b"header-read-test", 1024)
+            .unwrap(),
+        Some(vec![7; 1024])
+    );
+    assert_eq!(
+        db.view()
+            .unwrap()
+            .source()
+            .get_bounded(b"header-read-test", 2)
+            .unwrap(),
+        Some(vec![8; 2])
+    );
+}
+
+#[test]
 fn full_state_scan_detects_deep_damage_and_keeps_the_original_rocksdb_snapshot() {
     use ae_trie::scan::PageLimits;
     let dir = Temp::new();

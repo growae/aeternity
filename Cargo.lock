@@ -129,6 +129,7 @@ version = "0.1.0"
 dependencies = [
  "ae-chain",
  "ae-codec",
+ "ae-consensus",
  "ae-crypto",
  "ae-execution",
  "ae-hyperchain",
@@ -149,6 +150,7 @@ dependencies = [
  "httparse",
  "jsonschema",
  "num-bigint",
+ "num-traits",
  "rustix",
  "serde_json",
  "tokio",

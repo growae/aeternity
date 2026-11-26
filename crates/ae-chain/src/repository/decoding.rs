@@ -30,6 +30,30 @@ impl Default for ReadConfig {
     }
 }
 impl ReadConfig {
+    pub(super) fn header_body(&self) -> Result<ae_codec::rlp::DecodeLimits, super::Error> {
+        Ok(ae_codec::rlp::DecodeLimits {
+            // Both record formats have flat binary transaction/hash entries,
+            // at most two list levels and at most six other RLP items.
+            max_items: self.body.max_items.min(
+                self.max_transactions
+                    .checked_add(6)
+                    .ok_or(super::Error::ResourceLimit)?,
+            ),
+            max_depth: self.body.max_depth.min(2),
+            ..self.body
+        })
+    }
+    pub fn header_read_weight(&self) -> Result<usize, super::Error> {
+        // One copied record plus borrowed RLP nodes. Four times the node size
+        // covers geometric Vec capacity and overlapping reallocation buffers;
+        // the two parser frames and fixed-size headers fit in the extra 64 KiB.
+        self.header_body()?
+            .max_items
+            .checked_mul(4 * std::mem::size_of::<ae_codec::rlp::Rlp<'_>>())
+            .and_then(|bytes| bytes.checked_add(self.max_block_bytes))
+            .and_then(|bytes| bytes.checked_add(64 * 1024))
+            .ok_or(super::Error::ResourceLimit)
+    }
     pub fn block(&self) -> DecodeConfig<'_> {
         DecodeConfig {
             mode: self.mode,

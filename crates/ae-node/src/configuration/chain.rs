@@ -29,6 +29,7 @@ pub struct Settings {
     profile: NetworkProfile,
     consensus: Checked,
     genesis_time: u64,
+    expected_mine_rate: serde_json::Value,
 }
 impl Settings {
     pub fn resolve(
@@ -69,6 +70,17 @@ impl Settings {
             profile,
             consensus,
             genesis_time,
+            // This operational value is not part of canonical chain identity.
+            // Preserve the original consumer's user/application/default order
+            // and integer domain; status arithmetic handles invalid app values.
+            expected_mine_rate: resolved
+                .user_or_application(
+                    &["mining", "expected_mine_rate"],
+                    "aecore",
+                    "expected_mine_rate",
+                    &serde_json::json!(180_000),
+                )
+                .map_err(Error::Resolution)?,
         })
     }
     pub fn profile(&self) -> &NetworkProfile {
@@ -76,6 +88,9 @@ impl Settings {
     }
     pub fn consensus(&self) -> &Checked {
         &self.consensus
+    }
+    pub fn expected_mine_rate(&self) -> &serde_json::Value {
+        &self.expected_mine_rate
     }
     pub fn genesis_header(&self, state_hash: Hash256) -> KeyHeader {
         let target = match self.consensus.genesis().kind() {

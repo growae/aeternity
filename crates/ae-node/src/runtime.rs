@@ -24,6 +24,12 @@ use std::sync::{
 mod configuration;
 mod launch;
 mod metrics;
+pub(crate) struct Information {
+    pub started: std::time::Instant,
+    pub build: ae_sync::peer::info::Metadata,
+    pub expected_mine_rate: serde_json::Value,
+    pub order: Otp26,
+}
 pub use launch::{Cuckoo, Hyperchain, OnDemand, Settings, StartError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +310,7 @@ pub struct Handle {
     metrics: Option<metrics::View>,
     http: Option<http::Handle>,
     notice_next: Arc<AtomicBool>,
+    pub(crate) information: Arc<Information>,
 }
 impl Handle {
     pub fn mode(&self) -> ApplicationMode {
@@ -472,6 +479,7 @@ pub struct Running {
     metrics: Option<metrics::Owner>,
     http: Option<http::Running>,
     notice_next: Arc<AtomicBool>,
+    information: Arc<Information>,
 }
 impl Running {
     pub async fn listen_http(&mut self, config: http::Config) -> Result<http::Handle, http::Error> {
@@ -486,6 +494,7 @@ impl Running {
     pub fn handle(&self) -> Handle {
         Handle {
             mode: self.mode,
+            information: self.information.clone(),
             inner: match &self.inner {
                 RunningInner::Cuckoo(r) => HandleInner::Cuckoo(r.handle()),
                 RunningInner::OnDemand(r) => HandleInner::OnDemand(r.handle()),

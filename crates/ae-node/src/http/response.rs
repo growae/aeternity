@@ -150,6 +150,7 @@ pub(super) enum Operation {
     Current { height: bool },
     SyncStatus { v3: bool },
     PeerPublicKey,
+    Status { v3: bool },
 }
 pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     if config.target != Target::External {
@@ -165,6 +166,7 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         "/key-blocks/current/hash" => (Operation::Current { height: false }, "chain"),
         "/sync-status" => (Operation::SyncStatus { v3 }, "node_info"),
         "/peers/pubkey" => (Operation::PeerPublicKey, "node_info"),
+        "/status" => (Operation::Status { v3 }, "node_info"),
         _ => return None,
     };
     config

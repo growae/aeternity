@@ -202,6 +202,11 @@ impl Client {
     pub fn refresh(&self) -> Result<Ticket<Inspection>, Error> {
         self.submit(BASE_WEIGHT, |s| s.refresh())
     }
+    // Read the owned active/visited tables after earlier accepted work. Unlike
+    // refresh, this neither reconciles chain changes nor commits pool writes.
+    pub fn inspection(&self) -> Result<Ticket<Inspection>, Error> {
+        self.submit(BASE_WEIGHT, |s| s.read_inspection())
+    }
     pub fn peek(
         &self,
         max: usize,

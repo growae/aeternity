@@ -2,6 +2,9 @@ use super::*;
 use crate::block::MicroBlock;
 use ae_codec::headers::Header;
 
+mod header;
+pub(super) use header::decode as header;
+
 const MAGIC: &[u8] = b"\0aeblock\x01";
 fn bounded(block: &Block, config: &ReadConfig) -> Result<(), Error> {
     let mut size = block

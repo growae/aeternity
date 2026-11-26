@@ -8,6 +8,7 @@ use tokio::{
 
 mod key;
 mod response;
+mod status;
 mod sync;
 mod transport;
 pub use response::Cors;

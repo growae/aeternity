@@ -111,6 +111,14 @@ pub trait Read: NodeReader + Clone {
         Default::default()
     }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
+    // Backends supporting pinned values should check this before copying.
+    fn get_bounded(&self, key: &[u8], bytes: usize) -> Result<Option<Vec<u8>>, Error> {
+        let value = self.get(key)?;
+        if value.as_ref().is_some_and(|value| value.len() > bytes) {
+            return Err(Error::ResourceLimit);
+        }
+        Ok(value)
+    }
     fn prefix(&self, prefix: &[u8], limit: usize) -> Result<Entries, Error>;
     fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<Entries, Error>;
     fn visit_range(
@@ -610,6 +618,23 @@ impl<S: Read> View<S> {
                 Ok(block)
             })
             .transpose()
+    }
+    // Authenticate only the header. This does not load transaction records or
+    // validate transaction/proof contents and cannot replace block validation.
+    pub fn header(&self, h: Hash256) -> Result<Option<ae_codec::headers::Header>, Error> {
+        self.source
+            .get_bounded(&key(BLOCKS, h.0), self.config.max_block_bytes)?
+            .map(|bytes| {
+                let header = blocks::header(&bytes, &self.config)?;
+                if header.hash().map_err(|_| Error::Corrupt("header hash"))? != h {
+                    return Err(Error::Corrupt("block identity"));
+                }
+                Ok(header)
+            })
+            .transpose()
+    }
+    pub fn require_header(&self, h: Hash256) -> Result<ae_codec::headers::Header, Error> {
+        self.header(h)?.ok_or(Error::Missing(h))
     }
     pub fn transaction(
         &self,

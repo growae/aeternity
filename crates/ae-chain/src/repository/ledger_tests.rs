@@ -98,6 +98,73 @@ fn u(v: &J) -> Unsigned {
 fn data() -> J {
     serde_json::from_str(include_str!("../../tests/fixtures/erlang_chain_store.json")).unwrap()
 }
+#[test]
+fn header_queries_read_both_record_formats_without_transaction_records() {
+    let data = data();
+    let config = ReadConfig::default();
+    let mut checked = 0;
+    let mut transaction_bodies = 0;
+    for trace in data["traces"].as_array().unwrap() {
+        for row in trace.as_array().unwrap() {
+            let raw = hex::decode(row["block"].as_str().unwrap()).unwrap();
+            let block = Block::decode(&raw, config.block()).unwrap();
+            let hash = block.hash().unwrap();
+            let id = Identity::new(&NetworkProfile::mainnet(), hash, Hash256::ZERO);
+            for encoded in [raw, blocks::encode(&block, &config).unwrap()] {
+                let mut db = Memory::default();
+                let values = Arc::make_mut(&mut db.kv);
+                values.insert(IDENTITY.to_vec(), id.encode());
+                values.insert(STATUS.to_vec(), Status::default().encode());
+                values.insert(key(BLOCKS, hash.0), encoded.clone());
+                let view = View::load(db.clone()).unwrap();
+                assert_eq!(view.require_header(hash).unwrap(), block.header());
+                assert_eq!(view.header(Hash256::ZERO).unwrap(), None);
+                if matches!(&block, Block::Micro(m) if !m.transactions.is_empty()) {
+                    assert!(view.require_block(hash).is_err());
+                    transaction_bodies += 1;
+                }
+                let small = ReadConfig {
+                    max_block_bytes: encoded.len() - 1,
+                    ..config.clone()
+                };
+                assert_eq!(
+                    View::load_with_config(db.clone(), small)
+                        .unwrap()
+                        .header(hash),
+                    Err(Error::ResourceLimit)
+                );
+                Arc::make_mut(&mut db.kv).insert(key(BLOCKS, Hash256::ZERO.0), encoded);
+                assert_eq!(
+                    View::load(db).unwrap().header(Hash256::ZERO),
+                    Err(Error::Corrupt("block identity"))
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 10);
+    assert!(transaction_bodies > 0);
+    assert!(config.header_read_weight().unwrap() < 48 << 20);
+    assert_eq!(
+        ReadConfig {
+            max_transactions: usize::MAX,
+            ..config.clone()
+        }
+        .header_read_weight(),
+        Err(Error::ResourceLimit)
+    );
+    assert_eq!(
+        ReadConfig {
+            max_block_bytes: usize::MAX,
+            ..config
+        }
+        .header_read_weight(),
+        Err(Error::ResourceLimit)
+    );
+    eprintln!(
+        "Header-only native block records: {checked}; transaction bodies omitted: {transaction_bodies}"
+    );
+}
 fn entries(v: &View<Memory>, prefix: u8) -> J {
     json!([
         "list",

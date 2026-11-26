@@ -65,6 +65,23 @@ impl Prepared {
             }));
         }
         let metrics_config = self.1.clone();
+        let information = Arc::new(Information {
+            started: std::time::Instant::now(),
+            build: ae_sync::peer::info::Metadata::current(),
+            expected_mine_rate: self
+                .configured()
+                .chain()
+                .settings()
+                .expected_mine_rate()
+                .clone(),
+            order: self.configured().execution().execution().with_config(|c| {
+                c.fate
+                    .as_ref()
+                    .expect("configured FATE profile")
+                    .order
+                    .clone()
+            }),
+        });
         let mode = self.configured().mode().application();
         let prefix = match &settings {
             Settings::Cuckoo(s) => &s.config.connections.observer.prefix,
@@ -189,6 +206,7 @@ impl Prepared {
         };
         let mut running = Running {
             mode,
+            information,
             inner: running,
             metrics: None,
             http: None,

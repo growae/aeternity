@@ -40,6 +40,58 @@ fn gate(client: &Client) -> (mpsc::Sender<()>, Ticket<Inspection>) {
 }
 
 #[test]
+fn read_only_inspection_counts_both_tables_without_commits_and_retires_with_owner() {
+    let temp = Temp::new();
+    let db = database(&temp);
+    let worker = Worker::spawn(
+        db.clone(),
+        NetworkProfile::mainnet(),
+        config(),
+        Settings {
+            requests: 2,
+            ..settings()
+        },
+    )
+    .unwrap();
+    let client = worker.client();
+    until(&client, |i| i.background_runs > 0 && !i.in_flight);
+    let pushed = client.push(tx(), Event::Created, false).unwrap();
+    let read = client.inspection().unwrap();
+    pushed.wait().unwrap();
+    let active = read.wait().unwrap();
+    assert_eq!((active.active, active.visited), (1, 0));
+    let before = db.pool_view().unwrap().revision;
+    assert_eq!(client.inspection().unwrap().wait().unwrap(), active);
+    assert_eq!(db.pool_view().unwrap().revision, before);
+    client
+        .candidate(1_000_000, BTreeSet::new(), Default::default())
+        .unwrap()
+        .wait()
+        .unwrap();
+    let visited = client.inspection().unwrap().wait().unwrap();
+    assert_eq!((visited.active, visited.visited), (0, 1));
+    let before = db.pool_view().unwrap().revision;
+    assert_eq!(client.inspection().unwrap().wait().unwrap(), visited);
+    assert_eq!(db.pool_view().unwrap().revision, before);
+    let (release, gated) = gate(&client);
+    let queued = client.inspection().unwrap();
+    assert_eq!(client.inspection().err(), Some(Error::Saturated));
+    worker.request_shutdown();
+    assert_eq!(client.inspection().err(), Some(Error::Stopped));
+    release.send(()).unwrap();
+    gated.wait().unwrap();
+    let drained = queued.wait().unwrap();
+    assert_eq!(drained.active + drained.visited, 1);
+    worker.shutdown().unwrap();
+    let replacement = spawn(db);
+    assert!(!client.same_worker(&replacement.client()));
+    let current = replacement.client().inspection().unwrap().wait().unwrap();
+    assert_eq!(current.active + current.visited, 1);
+    assert_eq!(client.inspection().err(), Some(Error::Stopped));
+    replacement.shutdown().unwrap();
+}
+
+#[test]
 fn async_tickets_wake_the_latest_waiter_and_report_lost_replies() {
     use std::{
         future::Future,

@@ -31,6 +31,42 @@ fn kind(value: &Value) -> Kind {
     }
 }
 #[test]
+fn expected_mine_rate_preserves_precedence_large_integers_and_chain_identity() {
+    let empty = Configuration::empty();
+    let mut ctx = context();
+    let default =
+        Settings::resolve(&empty.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
+    assert_eq!(default.expected_mine_rate(), &json!(180_000));
+    let identity = default.identity(Hash256::ZERO, Hash256::ZERO).unwrap();
+    for value in [
+        json!(7),
+        serde_json::from_str::<Value>(
+            "100000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap(),
+        json!(0),
+    ] {
+        ctx.set("aecore".into(), "expected_mine_rate".into(), value.clone())
+            .unwrap();
+        let app =
+            Settings::resolve(&empty.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
+        assert_eq!(app.expected_mine_rate(), &value);
+        assert_eq!(
+            app.identity(Hash256::ZERO, Hash256::ZERO).unwrap(),
+            identity
+        );
+        let user =
+            Configuration::from_value(json!({"mining":{"expected_mine_rate":1234}})).unwrap();
+        let chosen =
+            Settings::resolve(&user.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
+        assert_eq!(chosen.expected_mine_rate(), &json!(1234));
+        assert_eq!(
+            chosen.identity(Hash256::ZERO, Hash256::ZERO).unwrap(),
+            identity
+        );
+    }
+}
+#[test]
 fn original_consensus_selection_and_startup_checks() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/erlang_node_consensus.json")).unwrap();

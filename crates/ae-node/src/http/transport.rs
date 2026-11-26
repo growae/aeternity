@@ -269,6 +269,16 @@ pub(super) fn dispatch(
                 Response::invalid_response()
             }
         }
+        (Ok((Operation::Status { v3 }, strings)), Ok(mut body)) => {
+            if strings {
+                response::integers_as_strings(&mut body);
+            }
+            if super::status::valid_response(&body, v3) {
+                Response::json(200, body)
+            } else {
+                Response::invalid_response()
+            }
+        }
         (Ok((Operation::Current { .. } | Operation::PeerPublicKey, strings)), Ok(mut body)) => {
             if strings {
                 response::integers_as_strings(&mut body);
@@ -302,6 +312,7 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         Ok((Operation::Current { height }, _)) => selected.map(|s| response::current(s, *height)),
         Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
         Ok((Operation::PeerPublicKey, _)) => super::key::query(&parent, &config).await,
+        Ok((Operation::Status { .. }, _)) => super::status::query(&parent, &config).await,
         Err(_) => Err(Response::unavailable(false)),
     };
     let mut response = dispatch(plan, result);

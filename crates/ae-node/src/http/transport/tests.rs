@@ -187,7 +187,7 @@ fn routing_methods_groups_and_preflight_are_separate() {
         config.target = target;
         for group in ["chain", "node_info", "external"] {
             config.groups = [group.into()].into();
-            for path in ["/v3/sync-status", "/v3/peers/pubkey"] {
+            for path in ["/v3/sync-status", "/v3/peers/pubkey", "/v3/status"] {
                 request.path = path.into();
                 assert_eq!(
                     plan(&request, &config).is_ok(),
@@ -229,7 +229,7 @@ fn original_cowboy_queries_match_supported_operations_and_error_headers() {
             "GetCurrentKeyBlockHash" => "/key-blocks/current/hash",
             "GetSyncStatus" => "/sync-status",
             "GetPeerPubkey" => "/peers/pubkey",
-            "GetStatus" => continue,
+            "GetStatus" => "/status",
             _ => unreachable!(),
         };
         let input = native["inputs"]
@@ -289,5 +289,5 @@ fn original_cowboy_queries_match_supported_operations_and_error_headers() {
         }
         count += 1;
     }
-    assert_eq!(count, 208);
+    assert_eq!(count, 260);
 }

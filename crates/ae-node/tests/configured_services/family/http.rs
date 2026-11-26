@@ -81,6 +81,11 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
     let expected_peer = api::encode(ApiType::PeerPubkey, peer.as_ref());
     let http = running.listen_http(config()).await.unwrap();
     let address = http.status().address;
+    let (status_code, _, initial_status) = get(address, "/v2/status").await;
+    assert_eq!(status_code, 200);
+    assert_eq!(initial_status["difficulty"], 1338);
+    assert_eq!(initial_status["peer_pubkey"], expected_peer);
+    let mut last_uptime = super::http_checks::uptime_ms(initial_status["uptime"].as_str().unwrap());
     let native: Value =
         serde_json::from_str(include_str!("../../fixtures/erlang_http_queries.json")).unwrap();
     let mut checked = 0;
@@ -93,7 +98,7 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
             ),
             "GetPeerPubkey" => ("/peers/pubkey", json!({"pubkey":expected_peer})),
             "GetSyncStatus" => ("/sync-status", json!({"reason":"Node is not syncing"})),
-            "GetStatus" => continue,
+            "GetStatus" => ("/status", initial_status.clone()),
             _ => unreachable!(),
         };
         let version = if row["module"] == "oas_endpoints" {
@@ -129,11 +134,27 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
             {
                 expected["height"] = json!("0");
             }
-            assert_eq!(
-                serde_json::from_slice::<Value>(&body).unwrap(),
-                expected,
-                "{row}"
-            );
+            let actual = serde_json::from_slice::<Value>(&body).unwrap();
+            if row["id"] == "GetStatus" {
+                let uptime = super::http_checks::uptime_ms(actual["uptime"].as_str().unwrap());
+                assert!(uptime >= last_uptime);
+                last_uptime = uptime;
+                expected["uptime"] = actual["uptime"].clone();
+                if row["result"]["response"]["body"]["difficulty"].is_string() {
+                    fn strings(value: &mut Value) {
+                        match value {
+                            Value::Number(n) if !n.as_str().contains(['.', 'e', 'E']) => {
+                                *value = json!(n.to_string())
+                            }
+                            Value::Array(a) => a.iter_mut().for_each(strings),
+                            Value::Object(m) => m.values_mut().for_each(strings),
+                            _ => (),
+                        }
+                    }
+                    strings(&mut expected);
+                }
+            }
+            assert_eq!(actual, expected, "{row}");
             assert_eq!(headers["x-ae-height"], "0");
             assert_eq!(
                 headers["access-control-allow-origin"],
@@ -142,7 +163,7 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 208);
+    assert_eq!(checked, 260);
     let generation = workers.status().keys_generation;
     assert_eq!(
         workers
@@ -163,6 +184,10 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
     for version in ["v2", "v3"] {
         let (code, _, body) = get(address, &format!("/{version}/peers/pubkey")).await;
         assert_eq!((code, body), (200, json!({"pubkey":expected_peer})));
+        let (code, _, body) = get(address, &format!("/{version}/status")).await;
+        assert_eq!(code, 200);
+        assert_eq!(body["peer_pubkey"], expected_peer);
+        assert!(super::http_checks::uptime_ms(body["uptime"].as_str().unwrap()) >= last_uptime);
     }
     assert!(running.shutdown().await.unwrap().status().joined);
     assert!(matches!(
@@ -301,7 +326,24 @@ async fn http_sync_status_uses_live_peer_progress_statistics_and_replacement_own
     })
     .await;
     assert_eq!(progress.target, 3);
+    let metrics = generation.network.metrics().unwrap().wait().await.unwrap();
+    assert!(metrics.verified + metrics.unverified > 0);
+    assert!(metrics.registry.counts.inbound + metrics.registry.counts.outbound > 0);
+    let mut status_uptime = 0;
     for version in ["v2", "v3"] {
+        let (code, _, status) = get(address, &format!("/{version}/status")).await;
+        assert_eq!(code, 200, "{status}");
+        assert_eq!(status["syncing"], true);
+        assert_eq!(status["sync_progress"], json!(progress.percent));
+        assert_eq!(
+            status["peer_count"],
+            json!(metrics.verified + metrics.unverified)
+        );
+        assert_eq!(
+            status["peer_connections"],
+            json!({"inbound":metrics.registry.counts.inbound,"outbound":metrics.registry.counts.outbound})
+        );
+        status_uptime = super::http_checks::uptime_ms(status["uptime"].as_str().unwrap());
         let (code, headers, body) = get(
             address,
             &format!("/{version}/sync-status?int-as-string=true"),
@@ -360,6 +402,12 @@ async fn http_sync_status_uses_live_peer_progress_statistics_and_replacement_own
     assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
     assert_eq!(headers["retry-after"], "3");
     assert_eq!(headers["x-ae-height"], "3");
+    let (code, headers, status) = get(address, "/v3/status").await;
+    assert_eq!(
+        (code, status),
+        (503, json!({"reason":"Temporary overload"}))
+    );
+    assert_eq!(headers["retry-after"], "3");
     drop(unread);
     generation.cache.as_ref().unwrap().shutdown();
     let mut replacement = connection_ready(&mut connections, generation.number + 1).await;
@@ -373,6 +421,11 @@ async fn http_sync_status_uses_live_peer_progress_statistics_and_replacement_own
     }
     ready(&mut handle).await;
     assert_eq!(get(address, "/v3/sync-status").await.0, 404);
+    let (code, _, status) = get(address, "/v3/status").await;
+    assert_eq!(code, 200);
+    assert_eq!(status["syncing"], false);
+    assert_eq!(status["top_block_height"], 3);
+    assert!(super::http_checks::uptime_ms(status["uptime"].as_str().unwrap()) >= status_uptime);
     client.shutdown();
     within(driver).await.unwrap();
     assert!(running.shutdown().await.unwrap().status().joined);
@@ -421,6 +474,9 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
         assert!(unread.len() <= 64);
     }
     assert!(!unread.is_empty());
+    let (code, headers, body) = get(address, "/v3/status").await;
+    assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
+    assert_eq!(headers["retry-after"], "3");
     let (code, headers, body) = get(address, "/v3/key-blocks/current/height").await;
     assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
     assert_eq!(headers["retry-after"], "3");
@@ -449,6 +505,11 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
         .unwrap()
         .await
         .unwrap();
+    let (code, _, status) = get(address, "/v3/status").await;
+    assert_eq!(code, 200);
+    assert_eq!(status["pending_transactions_count"], 1);
+    assert_eq!(status["difficulty"], 1338);
+    assert_eq!(status["top_block_height"], 0);
     let completion = h
         .commands()
         .unwrap()
@@ -475,6 +536,34 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
         )
     };
     assert!(height > 0);
+    let pool = h
+        .pow()
+        .unwrap()
+        .workers()
+        .unwrap()
+        .bindings()
+        .admission
+        .current()
+        .unwrap()
+        .client;
+    within(async {
+        loop {
+            let current = pool.inspection().unwrap().await.unwrap();
+            if current.active + current.visited == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let (code, _, status) = get(address, "/v3/status?int-as-string=true").await;
+    assert_eq!(code, 200);
+    assert_eq!(status["pending_transactions_count"], "0");
+    assert_eq!(status["top_block_height"], height.to_string());
+    assert_eq!(
+        status["top_key_block_hash"],
+        api::encode(ApiType::KeyBlockHash, key.as_ref())
+    );
     let (code, headers, body) =
         get(address, "/v3/key-blocks/current/height?int-as-string=TRUE").await;
     assert_eq!((code, body), (200, json!({"height":height.to_string()})));

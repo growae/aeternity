@@ -455,6 +455,12 @@ impl Service {
             maintenance: self.live.maintenance,
         }
     }
+    pub(super) fn read_inspection(&self) -> Result<Inspection, Failure> {
+        if self.uncertain {
+            return Err(Failure::RestartRequired);
+        }
+        Ok(self.inspection())
+    }
     pub fn push(
         &mut self,
         tx: Arc<Signed>,

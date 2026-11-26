@@ -14,6 +14,7 @@ yaml-rust2.workspace = true
 jsonschema.workspace = true
 serde_json.workspace = true
 ae-chain.workspace = true
+ae-consensus.workspace = true
 ae-mempool.workspace = true
 ae-types.workspace = true
 ae-protocol.workspace = true
@@ -32,6 +33,7 @@ ae-trie.workspace = true
 ae-tx.workspace = true
 ae-vm-aevm.workspace = true
 num-bigint.workspace = true
+num-traits.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

@@ -357,6 +357,9 @@ impl Database {
         let policy = self.writer.lock().map_err(|_| backend_lock())?;
         self.view_locked(&policy)
     }
+    pub fn read_config(&self) -> &ReadConfig {
+        &self.config
+    }
     pub fn hyperchain_reader<O>(
         &self,
         identity: &Identity,
@@ -724,6 +727,18 @@ impl Read for Snapshot<'_> {
     }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         self.snapshot.get(key).map_err(backend)
+    }
+    fn get_bounded(&self, key: &[u8], bytes: usize) -> Result<Option<Vec<u8>>, Error> {
+        self.snapshot
+            .get_pinned(key)
+            .map_err(backend)?
+            .map(|value| {
+                if value.len() > bytes {
+                    return Err(Error::ResourceLimit);
+                }
+                Ok(value.to_vec())
+            })
+            .transpose()
     }
     fn prefix(&self, prefix: &[u8], limit: usize) -> Result<repo::Entries, Error> {
         let mut out = vec![];

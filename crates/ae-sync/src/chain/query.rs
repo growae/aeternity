@@ -1,4 +1,5 @@
 use super::*;
+use ae_codec::headers::Header;
 use ae_storage::events::{Cursor, Reader};
 
 pub(super) struct Height {
@@ -10,8 +11,7 @@ impl Height {
     pub fn new(db: &Database) -> Result<Self, Error> {
         let (view, cursor) = db.event_snapshot()?;
         let height = view
-            .require_block(view.status().tip.ok_or(repository::Error::Uninitialized)?)?
-            .header()
+            .require_header(view.status().tip.ok_or(repository::Error::Uninitialized)?)?
             .common()
             .height;
         let reader = db.events();
@@ -69,12 +69,21 @@ pub struct Current {
     pub height: u64,
 }
 
-pub struct Ticket {
-    pending: blocking::Pending<Result<Current, Error>>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Key {
+    pub selected: Current,
+    pub header: ae_codec::headers::KeyHeader,
+    pub algorithm: ae_protocol::ConsensusAlgorithm,
+    pub genesis: Hash256,
+    pub network: ae_protocol::NetworkProfile,
+}
+
+pub struct Ticket<T = Current> {
+    pending: blocking::Pending<Result<T, Error>>,
     timeout: Duration,
 }
-impl Ticket {
-    pub async fn wait(self) -> Result<Current, Error> {
+impl<T> Ticket<T> {
+    pub async fn wait(self) -> Result<T, Error> {
         tokio::time::timeout(self.timeout, self.pending)
             .await
             .map_err(|_| Error::Timeout)?
@@ -82,6 +91,11 @@ impl Ticket {
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
+    fn reserve_header(&self) -> Result<blocking::Reservation, Error> {
+        self.check_open()?;
+        let weight = self.context.db.read_config().header_read_weight()?;
+        self.jobs.reserve(weight).map_err(Into::into)
+    }
     // Seeded at owner creation, then advanced only by acknowledged selected
     // top events. A missing/gapped/failed source is unknown, never height zero.
     // This hot path uses no storage-work slot, including under HTTP overload.
@@ -94,16 +108,16 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     // No snapshot or database job is run on the async executor.
     pub fn current(&self) -> Result<Ticket, Error> {
         let context = self.context.clone();
-        let pending = self.reserve()?.submit(move |cancel| {
+        let pending = self.reserve_header()?.submit(move |cancel| {
             context.check(&cancel, None)?;
             let (view, cursor) = context.db.event_snapshot()?;
             let status = view.status();
             let top = status.tip.ok_or(repository::Error::Uninitialized)?;
-            let block = view.require_block(top)?;
-            let height = block.header().common().height;
+            let block = view.require_header(top)?;
+            let height = block.common().height;
             let key = match block {
-                Block::Key(_) => top,
-                Block::Micro(micro) => Hash256(micro.header.common.previous_key_hash),
+                Header::Key(_) => top,
+                Header::Micro(micro) => Hash256(micro.common.previous_key_hash),
             };
             context.check(&cancel, None)?;
             context.height.seed(cursor, height);
@@ -112,6 +126,51 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 top,
                 key,
                 height,
+            })
+        })?;
+        Ok(Ticket {
+            pending,
+            timeout: self.context.config.timeout,
+        })
+    }
+    // The selected top can be a microblock. Resolve its key header in the
+    // same bounded storage job and snapshot, retaining this importer's fixed
+    // network/consensus identity. This does not sample other node services.
+    pub fn top_key(&self) -> Result<Ticket<Key>, Error> {
+        let context = self.context.clone();
+        let algorithm = self.algorithm();
+        let pending = self.reserve_header()?.submit(move |cancel| {
+            context.check(&cancel, None)?;
+            let (view, cursor) = context.db.event_snapshot()?;
+            let status = view.status();
+            let top = status.tip.ok_or(repository::Error::Uninitialized)?;
+            let block = view.require_header(top)?;
+            let height = block.common().height;
+            let (hash, header) = match block {
+                Header::Key(header) => (top, header),
+                Header::Micro(micro) => {
+                    let hash = Hash256(micro.common.previous_key_hash);
+                    let Header::Key(header) = view.require_header(hash)? else {
+                        return Err(
+                            repository::Error::Corrupt("selected key is not a key block").into(),
+                        );
+                    };
+                    (hash, header)
+                }
+            };
+            context.check(&cancel, None)?;
+            context.height.seed(cursor, height);
+            Ok(Key {
+                selected: Current {
+                    revision: status.revision,
+                    top,
+                    key: hash,
+                    height,
+                },
+                header,
+                algorithm,
+                genesis: context.strategy.genesis(),
+                network: context.strategy.network().clone(),
             })
         })?;
         Ok(Ticket {
