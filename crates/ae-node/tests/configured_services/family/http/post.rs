@@ -35,7 +35,7 @@ async fn http_post_transaction_admits_once_mines_and_uses_replacement_worker() {
     let mut h = running.handle();
     ready(&mut h).await;
     let mut cfg = config();
-    cfg.groups.insert("transaction".into());
+    cfg.groups = ["external".into()].into();
     let http = running.listen_http(cfg).await.unwrap();
     let address = http.status().address;
     let hash = api::encode(ApiType::TxHash, tx.hash().as_ref());

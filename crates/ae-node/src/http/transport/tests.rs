@@ -440,6 +440,127 @@ fn routing_methods_groups_and_preflight_are_separate() {
 }
 
 #[test]
+fn original_full_router_groups_match_every_implemented_route_without_exposing_other_targets() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_routing_groups.json"
+    ))
+    .unwrap();
+    // This inventory grows as actual endpoint implementations are connected.
+    let implemented = [
+        "GetAccountByPubkey",
+        "GetAccountByPubkeyAndHash",
+        "GetAccountByPubkeyAndHeight",
+        "GetAccountNextNonce",
+        "GetPendingAccountTransactionsByPubkey",
+        "GetContract",
+        "GetContractCode",
+        "GetContractPoI",
+        "GetTopBlock",
+        "GetTopHeader",
+        "GetCurrentGeneration",
+        "GetGenerationByHash",
+        "GetGenerationByHeight",
+        "GetCurrentKeyBlock",
+        "GetCurrentKeyBlockHash",
+        "GetCurrentKeyBlockHeight",
+        "GetKeyBlockByHash",
+        "GetKeyBlockByHeight",
+        "GetPendingKeyBlock",
+        "GetMicroBlockHeaderByHash",
+        "GetMicroBlockTransactionsByHash",
+        "GetMicroBlockTransactionsCountByHash",
+        "GetMicroBlockTransactionByHashAndIndex",
+        "GetPeerPubkey",
+        "GetStatus",
+        "GetSyncStatus",
+        "PostTransaction",
+        "GetTransactionByHash",
+        "GetTransactionInfoByHash",
+    ];
+    let catalog: Vec<_> = ["swagger2", "oas3"]
+        .into_iter()
+        .flat_map(|v| fixture["tables"][v].as_array().unwrap())
+        .collect();
+    assert_eq!(implemented.len(), 29);
+    assert_eq!(
+        catalog
+            .iter()
+            .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
+            .count(),
+        56
+    );
+    assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
+    let mut checked = 0;
+    for row in fixture["rows"].as_array().unwrap() {
+        let target = match row["target"].as_str().unwrap() {
+            "external" => super::super::Target::External,
+            "internal" => super::super::Target::Internal,
+            "rosetta" => super::super::Target::Rosetta,
+            "rosetta_offline" => super::super::Target::RosettaOffline,
+            "unknown" => {
+                assert_eq!(row["paths"].as_array().unwrap().len(), 1);
+                continue;
+            }
+            _ => panic!("target"),
+        };
+        let config = Config {
+            target,
+            groups: row["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g.as_str().unwrap().to_owned())
+                .collect(),
+            ..Default::default()
+        };
+        for op in &catalog {
+            let path = op["path"].as_str().unwrap();
+            let pattern = path.replace('{', ":").replace('}', "");
+            let path = path
+                .split('/')
+                .map(|p| if p.starts_with('{') { "1" } else { p })
+                .collect::<Vec<_>>()
+                .join("/");
+            let enabled = implemented.contains(&op["id"].as_str().unwrap())
+                && row["paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p[0] == pattern && p[1] == "aehttp_api_handler");
+            let mut request = Request {
+                method: op["method"].as_str().unwrap().to_ascii_uppercase(),
+                path,
+                query: String::new(),
+                headers: Headers::from([
+                    ("content-type".into(), "application/json".into()),
+                    ("content-length".into(), "0".into()),
+                ]),
+            };
+            let result = plan(&request, &config);
+            assert_eq!(
+                result.is_ok(),
+                enabled,
+                "{} {} {}: {result:?}",
+                row["target"],
+                row["groups"],
+                op["path"]
+            );
+            if enabled {
+                let method = request.method.clone();
+                request.method = "DELETE".into();
+                let rejected = plan(&request, &config).unwrap_err();
+                assert_eq!(rejected.status, 405);
+                assert_eq!(rejected.headers["allow"], method);
+            } else {
+                assert_eq!(result.unwrap_err().status, 404);
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 33600);
+}
+
+#[test]
 fn json_accept_uses_the_most_specific_range_and_bounded_quality() {
     for (accept, expected) in [
         ("*/*", true),

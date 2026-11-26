@@ -182,6 +182,7 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     if config.target != Target::External {
         return None;
     }
+    let enabled = |group: &str| config.groups.contains(group) || config.groups.contains("external");
     let segments = super::transport::path_segments(path)?;
     let (version, suffix) = segments.split_first()?;
     let v3 = match version.as_slice() {
@@ -191,23 +192,16 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
     if let Some(operation) = super::contracts::route(&suffix) {
-        return (config.groups.contains("contract") || config.groups.contains("external"))
-            .then_some((v3, Operation::Contracts { operation, v3 }));
+        return enabled("contract").then_some((v3, Operation::Contracts { operation, v3 }));
     }
     if let Some(operation) = super::accounts::route(&suffix) {
-        return (config.groups.contains("account") || config.groups.contains("external"))
-            .then_some((v3, Operation::Accounts { operation, v3 }));
+        return enabled("account").then_some((v3, Operation::Accounts { operation, v3 }));
     }
     if suffix.as_slice() == [b"transactions".as_slice()] {
-        return config
-            .groups
-            .contains("transaction")
-            .then_some((v3, Operation::PostTransaction { v3 }));
+        return enabled("transaction").then_some((v3, Operation::PostTransaction { v3 }));
     }
     if let Some(operation) = super::transactions::route(&suffix) {
-        return config
-            .groups
-            .contains(operation.group())
+        return enabled(operation.group())
             .then_some((v3, Operation::Transactions { operation, v3 }));
     }
     let (operation, group) = match suffix.as_slice() {
@@ -225,11 +219,7 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
             "chain",
         ),
     };
-    config
-        .groups
-        .iter()
-        .any(|g| g == group || g == "external")
-        .then_some((v3, operation))
+    enabled(group).then_some((v3, operation))
 }
 pub(super) fn current(current: Current, height: bool) -> Value {
     if height {
