@@ -455,6 +455,7 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         "GetContract",
         "GetContractCode",
         "GetContractPoI",
+        "GetChannelByPubkey",
         "GetNameEntryByName",
         "GetNameEntryByNameHash",
         "GetAuctionEntryByName",
@@ -487,13 +488,13 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 35);
+    assert_eq!(implemented.len(), 36);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        67
+        69
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;
@@ -885,6 +886,90 @@ fn original_name_http_wrapper_matches_all_raw_bindings_schemas_versions_and_erro
         for name in ["access-control-allow-origin", "x-ae-height", "retry-after"] {
             assert_eq!(
                 response.headers.get(name).map(String::as_str),
+                expected["headers"][name].as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn original_channel_http_wrapper_matches_every_version_schema_integer_mode_and_error() {
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_channel_schema.json"
+    ))
+    .unwrap();
+    let inputs = f["inputs"].as_array().unwrap();
+    let rows = f["schema"].as_array().unwrap();
+    assert_eq!(inputs.len(), 338);
+    assert_eq!(rows.len(), 5408);
+    let cfg = Config {
+        groups: ["channel".into()].into(),
+        ..Default::default()
+    };
+    for row in rows {
+        let input = &inputs[row["id"].as_u64().unwrap() as usize];
+        let v3 = row["module"] == "oas_endpoints";
+        let key = hex::decode(input["bindings_hex"]["pubkey"].as_str().unwrap()).unwrap();
+        let encoded: String = key.iter().map(|b| format!("%{b:02X}")).collect();
+        let req = Request {
+            method: "GET".into(),
+            path: format!("/{}/channels/{encoded}", if v3 { "v3" } else { "v2" }),
+            query: row["query"]["query"].as_str().unwrap().into(),
+            headers: Headers::from([("origin".into(), "https://client.example".into())]),
+        };
+        let planned = plan(&req, &cfg);
+        assert_eq!(
+            usize::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap() as usize,
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if let Ok((Operation::Channels { operation, .. }, strings)) = &planned {
+            assert_eq!(operation.key, key);
+            let mut params = json!({"pubkey":super::super::text::binary(&key)});
+            if v3 {
+                params["int-as-string"] = json!(strings);
+            }
+            assert_eq!(params, row["logic_params"]);
+        }
+        let code = input["code"].as_u64().unwrap() as u16;
+        let result = if code == 200 {
+            Ok(input["body"].clone())
+        } else {
+            let mut r = Response::json(code, input["body"].clone());
+            for (k, v) in input["headers"].as_object().unwrap() {
+                r.headers.insert(k.clone(), v.as_str().unwrap().into());
+            }
+            Err(r)
+        };
+        let mut r = super::dispatch(planned, result);
+        r.stamp(&cfg, &req.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            u64::from(r.status),
+            expected["code"].as_u64().unwrap(),
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(r.body.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap(),
+                expected["body"],
+                "{} {} {}",
+                row["id"],
+                row["module"],
+                req.query
+            );
+        }
+        for name in ["access-control-allow-origin", "x-ae-height", "retry-after"] {
+            assert_eq!(
+                r.headers.get(name).map(String::as_str),
                 expected["headers"][name].as_str()
             );
         }

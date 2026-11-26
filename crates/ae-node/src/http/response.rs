@@ -147,6 +147,10 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
+    Channels {
+        operation: super::channels::Operation,
+        v3: bool,
+    },
     Names {
         operation: super::names::Operation,
         v3: bool,
@@ -199,6 +203,9 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         _ => return None,
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    if let Some(operation) = super::channels::route(&suffix) {
+        return enabled("channel").then_some((v3, Operation::Channels { operation, v3 }));
+    }
     if let Some(operation) = super::names::route(v3, &suffix) {
         return enabled("name_service").then_some((v3, Operation::Names { operation, v3 }));
     }

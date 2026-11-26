@@ -2,6 +2,7 @@
 pub mod account;
 pub mod admission;
 pub mod block;
+pub mod channel;
 pub mod contract;
 pub mod execution;
 pub mod forks;

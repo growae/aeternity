@@ -491,6 +491,92 @@
         "highest_bidder",
         "highest_bid"
       ]
+    },
+    "Channel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "initiator_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "responder_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "channel_amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "initiator_amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "responder_amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "channel_reserve": {
+          "$ref": "#/definitions/UInt"
+        },
+        "delegate_ids": {
+          "$ref": "#/definitions/Delegates"
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "round": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "solo_round": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "lock_period": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "locked_until": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "id",
+        "initiator_id",
+        "responder_id",
+        "channel_amount",
+        "initiator_amount",
+        "responder_amount",
+        "channel_reserve",
+        "delegate_ids",
+        "state_hash",
+        "round",
+        "solo_round",
+        "lock_period",
+        "locked_until"
+      ]
+    },
+    "Delegates": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/DelegatesList"
+        },
+        {
+          "$ref": "#/definitions/DelegatesObject"
+        }
+      ]
+    },
+    "DelegatesObject": {
+      "type": "object",
+      "properties": {
+        "initiator": {
+          "$ref": "#/definitions/DelegatesList"
+        },
+        "responder": {
+          "$ref": "#/definitions/DelegatesList"
+        }
+      }
+    },
+    "DelegatesList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EncodedPubkey"
+      }
     }
   },
   "operations": {
@@ -549,6 +635,9 @@
     },
     "GetNameEntryByName": {
       "$ref": "#/definitions/NameEntry"
+    },
+    "GetChannelByPubkey": {
+      "$ref": "#/definitions/Channel"
     }
   }
 }
