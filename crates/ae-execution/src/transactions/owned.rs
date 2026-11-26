@@ -11,6 +11,7 @@ use std::{collections::BTreeSet, sync::Arc};
 // and block context from its captured database view before executing a block.
 #[derive(Clone)]
 pub struct Owned<O = Otp26> {
+    name_claim_bid_timeout: Option<ae_types::Unsigned>,
     network: NetworkProfile,
     consensus: ConsensusType,
     context: machine::Context,
@@ -40,6 +41,7 @@ impl<O: Clone> Owned<O> {
         let fate = config.fate.ok_or(Error::MissingFate)?;
         let aevm = config.aevm.ok_or(Error::MissingAevm)?;
         Ok(Self {
+            name_claim_bid_timeout: config.name_claim_bid_timeout.cloned(),
             network: config.network.clone(),
             consensus: config.consensus,
             context: fate.context.clone(),
@@ -80,6 +82,7 @@ impl<O: MapOrder> Owned<O> {
             diagnostic_profile: self.diagnostic_profile,
         };
         f(&Config {
+            name_claim_bid_timeout: self.name_claim_bid_timeout.as_ref(),
             network: &self.network,
             consensus: self.consensus,
             fate: Some(&fate),

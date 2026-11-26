@@ -375,6 +375,7 @@ fn context_tree_read_failures_do_not_become_absence_or_payability_defaults() {
     let fail = Rc::new(Cell::new(false));
     let v = view(&c, &fail);
     let mut host = ae_execution::fate_chain::remote::State {
+        name_claim_bid_timeout: None,
         contract_cache: Default::default(),
         auth_tx: c.auth_tx.clone(),
 

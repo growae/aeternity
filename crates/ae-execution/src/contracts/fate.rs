@@ -162,6 +162,7 @@ pub(super) fn execute_with_views<A: NodeWriter + Clone, C: NodeWriter + Clone, O
         environment.auth_tx_hash = context.ga_transaction_hash.map(|h| h.0.to_vec());
     }
     let host = Host {
+        name_claim_bid_timeout: context.name_claim_bid_timeout.clone(),
         contract_cache: Default::default(),
         auth_tx: context
             .ga_transaction

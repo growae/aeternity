@@ -75,13 +75,14 @@ impl Prepared {
         } else {
             ae_protocol::ConsensusType::Pow
         };
-        let execution = execution::Bound::build(
+        let execution = execution::Bound::build_with_name_auction_timeout(
             specification,
             &auxiliary,
             settings.profile(),
             consensus,
             gas_limit,
             resources,
+            execution::name_claim_bid_timeout(resolved).map_err(Error::Execution)?,
         )
         .map_err(Error::Execution)?;
         let genesis = genesis::Prepared::load_at(

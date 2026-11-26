@@ -26,6 +26,7 @@ pub use signatures::{
 };
 
 pub struct Config<'a, O = Otp26> {
+    pub name_claim_bid_timeout: Option<&'a Unsigned>,
     pub network: &'a NetworkProfile,
     pub consensus: ConsensusType,
     pub fate: Option<&'a contracts::fate::Config<'a, O>>,
@@ -41,6 +42,7 @@ pub struct Config<'a, O = Otp26> {
 impl<'a> Config<'a> {
     pub fn primitives(network: &'a NetworkProfile) -> Self {
         Self {
+            name_claim_bid_timeout: None,
             network,
             consensus: ConsensusType::Pow,
             fate: None,
@@ -179,7 +181,11 @@ pub fn process_with_signed_source<A: NodeWriter + Clone, C: NodeWriter + Clone, 
     config: &Config<'_, O>,
     source: Option<&SignedTransaction<Transaction>>,
 ) -> Result<Receipt, Error<A, C>> {
-    wrappers::process(tx, trees, context, config, source)
+    // Bind trusted execution configuration before wrappers and VM invocation;
+    // an incoming transaction context cannot replace this chain setting.
+    let mut context = context.clone();
+    context.name_claim_bid_timeout = config.name_claim_bid_timeout.cloned();
+    wrappers::process(tx, trees, &context, config, source)
 }
 
 fn check_wrapper<A, C>(

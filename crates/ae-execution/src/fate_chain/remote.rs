@@ -28,6 +28,7 @@ pub struct Authentication {
 
 #[derive(Debug, Clone)]
 pub struct State<A = MemoryStore, C = MemoryStore> {
+    pub name_claim_bid_timeout: Option<ae_types::Unsigned>,
     // Pending records and stores belong to this invocation, before publication.
     pub contract_cache: super::deployment::Cache,
     // Trusted invocation input; wire shape alone does not authenticate/admit a transaction.

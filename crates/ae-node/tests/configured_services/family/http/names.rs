@@ -37,6 +37,160 @@ async fn admit(h: &node::Handle, tx: Arc<SignedTransaction<Transaction>>) {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn configured_auction_timeout_changes_mined_state_and_binds_database_reopen() {
+    for timeout in [0, 17] {
+        let lab = Lab::new();
+        lab.write("alloc.json",serde_json::to_vec(&json!({api::encode(ApiType::AccountPubkey,payer().public_key().as_ref()):10_000_000_000_000_000_000u64})).unwrap());
+        let load = |value: Option<u64>| {
+            let mut value_json = json!({"fork_management":{"network_id":"ae_auction_override"},"system":{"dev_mode":true,"custom_prefunded_accs_file":"alloc.json"},"chain":{"hard_forks":{"1":0,"6":1},"consensus":{"0":{"type":"on_demand"}}}});
+            if let Some(value) = value {
+                value_json["mining"] = json!({"name_claim_bid_timeout":value});
+            }
+            let cfg = Configuration::from_value(value_json).unwrap();
+            let ctx = Context::new(Directories {
+                home: lab.0.display().to_string(),
+                data: "data".into(),
+                log: "log".into(),
+            })
+            .unwrap();
+            configured::Prepared::load(
+                &cfg.resolve(&ctx).unwrap(),
+                None,
+                &lab.0,
+                &empty(),
+                &Specification::from_value(&profile::default_value()).unwrap(),
+                Default::default(),
+                &6_000_000.into(),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap()
+        };
+        let opened = load(Some(timeout))
+            .open("chain", Default::default())
+            .unwrap();
+        let identity = opened.chain().identity().clone();
+        let db = opened.chain().database().clone();
+        let name = b"auctionquery.chain";
+        let second = b"replacement-long-auction-name.chain";
+        let fee = ae_protocol::names::claim_fee(
+            (name.len() - 6).try_into().unwrap(),
+            ae_protocol::Protocol::Ceres,
+        );
+        let claim = signed(
+            &opened,
+            1,
+            NameOperation::Claim {
+                name: name.to_vec(),
+                salt: 0.into(),
+                name_fee: Some(fee.clone()),
+            },
+        );
+        let rebid = signed(
+            &opened,
+            2,
+            NameOperation::Claim {
+                name: name.to_vec(),
+                salt: 0.into(),
+                name_fee: Some(fee.mul_u64(2)),
+            },
+        );
+        let next = signed(
+            &opened,
+            if timeout == 0 { 2 } else { 3 },
+            NameOperation::Claim {
+                name: second.to_vec(),
+                salt: 0.into(),
+                name_fee: Some(ae_protocol::names::claim_fee(
+                    (second.len() - 6).try_into().unwrap(),
+                    ae_protocol::Protocol::Ceres,
+                )),
+            },
+        );
+        let p = node::Prepared::new(opened, Default::default()).unwrap();
+        let mut running = p.launch(commands(&lab), || Ok(Default::default())).unwrap();
+        let mut h = running.handle();
+        ready(&mut h).await;
+        let mut cfg = config();
+        cfg.groups = ["name_service".into()].into();
+        let http = running.listen_http(cfg).await.unwrap();
+        let address = http.status().address;
+        info::mine(&h, 1, Kind::Key).await;
+        admit(&h, claim.clone()).await;
+        info::mine(&h, 1, Kind::Micro).await;
+        assert!(db.view().unwrap().location(claim.hash()).unwrap().is_some());
+        let path = format!(
+            "/v3/{}/{}",
+            if timeout == 0 { "names" } else { "auctions" },
+            std::str::from_utf8(name).unwrap()
+        );
+        let first = get(address, &path).await;
+        assert_eq!(first.0, 200, "{:?}", first.2);
+        if timeout == 0 {
+            assert_eq!(first.2["ttl"], 180001);
+        } else {
+            assert_eq!(first.2["ends_at"], 18);
+            admit(&h, rebid.clone()).await;
+            info::mine(&h, 1, Kind::Micro).await;
+            assert!(db.view().unwrap().location(rebid.hash()).unwrap().is_some());
+            assert_eq!(get(address, &path).await.2["ends_at"], 241);
+        }
+        let workers = h.pow().unwrap().workers().unwrap();
+        let generation = workers.status().admission_generation;
+        let command = h.commands().unwrap().number;
+        workers
+            .restart(ae_sync::runtime::workers::Child::Admission, generation)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        within(async {
+            while !h.status().ready || h.commands().is_none_or(|c| c.number <= command) {
+                h.changed().await.unwrap();
+            }
+        })
+        .await;
+        admit(&h, next.clone()).await;
+        info::mine(&h, 1, Kind::Micro).await;
+        assert!(db.view().unwrap().location(next.hash()).unwrap().is_some());
+        let second_path = path.replace(
+            std::str::from_utf8(name).unwrap(),
+            std::str::from_utf8(second).unwrap(),
+        );
+        let second = get(address, &second_path).await;
+        assert_eq!(second.0, 200);
+        assert_eq!(
+            second.2[if timeout == 0 { "ttl" } else { "ends_at" }],
+            if timeout == 0 { 180001 } else { 18 }
+        );
+        let top = db.view().unwrap().status().tip;
+        let exit = within(running.shutdown()).await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        drop((exit, h, http, workers, db));
+        for changed in [None, Some(timeout + 1)] {
+            assert!(matches!(
+                load(changed).open("chain", Default::default()),
+                Err(configured::Error::Genesis(
+                    ae_node::bootstrap::genesis::Error::Database(
+                        ae_node::bootstrap::Error::Repository(
+                            ae_chain::repository::Error::Identity
+                        )
+                    )
+                ))
+            ));
+        }
+        let reopened = load(Some(timeout))
+            .open("chain", Default::default())
+            .unwrap();
+        assert_eq!(reopened.chain().identity(), &identity);
+        assert_eq!(
+            reopened.chain().database().view().unwrap().status().tip,
+            top
+        );
+    }
+}
 #[tokio::test]
 async fn name_http_tracks_claim_update_revoke_auction_bids_replacement_pressure_and_rollback() {
     let lab = Lab::new();

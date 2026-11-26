@@ -134,6 +134,7 @@ pub(super) fn fault_host(host: Chain, faults: &Faults) -> Chain<FaultStore, Faul
         faults: faults.clone(),
     };
     Chain {
+        name_claim_bid_timeout: host.name_claim_bid_timeout.clone(),
         contract_cache: host.contract_cache.clone(),
         auth_tx: host.auth_tx.clone(),
 

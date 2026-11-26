@@ -268,6 +268,7 @@ pub fn write<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     next.names = base.clone();
     next.name_cache.flush(&mut next.names)?;
     let context = Context {
+        name_claim_bid_timeout: next.name_claim_bid_timeout.clone(),
         height: next.height,
         protocol,
         origin: Origin::Contract,
@@ -371,8 +372,7 @@ pub fn write<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             let hash = hashing::name_hash(&ascii).0;
             if let Some(n) = next.names.name(hash).map_err(backend)? {
                 next.name_cache.names.insert(hash, n);
-            }
-            if let Some(a) = next
+            } else if let Some(a) = next
                 .names
                 .auction(hashing::auction_hash(hash))
                 .map_err(backend)?

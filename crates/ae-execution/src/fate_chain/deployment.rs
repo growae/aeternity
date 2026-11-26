@@ -257,6 +257,7 @@ fn next_nonce<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     let protocol = Protocol::try_from(protocol)
         .map_err(|_| HostFailure::Backend(Error::UnsupportedProtocol(protocol)))?;
     let context = crate::Context {
+        name_claim_bid_timeout: state.name_claim_bid_timeout.clone(),
         height: state.height,
         protocol,
         origin: crate::Origin::Contract,

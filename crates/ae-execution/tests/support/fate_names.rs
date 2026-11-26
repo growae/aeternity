@@ -93,6 +93,67 @@ fn names_reads_writes_delegations_and_rollback_match_original_instruction_and_wh
     }
 }
 
+#[test]
+fn auction_overrides_match_original_fate_traces_under_both_observed_atom_profiles() {
+    let packed: J =
+        serde_json::from_str(include_str!("../fixtures/erlang_auction_vm_override.json")).unwrap();
+    let pool = rows(&packed["values"]);
+    let data = expand(&packed["root"], pool, pool.len());
+    let cases = rows(&data["fate"]["cases"]);
+    assert_eq!(cases.len(), 128);
+    assert_eq!(data["fate"]["base"], FIXTURE["base"]);
+    for profile in [&data["fate"]["profile"], &data["repeat_profile"]] {
+        let order = otp_order::profile(profile);
+        let overrides = Overrides::default();
+        let sources = remote_tests::sources();
+        for row in cases {
+            let mut context = context(row);
+            context.current_contract = small(1);
+            context.reserved_gas = 18.into();
+            let executor = Executor {
+                context: &context,
+                order: &order,
+                overrides: &overrides,
+                contracts: &sources,
+            };
+            let mut host = context_tests::chain_base(row);
+            host.name_claim_bid_timeout = row["override"]
+                .as_str()
+                .map(|s| ae_types::Unsigned::from_decimal(s).unwrap());
+            for run in rows(&row["runs"]) {
+                let (mut state, mut limits) =
+                    context_tests::start_with_host(&executor, row, &run["gas"], host.clone());
+                for (index, step) in rows(&run["steps"]).iter().enumerate() {
+                    let expected = &data["fate"]["results"][step.as_u64().unwrap() as usize];
+                    let out = executor.advance_remote_program(&state, limits).unwrap();
+                    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        remote_tests::check(out, expected)
+                    }))
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "auction {} protocol {} vm {} override {} gas {} step {}",
+                            row["name"],
+                            row["protocol"],
+                            row["vm"],
+                            row["override"],
+                            run["gas"],
+                            index
+                        );
+                        std::panic::resume_unwind(e)
+                    });
+                    if let Some((next, budget)) = checked {
+                        state = next;
+                        limits = budget;
+                    } else {
+                        assert_eq!(index + 1, rows(&run["steps"]).len());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 use ae_state::names::hashing;
 use ae_types::{IdTag, Unsigned};
 use ae_vm_fate::machine::program::remote::{

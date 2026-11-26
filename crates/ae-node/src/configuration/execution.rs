@@ -19,6 +19,7 @@ use std::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Resolution(super::resolution::Error),
     Network,
     Limit,
     Field(&'static str),
@@ -223,6 +224,32 @@ pub struct Bound {
     canonical: Vec<u8>,
     missing_atoms: Vec<Atom>,
     gas_limit: Unsigned,
+    name_claim_bid_timeout: Option<Unsigned>,
+}
+pub fn name_claim_bid_timeout(
+    resolved: &super::resolution::Resolved<'_>,
+) -> Result<Option<Unsigned>, Error> {
+    use super::resolution::Strategy;
+    resolved
+        .find(
+            &["mining", "name_claim_bid_timeout"],
+            &[
+                Strategy::User,
+                Strategy::Application {
+                    app: "aecore",
+                    key: "name_claim_bid_timeout",
+                },
+            ],
+        )
+        .map_err(Error::Resolution)?
+        .map(|v| {
+            let number = v
+                .as_number()
+                .ok_or(Error::Field("name_claim_bid_timeout"))?;
+            Unsigned::from_decimal(number.as_str())
+                .map_err(|_| Error::Field("name_claim_bid_timeout"))
+        })
+        .transpose()
 }
 impl Bound {
     pub fn build(
@@ -233,11 +260,40 @@ impl Bound {
         gas_limit: &Unsigned,
         resources: Resources,
     ) -> Result<Self, Error> {
+        Self::build_with_name_auction_timeout(
+            specification,
+            auxiliary,
+            network,
+            consensus,
+            gas_limit,
+            resources,
+            None,
+        )
+    }
+    pub fn build_with_name_auction_timeout(
+        specification: &Specification,
+        auxiliary: &Loaded,
+        network: &NetworkProfile,
+        consensus: ConsensusType,
+        gas_limit: &Unsigned,
+        resources: Resources,
+        name_claim_bid_timeout: Option<Unsigned>,
+    ) -> Result<Self, Error> {
         if auxiliary.network() != network.network_id() {
             return Err(Error::Network);
         }
         let gas_limit = network.block_gas_limit(gas_limit);
-        let canonical = specification.canonical(auxiliary, &gas_limit);
+        let base = specification.canonical(auxiliary, &gas_limit);
+        // Preserve existing bindings when no override is configured. Explicit
+        // overrides alter execution, including zero, and must bind the database.
+        let canonical = match &name_claim_bid_timeout {
+            None => base,
+            Some(value) => rlp::encode(&Rlp::List(vec![
+                Rlp::Bytes(b"ae-rust-execution-auction-v1"),
+                Rlp::Bytes(&base),
+                Rlp::Bytes(value.as_bytes()),
+            ])),
+        };
         let fingerprint = ae_crypto::blake2b_256(&canonical);
         let order = Otp26::new(
             specification.word,
@@ -306,6 +362,7 @@ impl Bound {
             aevm: Some(&aevm),
             signature_limits: resources.signatures,
             channel_limits: resources.channels,
+            name_claim_bid_timeout: name_claim_bid_timeout.as_ref(),
             channel_state_atoms: specification.channel_atoms.as_ref(),
             oracle_limits: resources.oracles,
             fate_limits: resources.fate,
@@ -319,6 +376,7 @@ impl Bound {
             canonical,
             missing_atoms: specification.missing_atoms(),
             gas_limit,
+            name_claim_bid_timeout,
         })
     }
     pub fn execution(&self) -> &Owned {
@@ -335,5 +393,8 @@ impl Bound {
     }
     pub fn effective_gas_limit(&self) -> &Unsigned {
         &self.gas_limit
+    }
+    pub fn name_claim_bid_timeout(&self) -> Option<&Unsigned> {
+        self.name_claim_bid_timeout.as_ref()
     }
 }

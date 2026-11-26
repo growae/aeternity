@@ -169,6 +169,7 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
         aevm: Some(&a),
         channel_limits: Default::default(),
         consensus: ae_protocol::ConsensusType::Pow,
+        name_claim_bid_timeout: None,
         channel_state_atoms: None,
         signature_limits: limits,
         oracle_limits: Default::default(),

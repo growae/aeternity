@@ -22,6 +22,11 @@ static DATA: LazyLock<J> = LazyLock::new(|| {
         serde_json::from_str(include_str!("../fixtures/erlang_aevm_name_writes.json")).unwrap();
     expand(&p["root"], p["values"].as_array().unwrap())
 });
+static AUCTION: LazyLock<J> = LazyLock::new(|| {
+    let p: J =
+        serde_json::from_str(include_str!("../fixtures/erlang_auction_vm_override.json")).unwrap();
+    expand(&p["root"], p["values"].as_array().unwrap())
+});
 fn trie(v: &J) -> Trie<MemoryStore> {
     let mut t = Trie::new(MemoryStore::default());
     for pair in v[1].as_array().unwrap() {
@@ -67,6 +72,9 @@ fn state(row: &J) -> State {
         context: Arc::new({
             let mut c = context(row);
             c.height = row["height"].as_u64().unwrap_or(50);
+            c.name_claim_bid_timeout = row["override"]
+                .as_str()
+                .map(|s| Unsigned::from_decimal(s).unwrap());
             c
         }),
         event_context: EventContext::None,
@@ -677,4 +685,83 @@ fn name_lifecycles_preserve_height_nonce_ownership_and_event_order() {
         }
     }
     assert_eq!(counts, [108, 108]);
+}
+
+#[test]
+fn auction_override_name_writes_match_original_aevm_callbacks_and_state() {
+    let rows = AUCTION["aevm"].as_array().unwrap();
+    assert_eq!(rows.len(), 288);
+    let mut counts = [0; 2];
+    for (i, row) in rows.iter().enumerate() {
+        let s = state(row);
+        let before = snapshot(&s);
+        let inner = s.onchain.as_ref().map(|t| t.roots());
+        let h = Traced::default();
+        let (actual, next) = direct(row, &s, &h, Limits::default()).unwrap();
+        assert_eq!(actual, expected(row), "row {i}: {row}");
+        let desired = if matches!(actual, primops::Outcome::Complete { .. }) {
+            counts[0] += 1;
+            field(&row["result"]["value"][1][3], "chain_state")
+        } else {
+            counts[1] += 1;
+            field(&row["before"], "chain_state")
+        };
+        assert_eq!(snapshot(&next), logical(desired.clone()), "row {i}");
+        assert_eq!(list(h.events.into_inner()), row["host_calls"], "row {i}");
+        assert_eq!(snapshot(&s), before);
+        assert_eq!(next.onchain.as_ref().map(|t| t.roots()), inner);
+    }
+    assert_eq!(counts.iter().sum::<usize>(), 288);
+    assert!(counts.iter().all(|n| *n > 0));
+}
+
+#[test]
+fn auction_override_outer_calls_preserve_aevm_errors_reverts_and_state() {
+    let rows = AUCTION["outer"].as_array().unwrap();
+    assert_eq!(rows.len(), 180);
+    let mut counts = [0; 3];
+    for (i, row) in rows.iter().enumerate() {
+        let s = state(row);
+        let before = snapshot(&s);
+        let vm = invocations::vm(row, &row["before"]);
+        let h = Traced::default();
+        let r = outer_call::evaluate(&vm, &s, &h, Limits::default()).unwrap();
+        let e = &row["result"]["value"][1];
+        assert_eq!(row["result"]["kind"], "ok");
+        match r {
+            runtime::Outcome::Complete { state, chain } => {
+                counts[0] += 1;
+                assert_eq!(e[0], atom("ok"));
+                assert_eq!(*state, invocations::vm(row, &e[1]), "row {i}");
+                assert_eq!(
+                    snapshot(&chain),
+                    logical(field(&e[1], "chain_state").clone()),
+                    "row {i}"
+                );
+            }
+            runtime::Outcome::Error { reason, gas } => {
+                counts[1] += 1;
+                assert_eq!(e[0], atom("error"));
+                let expected = if e[1] == atom("out_of_gas") {
+                    execution::Failure::OutOfGas
+                } else if e[1] == atom("error_pop_empty_stack") {
+                    execution::Failure::PopEmpty
+                } else {
+                    execution::Failure::Call(e[1][1].as_str().unwrap().into())
+                };
+                assert_eq!(reason, expected, "row {i}");
+                assert_eq!(int(gas), e[2]);
+            }
+            runtime::Outcome::Revert { output, gas } => {
+                counts[2] += 1;
+                assert_eq!(e[0], atom("revert"));
+                assert_eq!(bin(output), e[1]);
+                assert_eq!(int(gas), e[2]);
+            }
+        }
+        assert_eq!(list(h.events.into_inner()), row["host_calls"], "row {i}");
+        assert_eq!(snapshot(&s), before);
+    }
+    assert_eq!(counts.iter().sum::<usize>(), 180);
+    assert!(counts.iter().all(|n| *n > 0));
 }

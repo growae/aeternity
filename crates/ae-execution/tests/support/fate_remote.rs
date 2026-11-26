@@ -401,6 +401,7 @@ pub(super) fn chain(row: &J) -> Chain {
     let a = tree(&row["initial"]["chain"]["accounts"]);
     let c = tree(&row["contracts"]);
     Chain {
+        name_claim_bid_timeout: None,
         contract_cache: Default::default(),
         auth_tx: None,
 

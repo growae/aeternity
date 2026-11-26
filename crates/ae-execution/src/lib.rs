@@ -36,6 +36,7 @@ pub enum Origin {
 // wrapper/VM execution, never from caller-supplied HTTP transaction fields.
 #[derive(Debug, Clone)]
 pub struct Context {
+    pub name_claim_bid_timeout: Option<Unsigned>,
     pub height: u64,
     pub protocol: Protocol,
     pub origin: Origin,
@@ -49,6 +50,7 @@ pub struct Context {
 impl Context {
     pub fn transaction(height: u64, protocol: Protocol) -> Self {
         Self {
+            name_claim_bid_timeout: None,
             height,
             protocol,
             origin: Origin::Transaction,

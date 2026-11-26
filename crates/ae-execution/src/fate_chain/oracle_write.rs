@@ -190,6 +190,7 @@ pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone>(
             .map_err(|e| HostFailure::Backend(Error::Oracles(e)))?;
     }
     let context = Context {
+        name_claim_bid_timeout: next.name_claim_bid_timeout.clone(),
         height: next.height,
         protocol,
         origin: Origin::Contract,

@@ -17,7 +17,7 @@ pub fn max_expiration(protocol: Protocol) -> u64 {
     }
 }
 // Callers supply the IDNA-normalized label byte length, excluding registrar.
-// A development override must be resolved by its explicit network profile.
+// Overrides are explicit execution configuration, never ambient environment.
 pub fn bid_timeout(size: usize, protocol: Protocol, development_override: Option<u64>) -> u64 {
     if protocol < Protocol::Lima {
         return 0;
@@ -41,6 +41,31 @@ pub fn bid_extension(size: usize, protocol: Protocol, development_override: Opti
         240
     } else {
         0
+    }
+}
+// The native override is an arbitrary nonnegative integer. Keep the fixed
+// table API above for callers that only need bounded protocol constants.
+pub fn bid_timeout_value(
+    size: usize,
+    protocol: Protocol,
+    configured: Option<&Unsigned>,
+) -> Unsigned {
+    if protocol >= Protocol::Lima
+        && let Some(value) = configured
+    {
+        return value.clone();
+    }
+    bid_timeout(size, protocol, None).into()
+}
+pub fn bid_extension_value(
+    size: usize,
+    protocol: Protocol,
+    configured: Option<&Unsigned>,
+) -> Unsigned {
+    if protocol < Protocol::Ceres {
+        bid_timeout_value(size, protocol, configured)
+    } else {
+        bid_extension(size, protocol, None).into()
     }
 }
 pub fn claim_fee(size: std::num::NonZeroUsize, protocol: Protocol) -> Unsigned {

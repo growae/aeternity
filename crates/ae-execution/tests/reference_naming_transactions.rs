@@ -180,6 +180,103 @@ fn event(e: &Json) -> Event {
         _ => panic!("unexpected event"),
     }
 }
+
+#[test]
+fn configured_auction_overrides_match_native_policy_transactions_events_and_roots() {
+    let corpus: Json =
+        serde_json::from_str(include_str!("fixtures/erlang_auction_override.json")).unwrap();
+    assert_eq!(corpus["policies"].as_array().unwrap().len(), 2240);
+    for row in corpus["policies"].as_array().unwrap() {
+        let override_value = row["override"]
+            .as_str()
+            .map(|s| Unsigned::from_decimal(s).unwrap());
+        let p = (row["protocol"].as_u64().unwrap() as u32)
+            .try_into()
+            .unwrap();
+        let size = row["size"].as_u64().unwrap() as usize;
+        assert_eq!(
+            ae_protocol::names::bid_timeout_value(size, p, override_value.as_ref()),
+            number(&row["timeout"])
+        );
+        assert_eq!(
+            ae_protocol::names::bid_extension_value(size, p, override_value.as_ref()),
+            number(&row["extension"])
+        );
+    }
+    let rows = corpus["transactions"].as_array().unwrap();
+    assert_eq!(rows.len(), 336);
+    let network = ae_protocol::NetworkProfile::mainnet();
+    let mut successes = 0;
+    for row in rows {
+        let mut ctx = context(row);
+        let configured = row["override"]
+            .as_str()
+            .map(|s| Unsigned::from_decimal(s).unwrap());
+        ctx.name_claim_bid_timeout = configured.clone();
+        let tx = NameTransaction::decode(&bytes(&row["transaction"])).unwrap();
+        let (mut accounts, mut names) = initial(&row["initial"]);
+        let direct = names::process(&tx, &mut accounts, &mut names, &ctx);
+        match direct {
+            Ok(r) => {
+                successes += 1;
+                assert_eq!(snapshot(&accounts, &names), row["final"], "{row}");
+                assert_eq!(
+                    r.events,
+                    row["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(event)
+                        .collect::<Vec<_>>()
+                );
+            }
+            Err(e) => {
+                assert_eq!(Some(reason(&e)), row["error"].as_str(), "{row}");
+                assert_eq!(snapshot(&accounts, &names), row["initial"]);
+            }
+        }
+        let (accounts, names) = initial(&row["initial"]);
+        let mut trees = ae_state::Trees {
+            accounts,
+            names,
+            contracts: Default::default(),
+            calls: Default::default(),
+            channels: Default::default(),
+            oracles: Default::default(),
+        };
+        let mut cfg = ae_execution::transactions::Config::primitives(&network);
+        cfg.name_claim_bid_timeout = configured.as_ref();
+        // The execution owner is authoritative, even when a supplied context
+        // carries another value. It propagates through the wrapper boundary.
+        ctx.name_claim_bid_timeout = Some(999.into());
+        let transaction = ae_tx::Transaction::new(ae_tx::TransactionLeaf::Name(tx));
+        match ae_execution::transactions::process(&transaction, &mut trees, &ctx, &cfg) {
+            Ok(r) => {
+                assert_eq!(
+                    snapshot(&trees.accounts, &trees.names),
+                    row["final"],
+                    "{row}"
+                );
+                assert_eq!(r.context.name_claim_bid_timeout, configured);
+                assert_eq!(
+                    r.events,
+                    row["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|e| ae_execution::transactions::Event::Primitive(event(e)))
+                        .collect::<Vec<_>>()
+                );
+            }
+            Err(ae_execution::transactions::Error::Primitive(e)) => {
+                assert_eq!(Some(reason(&e)), row["error"].as_str(), "{row}");
+                assert_eq!(snapshot(&trees.accounts, &trees.names), row["initial"]);
+            }
+            Err(e) => panic!("unexpected {e:?}: {row}"),
+        }
+    }
+    assert_eq!(successes, 300);
+}
 #[test]
 fn all_five_naming_callbacks_match_original_erlang_bytes_rules_events_and_roots() {
     let corpus: Json =

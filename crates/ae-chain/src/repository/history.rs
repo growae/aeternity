@@ -153,6 +153,7 @@ pub(super) fn with_history<O: MapOrder, R>(
         aevm: aevm.as_ref(),
         signature_limits: config.signature_limits,
         channel_limits: config.channel_limits,
+        name_claim_bid_timeout: config.name_claim_bid_timeout,
         channel_state_atoms: config.channel_state_atoms,
         oracle_limits: config.oracle_limits,
         fate_limits: config.fate_limits,

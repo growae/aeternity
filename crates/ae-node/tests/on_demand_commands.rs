@@ -674,6 +674,7 @@ fn pinned_readers_keep_vm_limits_while_rebinding_block_environment() {
                 max_memory_words: 103,
                 max_depth: 9,
             },
+            name_claim_bid_timeout: None,
             channel_state_atoms: Some(&atoms),
             maximum_fate_steps: 117,
             ..*base

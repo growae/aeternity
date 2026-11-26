@@ -318,7 +318,11 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
     };
     let hash = hashing::name_hash(&ascii).0;
     let auction_hash = hashing::auction_hash(hash);
-    let timeout = rules::bid_timeout(size, context.protocol, None);
+    let timeout = rules::bid_timeout_value(
+        size,
+        context.protocol,
+        context.name_claim_bid_timeout.as_ref(),
+    );
     debit(accounts, changes, claim.owner, claim.fee)?;
     events.push(Event::NameDebit {
         account: claim.owner,
@@ -326,11 +330,11 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
     });
     if (context.protocol >= Protocol::Lima && claim.fee == &0.into())
         || (context.protocol < Protocol::Lima
-            && (claim.fee != &rules::LEGACY_LOCKED_FEE.into() || timeout != 0))
+            && (claim.fee != &rules::LEGACY_LOCKED_FEE.into() || timeout != 0.into()))
     {
         return Err(Failure::IllegalNameFee.into());
     }
-    if timeout == 0 {
+    if timeout == 0.into() {
         credit(accounts, changes, AccountPublicKey::ZERO, claim.fee, true)?;
         events.push(Event::NameFeeLocked {
             amount: claim.fee.clone(),
@@ -340,7 +344,7 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
         return Err(Failure::NameAlreadyTaken.into());
     }
     let zero_salt = claim.salt == &0.into();
-    if timeout == 0 {
+    if timeout == 0.into() {
         if context.protocol < Protocol::Ceres || !zero_salt {
             claim_after_preclaim(names, claim, &ascii, registrar, size, context)?;
         }
@@ -355,7 +359,7 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
                 hash,
                 claim.owner,
                 claim.fee.clone(),
-                timeout.into(),
+                timeout,
                 context.height.into(),
             ))?,
             None => return Err(Failure::NameNotInAuction.into()),
@@ -379,7 +383,11 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
                 names.enter_auction(&previous.extend(
                     claim.owner,
                     claim.fee.clone(),
-                    rules::bid_extension(size, context.protocol, None).into(),
+                    rules::bid_extension_value(
+                        size,
+                        context.protocol,
+                        context.name_claim_bid_timeout.as_ref(),
+                    ),
                     context.height.into(),
                 ))?;
             }
@@ -393,7 +401,7 @@ pub(crate) fn process_claim<S: NodeReader, N: NodeWriter, C: NodeWriter>(
             hash,
             claim.owner,
             claim.fee.clone(),
-            timeout.into(),
+            timeout,
             context.height.into(),
         ))?;
     }

@@ -78,6 +78,94 @@ fn overrides() -> Vec<u8> {
     );
     serde_json::to_vec(&json!({k:v})).unwrap()
 }
+
+#[test]
+fn auction_override_resolution_and_execution_identity_preserve_native_precedence() {
+    let data: Value = serde_json::from_str(include_str!(
+        "../../ae-execution/tests/fixtures/erlang_auction_override.json"
+    ))
+    .unwrap();
+    let tmp = Temp::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for row in data["transactions"].as_array().unwrap() {
+        let setting = &row["configuration"];
+        if !seen.insert(setting.to_string()) {
+            continue;
+        }
+        let cfg = Configuration::from_value(setting["user"].clone()).unwrap();
+        let mut ctx = tmp.context();
+        if !setting["application"].is_null() {
+            ctx.set(
+                "aecore".into(),
+                "name_claim_bid_timeout".into(),
+                setting["application"].clone(),
+            )
+            .unwrap();
+        }
+        let resolved = cfg.resolve(&ctx).unwrap();
+        let value = execution::name_claim_bid_timeout(&resolved).unwrap();
+        let expected = row["override"]
+            .as_str()
+            .map(|s| ae_types::Unsigned::from_decimal(s).unwrap());
+        assert_eq!(value, expected);
+        for network in [
+            ae_protocol::NetworkProfile::mainnet(),
+            ae_protocol::NetworkProfile::uat(),
+        ] {
+            let aux = auxiliary::Plan::resolve(&resolved, network.network_id(), &tmp.0)
+                .unwrap()
+                .load(Default::default())
+                .unwrap();
+            let spec = Specification::from_value(&profile::default_value()).unwrap();
+            let base = Bound::build(
+                &spec,
+                &aux,
+                &network,
+                ConsensusType::Pow,
+                &6_000_000.into(),
+                Default::default(),
+            )
+            .unwrap();
+            let bound = Bound::build_with_name_auction_timeout(
+                &spec,
+                &aux,
+                &network,
+                ConsensusType::Pow,
+                &6_000_000.into(),
+                Default::default(),
+                value.clone(),
+            )
+            .unwrap();
+            assert_eq!(bound.name_claim_bid_timeout(), expected.as_ref());
+            bound
+                .execution()
+                .with_config(|c| assert_eq!(c.name_claim_bid_timeout, expected.as_ref()));
+            assert_eq!(
+                base.fingerprint() == bound.fingerprint(),
+                expected.is_none()
+            );
+            if expected.is_none() {
+                assert_eq!(base.canonical(), bound.canonical());
+            }
+        }
+    }
+    assert_eq!(seen.len(), 7);
+    for value in [
+        json!(-1),
+        json!(1.5),
+        json!(false),
+        json!("17"),
+        Value::Null,
+    ] {
+        let mut ctx = tmp.context();
+        ctx.set("aecore".into(), "name_claim_bid_timeout".into(), value)
+            .unwrap();
+        assert!(
+            execution::name_claim_bid_timeout(&Configuration::empty().resolve(&ctx).unwrap())
+                .is_err()
+        );
+    }
+}
 #[test]
 fn explicit_profiles_reject_unsupported_choices_and_bind_each_semantic_input() {
     let tmp = Temp::new();
