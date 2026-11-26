@@ -19,7 +19,20 @@ pub async fn start(running: &mut runtime::Running) -> http::Handle {
         .await
         .unwrap()
 }
-pub async fn verify(http: &http::Handle, database: &ae_storage::Database) {
+pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: &runtime::Handle) {
+    let bindings = match root.pow() {
+        Some(pow) => pow.workers().unwrap().bindings(),
+        None => root.hyperchain().unwrap().workers().unwrap().bindings(),
+    };
+    let peer = bindings
+        .keys
+        .unwrap()
+        .current()
+        .unwrap()
+        .peer_public_key()
+        .unwrap()
+        .await
+        .unwrap();
     let (key, height) = {
         let view = database.view().unwrap();
         let top = view.status().tip.unwrap();
@@ -31,6 +44,16 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database) {
         (key, block.header().common().height)
     };
     for (path, code, body) in [
+        (
+            "/v2/peers/pubkey",
+            200,
+            json!({"pubkey":api::encode(ApiType::PeerPubkey,peer.as_ref())}),
+        ),
+        (
+            "/v3/peers/pubkey?int-as-string=true",
+            200,
+            json!({"pubkey":api::encode(ApiType::PeerPubkey,peer.as_ref())}),
+        ),
         (
             "/v2/key-blocks/current/height",
             200,

@@ -171,6 +171,35 @@ fn key_worker_bounds_pending_requests_and_drains_accepted_work_before_join() {
     assert!(status.failure.is_none() && !status.running);
 }
 
+#[test]
+fn public_peer_key_queries_are_bounded_and_keep_the_captured_worker() {
+    let temp = Temp::new();
+    let mut config = temp.config();
+    config.requests = 2;
+    let worker = Worker::spawn(config.clone()).unwrap();
+    let client = worker.client();
+    assert!(client.same_worker(&client.clone()));
+    let expected = client.info().keys.peer;
+    let (ready, release) = worker::pause(&client);
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let accepted = client.peer_public_key().unwrap();
+    assert!(matches!(client.peer_public_key(), Err(Error::Busy)));
+    worker.request_shutdown();
+    assert!(matches!(client.peer_public_key(), Err(Error::Stopped)));
+    release.send(()).unwrap();
+    worker.shutdown().unwrap();
+    assert_eq!(accepted.blocking_wait().unwrap(), expected);
+    let replacement = Worker::spawn(config).unwrap();
+    let current = replacement.client();
+    assert!(!client.same_worker(&current));
+    assert_eq!(
+        current.peer_public_key().unwrap().blocking_wait().unwrap(),
+        expected
+    );
+    assert!(matches!(client.peer_public_key(), Err(Error::Stopped)));
+    replacement.shutdown().unwrap();
+}
+
 struct Sequence {
     next: u8,
     fail: bool,

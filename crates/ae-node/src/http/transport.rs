@@ -93,6 +93,9 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
     }
 }
 fn decode(value: &str, plus: bool) -> Option<String> {
+    String::from_utf8(decode_bytes(value, plus)?).ok()
+}
+fn decode_bytes(value: &str, plus: bool) -> Option<Vec<u8>> {
     let mut decoded = Vec::with_capacity(value.len());
     let mut bytes = value.bytes();
     while let Some(byte) = bytes.next() {
@@ -106,7 +109,7 @@ fn decode(value: &str, plus: bool) -> Option<String> {
             b => decoded.push(b),
         }
     }
-    String::from_utf8(decoded).ok()
+    Some(decoded)
 }
 fn strings(query: &str) -> Result<bool, Response> {
     let mut selected = None;
@@ -117,24 +120,26 @@ fn strings(query: &str) -> Result<bool, Response> {
         let (key, value) = pair
             .split_once('=')
             .map_or((pair, None), |(k, v)| (k, Some(v)));
-        let key = decode(key, true).ok_or_else(|| Response::empty(400))?;
+        if key.is_empty() {
+            return Err(Response::stream_error(400));
+        }
+        let key = decode_bytes(key, true).ok_or_else(|| Response::stream_error(400))?;
         let value = match value {
-            Some(v) => Some(decode(v, true).ok_or_else(|| Response::empty(400))?),
+            Some(v) => Some(decode_bytes(v, true).ok_or_else(|| Response::stream_error(400))?),
             None => None,
         };
-        if key == "int-as-string" && selected.is_none() {
+        if key == b"int-as-string" && selected.is_none() {
             selected = Some(value);
         }
     }
     match selected {
         None => Ok(false),
         Some(None) => Ok(true),
-        Some(Some(value)) if value.eq_ignore_ascii_case("true") => Ok(true),
-        Some(Some(value)) if value.eq_ignore_ascii_case("false") => Ok(false),
-        Some(Some(value)) => Err(Response::json(
-            400,
-            json!({"reason":"validation_error", "parameter":"int-as-string", "info":{"error":"wrong_type", "data":value}}),
-        )),
+        Some(Some(value)) if value.eq_ignore_ascii_case(b"true") => Ok(true),
+        Some(Some(value)) if value.eq_ignore_ascii_case(b"false") => Ok(false),
+        // The original schema wrapper's invalid-boolean error cannot be
+        // encoded by JSX; the request process emits an empty stream error.
+        Some(Some(_)) => Err(Response::stream_error(500)),
     }
 }
 fn accepts_json(headers: &Headers) -> bool {
@@ -244,7 +249,7 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if !accepts_json(&request.headers) {
         return Err(Response::empty(406));
     }
-    let strings = if v3 && matches!(operation, Operation::Current { .. }) {
+    let strings = if v3 && !matches!(operation, Operation::SyncStatus { .. }) {
         strings(&request.query)?
     } else {
         false
@@ -264,7 +269,7 @@ pub(super) fn dispatch(
                 Response::invalid_response()
             }
         }
-        (Ok((Operation::Current { .. }, strings)), Ok(mut body)) => {
+        (Ok((Operation::Current { .. } | Operation::PeerPublicKey, strings)), Ok(mut body)) => {
             if strings {
                 response::integers_as_strings(&mut body);
             }
@@ -296,6 +301,7 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
     let result = match &plan {
         Ok((Operation::Current { height }, _)) => selected.map(|s| response::current(s, *height)),
         Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
+        Ok((Operation::PeerPublicKey, _)) => super::key::query(&parent, &config).await,
         Err(_) => Err(Response::unavailable(false)),
     };
     let mut response = dispatch(plan, result);

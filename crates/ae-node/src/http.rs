@@ -6,6 +6,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+mod key;
 mod response;
 mod sync;
 mod transport;

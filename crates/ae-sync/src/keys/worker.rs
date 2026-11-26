@@ -52,6 +52,9 @@ enum Command {
     Identity {
         reply: oneshot::Sender<Result<Arc<noise::Identity>, Error>>,
     },
+    PeerPublicKey {
+        reply: oneshot::Sender<Result<PeerPublicKey, Error>>,
+    },
 }
 struct Queue {
     commands: VecDeque<Command>,
@@ -91,6 +94,9 @@ impl Shared {
 #[derive(Clone)]
 pub struct Client(Arc<Shared>);
 impl Client {
+    pub fn same_worker(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub fn info(&self) -> Info {
         self.0.lock().info.clone()
     }
@@ -140,6 +146,9 @@ impl Client {
     // It can remain alive with a connection after the key worker stops.
     pub fn peer_identity(&self) -> Result<Ticket<Arc<noise::Identity>>, Error> {
         self.submit(|reply| Command::Identity { reply })
+    }
+    pub fn peer_public_key(&self) -> Result<Ticket<PeerPublicKey>, Error> {
+        self.submit(|reply| Command::PeerPublicKey { reply })
     }
 }
 pub struct Worker {
@@ -274,6 +283,11 @@ fn run(shared: &Shared, mut state: keeper::State, mut rng: keeper::Os) {
             }
             Command::Identity { reply } => {
                 let result = state.identity();
+                shared.complete(state.public(), false, None);
+                let _ = reply.send(Ok(result));
+            }
+            Command::PeerPublicKey { reply } => {
+                let result = state.public().peer;
                 shared.complete(state.public(), false, None);
                 let _ = reply.send(Ok(result));
             }

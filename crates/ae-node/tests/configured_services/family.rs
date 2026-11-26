@@ -788,10 +788,10 @@ async fn application_metrics_outlive_connection_generations_in_both_pow_families
             let mut handle = running.handle();
             ready(&mut handle).await;
             let http = http_checks::start(&mut running).await;
-            http_checks::verify(&http, &database).await;
+            http_checks::verify(&http, &database, &handle).await;
             let client = metrics.verify(&handle, normal).await;
             metrics.replace_logger(&handle).await;
-            http_checks::verify(&http, &database).await;
+            http_checks::verify(&http, &database, &handle).await;
             let exit = running.shutdown().await.unwrap();
             http_checks::joined(&http).await;
             assert!(exit.status().joined && exit.status().failure.is_none());

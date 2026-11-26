@@ -380,6 +380,12 @@ impl Handle {
             HandleInner::Hyperchain(h) => h.connections(),
         }
     }
+    pub(crate) fn worker_bindings(&self) -> Option<ae_sync::runtime::workers::Bindings> {
+        match &self.inner {
+            HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => h.workers().map(|w| w.bindings()),
+            HandleInner::Hyperchain(h) => h.workers().map(|w| w.bindings()),
+        }
+    }
     pub fn pow(&self) -> Option<pow::Handle> {
         match &self.inner {
             HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => Some(h.clone()),

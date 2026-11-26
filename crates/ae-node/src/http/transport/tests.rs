@@ -82,10 +82,13 @@ fn original_boolean_coercion_and_query_version_scope() {
         };
         match strings(&query) {
             Ok(value) => assert_eq!(json!({"value":value}), row["result"]),
-            Err(response) => assert_eq!(
-                json!({"error":serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()}),
-                row["result"]
-            ),
+            Err(response) => {
+                // The standalone coercion fixture reports a parameter error;
+                // the actual schema wrapper cannot encode it and emits 500.
+                assert!(row["result"]["error"].is_object());
+                assert_eq!(response.status, 500);
+                assert!(response.body.is_empty());
+            }
         }
     }
     assert!(strings("x=1&int%2das%2dstring=TRUE&int-as-string=false").unwrap());
@@ -184,11 +187,13 @@ fn routing_methods_groups_and_preflight_are_separate() {
         config.target = target;
         for group in ["chain", "node_info", "external"] {
             config.groups = [group.into()].into();
-            request.path = "/v3/sync-status".into();
-            assert_eq!(
-                plan(&request, &config).is_ok(),
-                target == super::super::Target::External && group != "chain"
-            );
+            for path in ["/v3/sync-status", "/v3/peers/pubkey"] {
+                request.path = path.into();
+                assert_eq!(
+                    plan(&request, &config).is_ok(),
+                    target == super::super::Target::External && group != "chain"
+                );
+            }
         }
     }
 }
@@ -209,4 +214,80 @@ fn json_accept_uses_the_most_specific_range_and_bounded_quality() {
             "{accept}"
         );
     }
+}
+
+#[test]
+fn original_cowboy_queries_match_supported_operations_and_error_headers() {
+    let native: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_queries.json"
+    ))
+    .unwrap();
+    let mut count = 0;
+    for row in native["rows"].as_array().unwrap() {
+        let suffix = match row["id"].as_str().unwrap() {
+            "GetCurrentKeyBlockHeight" => "/key-blocks/current/height",
+            "GetCurrentKeyBlockHash" => "/key-blocks/current/hash",
+            "GetSyncStatus" => "/sync-status",
+            "GetPeerPubkey" => "/peers/pubkey",
+            "GetStatus" => continue,
+            _ => unreachable!(),
+        };
+        let input = native["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == row["id"])
+            .unwrap();
+        let v3 = row["module"] == "oas_endpoints";
+        let request = Request {
+            method: "GET".into(),
+            path: format!("/{}{suffix}", if v3 { "v3" } else { "v2" }),
+            query: row["query"]["query"].as_str().unwrap().into(),
+            headers: [("origin".into(), "https://client.example".into())].into(),
+        };
+        let config = Config::default();
+        let planned = plan(&request, &config);
+        assert_eq!(
+            u64::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap(),
+            "{row}"
+        );
+        let body = if row["id"] == "GetPeerPubkey" {
+            super::super::key::body(ae_types::PeerPublicKey(
+                hex::decode(native["peer_key"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ))
+        } else {
+            input["body"].clone()
+        };
+        let mut response = super::dispatch(planned, Ok(body));
+        response.stamp(&config, &request.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            response.status,
+            expected["code"].as_u64().unwrap() as u16,
+            "{row}"
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(response.body.is_empty(), "{row}");
+            assert!(response.headers.is_empty(), "{row}");
+            assert_eq!(expected["headers"], json!({"content-length":"0"}));
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                expected["body"],
+                "{row}"
+            );
+            for name in ["x-ae-height", "access-control-allow-origin"] {
+                assert_eq!(
+                    response.headers[name],
+                    expected["headers"][name].as_str().unwrap()
+                );
+            }
+        }
+        count += 1;
+    }
+    assert_eq!(count, 208);
 }

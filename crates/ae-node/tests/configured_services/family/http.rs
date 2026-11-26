@@ -59,6 +59,119 @@ async fn get(
 }
 
 #[tokio::test]
+async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
+    let lab = Lab::new();
+    let prepared = prepare(lab.services("on_demand", json!({"dev_mode":true}), Default::default()));
+    let genesis = prepared
+        .configured()
+        .chain()
+        .database()
+        .view()
+        .unwrap()
+        .identity()
+        .genesis;
+    let mut running = prepared
+        .launch(commands(&lab), || Ok(Default::default()))
+        .unwrap();
+    let mut handle = running.handle();
+    ready(&mut handle).await;
+    let workers = handle.pow().unwrap().workers().unwrap();
+    let old = workers.bindings().keys.unwrap().current().unwrap();
+    let peer = old.peer_public_key().unwrap().await.unwrap();
+    let expected_peer = api::encode(ApiType::PeerPubkey, peer.as_ref());
+    let http = running.listen_http(config()).await.unwrap();
+    let address = http.status().address;
+    let native: Value =
+        serde_json::from_str(include_str!("../../fixtures/erlang_http_queries.json")).unwrap();
+    let mut checked = 0;
+    for row in native["rows"].as_array().unwrap() {
+        let (suffix, mut expected) = match row["id"].as_str().unwrap() {
+            "GetCurrentKeyBlockHeight" => ("/key-blocks/current/height", json!({"height":0})),
+            "GetCurrentKeyBlockHash" => (
+                "/key-blocks/current/hash",
+                json!({"hash":api::encode(ApiType::KeyBlockHash, genesis.as_ref())}),
+            ),
+            "GetPeerPubkey" => ("/peers/pubkey", json!({"pubkey":expected_peer})),
+            "GetSyncStatus" => ("/sync-status", json!({"reason":"Node is not syncing"})),
+            "GetStatus" => continue,
+            _ => unreachable!(),
+        };
+        let version = if row["module"] == "oas_endpoints" {
+            "v3"
+        } else {
+            "v2"
+        };
+        let path = format!(
+            "/{version}{suffix}?{}",
+            row["query"]["query"].as_str().unwrap()
+        );
+        let (code, headers, body) = request(
+            address,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n\r\n"
+            ),
+        )
+        .await;
+        let expected_code = if row["id"] == "GetSyncStatus" {
+            404
+        } else {
+            row["result"]["response"]["code"].as_u64().unwrap() as u16
+        };
+        assert_eq!(code, expected_code, "{row}");
+        if row["result"]["kind"] == "stream_error" {
+            assert!(body.is_empty(), "{row}");
+            assert!(!headers.contains_key("x-ae-height"));
+            assert!(!headers.contains_key("access-control-allow-origin"));
+            assert!(!headers.contains_key("content-type"));
+        } else {
+            if row["id"] == "GetCurrentKeyBlockHeight"
+                && row["result"]["response"]["body"]["height"].is_string()
+            {
+                expected["height"] = json!("0");
+            }
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                expected,
+                "{row}"
+            );
+            assert_eq!(headers["x-ae-height"], "0");
+            assert_eq!(
+                headers["access-control-allow-origin"],
+                "https://client.example"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 208);
+    let generation = workers.status().keys_generation;
+    assert_eq!(
+        workers
+            .restart(ae_sync::runtime::workers::Child::Keys, generation)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        generation + 1
+    );
+    ready(&mut handle).await;
+    let current = workers.bindings().keys.unwrap().current().unwrap();
+    assert!(!old.same_worker(&current));
+    assert!(matches!(
+        old.peer_public_key(),
+        Err(ae_sync::keys::Error::Stopped)
+    ));
+    for version in ["v2", "v3"] {
+        let (code, _, body) = get(address, &format!("/{version}/peers/pubkey")).await;
+        assert_eq!((code, body), (200, json!({"pubkey":expected_peer})));
+    }
+    assert!(running.shutdown().await.unwrap().status().joined);
+    assert!(matches!(
+        current.peer_public_key(),
+        Err(ae_sync::keys::Error::Stopped)
+    ));
+}
+
+#[tokio::test]
 async fn http_sync_status_uses_live_peer_progress_statistics_and_replacement_ownership() {
     use ae_p2p::{message::Kind as WireKind, noise, ping, runtime as net};
     use ae_sync::{chain::sync, peer::snapshot};

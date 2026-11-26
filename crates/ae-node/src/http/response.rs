@@ -96,9 +96,12 @@ impl Response {
         }
     }
     pub fn invalid_response() -> Self {
-        // Jesse throws past the API handler. Cowboy's stream error response
-        // has no application body, CORS headers, or cached height marker.
-        let mut response = Self::empty(500);
+        Self::stream_error(500)
+    }
+    pub fn stream_error(status: u16) -> Self {
+        // Cowboy's request-process error response has no application body,
+        // CORS headers, or cached height marker.
+        let mut response = Self::empty(status);
         response.application_headers = false;
         response
     }
@@ -146,6 +149,7 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 pub(super) enum Operation {
     Current { height: bool },
     SyncStatus { v3: bool },
+    PeerPublicKey,
 }
 pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     if config.target != Target::External {
@@ -160,6 +164,7 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         "/key-blocks/current/height" => (Operation::Current { height: true }, "chain"),
         "/key-blocks/current/hash" => (Operation::Current { height: false }, "chain"),
         "/sync-status" => (Operation::SyncStatus { v3 }, "node_info"),
+        "/peers/pubkey" => (Operation::PeerPublicKey, "node_info"),
         _ => return None,
     };
     config
