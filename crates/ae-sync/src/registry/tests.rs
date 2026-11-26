@@ -4,6 +4,7 @@ use ae_protocol::NetworkProfile;
 use ae_state::genesis::{self, Network};
 use ae_types::Hash256;
 use std::{net::Ipv4Addr, path::PathBuf};
+mod metrics;
 mod native;
 mod recovery;
 mod startup;

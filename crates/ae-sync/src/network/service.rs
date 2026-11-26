@@ -269,7 +269,7 @@ impl Service {
             if let Some(timer) = self.frame.as_ref().and_then(|f| f.timer)
                 && timer.deadline <= self.now()?
             {
-                self.apply(policy::Command::Timeout(timer.token)).await?;
+                self.apply(policy::Command::TimerFired(timer)).await?;
                 self.refresh().await?;
                 progress = true;
             }

@@ -9,6 +9,8 @@ use std::{
 use zeroize::Zeroizing;
 
 mod connections;
+mod metrics;
+pub use metrics::{PeerMetrics, TimerCallback};
 mod resolver;
 mod state;
 #[cfg(test)]
@@ -290,6 +292,7 @@ pub enum Command {
     Delete(PeerPublicKey),
     Block(Info),
     Unblock(PeerPublicKey),
+    UnblockAll,
     IsBlocked(PeerPublicKey),
     Resolve {
         peer: Info,
@@ -333,6 +336,12 @@ pub enum Command {
         token: Token,
     },
     Timeout(Token),
+    // Preserve the callback class even after its timer token is retired.
+    TimerFired(Timer),
+    AllPeers {
+        target: Target,
+        maximum: usize,
+    },
     Sample {
         maximum: usize,
         percent_connected: Option<u8>,
@@ -360,6 +369,7 @@ pub struct Counts {
 pub struct Timer {
     pub token: Token,
     pub deadline: u64,
+    pub callback: TimerCallback,
 }
 #[derive(Clone)]
 struct OwnedConnection {
@@ -430,8 +440,12 @@ pub struct Prepared {
     revision: u64,
     next: State,
     change: Change,
+    metrics: Vec<PeerMetrics>,
 }
 impl Prepared {
+    pub fn peer_metrics(&self) -> &[PeerMetrics] {
+        &self.metrics
+    }
     pub fn persistence(&self) -> impl Iterator<Item = &discovery::Effect> {
         self.change.effects.iter().filter_map(|e| match e {
             Effect::Store(e) => Some(e),
@@ -554,13 +568,16 @@ impl Registry {
         let mut next = self.state.clone();
         next.now = now;
         let mut effects = vec![];
+        let observe = next.observes_peers(&command);
         let result = next.apply(command, &mut effects)?;
         next.reconcile();
+        let metrics = observe.then(|| next.peer_metrics()).into_iter().collect();
         Ok(Prepared {
             registry: self.state.registry,
             revision: self.revision,
             next,
             change: Change { result, effects },
+            metrics,
         })
     }
     // Startup block installation is one prepared transition and is available
@@ -585,8 +602,10 @@ impl Registry {
         let mut next = self.state.clone();
         next.now = now;
         let mut effects = vec![];
+        let mut metrics = Vec::with_capacity(peers.len());
         for peer in peers {
             next.block_address(peer.clone(), &mut effects)?;
+            metrics.push(next.peer_metrics());
         }
         next.schedule_connect(None)?;
         next.reconcile();
@@ -598,6 +617,7 @@ impl Registry {
                 result: Outcome::Done,
                 effects,
             },
+            metrics,
         })
     }
     pub fn configuration(&self) -> &Config {
@@ -653,6 +673,7 @@ impl Registry {
         self.state.timers.iter().map(|(&token, t)| Timer {
             token,
             deadline: t.at,
+            callback: self.state.timer_callback(&t.kind),
         })
     }
     pub fn is_closed(&self) -> bool {
@@ -669,6 +690,9 @@ impl Registry {
         Some(Timer {
             token,
             deadline: self.state.timers.get(&token)?.at,
+            callback: self
+                .state
+                .timer_callback(&self.state.timers.get(&token)?.kind),
         })
     }
     pub fn resolution_timer(&self, host: &[u8]) -> Option<Timer> {
@@ -676,6 +700,9 @@ impl Registry {
         Some(Timer {
             token,
             deadline: self.state.timers.get(&token)?.at,
+            callback: self
+                .state
+                .timer_callback(&self.state.timers.get(&token)?.kind),
         })
     }
 }

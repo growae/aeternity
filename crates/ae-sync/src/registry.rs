@@ -116,6 +116,7 @@ struct Pending {
     initial: bool,
 }
 struct Core<S> {
+    instrumentation: ae_chain::instrumentation::Publisher,
     registry: Registry,
     store: S,
     version: Version,
@@ -141,10 +142,11 @@ pub struct Service {
 impl Service {
     pub fn start(db: Arc<Database>, local: PeerPublicKey, config: Config) -> Result<Self, Error> {
         let registry = Registry::new(local, config.policy.clone())?;
+        let instrumentation = db.instrumentation().clone();
         let store = Writer::start(db, config.storage)?;
-        Ok(Self {
-            core: Core::start(registry, store, &config)?,
-        })
+        let mut core = Core::start(registry, store, &config)?;
+        core.instrumentation = instrumentation;
+        Ok(Self { core })
     }
     pub fn configure_startup(
         &mut self,
@@ -256,6 +258,7 @@ impl<S: Store> Core<S> {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::SequenceExhausted)?;
         Ok(Self {
+            instrumentation: Default::default(),
             registry,
             store,
             version,
@@ -394,6 +397,7 @@ impl<S: Store> Core<S> {
             self.failed = true;
             return Err(Error::Inconsistent);
         }
+        let metrics = pending.prepared.peer_metrics().to_vec();
         let change = match self.registry.commit(pending.prepared) {
             Ok(change) => change,
             Err(_) => {
@@ -439,7 +443,25 @@ impl<S: Store> Core<S> {
             }
             startup.reconcile(&self.registry);
         }
+        for snapshot in metrics {
+            self.observe_peers(snapshot);
+        }
         Ok(change.result)
+    }
+    fn observe_peers(&self, snapshot: policy::PeerMetrics) {
+        use ae_chain::instrumentation::{Gauge, Value};
+        for (gauge, value) in [
+            (Gauge::PeersCount, snapshot.inbound + snapshot.outbound),
+            (Gauge::PeersInbound, snapshot.inbound),
+            (Gauge::PeersOutbound, snapshot.outbound),
+            (Gauge::PeersVerified, snapshot.verified),
+            (Gauge::PeersUnverified, snapshot.unverified),
+            (Gauge::PeersErrored, snapshot.standby),
+            (Gauge::PeersBlocked, snapshot.blocked),
+        ] {
+            self.instrumentation
+                .gauge(gauge, Value::Integer(value as u64));
+        }
     }
     fn recover(&mut self) -> Result<Recovery, Error> {
         if self.failed {

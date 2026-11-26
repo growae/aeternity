@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{Value, json};
+mod metrics;
 
 fn key(n: u64) -> PeerPublicKey {
     let mut b = [0; 32];
@@ -166,6 +167,9 @@ fn invariant(r: &Registry) {
 fn original_registry_lifecycles_preserve_peer_policy_membership_and_persistence() {
     let data: Value =
         serde_json::from_str(include_str!("../../tests/fixtures/erlang_registry.json")).unwrap();
+    native_lifecycles(&data, 109);
+}
+fn native_lifecycles(data: &Value, expected_steps: usize) {
     let mut total = 0;
     for scenario in data["scenarios"].as_array().unwrap() {
         let mut c = config();
@@ -292,7 +296,11 @@ fn original_registry_lifecycles_preserve_peer_policy_membership_and_persistence(
                 }
                 op => panic!("unhandled native operation {op}"),
             };
-            let change = apply(&mut r, now, command);
+            let prepared = r.prepare(now, command).unwrap();
+            if let Some(expected) = row.get("metrics") {
+                metrics::assert_native(prepared.peer_metrics(), expected);
+            }
+            let change = r.commit(prepared).unwrap();
             for e in &change.effects {
                 if let Effect::Dial { token, peer, .. } = e {
                     let native = row["effects"]
@@ -349,9 +357,9 @@ fn original_registry_lifecycles_preserve_peer_policy_membership_and_persistence(
             total += 1;
         }
     }
-    assert_eq!(total, 109);
+    assert_eq!(total, expected_steps);
     println!(
-        "Original registry: {total} lifecycle steps in nine scenarios; owner retirement and repaired socket indices checked separately"
+        "Original registry: {total} lifecycle steps; owner retirement and repaired socket indices checked separately"
     );
 }
 

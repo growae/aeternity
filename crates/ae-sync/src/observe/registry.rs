@@ -174,12 +174,20 @@ impl Store {
                 {
                     return Err(StoreError::Configuration);
                 }
-                if kind == Kind::Gauge && s.enabled && old.metric.entry.enabled {
+                if kind == Kind::Gauge {
                     let value = match &m.values[0].1 {
                         report::Value::Integer(n) => Value::Integer(n.clone()),
                         report::Value::Float(n) => Value::Float(*n),
                         _ => return Err(StoreError::Configuration),
                     };
+                    // Validate the complete frame, but do not replace values
+                    // emitted by native callback owners with periodic samples.
+                    if predefined::callback_owned(&m.entry.name)
+                        || !s.enabled
+                        || !old.metric.entry.enabled
+                    {
+                        continue;
+                    }
                     let bytes = old.bytes
                         - scalar
                             .value

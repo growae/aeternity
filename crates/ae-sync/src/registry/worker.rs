@@ -319,7 +319,9 @@ impl Client {
                         .ok_or(Error::RequestTooLarge)?,
                 )
                 .ok_or(Error::RequestTooLarge)?,
-            Command::SampleConnected { maximum, .. } => self.sample_bytes(*maximum)?,
+            Command::SampleConnected { maximum, .. } | Command::AllPeers { maximum, .. } => {
+                self.sample_bytes(*maximum)?
+            }
             _ => 0,
         };
         let bytes = 256usize.checked_add(extra).ok_or(Error::RequestTooLarge)?;

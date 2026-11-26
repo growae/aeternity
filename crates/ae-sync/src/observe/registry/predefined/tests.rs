@@ -258,6 +258,93 @@ fn snapshot_ownership_is_atomic_and_never_readds_cumulative_ping_counts() {
     );
 }
 #[test]
+fn peer_metrics_callback_values_survive_periodic_frames_reset_and_disabled_updates() {
+    let (store, _owner, feed) = setup();
+    let publisher = Publisher::default();
+    let _binding = publisher.bind(feed).unwrap();
+    let peers = &GAUGES[1..8];
+    let frame: Vec<_> = peers
+        .iter()
+        .map(|(_, suffix)| Metric {
+            entry: Entry {
+                name: name(suffix),
+                kind: "gauge".into(),
+                enabled: true,
+            },
+            values: vec![(Part::atom("value"), report::Value::Integer(999.into()))],
+        })
+        .collect();
+    for (i, (gauge, _)) in peers.iter().enumerate() {
+        publisher.gauge(*gauge, instrumentation::Value::Integer(i as u64 + 1));
+    }
+    for _ in 0..3 {
+        store.put_frame(frame.clone(), true).unwrap();
+    }
+    for (i, (_, suffix)) in peers.iter().enumerate() {
+        assert_eq!(
+            scalar(&store, suffix),
+            Reading::Values(vec![(Part::atom("value"), Value::Integer((i + 1).into()))])
+        );
+        store.reset(&name(suffix)).unwrap();
+    }
+    store.put_frame(frame.clone(), true).unwrap();
+    for (_, suffix) in peers {
+        assert_eq!(
+            scalar(&store, suffix),
+            Reading::Values(vec![(Part::atom("value"), Value::Integer(0.into()))])
+        );
+    }
+    store.set_global_enabled(false).unwrap();
+    for (gauge, _) in peers {
+        publisher.gauge(*gauge, instrumentation::Value::Integer(77));
+    }
+    store.put_frame(frame.clone(), true).unwrap();
+    store.set_global_enabled(true).unwrap();
+    for (gauge, suffix) in peers {
+        store.set_enabled(&name(suffix), false).unwrap();
+        publisher.gauge(*gauge, instrumentation::Value::Integer(88));
+        store.put_frame(frame.clone(), true).unwrap();
+        store.set_enabled(&name(suffix), true).unwrap();
+        assert_eq!(
+            scalar(&store, suffix),
+            Reading::Values(vec![(Part::atom("value"), Value::Integer(0.into()))])
+        );
+    }
+    // A callback name remains reserved and validated even though the sample
+    // cannot overwrite it. Invalid frames must not partially apply height.
+    let height = Metric {
+        entry: Entry {
+            name: name("chain.height"),
+            kind: "gauge".into(),
+            enabled: true,
+        },
+        values: vec![(Part::atom("value"), report::Value::Integer(42.into()))],
+    };
+    let mut bad = frame[0].clone();
+    bad.values.clear();
+    assert_eq!(
+        store.put_frame(vec![height.clone(), bad], true),
+        Err(StoreError::Configuration)
+    );
+    let mut bad = frame[0].clone();
+    bad.values[0].1 = report::Value::Other;
+    assert_eq!(
+        store.put_frame(vec![height.clone(), bad], true),
+        Err(StoreError::Configuration)
+    );
+    store.remove(&name(peers[0].1)).unwrap();
+    let mut incomplete = vec![height];
+    incomplete.extend(frame);
+    assert_eq!(
+        store.put_frame(incomplete, true),
+        Err(StoreError::Configuration)
+    );
+    assert_eq!(
+        scalar(&store, "chain.height"),
+        Reading::Values(vec![(Part::atom("value"), Value::Integer(0.into()))])
+    );
+}
+#[test]
 fn installation_failure_preserves_existing_entries_and_retires_created_probes() {
     let store = Arc::new(Store::new(Limits::default()).unwrap());
     let _owner = Owner::spawn(store.clone()).unwrap();

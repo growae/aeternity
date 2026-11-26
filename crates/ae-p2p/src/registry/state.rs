@@ -257,6 +257,13 @@ impl State {
                 self.schedule_connect(None)?;
                 Ok(Outcome::Done)
             }
+            Command::UnblockAll => {
+                // Native batch unblocking emits no per-peer Unblocked events.
+                self.blocked.clear();
+                self.next_unblock = Some(self.now + self.config.unblock_interval);
+                self.schedule_connect(None)?;
+                Ok(Outcome::Done)
+            }
             Command::IsBlocked(id) => {
                 self.maybe_unblock();
                 Ok(Outcome::Bool(self.blocked.contains_key(&id)))
@@ -291,6 +298,25 @@ impl State {
             }
             Command::PingDone { peer, token } => self.ping_done(peer, token, effects),
             Command::Timeout(token) => self.timeout(token, effects),
+            Command::TimerFired(timer) => {
+                if self
+                    .timers
+                    .get(&timer.token)
+                    .is_some_and(|t| self.timer_callback(&t.kind) == timer.callback)
+                {
+                    self.timeout(timer.token, effects)
+                } else {
+                    Ok(Outcome::Stale)
+                }
+            }
+            Command::AllPeers { target, maximum } => {
+                if self.pool.count(discovery::Count::All, target) > maximum {
+                    return Err(Error::ResourceLimit);
+                }
+                let peers = self.pool.all(target).map(Info::from).collect();
+                self.start_probes()?;
+                Ok(Outcome::Peers(peers))
+            }
             Command::Sample {
                 maximum,
                 percent_connected,
