@@ -12,6 +12,7 @@ use ae_vm_fate::maps::MapOrder;
 mod hyperchain_insert;
 pub use hyperchain_insert::{
     HyperchainConfig, HyperchainError, PinRequestError, hyperchain_pin_request, prepare_hyperchain,
+    prepare_hyperchain_observed,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -711,6 +712,16 @@ pub fn prepare<S: Read, O: MapOrder>(
     rules: &key_execution::Rules,
     limits: Limits,
 ) -> Result<Update, InsertError<S>> {
+    prepare_observed(view, block, config, rules, limits, None)
+}
+pub fn prepare_observed<S: Read, O: MapOrder>(
+    view: &View<S>,
+    block: &Block,
+    config: &transactions::Config<'_, O>,
+    rules: &key_execution::Rules,
+    limits: Limits,
+    observation: Option<&crate::instrumentation::Insertion>,
+) -> Result<Update, InsertError<S>> {
     if config.consensus != ConsensusType::Pow || view.identity.consensus != ConsensusType::Pow {
         return Err(InsertError::WrongConsensus);
     }
@@ -747,12 +758,14 @@ pub fn prepare<S: Read, O: MapOrder>(
         view.insert_signal(k, fork, limits.history, &mut writes)?;
     }
     let parent_hash = Hash256(header.common().previous_hash);
-    let previous = view.require_block(parent_hash)?.header();
+    let previous =
+        crate::instrumentation::context(observation, view.require_block(parent_hash))?.header();
     let previous_key_hash = match &previous {
         Header::Key(_) => parent_hash,
         Header::Micro(m) => Hash256(m.common.previous_key_hash),
     };
-    let previous_key = require_key(view, previous_key_hash)?;
+    let previous_key =
+        crate::instrumentation::context(observation, require_key(view, previous_key_hash))?;
     let input_record = view.require_record(parent_hash)?;
     let parent_is_key = matches!(previous, Header::Key(_));
     let mut recent = vec![];
@@ -770,7 +783,7 @@ pub fn prepare<S: Read, O: MapOrder>(
         if recent.len() >= limits.history {
             return Err(Error::ResourceLimit.into());
         }
-        let k = require_key(view, h)?;
+        let k = crate::instrumentation::context(observation, require_key(view, h))?;
         h = Hash256(k.common.previous_key_hash);
         recent.push(k);
     }
@@ -819,13 +832,16 @@ pub fn prepare<S: Read, O: MapOrder>(
         |config| -> Result<_, InsertError<S>> {
             Ok(match block {
                 Block::Micro(m) => {
-                    let execute = if on_demand {
-                        execution::on_demand_micro
-                    } else {
-                        execution::pow_micro
-                    };
-                    let r = execute(m, &mut state, &parent, config, &rules.admission)
-                        .map_err(|e| InsertError::Micro(Box::new(e)))?;
+                    let r = execution::micro(
+                        m,
+                        &mut state,
+                        &parent,
+                        config,
+                        &rules.admission,
+                        on_demand,
+                        observation,
+                    )
+                    .map_err(|e| InsertError::Micro(Box::new(e)))?;
                     (
                         rewards::unsigned(r.fees().clone()),
                         r.reported_fraud(),

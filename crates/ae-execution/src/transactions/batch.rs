@@ -211,6 +211,28 @@ pub fn apply_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     gas_limit: BigInt,
     previous_fees: BigInt,
 ) -> Result<MicroReceipt<A, C>, Error<A, C>> {
+    apply_micro_observed(
+        transactions,
+        trees,
+        context,
+        config,
+        gas_limit,
+        previous_fees,
+        |_| {},
+    )
+}
+// The notification observes the strict batch result before deep-fee reads.
+// It cannot supply execution inputs or replace the result. The caller owns
+// operational clocks and callback isolation; publication remains atomic.
+pub fn apply_micro_observed<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+    transactions: &[SignedTransaction<Transaction>],
+    trees: &mut Trees<A, C>,
+    context: &Context,
+    config: &Config<'_, O>,
+    gas_limit: BigInt,
+    previous_fees: BigInt,
+    completed: impl FnOnce(&Result<Receipt<A, C>, Error<A, C>>),
+) -> Result<MicroReceipt<A, C>, Error<A, C>> {
     let mut next = trees.clone();
     let receipt = apply(
         transactions,
@@ -218,7 +240,9 @@ pub fn apply_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         context,
         config,
         &Options::strict_block(gas_limit),
-    )?;
+    );
+    completed(&receipt);
+    let receipt = receipt?;
     let mut fees = previous_fees;
     for (index, signed) in transactions.iter().enumerate() {
         fees += accounting::deep_fee(signed.transaction().view(), &next).map_err(|e| Error {

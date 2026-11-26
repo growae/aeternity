@@ -49,6 +49,84 @@ pub enum Stage {
     MicroTransactions,
 }
 
+// One runtime insertion may retry its transaction. A native exception after
+// strict transaction success (notably deep-fee reads) leaves the outer timer
+// unfinished even though the strict-transaction success was already observed.
+pub struct Insertion {
+    publisher: Publisher,
+    observation: Observation,
+    exception: std::cell::Cell<bool>,
+    missing_context: std::cell::Cell<bool>,
+}
+impl Insertion {
+    pub fn new(publisher: &Publisher, kind: Kind) -> Self {
+        Self {
+            publisher: publisher.clone(),
+            observation: publisher.start(Stage::Insert(kind)),
+            exception: std::cell::Cell::new(false),
+            missing_context: std::cell::Cell::new(false),
+        }
+    }
+    pub fn finish(self, success: bool) {
+        if !self.exception.get() {
+            self.observation.finish(success);
+        }
+    }
+    pub fn missing_context(&self) -> bool {
+        self.missing_context.get()
+    }
+}
+// Native context construction returns illegal_orphan for missing headers.
+// Missing state/records after that boundary are storage failures instead.
+pub(crate) fn context<T>(
+    insertion: Option<&Insertion>,
+    result: Result<T, crate::repository::Error>,
+) -> Result<T, crate::repository::Error> {
+    if matches!(&result, Err(crate::repository::Error::Missing(_)))
+        && let Some(insertion) = insertion
+    {
+        insertion.missing_context.set(true);
+    }
+    result
+}
+pub(crate) struct Micro<'a> {
+    insertion: Option<&'a Insertion>,
+    observation: Option<Observation>,
+    succeeded: bool,
+}
+impl<'a> Micro<'a> {
+    pub fn new(insertion: Option<&'a Insertion>) -> Self {
+        Self {
+            insertion,
+            observation: insertion.map(|i| i.publisher.start(Stage::MicroTransactions)),
+            succeeded: false,
+        }
+    }
+    pub fn completed<A, C>(
+        &mut self,
+        result: &Result<
+            ae_execution::transactions::batch::Receipt<A, C>,
+            ae_execution::transactions::batch::Error<A, C>,
+        >,
+    ) {
+        self.succeeded = result.is_ok();
+        if let Some(observation) = self.observation.take()
+            && !result.as_ref().is_err_and(|e| e.failure.is_operational())
+        {
+            observation.finish(self.succeeded);
+        }
+    }
+    pub fn finish<T, E>(self, result: Result<T, E>) -> Result<T, E> {
+        if self.succeeded
+            && result.is_err()
+            && let Some(insertion) = self.insertion
+        {
+            insertion.exception.set(true);
+        }
+        result
+    }
+}
+
 // Observation callbacks cannot supply consensus inputs or change a result.
 // Time and metric storage belong to the operational implementation of Sink.
 pub trait Sink: Send + Sync {
@@ -212,6 +290,42 @@ mod tests {
         fn start(&self, _: Stage) -> Option<Box<dyn Span>> {
             panic!("observation start panic");
         }
+    }
+    #[test]
+    fn late_failure_preserves_completed_strict_sample_and_suppresses_insertion_sample() {
+        use ae_execution::transactions::{self, batch};
+        let publisher = Publisher::default();
+        let events = Arc::new(Mutex::new(vec![]));
+        let _binding = publisher.bind(Arc::new(Events(events.clone()))).unwrap();
+        let insertion = Insertion::new(&publisher, Kind::Micro);
+        let mut micro = Micro::new(Some(&insertion));
+        let network = ae_protocol::NetworkProfile::mainnet();
+        let mut trees: ae_state::Trees = ae_state::Trees {
+            accounts: Default::default(),
+            contracts: Default::default(),
+            calls: Default::default(),
+            channels: Default::default(),
+            names: Default::default(),
+            oracles: Default::default(),
+        };
+        let result = batch::apply_micro_observed(
+            &[],
+            &mut trees,
+            &ae_execution::Context::transaction(1, ae_protocol::Protocol::Roma),
+            &transactions::Config::primitives(&network),
+            6_000_000.into(),
+            0.into(),
+            |result| micro.completed(result),
+        );
+        assert!(result.is_ok());
+        // The actual late-read failure and atomic roots are covered by the
+        // batch fixture test; this verifies the outer observer's phase routing.
+        assert_eq!(
+            micro.finish(Err::<(), _>("late fee failure")),
+            Err("late fee failure")
+        );
+        insertion.finish(false);
+        assert_eq!(*events.lock().unwrap(), vec![true]);
     }
     #[test]
     fn failed_observation_callbacks_do_not_escape_into_the_producer() {

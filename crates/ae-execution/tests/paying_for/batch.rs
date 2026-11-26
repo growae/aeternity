@@ -290,6 +290,99 @@ fn strict_micro_batches_include_final_deep_fees_and_publish_atomically() {
 }
 
 #[test]
+fn strict_completion_precedes_deep_fee_reads_without_publishing_failed_trees() {
+    let row = row("meta");
+    let signed = txs(row);
+    let input = trees(&row["before"]);
+    let control = std::rc::Rc::new(failures::Control::default());
+    let base = failures::wrapped(&input, &control);
+    control.reset();
+    let mut trees = base.clone();
+    let mut calls = 0;
+    let error = configured(row, |context, config| {
+        b::apply_micro_observed(
+            &signed,
+            &mut trees,
+            context,
+            config,
+            6_000_000.into(),
+            123.into(),
+            |strict| {
+                assert!(strict.is_ok());
+                calls += 1;
+                // Fail the very next read, after successful strict execution.
+                control.read_limit.set(Some(control.reads.get()));
+            },
+        )
+    })
+    .unwrap_err();
+    assert_eq!(calls, 1);
+    assert!(matches!(error.failure, b::Failure::Accounting(_)));
+    assert!(error.failure.is_operational());
+    assert_eq!(failures::roots(&trees), failures::roots(&base));
+
+    control.reset();
+    let observed = configured(row, |context, config| {
+        b::apply_micro_observed(
+            &signed,
+            &mut trees,
+            context,
+            config,
+            6_000_000.into(),
+            123.into(),
+            |strict| {
+                assert!(strict.is_ok());
+                calls += 1;
+            },
+        )
+    })
+    .unwrap();
+    let mut ordinary = base.clone();
+    let expected = configured(row, |context, config| {
+        b::apply_micro(
+            &signed,
+            &mut ordinary,
+            context,
+            config,
+            6_000_000.into(),
+            123.into(),
+        )
+    })
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(observed.fees, expected.fees);
+    assert_eq!(
+        observed
+            .transactions
+            .accepted
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>(),
+        expected
+            .transactions
+            .accepted
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        observed
+            .transactions
+            .events
+            .iter()
+            .map(event)
+            .collect::<Vec<_>>(),
+        expected
+            .transactions
+            .events
+            .iter()
+            .map(event)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(failures::roots(&trees), failures::roots(&ordinary));
+}
+
+#[test]
 fn batch_signature_vm_and_storage_stops_rollback_accepted_prefixes() {
     use std::rc::Rc;
     for scenario in ["fate_call", "aevm_call", "meta"] {

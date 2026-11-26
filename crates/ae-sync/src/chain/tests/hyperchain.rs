@@ -14,12 +14,14 @@ impl super::super::hyperchain::Engine for BeforeInsert {
         origin: ledger::Origin,
         scope: &ae_storage::policy::Scope,
         check: &mut dyn FnMut() -> Result<(), Error>,
+        observation: &ae_chain::instrumentation::Insertion,
     ) -> Result<ae_storage::Committed, Error> {
         let action = self.action.lock().unwrap().take();
         if let Some(action) = action {
             action();
         }
-        self.inner.insert(block, now, origin, scope, check)
+        self.inner
+            .insert(block, now, origin, scope, check, observation)
     }
 }
 fn importer(node: &fixture::Node, inputs: fixture::Inputs, config: Config) -> Importer {
@@ -33,6 +35,7 @@ async fn native_finalized_chains_import_in_both_generation_directions() {
             let node = fixture::Node::new(index);
             let inputs = fixture::Inputs::default();
             let importer = importer(&node, inputs.clone(), Default::default());
+            let (timings, _binding) = super::timing::Timings::bind(node.db.instrumentation());
             let mut leader = node
                 .db
                 .view()
@@ -106,9 +109,134 @@ async fn native_finalized_chains_import_in_both_generation_directions() {
                 }
             }
             assert_eq!(inputs.reads.lock().unwrap().len(), 14); // Initial snapshot + 13 new blocks.
+            use super::timing::Trace;
+            use ae_chain::instrumentation::Stage;
+            use ae_chain::publication::Kind;
+            let expected: Vec<_> = node
+                .blocks()
+                .iter()
+                .flat_map(|block| match block {
+                    Block::Key(_) => vec![
+                        Trace::Started(Stage::Insert(Kind::Key)),
+                        Trace::Finished(Stage::Insert(Kind::Key), true),
+                    ],
+                    Block::Micro(_) => vec![
+                        Trace::Started(Stage::Insert(Kind::Micro)),
+                        Trace::Started(Stage::MicroTransactions),
+                        Trace::Finished(Stage::MicroTransactions, true),
+                        Trace::Finished(Stage::Insert(Kind::Micro), true),
+                    ],
+                })
+                .collect();
+            assert_eq!(timings.take(), expected);
             importer.stop();
             importer.join().await;
         }
+    }
+}
+
+#[tokio::test]
+async fn hc_timing_distinguishes_strict_rejection_late_root_rejection_and_key_rejection() {
+    use super::timing::{Timings, Trace};
+    use ae_chain::instrumentation::Stage;
+    use ae_chain::publication::Kind;
+    for mode in 0..3 {
+        let node = fixture::Node::new(0);
+        let importer = importer(&node, Default::default(), Default::default());
+        let all = node.blocks();
+        if mode == 2 {
+            within(
+                importer
+                    .import_created_block(all[0].encode().unwrap(), HC_NOW)
+                    .unwrap()
+                    .wait(),
+            )
+            .await
+            .unwrap();
+        }
+        let (timings, _binding) = Timings::bind(node.db.instrumentation());
+        let mut bad = all[usize::from(mode == 2)].clone();
+        let original = bad.header().signature_bytes().unwrap();
+        // These deterministic signing seeds belong to hc_finalized_vectors.
+        let signer = (12..=14)
+            .map(fixture::conductor::signer)
+            .find(|key| {
+                let signature = key.sign(&original).0;
+                match &bad {
+                    Block::Micro(m) => m.header.signature == signature,
+                    Block::Key(k) => k.seal[..16]
+                        .iter()
+                        .flat_map(|n| n.to_be_bytes())
+                        .eq(signature),
+                }
+            })
+            .unwrap();
+        match &mut bad {
+            Block::Micro(m) => {
+                if mode == 1 {
+                    assert!(!m.transactions.is_empty());
+                    m.transactions[0] = ae_tx::SignedTransaction::new(
+                        m.transactions[0].transaction().clone(),
+                        vec![],
+                    );
+                    let encoded: Vec<_> = m
+                        .transactions
+                        .iter()
+                        .map(ae_tx::SignedTransaction::encode)
+                        .collect();
+                    m.header.transactions_hash =
+                        ae_trie::transaction_root(encoded.iter().map(Vec::as_slice))
+                            .unwrap()
+                            .0;
+                } else {
+                    m.header.common.state_hash = [47; 32];
+                }
+                m.header.signature = signer
+                    .sign(&Header::Micro(m.header.clone()).signature_bytes().unwrap())
+                    .0;
+            }
+            Block::Key(k) => {
+                k.common.state_hash = [47; 32];
+                let signature = signer
+                    .sign(&Header::Key(k.clone()).signature_bytes().unwrap())
+                    .0;
+                for (word, bytes) in k.seal[..16].iter_mut().zip(signature.chunks_exact(4)) {
+                    *word = u32::from_be_bytes(bytes.try_into().unwrap());
+                }
+            }
+        }
+        let before = node.db.view().unwrap().status();
+        let failure = within(
+            importer
+                .import_created_block(bad.encode().unwrap(), HC_NOW)
+                .unwrap()
+                .wait(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                failure.error,
+                Error::Validation {
+                    operational: false,
+                    ..
+                }
+            ),
+            "{failure:?}"
+        );
+        let insert = Stage::Insert(if mode == 2 { Kind::Key } else { Kind::Micro });
+        let mut expected = vec![Trace::Started(insert)];
+        if mode != 2 {
+            expected.extend([
+                Trace::Started(Stage::MicroTransactions),
+                Trace::Finished(Stage::MicroTransactions, mode == 0),
+            ]);
+        }
+        expected.push(Trace::Finished(insert, false));
+        assert_eq!(timings.take(), expected, "mode {mode}");
+        assert_eq!(node.db.view().unwrap().status(), before);
+        importer.stop();
+        importer.join().await;
     }
 }
 
@@ -538,6 +666,7 @@ impl super::super::hyperchain::Engine for Empty {
         _: ledger::Origin,
         _: &ae_storage::policy::Scope,
         _: &mut dyn FnMut() -> Result<(), Error>,
+        _: &ae_chain::instrumentation::Insertion,
     ) -> Result<ae_storage::Committed, Error> {
         panic!("unused placeholder")
     }

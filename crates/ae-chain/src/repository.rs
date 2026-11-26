@@ -29,7 +29,7 @@ pub use history::vm_history;
 pub mod ledger;
 pub use ledger::{
     HyperchainConfig, HyperchainError, InsertError, Limits, Update, bootstrap, prepare,
-    prepare_hyperchain,
+    prepare_hyperchain, prepare_hyperchain_observed,
 };
 
 pub const IDENTITY: &[u8] = b"\0identity";

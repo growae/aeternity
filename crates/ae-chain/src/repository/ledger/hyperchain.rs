@@ -89,6 +89,17 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     state: &mut consensus::State,
     host: &mut H,
 ) -> Result<Update, HyperchainError<H::Error, S>> {
+    prepare_hyperchain_observed(view, block, config, now_ms, state, host, None)
+}
+pub fn prepare_hyperchain_observed<S: Read, O: MapOrder + Clone, H: consensus::Host>(
+    view: &View<S>,
+    block: &Block,
+    config: &HyperchainConfig<O>,
+    now_ms: u64,
+    state: &mut consensus::State,
+    host: &mut H,
+    observation: Option<&crate::instrumentation::Insertion>,
+) -> Result<Update, HyperchainError<H::Error, S>> {
     let limits = config.limits;
     if view.identity != config.identity
         || view.identity.consensus != ConsensusType::Pos
@@ -136,12 +147,13 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     profile.network = network;
     let reader = config.reader(view.clone(), Arc::new(profile))?;
     let parent_hash = Hash256(header.common().previous_hash);
-    let previous = view.require_block(parent_hash)?.header();
+    let previous =
+        crate::instrumentation::context(observation, view.require_block(parent_hash))?.header();
     let key_hash = match &previous {
         Header::Key(_) => parent_hash,
         Header::Micro(m) => Hash256(m.common.previous_key_hash),
     };
-    let previous_key = require_key(view, key_hash)?;
+    let previous_key = crate::instrumentation::context(observation, require_key(view, key_hash))?;
     let input = view.require_record(parent_hash)?;
     let parent_view = reader
         .view(&chain::RunEnv::Hash(parent_hash.0.to_vec()))
@@ -172,7 +184,7 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
     let mut rules = config.rules.clone();
     rules.now_ms = now_ms;
     let (mut next, mut staged) = (state.clone(), host.clone());
-    let out = match hc::execute(
+    let out = match hc::execute_observed(
         block,
         &parent,
         &history,
@@ -180,6 +192,7 @@ pub fn prepare_hyperchain<S: Read, O: MapOrder + Clone, H: consensus::Host>(
         &mut next,
         &mut staged,
         &rules,
+        observation,
     ) {
         Ok(out) => out,
         Err(e) => {

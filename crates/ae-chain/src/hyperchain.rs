@@ -12,6 +12,7 @@ pub mod candidate;
 mod transition;
 mod validation;
 pub use transition::execute;
+pub(crate) use transition::execute_observed;
 pub(crate) use transition::input_trees;
 pub use validation::{keep_tip, score, standalone};
 

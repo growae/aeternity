@@ -309,8 +309,30 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         inputs: I,
         check: impl FnMut() -> Result<(), G>,
     ) -> Result<Committed, Error<I::Error, Snapshot<'_>, G>> {
-        self.insert_inputs(block, now_ms, origin, Some(scope), inputs, check)
+        self.insert_inputs(block, now_ms, origin, Some(scope), inputs, check, None)
     }
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_scoped_observed<G, I: Inputs<H, G>>(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        origin: repo::ledger::Origin,
+        scope: &crate::policy::Scope,
+        inputs: I,
+        check: impl FnMut() -> Result<(), G>,
+        observation: &ae_chain::instrumentation::Insertion,
+    ) -> Result<Committed, Error<I::Error, Snapshot<'_>, G>> {
+        self.insert_inputs(
+            block,
+            now_ms,
+            origin,
+            Some(scope),
+            inputs,
+            check,
+            Some(observation),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
     fn insert_inputs<G, I: Inputs<H, G>>(
         &self,
         block: &Block,
@@ -319,6 +341,7 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         scope: Option<&crate::policy::Scope>,
         mut inputs: I,
         mut check: impl FnMut() -> Result<(), G>,
+        observation: Option<&ae_chain::instrumentation::Insertion>,
     ) -> Result<Committed, Error<I::Error, Snapshot<'_>, G>> {
         let mut live = self.live.lock().map_err(|_| Error::RecoveryRequired)?;
         if live.failed || self.database.events().info().failure.is_some() {
@@ -341,8 +364,15 @@ impl<O: MapOrder + Clone, H: Clone> Owner<O, H> {
         let mut config = self.config.clone();
         config.limits.policy.origin = origin;
         let update = loop {
-            let prepared =
-                repo::prepare_hyperchain(&view, block, &config, now_ms, &mut state, &mut host);
+            let prepared = repo::prepare_hyperchain_observed(
+                &view,
+                block,
+                &config,
+                now_ms,
+                &mut state,
+                &mut host,
+                observation,
+            );
             check().map_err(Error::Guard)?;
             match prepared {
                 Ok(update) => break update,
@@ -407,6 +437,7 @@ impl<O: MapOrder + Clone, H: Host> Owner<O, H> {
                 Ok(host.clone())
             })),
             || Ok(()),
+            None,
         )
     }
     // Capture parent inputs once for this attempt, against the same immutable
@@ -427,6 +458,28 @@ impl<O: MapOrder + Clone, H: Host> Owner<O, H> {
             Some(scope),
             OwnedInputs(Some(inputs)),
             check,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_guarded_observed<G>(
+        &self,
+        block: &Block,
+        now_ms: u64,
+        origin: repo::ledger::Origin,
+        scope: &crate::policy::Scope,
+        inputs: impl FnOnce(&repo::View<Snapshot<'_>>, &H) -> Result<H, G>,
+        check: impl FnMut() -> Result<(), G>,
+        observation: &ae_chain::instrumentation::Insertion,
+    ) -> Result<Committed, Error<H::Error, Snapshot<'_>, G>> {
+        self.insert_inputs(
+            block,
+            now_ms,
+            origin,
+            Some(scope),
+            OwnedInputs(Some(inputs)),
+            check,
+            Some(observation),
         )
     }
     #[cfg(test)]

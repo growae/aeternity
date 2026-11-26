@@ -103,7 +103,7 @@ pub fn pow_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     config: &transactions::Config<'_, O>,
     rules: &Rules,
 ) -> Result<ExecutedMicro, Error<A, C>> {
-    micro(block, trees, parent, config, rules, false)
+    micro(block, trees, parent, config, rules, false, None)
 }
 pub fn on_demand_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     block: &MicroBlock,
@@ -112,15 +112,16 @@ pub fn on_demand_micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder
     config: &transactions::Config<'_, O>,
     rules: &Rules,
 ) -> Result<ExecutedMicro, Error<A, C>> {
-    micro(block, trees, parent, config, rules, true)
+    micro(block, trees, parent, config, rules, true, None)
 }
-fn micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
+pub(crate) fn micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     block: &MicroBlock,
     trees: &mut Trees<A, C>,
     parent: &Parent<'_>,
     config: &transactions::Config<'_, O>,
     rules: &Rules,
     on_demand: bool,
+    observation: Option<&crate::instrumentation::Insertion>,
 ) -> Result<ExecutedMicro, Error<A, C>> {
     if config.consensus != ConsensusType::Pow {
         return Err(Error::WrongConsensus);
@@ -179,14 +180,17 @@ fn micro<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         .map_or_else(|| rules.configured_gas_limit.clone(), BigInt::from);
     let mut next = trees.clone();
     let apply = |config: &transactions::Config<'_, O>| {
-        batch::apply_micro(
+        let mut observed = crate::instrumentation::Micro::new(observation);
+        let result = batch::apply_micro_observed(
             &block.transactions,
             &mut next,
             &context,
             config,
             gas_limit.clone(),
             parent.fees.clone(),
-        )
+            |result| observed.completed(result),
+        );
+        observed.finish(result)
     };
     let result = if on_demand {
         Ok(with_block_environment_difficulty(

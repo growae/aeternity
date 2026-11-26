@@ -89,13 +89,14 @@ where
         origin: ledger::Origin,
         scope: &ae_storage::policy::Scope,
         check: &mut dyn FnMut() -> Result<(), Error>,
+        observation: &ae_chain::instrumentation::Insertion,
     ) -> Result<Committed, Error> {
         let bound = self.parents.bind().map_err(input_error)?;
         let parents = bound.as_ref().unwrap_or(&self.parents);
-        self.owner.insert_scoped(block, now_ms, origin, scope, Capture(parents), || {
+        self.owner.insert_scoped_observed(block, now_ms, origin, scope, Capture(parents), || {
             check()?;
             parents.check().map_err(input_error)
-        }).map_err(|error| match error {
+        }, observation).map_err(|error| match error {
             storage::Error::Guard(error) => error,
             storage::Error::RecoveryRequired => Error::RecoveryRequired,
             storage::Error::Repository(error) => error.into(),

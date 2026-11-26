@@ -33,6 +33,7 @@ pub(super) trait Engine: Send + Sync {
         origin: ledger::Origin,
         scope: &ae_storage::policy::Scope,
         check: &mut dyn FnMut() -> Result<(), Error>,
+        observation: &ae_chain::instrumentation::Insertion,
     ) -> Result<Committed, Error>;
 }
 struct Execution<O, P: ParentInputs> {
@@ -52,9 +53,10 @@ where
         origin: ledger::Origin,
         scope: &ae_storage::policy::Scope,
         check: &mut dyn FnMut() -> Result<(), Error>,
+        observation: &ae_chain::instrumentation::Insertion,
     ) -> Result<Committed, Error> {
         self.owner
-            .insert_guarded(
+            .insert_guarded_observed(
                 block,
                 now_ms,
                 origin,
@@ -66,6 +68,7 @@ where
                     })
                 },
                 check,
+                observation,
             )
             .map_err(|e| match e {
                 storage::Error::Guard(e) => e,

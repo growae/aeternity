@@ -352,6 +352,34 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
         })
         .await;
         let before = db.view().unwrap().status();
+        let n = ae_sync::routing::Part::atom("n");
+        let count = |suffix: &str| {
+            let Reading::Values(values) = registry
+                .get_value(
+                    &predefined::name(suffix),
+                    &ae_sync::observe::reporter::Points::One(n.clone()),
+                )
+                .unwrap()
+            else {
+                panic!("enabled timing histogram")
+            };
+            let [(point, Value::Integer(value))] = values.as_slice() else {
+                panic!("histogram count")
+            };
+            assert_eq!(point, &n);
+            value.clone()
+        };
+        let micros = count("blocks.micro.insert_execution_time.success");
+        assert!(micros > 0.into());
+        assert_eq!(count("blocks.micro.txs_execution_time.success"), micros);
+        assert!(count("blocks.key.insert_execution_time.success") > 0.into());
+        for suffix in [
+            "blocks.micro.insert_execution_time.error",
+            "blocks.micro.txs_execution_time.error",
+            "blocks.key.insert_execution_time.error",
+        ] {
+            assert_eq!(count(suffix), 0.into());
+        }
         for (name, expected) in [
             ("mining.blocks_mined", 0u64),
             ("mining.retries", 0),

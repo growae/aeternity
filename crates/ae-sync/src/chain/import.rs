@@ -262,100 +262,149 @@ impl<O: MapOrder> Context<O> {
         origin: ledger::Origin,
         expected: Option<Hash256>,
     ) -> Result<Accepted, Error> {
-        let hash = block.hash().map_err(|_| Error::Hash)?;
-        for attempt in 0..=self.config.conflicts {
-            self.check(cancel, client)?;
-            let view = self.db.view()?;
-            if expected.is_some() && view.status().tip != expected {
-                return Err(Error::Stale);
-            }
-            let height = block.header().common().height;
-            let network =
-                view.protocol_profile(self.strategy.network(), height, self.config.ledger.history)?;
-            let previous = view
-                .block(Hash256(block.header().common().previous_hash))?
-                .map(|b| b.header());
-            // add_synced_block validates before the conductor's duplicate
-            // check. In particular, a known header is not permission to
-            // accept a malformed replacement micro body.
-            self.whitelist(block)?;
-            self.strategy
-                .validate(block, previous.as_ref(), &network, now_ms)?;
-            if view.block(hash)?.is_some() {
-                view.require_record(hash)?;
-                return Ok(Accepted {
-                    hash,
-                    outcome: Outcome::Present,
-                    micro_transactions: match block {
-                        Block::Micro(b) => Some(b.transactions.len() as u64),
-                        Block::Key(_) => None,
-                    },
-                });
-            }
-            let committed = match &self.strategy {
-                strategy::Strategy::Pow(pow) => {
-                    let mut rules = pow.rules.clone();
-                    rules.admission.now_ms = now_ms;
-                    let update = pow
-                        .execution
-                        .with_config(|execution| {
-                            let mut limits = self.config.ledger;
-                            limits.policy.origin = origin;
-                            ledger::prepare(&view, block, execution, &rules, limits)
-                        })
-                        .map_err(|e| match e {
-                            ledger::InsertError::Repository(error) => Error::Storage(error),
-                            ledger::InsertError::Policy { height, top } => {
-                                Error::Policy { height, top }
-                            }
-                            ledger::InsertError::WrongConsensus => Error::WrongConsensus,
-                            other => Error::Validation {
-                                operational: other.is_operational(),
-                                reason: format!("{other:?}"),
-                            },
-                        })?;
-                    self.check(cancel, client)?;
-                    self.commit(update, &mut || self.check(cancel, client))
+        let mut observation = None;
+        let result = (|| {
+            let hash = block.hash().map_err(|_| Error::Hash)?;
+            for attempt in 0..=self.config.conflicts {
+                self.check(cancel, client)?;
+                let view = self.db.view()?;
+                if expected.is_some() && view.status().tip != expected {
+                    return Err(Error::Stale);
                 }
-                strategy::Strategy::Hyperchain(hc) => {
-                    hc.engine
-                        .insert(block, now_ms, origin, &self.policy_scope, &mut || {
-                            self.check(cancel, client)
-                        })
-                }
-            };
-            match committed {
-                Ok(committed) => {
+                let height = block.header().common().height;
+                let network = view.protocol_profile(
+                    self.strategy.network(),
+                    height,
+                    self.config.ledger.history,
+                )?;
+                let previous = view
+                    .block(Hash256(block.header().common().previous_hash))?
+                    .map(|b| b.header());
+                // add_synced_block validates before the conductor's duplicate
+                // check. In particular, a known header is not permission to
+                // accept a malformed replacement micro body.
+                self.whitelist(block)?;
+                self.strategy
+                    .validate(block, previous.as_ref(), &network, now_ms)?;
+                if view.block(hash)?.is_some() {
+                    view.require_record(hash)?;
                     return Ok(Accepted {
                         hash,
-                        outcome: Outcome::Committed {
-                            revision: committed.change().revision,
-                        },
+                        outcome: Outcome::Present,
                         micro_transactions: match block {
                             Block::Micro(b) => Some(b.transactions.len() as u64),
                             Block::Key(_) => None,
                         },
                     });
                 }
-                Err(Error::Storage(repository::Error::Conflict))
-                    if attempt < self.config.conflicts =>
+                // Conductor validation and the ordinary known-block shortcut
+                // precede native internal_insert. Keep one span across retries.
+                let observation = observation.get_or_insert_with(|| {
+                    ae_chain::instrumentation::Insertion::new(
+                        self.db.instrumentation(),
+                        match block {
+                            Block::Key(_) => ae_chain::publication::Kind::Key,
+                            Block::Micro(_) => ae_chain::publication::Kind::Micro,
+                        },
+                    )
+                });
+                let committed = match &self.strategy {
+                    strategy::Strategy::Pow(pow) => {
+                        let mut rules = pow.rules.clone();
+                        rules.admission.now_ms = now_ms;
+                        let update = pow
+                            .execution
+                            .with_config(|execution| {
+                                let mut limits = self.config.ledger;
+                                limits.policy.origin = origin;
+                                ledger::prepare_observed(
+                                    &view,
+                                    block,
+                                    execution,
+                                    &rules,
+                                    limits,
+                                    Some(observation),
+                                )
+                            })
+                            .map_err(|e| match e {
+                                ledger::InsertError::Repository(error) => Error::Storage(error),
+                                ledger::InsertError::Policy { height, top } => {
+                                    Error::Policy { height, top }
+                                }
+                                ledger::InsertError::WrongConsensus => Error::WrongConsensus,
+                                other => Error::Validation {
+                                    operational: other.is_operational(),
+                                    reason: format!("{other:?}"),
+                                },
+                            })?;
+                        self.check(cancel, client)?;
+                        self.commit(update, &mut || self.check(cancel, client))
+                    }
+                    strategy::Strategy::Hyperchain(hc) => hc.engine.insert(
+                        block,
+                        now_ms,
+                        origin,
+                        &self.policy_scope,
+                        &mut || self.check(cancel, client),
+                        observation,
+                    ),
+                };
+                match committed {
+                    Ok(committed) => {
+                        return Ok(Accepted {
+                            hash,
+                            outcome: Outcome::Committed {
+                                revision: committed.change().revision,
+                            },
+                            micro_transactions: match block {
+                                Block::Micro(b) => Some(b.transactions.len() as u64),
+                                Block::Key(_) => None,
+                            },
+                        });
+                    }
+                    Err(Error::Storage(repository::Error::Conflict))
+                        if attempt < self.config.conflicts =>
+                    {
+                        continue;
+                    }
+                    Err(Error::Storage(error @ repository::Error::Backend(_))) => {
+                        // Never retry an uncertain publication, or let later jobs
+                        // use this owner. Reopen/reconcile the database first.
+                        let error = Error::CommitUncertain { hash, error };
+                        self.recovery
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_insert_with(|| error.clone());
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("last conflict is returned")
+        })();
+        if let Some(observation) = observation {
+            match &result {
+                Ok(accepted) => {
+                    observation.finish(matches!(accepted.outcome, Outcome::Committed { .. }))
+                }
+                Err(
+                    Error::Validation {
+                        operational: false, ..
+                    }
+                    | Error::Policy { .. }
+                    | Error::Storage(repository::Error::AlreadyPresent),
+                ) => observation.finish(false),
+                Err(Error::Storage(repository::Error::Missing(_)))
+                    if observation.missing_context() =>
                 {
-                    continue;
+                    observation.finish(false)
                 }
-                Err(Error::Storage(error @ repository::Error::Backend(_))) => {
-                    // Never retry an uncertain publication, or let later jobs
-                    // use this owner. Reopen/reconcile the database first.
-                    let error = Error::CommitUncertain { hash, error };
-                    self.recovery
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_insert_with(|| error.clone());
-                    return Err(error);
-                }
-                Err(error) => return Err(error),
+                // Runtime/resource stops and uncertain writes are not native
+                // returned consensus errors. Unfinished observations drop.
+                Err(_) => (),
             }
         }
-        unreachable!("last conflict is returned")
+        result
     }
     fn whitelist(&self, block: &Block) -> Result<(), Error> {
         if let Block::Key(key) = block

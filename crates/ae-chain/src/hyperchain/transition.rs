@@ -136,6 +136,25 @@ pub fn execute<
     host: &mut H,
     rules: &Rules,
 ) -> Result<Outcome<A, C>, Error<H::Error, A, C>> {
+    execute_observed(block, parent, history, reader, state, host, rules, None)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_observed<
+    A: NodeWriter + Clone,
+    C: NodeWriter + Clone,
+    O: MapOrder,
+    S: chain::Source<A, C>,
+    H: hc::Host,
+>(
+    block: &Block,
+    parent: &Parent<'_, A, C>,
+    history: &rewards::History,
+    reader: &Reader<A, C, O, S>,
+    state: &mut hc::State,
+    host: &mut H,
+    rules: &Rules,
+    observation: Option<&crate::instrumentation::Insertion>,
+) -> Result<Outcome<A, C>, Error<H::Error, A, C>> {
     let mut next = state.clone();
     let mut staged = host.clone();
     let result = execute_inner(
@@ -146,6 +165,7 @@ pub fn execute<
         &mut next,
         &mut staged,
         rules,
+        observation,
     );
     if !result.as_ref().is_err_and(|e| e.is_operational::<H>()) {
         *state = next;
@@ -153,6 +173,7 @@ pub fn execute<
     }
     result
 }
+#[allow(clippy::too_many_arguments)]
 fn execute_inner<
     A: NodeWriter + Clone,
     C: NodeWriter + Clone,
@@ -167,6 +188,7 @@ fn execute_inner<
     state: &mut hc::State,
     host: &mut H,
     rules: &Rules,
+    observation: Option<&crate::instrumentation::Insertion>,
 ) -> Result<Outcome<A, C>, Error<H::Error, A, C>> {
     if parent.view.environment.consensus != Consensus::Pos
         || parent.view.environment.network_id != reader.profile.network.network_id()
@@ -243,14 +265,17 @@ fn execute_inner<
             let mut trees = current.trees.as_ref().clone();
             let applied = reader
                 .with_execution(&current, |cfg| {
-                    batch::apply_micro(
+                    let mut observed = crate::instrumentation::Micro::new(observation);
+                    let result = batch::apply_micro_observed(
                         &m.transactions,
                         &mut trees,
                         &current.context,
                         cfg,
                         rewards::number(&gas),
                         rewards::number(&incoming),
-                    )
+                        |result| observed.completed(result),
+                    );
+                    observed.finish(result)
                 })
                 .map_err(Error::Transactions)?;
             Outcome {
