@@ -2,7 +2,9 @@ use super::*;
 use ae_types::Hash256;
 
 fn dispatch(request: &Request, config: &Config, selected: Result<Current, Response>) -> Response {
-    super::dispatch(plan(request, config), selected)
+    let plan = plan(request, config);
+    let height = matches!(plan, Ok((Operation::Current { height: true }, _)));
+    super::dispatch(plan, selected.map(|s| response::current(s, height)))
 }
 
 fn corpus() -> serde_json::Value {
@@ -111,6 +113,20 @@ fn original_boolean_coercion_and_query_version_scope() {
             expected
         );
     }
+    for v3 in [false, true] {
+        for query in ["int-as-string=true", "int-as-string=invalid", "ignored=%zz"] {
+            let request = Request {
+                method: "GET".into(),
+                path: format!("/{}/sync-status", if v3 { "v3" } else { "v2" }),
+                query: query.into(),
+                headers: Headers::new(),
+            };
+            assert_eq!(
+                plan(&request, &Config::default()).unwrap(),
+                (Operation::SyncStatus { v3 }, false)
+            );
+        }
+    }
 }
 #[test]
 fn routing_methods_groups_and_preflight_are_separate() {
@@ -159,6 +175,22 @@ fn routing_methods_groups_and_preflight_are_separate() {
         dispatch(&request, &config, Err(Response::unavailable(false))).status,
         503
     );
+    for target in [
+        super::super::Target::External,
+        super::super::Target::Internal,
+        super::super::Target::Rosetta,
+        super::super::Target::RosettaOffline,
+    ] {
+        config.target = target;
+        for group in ["chain", "node_info", "external"] {
+            config.groups = [group.into()].into();
+            request.path = "/v3/sync-status".into();
+            assert_eq!(
+                plan(&request, &config).is_ok(),
+                target == super::super::Target::External && group != "chain"
+            );
+        }
+    }
 }
 
 #[test]

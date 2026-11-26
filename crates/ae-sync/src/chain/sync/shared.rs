@@ -102,6 +102,17 @@ pub(super) enum Join {
     },
 }
 impl<O> Book<O> {
+    pub fn estimate(&self, task: u64) -> Result<f64, statistics::Error> {
+        let group = self
+            .groups
+            .iter()
+            .find(|g| g.model.state().chain.id() == task)
+            .ok_or(statistics::Error::UnknownTask)?;
+        if group.statistics_failure.is_some() {
+            return Err(statistics::Error::Stopped);
+        }
+        group.statistics.estimate()
+    }
     pub fn peers_in_sync(&self) -> Vec<PeerPublicKey> {
         // Native peer_in_sync includes retained suspect chain hints too.
         self.groups

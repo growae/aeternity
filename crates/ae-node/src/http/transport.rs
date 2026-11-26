@@ -1,6 +1,6 @@
 use super::{
     Config,
-    response::{self, Headers, Response},
+    response::{self, Headers, Operation, Response},
 };
 use crate::runtime;
 use ae_sync::chain::{self, query::Current};
@@ -229,11 +229,11 @@ fn failure(error: chain::Error) -> Response {
         _ => Response::unavailable(false),
     }
 }
-fn plan(request: &Request, config: &Config) -> Result<(bool, bool), Response> {
+fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Response> {
     if request.method == "OPTIONS" {
         return Err(Response::empty(200));
     }
-    let Some((v3, height)) = response::current(&request.path, config) else {
+    let Some((v3, operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
     };
     if request.method != "GET" {
@@ -244,13 +244,32 @@ fn plan(request: &Request, config: &Config) -> Result<(bool, bool), Response> {
     if !accepts_json(&request.headers) {
         return Err(Response::empty(406));
     }
-    let strings = if v3 { strings(&request.query)? } else { false };
-    Ok((height, strings))
+    let strings = if v3 && matches!(operation, Operation::Current { .. }) {
+        strings(&request.query)?
+    } else {
+        false
+    };
+    Ok((operation, strings))
 }
-fn dispatch(plan: Result<(bool, bool), Response>, selected: Result<Current, Response>) -> Response {
-    match (plan, selected) {
+pub(super) fn dispatch(
+    plan: Result<(Operation, bool), Response>,
+    result: Result<serde_json::Value, Response>,
+) -> Response {
+    match (plan, result) {
         (Err(response), _) | (_, Err(response)) => response,
-        (Ok((height, strings)), Ok(current)) => response::answer(current, height, strings),
+        (Ok((Operation::SyncStatus { v3 }, _)), Ok(body)) => {
+            if super::sync::valid_response(&body, v3) {
+                Response::json(200, body)
+            } else {
+                Response::invalid_response()
+            }
+        }
+        (Ok((Operation::Current { .. }, strings)), Ok(mut body)) => {
+            if strings {
+                response::integers_as_strings(&mut body);
+            }
+            Response::json(200, body)
+        }
     }
 }
 pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, config: Arc<Config>) {
@@ -266,7 +285,7 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         Ok(request) => (plan(&request, &config), request.headers),
         Err(status) => (Err(Response::empty(status)), Headers::new()),
     };
-    let selected = if plan.is_ok() || height.is_none() {
+    let selected = if matches!(plan, Ok((Operation::Current { .. }, _))) || height.is_none() {
         selected(&parent, &config, captured.as_ref()).await
     } else {
         Err(Response::unavailable(false))
@@ -274,7 +293,12 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
     if height.is_none() {
         height = selected.as_ref().ok().map(|s| s.height);
     }
-    let mut response = dispatch(plan, selected);
+    let result = match &plan {
+        Ok((Operation::Current { height }, _)) => selected.map(|s| response::current(s, *height)),
+        Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
+        Err(_) => Err(Response::unavailable(false)),
+    };
+    let mut response = dispatch(plan, result);
     response.stamp(&config, &headers, height);
     if matches!(
         tokio::time::timeout(config.timeout, write(&mut stream, response)).await,

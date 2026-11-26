@@ -25,6 +25,7 @@ pub mod blocks;
 pub mod coordination;
 pub mod lifecycle;
 pub mod metrics;
+pub mod query;
 mod service;
 mod session;
 mod shared;
@@ -175,6 +176,7 @@ pub enum Error {
     Runtime(net::Error),
     Storage(repository::Error),
     Progress(lifecycle::Error),
+    Statistics(statistics::Error),
     Import(super::Failure),
     Policy(super::Error),
     Resilience(crate::resilience::Error),
@@ -319,6 +321,7 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Handle {
+    queries: Weak<dyn query::Source>,
     membership: PeerSet,
     database: std::sync::Weak<Database>,
     event_owner: Arc<()>,
@@ -401,6 +404,7 @@ struct Context<O> {
     reads: blocking::Pool,
     policy_source: Option<crate::resilience::Source>,
     stopped: AtomicBool,
+    requested: watch::Receiver<bool>,
     wake: watch::Sender<()>,
     shared: Mutex<shared::Book<O>>,
     headers: Mutex<BTreeMap<PeerPublicKey, HeaderLane>>,
@@ -522,17 +526,20 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
         reads,
         policy_source: policy_source.clone(),
         stopped: AtomicBool::new(false),
+        requested: stopped.clone(),
         wake,
         shared: Mutex::new(book),
         headers: Mutex::new(BTreeMap::new()),
     });
     let membership: Arc<dyn PeerMembership> = context.clone();
     let membership = PeerSet(Arc::downgrade(&membership));
+    let queries: Arc<dyn query::Source> = context.clone();
     application
         .bind_sync(membership.clone())
         .map_err(|_| Error::Configuration)?;
     Ok((
         Handle {
+            queries: Arc::downgrade(&queries),
             membership,
             database,
             event_owner: event_owner.clone(),

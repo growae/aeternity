@@ -1,5 +1,6 @@
 // Checked family dispatch composes the actual owners. It neither reopens the
 // database nor rebuilds the historical execution configuration during launch.
+use crate::configuration::resolution::ApplicationMode;
 use crate::{
     bootstrap::configured::{self, hyperchain as hc, pow as configured_pow},
     configuration::consensus::Kind,
@@ -299,11 +300,15 @@ enum HandleInner {
 #[derive(Clone)]
 pub struct Handle {
     inner: HandleInner,
+    mode: ApplicationMode,
     metrics: Option<metrics::View>,
     http: Option<http::Handle>,
     notice_next: Arc<AtomicBool>,
 }
 impl Handle {
+    pub fn mode(&self) -> ApplicationMode {
+        self.mode
+    }
     pub fn status(&self) -> Status {
         let status = match &self.inner {
             HandleInner::Cuckoo(h) => Status::pow(h.status(), Family::Cuckoo),
@@ -457,6 +462,7 @@ enum RunningInner {
 }
 pub struct Running {
     inner: RunningInner,
+    mode: ApplicationMode,
     metrics: Option<metrics::Owner>,
     http: Option<http::Running>,
     notice_next: Arc<AtomicBool>,
@@ -473,6 +479,7 @@ impl Running {
     }
     pub fn handle(&self) -> Handle {
         Handle {
+            mode: self.mode,
             inner: match &self.inner {
                 RunningInner::Cuckoo(r) => HandleInner::Cuckoo(r.handle()),
                 RunningInner::OnDemand(r) => HandleInner::OnDemand(r.handle()),

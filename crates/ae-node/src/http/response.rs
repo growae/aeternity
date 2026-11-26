@@ -73,13 +73,18 @@ pub(super) struct Response {
     pub status: u16,
     pub headers: Headers,
     pub body: Vec<u8>,
+    application_headers: bool,
 }
 impl Response {
+    pub fn internal() -> Self {
+        Self::json(500, json!({"reason":"Internal server error"}))
+    }
     pub fn empty(status: u16) -> Self {
         Self {
             status,
             headers: Headers::new(),
             body: vec![],
+            application_headers: true,
         }
     }
     pub fn json(status: u16, body: Value) -> Self {
@@ -87,7 +92,15 @@ impl Response {
             status,
             headers: Headers::from([("content-type".into(), "application/json".into())]),
             body: serde_json::to_vec(&body).expect("JSON value"),
+            application_headers: true,
         }
+    }
+    pub fn invalid_response() -> Self {
+        // Jesse throws past the API handler. Cowboy's stream error response
+        // has no application body, CORS headers, or cached height marker.
+        let mut response = Self::empty(500);
+        response.application_headers = false;
+        response
     }
     pub fn unavailable(overload: bool) -> Self {
         let mut response = Self::json(
@@ -101,6 +114,9 @@ impl Response {
         response
     }
     pub fn stamp(&mut self, config: &Config, request: &Headers, height: Option<u64>) {
+        if !self.application_headers {
+            return;
+        }
         if let Some(height) = height {
             self.headers
                 .insert("x-ae-height".into(), height.to_string());
@@ -126,13 +142,13 @@ pub(super) fn integers_as_strings(value: &mut Value) {
         _ => (),
     }
 }
-pub(super) fn current(path: &str, config: &Config) -> Option<(bool, bool)> {
-    if config.target != Target::External
-        || !config
-            .groups
-            .iter()
-            .any(|g| g == "chain" || g == "external")
-    {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Operation {
+    Current { height: bool },
+    SyncStatus { v3: bool },
+}
+pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
+    if config.target != Target::External {
         return None;
     }
     let (v3, suffix) = if let Some(p) = path.strip_prefix("/v3") {
@@ -140,22 +156,24 @@ pub(super) fn current(path: &str, config: &Config) -> Option<(bool, bool)> {
     } else {
         (false, path.strip_prefix("/v2")?)
     };
-    match suffix {
-        "/key-blocks/current/height" => Some((v3, true)),
-        "/key-blocks/current/hash" => Some((v3, false)),
-        _ => None,
-    }
+    let (operation, group) = match suffix {
+        "/key-blocks/current/height" => (Operation::Current { height: true }, "chain"),
+        "/key-blocks/current/hash" => (Operation::Current { height: false }, "chain"),
+        "/sync-status" => (Operation::SyncStatus { v3 }, "node_info"),
+        _ => return None,
+    };
+    config
+        .groups
+        .iter()
+        .any(|g| g == group || g == "external")
+        .then_some((v3, operation))
 }
-pub(super) fn answer(current: Current, height: bool, strings: bool) -> Response {
-    let mut body = if height {
+pub(super) fn current(current: Current, height: bool) -> Value {
+    if height {
         json!({"height":current.height})
     } else {
         json!({"hash":api::encode(ApiType::KeyBlockHash, current.key.as_ref())})
-    };
-    if strings {
-        integers_as_strings(&mut body);
     }
-    Response::json(200, body)
 }
 
 #[cfg(test)]

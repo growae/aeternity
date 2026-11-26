@@ -59,6 +59,214 @@ async fn get(
 }
 
 #[tokio::test]
+async fn http_sync_status_uses_live_peer_progress_statistics_and_replacement_ownership() {
+    use ae_p2p::{message::Kind as WireKind, noise, ping, runtime as net};
+    use ae_sync::{chain::sync, peer::snapshot};
+    let source_lab = Lab::new();
+    let source =
+        prepare(source_lab.services("on_demand", json!({"dev_mode":true}), Default::default()));
+    let source_db = source.configured().chain().database().clone();
+    let source = source
+        .launch(commands(&source_lab), || Ok(Default::default()))
+        .unwrap();
+    let mut source_handle = source.handle();
+    ready(&mut source_handle).await;
+    let made = source_handle
+        .commands()
+        .unwrap()
+        .client
+        .submit(Command::Blocks {
+            count: 3,
+            kind: Kind::Key,
+        })
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(made.result.as_ref().unwrap().command.result.is_ok());
+    let lab = Lab::new();
+    let prepared = prepare(lab.services("on_demand", json!({}), Default::default()));
+    let db = prepared.configured().chain().database().clone();
+    let mut settings = commands(&lab);
+    if let node::Settings::OnDemand(s) = &mut settings {
+        s.config.connections.sync.headers = 1;
+        s.config.connections.sync.concurrent = 1;
+        s.config.connections.sync.read_bytes = 256 << 20;
+    }
+    let mut running = prepared
+        .launch(settings, || Ok(Default::default()))
+        .unwrap();
+    let mut handle = running.handle();
+    ready(&mut handle).await;
+    let http = running.listen_http(config()).await.unwrap();
+    let address = http.status().address;
+    assert_eq!(get(address, "/v2/sync-status").await.0, 404);
+    let mut connections = handle.connections().unwrap();
+    let mut generation = connection_ready(&mut connections, 1).await;
+    while !generation.network.status().ready {
+        generation.network.changed().await.unwrap();
+    }
+    let identity = handle
+        .pow()
+        .unwrap()
+        .workers()
+        .unwrap()
+        .bindings()
+        .keys
+        .unwrap()
+        .current()
+        .unwrap()
+        .peer_identity()
+        .unwrap()
+        .await
+        .unwrap();
+    let binding = db.view().unwrap().identity().clone();
+    assert_eq!(
+        binding.genesis,
+        source_db.view().unwrap().identity().genesis
+    );
+    let network = noise::Network::new(1, binding.genesis, &binding.network).unwrap();
+    let socket = TcpStream::connect(generation.network.status().listening.unwrap())
+        .await
+        .unwrap();
+    let (client, mut events, driver) = net::establish(
+        socket,
+        &noise::Identity::from_secret([98; 32]),
+        &network,
+        noise::Role::Initiator(identity.public_key()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let driver = tokio::spawn(driver.run());
+    let ping = ping::encode(
+        &snapshot::local(&source_db.view().unwrap(), false).unwrap(),
+        vec![],
+        &[],
+        ping::Encoding {
+            version: 1,
+            minimum_version: 1,
+            port: 4321,
+            share: 0.into(),
+            limits: Default::default(),
+        },
+    )
+    .unwrap();
+    within(client.request(&ping, None).unwrap()).await.unwrap();
+    let mut requests = 0;
+    let held = within(async {
+        loop {
+            let Some(net::Event::Message(received)) = events.recv().await else {
+                continue;
+            };
+            if received.message().kind() == WireKind::GetGeneration {
+                requests += 1;
+                if requests == 2 {
+                    break received;
+                }
+            }
+            if let Some(reply) = snapshot::serve(
+                &source_db.pool_view().unwrap(),
+                received.message(),
+                Default::default(),
+            )
+            .unwrap()
+            {
+                client.send(&reply).unwrap().await.unwrap();
+            }
+        }
+    })
+    .await;
+    let progress = within(async {
+        loop {
+            let progress = generation.sync.progress().unwrap().wait().await.unwrap();
+            if progress.percent > 0.0 && generation.sync.estimate(progress.task.unwrap()).is_ok() {
+                break progress;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(progress.target, 3);
+    for version in ["v2", "v3"] {
+        let (code, headers, body) = get(
+            address,
+            &format!("/{version}/sync-status?int-as-string=true"),
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["progress"], json!(progress.percent));
+        assert!(body["speed"].as_f64().unwrap() > 0.0);
+        assert_eq!(body["target"], 3);
+        assert!(body["estimate"].is_number());
+        assert_eq!(
+            headers["x-ae-height"],
+            generation
+                .sync
+                .selected_height()
+                .unwrap()
+                .wait()
+                .await
+                .unwrap()
+                .to_string()
+        );
+    }
+    let reply = snapshot::serve(
+        &source_db.pool_view().unwrap(),
+        held.message(),
+        Default::default(),
+    )
+    .unwrap()
+    .unwrap();
+    client.send(&reply).unwrap().await.unwrap();
+    within(async {
+        loop {
+            if generation.sync.status().counts.finished > 0 { break; }
+            tokio::select! {
+                result = generation.sync.changed() => { result.unwrap(); },
+                event = events.recv() => {
+                    if let Some(net::Event::Message(received)) = event
+                        && let Some(reply) = snapshot::serve(&source_db.pool_view().unwrap(),received.message(),Default::default()).unwrap() {
+                        client.send(&reply).unwrap().await.unwrap();
+                    }
+                }
+            }
+        }
+    }).await;
+    assert_eq!(get(address, "/v3/sync-status").await.0, 404);
+    let mut unread = vec![];
+    loop {
+        match generation.sync.progress() {
+            Ok(ticket) => unread.push(ticket),
+            Err(sync::Error::Busy) => break,
+            _ => panic!("live sync"),
+        }
+        assert!(unread.len() <= 16);
+    }
+    let (code, headers, body) = get(address, "/v3/sync-status").await;
+    assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
+    assert_eq!(headers["retry-after"], "3");
+    assert_eq!(headers["x-ae-height"], "3");
+    drop(unread);
+    generation.cache.as_ref().unwrap().shutdown();
+    let mut replacement = connection_ready(&mut connections, generation.number + 1).await;
+    assert!(!generation.sync.same_owner(&replacement.sync));
+    assert!(matches!(
+        generation.sync.progress(),
+        Err(sync::Error::Closed)
+    ));
+    while !replacement.network.status().ready {
+        replacement.network.changed().await.unwrap();
+    }
+    ready(&mut handle).await;
+    assert_eq!(get(address, "/v3/sync-status").await.0, 404);
+    client.shutdown();
+    within(driver).await.unwrap();
+    assert!(running.shutdown().await.unwrap().status().joined);
+    assert!(source.shutdown().await.unwrap().status().joined);
+}
+
+#[tokio::test]
 async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     let lab = Lab::new();
     let prepared = prepare(lab.services("on_demand", json!({"dev_mode":true}), Default::default()));

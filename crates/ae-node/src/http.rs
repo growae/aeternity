@@ -7,6 +7,7 @@ use tokio::{
 };
 
 mod response;
+mod sync;
 mod transport;
 pub use response::Cors;
 

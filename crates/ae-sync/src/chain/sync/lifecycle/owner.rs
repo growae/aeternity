@@ -260,6 +260,7 @@ mod tests {
             reads,
             policy_source: None,
             stopped: AtomicBool::new(false),
+            requested: watch::channel(false).1,
             wake,
             shared: Mutex::new(shared::Book::new()),
             headers: Mutex::new(BTreeMap::new()),

@@ -65,6 +65,7 @@ impl Prepared {
             }));
         }
         let metrics_config = self.1.clone();
+        let mode = self.configured().mode().application();
         let prefix = match &settings {
             Settings::Cuckoo(s) => &s.config.connections.observer.prefix,
             Settings::OnDemand(s) => &s.config.connections.observer.prefix,
@@ -187,6 +188,7 @@ impl Prepared {
             _ => unreachable!("checked family and prepared identity"),
         };
         let mut running = Running {
+            mode,
             inner: running,
             metrics: None,
             http: None,

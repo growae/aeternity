@@ -30,11 +30,26 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database) {
         };
         (key, block.header().common().height)
     };
-    for (path, body) in [
-        ("/v2/key-blocks/current/height", json!({"height":height})),
+    for (path, code, body) in [
+        (
+            "/v2/key-blocks/current/height",
+            200,
+            json!({"height":height}),
+        ),
         (
             "/v3/key-blocks/current/hash",
+            200,
             json!({"hash":api::encode(ApiType::KeyBlockHash,key.as_ref())}),
+        ),
+        (
+            "/v2/sync-status",
+            404,
+            json!({"reason":"Node is not syncing"}),
+        ),
+        (
+            "/v3/sync-status?int-as-string=true",
+            404,
+            json!({"reason":"Node is not syncing"}),
         ),
     ] {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -48,7 +63,7 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database) {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut response = httparse::Response::new(&mut headers);
             let end = response.parse(&bytes).unwrap().unwrap();
-            assert_eq!(response.code, Some(200));
+            assert_eq!(response.code, Some(code));
             assert_eq!(
                 response
                     .headers
