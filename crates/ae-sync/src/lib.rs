@@ -8,7 +8,7 @@ mod test_support;
 
 pub mod analytics;
 pub mod bindings;
-mod blocking;
+pub mod blocking;
 pub mod chain;
 pub mod conductor;
 pub mod events;

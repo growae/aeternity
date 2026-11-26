@@ -8,6 +8,7 @@ use tokio::{
 
 mod blocks;
 mod key;
+mod post;
 mod response;
 mod status;
 mod sync;
@@ -15,6 +16,7 @@ mod text;
 pub mod transaction;
 mod transactions;
 mod transport;
+pub use post::Limits as SubmissionLimits;
 pub use response::Cors;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub struct Config {
     pub connections: usize,
     pub header_bytes: usize,
     pub body_bytes: usize,
+    pub submissions: SubmissionLimits,
     pub timeout: Duration,
 }
 impl Default for Config {
@@ -45,7 +48,8 @@ impl Default for Config {
             cors: Cors::default(),
             connections: 128,
             header_bytes: 16 << 10,
-            body_bytes: 1 << 20,
+            body_bytes: 5_000_000,
+            submissions: SubmissionLimits::default(),
             timeout: Duration::from_secs(30),
         }
     }
@@ -56,6 +60,7 @@ impl Config {
             || self.connections > 4096
             || !(1024..=1 << 20).contains(&self.header_bytes)
             || self.body_bytes > 64 << 20
+            || !self.submissions.valid(self.body_bytes)
             || self.timeout.is_zero()
             || tokio::time::Instant::now()
                 .checked_add(self.timeout)
@@ -128,6 +133,7 @@ impl Running {
         let address = listener
             .local_addr()
             .map_err(|e| Error::Io(e.to_string()))?;
+        let posts = post::Service::new(&config)?;
         let state = Status {
             address,
             running: true,
@@ -141,7 +147,14 @@ impl Running {
         let (publish, status) = watch::channel(state);
         let (stop, stopping) = watch::channel(false);
         let handle = Handle { stop, status };
-        let task = tokio::spawn(run(parent, Arc::new(config), listener, stopping, publish));
+        let task = tokio::spawn(run(
+            parent,
+            Arc::new(config),
+            posts,
+            listener,
+            stopping,
+            publish,
+        ));
         Ok(Self {
             handle,
             task: Some(task),
@@ -172,6 +185,7 @@ impl Drop for Running {
 async fn run(
     mut parent: runtime::Handle,
     config: Arc<Config>,
+    posts: post::Service,
     listener: TcpListener,
     mut stopping: watch::Receiver<bool>,
     publish: watch::Sender<Status>,
@@ -197,7 +211,8 @@ async fn run(
                         state.accepted = state.accepted.saturating_add(1);
                         state.active += 1;
                         let config = config.clone(); let parent = parent.clone();
-                        clients.spawn(async move { transport::exchange(stream, parent, config).await });
+                        let posts = posts.clone();
+                        clients.spawn(async move { transport::exchange(stream, parent, config, posts).await });
                         publish.send_replace(state.clone());
                     },
                     Err(error) => { state.failure = Some(Error::Io(error.to_string())); break; }
@@ -219,6 +234,7 @@ async fn run(
             Err(_) => state.failure = Some(Error::Task),
         }
     }
+    posts.finish().await;
     // Accepted reads are owned and joined by the parent's bounded importer.
     // Dropping a client cancels its pending receipt; no detached storage job
     // or replacement-owner lookup is introduced by this listener.

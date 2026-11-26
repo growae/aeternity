@@ -10,6 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+mod body;
 
 struct Request {
     method: String,
@@ -17,13 +18,18 @@ struct Request {
     query: String,
     headers: Headers,
 }
-async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
+struct Read {
+    request: Request,
+    prefetched: Vec<u8>,
+    http11: bool,
+}
+async fn read(stream: &mut TcpStream, config: &Config) -> Result<Read, u16> {
     let mut bytes = Vec::new();
     loop {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut request = httparse::Request::new(&mut headers);
         match request.parse(&bytes) {
-            Ok(httparse::Status::Complete(_)) => {
+            Ok(httparse::Status::Complete(end)) => {
                 let method = request.method.ok_or(400u16)?.to_owned();
                 let uri = request.path.ok_or(400u16)?;
                 if !uri.starts_with('/') || uri.contains('#') {
@@ -54,11 +60,12 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
                     return Err(400);
                 }
                 if fields.contains_key("transfer-encoding") {
-                    return Err(if fields.contains_key("content-length") {
-                        400
-                    } else {
-                        501
-                    });
+                    if fields.contains_key("content-length") {
+                        return Err(400);
+                    }
+                    if !fields["transfer-encoding"].eq_ignore_ascii_case("chunked") {
+                        return Err(400);
+                    }
                 }
                 if let Some(length) = fields.get("content-length") {
                     if length.is_empty() || !length.bytes().all(|b| b.is_ascii_digit()) {
@@ -69,11 +76,15 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
                         return Err(413);
                     }
                 }
-                return Ok(Request {
-                    method,
-                    path,
-                    query: query.into(),
-                    headers: fields,
+                return Ok(Read {
+                    request: Request {
+                        method,
+                        path,
+                        query: query.into(),
+                        headers: fields,
+                    },
+                    prefetched: bytes[end..].to_vec(),
+                    http11: request.version == Some(1),
                 });
             }
             Ok(httparse::Status::Partial) => (),
@@ -130,7 +141,7 @@ fn decode_bytes(value: &str, plus: bool) -> Option<Vec<u8>> {
     }
     Some(decoded)
 }
-fn strings(query: &str) -> Result<bool, Response> {
+pub(super) fn strings(query: &str) -> Result<bool, Response> {
     let mut selected = None;
     for pair in query.split('&') {
         if pair.is_empty() {
@@ -263,15 +274,33 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     let Some((v3, operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
     };
-    if request.method != "GET" {
+    let method = if matches!(operation, Operation::PostTransaction { .. }) {
+        "POST"
+    } else {
+        "GET"
+    };
+    if !matches!(
+        request.method.as_str(),
+        "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
+    ) {
+        return Err(Response::empty(501));
+    }
+    if request.method != method {
         let mut response = Response::empty(405);
-        response.headers.insert("allow".into(), "GET".into());
+        response.headers.insert("allow".into(), method.into());
         return Err(response);
     }
     if !accepts_json(&request.headers) {
         return Err(Response::empty(406));
     }
-    let strings = if v3 && !matches!(operation, Operation::SyncStatus { .. }) {
+    if matches!(operation, Operation::PostTransaction { .. }) {
+        body::validate_headers(&request.headers)?;
+    }
+    let strings = if v3
+        && !matches!(
+            operation,
+            Operation::SyncStatus { .. } | Operation::PostTransaction { .. }
+        ) {
         strings(&request.query)?
     } else {
         false
@@ -312,7 +341,10 @@ pub(super) fn dispatch(
         }
         (
             Ok((
-                Operation::Current { .. } | Operation::PeerPublicKey | Operation::Blocks { .. },
+                Operation::Current { .. }
+                | Operation::PeerPublicKey
+                | Operation::Blocks { .. }
+                | Operation::PostTransaction { .. },
                 strings,
             )),
             Ok(mut body),
@@ -324,7 +356,12 @@ pub(super) fn dispatch(
         }
     }
 }
-pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, config: Arc<Config>) {
+pub(super) async fn exchange(
+    mut stream: TcpStream,
+    parent: runtime::Handle,
+    config: Arc<Config>,
+    posts: super::post::Service,
+) {
     let request = match tokio::time::timeout(config.timeout, read(&mut stream, &config)).await {
         Ok(result) => result,
         Err(_) => Err(408),
@@ -333,9 +370,25 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
     // a read-work slot, so preflight and overload responses keep their marker.
     let captured = parent.importer().filter(|_| parent.status().ready);
     let mut height = captured.as_ref().and_then(|i| i.cached_height());
-    let (plan, headers) = match request {
-        Ok(request) => (plan(&request, &config), request.headers),
-        Err(status) => (Err(Response::empty(status)), Headers::new()),
+    let (plan, headers, prefetched, query, http11) = match request {
+        Ok(Read {
+            request,
+            prefetched,
+            http11,
+        }) => (
+            plan(&request, &config),
+            request.headers,
+            prefetched,
+            request.query,
+            http11,
+        ),
+        Err(status) => (
+            Err(Response::empty(status)),
+            Headers::new(),
+            vec![],
+            String::new(),
+            false,
+        ),
     };
     let selected = if matches!(plan, Ok((Operation::Current { .. }, _))) || height.is_none() {
         selected(&parent, &config, captured.as_ref()).await
@@ -347,7 +400,28 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
     }
     let mut retained = None;
     let mut rendered = None;
+    let mut post_credits = None;
     let result = match &plan {
+        Ok((Operation::PostTransaction { v3 }, _)) => {
+            match post(
+                &mut stream,
+                &headers,
+                prefetched,
+                &posts,
+                parent.clone(),
+                &config,
+                (*v3, query, http11),
+            )
+            .await
+            {
+                Ok(reply) => {
+                    post_credits = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::Transactions { operation, v3 }, strings)) => {
             match super::transactions::query(
                 &parent,
@@ -383,6 +457,7 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         Ok(Ok(()))
     );
     drop(retained);
+    drop(post_credits);
     if written {
         // Half-close the response first. Bounded draining gives the client a
         // chance to receive the error before unread request bytes cause a TCP
@@ -404,6 +479,33 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         .await;
     }
 }
+async fn post(
+    stream: &mut TcpStream,
+    headers: &Headers,
+    prefetched: Vec<u8>,
+    posts: &super::post::Service,
+    parent: runtime::Handle,
+    config: &Config,
+    options: (bool, String, bool),
+) -> Result<ae_sync::blocking::Retained<Response>, Response> {
+    let (v3, query, http11) = options;
+    let reservation = posts.reserve(config)?;
+    if http11
+        && headers
+            .get("expect")
+            .is_some_and(|e| e.eq_ignore_ascii_case("100-continue"))
+    {
+        tokio::time::timeout(
+            config.timeout,
+            stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        )
+        .await
+        .map_err(|_| Response::empty(408))?
+        .map_err(|_| Response::empty(400))?;
+    }
+    let body = body::read(stream, headers, prefetched, config).await?;
+    super::post::submit(posts, reservation, parent, config, body, (v3, query)).await
+}
 async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Result<()> {
     let phrase = match response.status {
         200 => "OK",
@@ -413,6 +515,8 @@ async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Resul
         406 => "Not Acceptable",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        417 => "Expectation Failed",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",

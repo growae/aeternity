@@ -1,6 +1,87 @@
 use super::*;
 use ae_types::Hash256;
 
+#[tokio::test]
+async fn original_post_wire_cases_match_request_parsing_and_validation_order() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_post_wire.json"
+    ))
+    .unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 66);
+    let mut compared = 0;
+    for row in rows {
+        // This capture deliberately bypassed CORS middleware. The real node
+        // and Rust listener intercept OPTIONS before Cowboy REST routing.
+        if row["input"]["name"] == "method_OPTIONS" {
+            continue;
+        }
+        let v3 = row["v3"].as_bool().unwrap();
+        let raw = String::from_utf8(hex::decode(row["input"]["raw"].as_str().unwrap()).unwrap())
+            .unwrap()
+            .replacen(
+                "/transactions",
+                if v3 {
+                    "/v3/transactions"
+                } else {
+                    "/v2/transactions"
+                },
+                1,
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, wait) = tokio::sync::oneshot::channel();
+        let client = tokio::spawn(async move {
+            let mut socket = TcpStream::connect(address).await.unwrap();
+            socket.write_all(raw.as_bytes()).await.unwrap();
+            let _ = wait.await;
+            drop(socket);
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let config = Config {
+            groups: ["transaction".into()].into(),
+            timeout: std::time::Duration::from_millis(25),
+            ..Default::default()
+        };
+        let outcome = async {
+            let read = read(&mut socket, &config).await.map_err(Response::empty)?;
+            plan(&read.request, &config)?;
+            let data =
+                body::read(&mut socket, &read.request.headers, read.prefetched, &config).await?;
+            let value = crate::http::post::body_value(data, v3, config.body_bytes)?;
+            if v3 {
+                strings(&read.request.query)?;
+            }
+            Ok::<_, Response>(value)
+        }
+        .await;
+        let _ = done.send(());
+        client.await.unwrap();
+        match outcome {
+            Ok(value) => {
+                assert_eq!(row["status"], 200, "{row}");
+                let expected = &row["logic"][0][if v3 { "EncodedTx" } else { "Tx" }];
+                assert_eq!(value, *expected, "{row}");
+            }
+            Err(response) => {
+                assert_eq!(
+                    u64::from(response.status),
+                    row["status"].as_u64().unwrap(),
+                    "{row}"
+                );
+                let value: serde_json::Value = if response.body.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_slice(&response.body).unwrap()
+                };
+                assert_eq!(value, row["body"], "{row}");
+            }
+        }
+        compared += 1;
+    }
+    assert_eq!(compared, 64);
+}
+
 #[test]
 fn original_cowboy_paths_preserve_segment_boundaries_dots_and_error_bodies() {
     let corpus: serde_json::Value = serde_json::from_str(include_str!(

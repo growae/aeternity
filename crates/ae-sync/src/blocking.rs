@@ -13,7 +13,7 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     Configuration,
     Busy,
     Stopped,
@@ -22,7 +22,7 @@ pub(crate) enum Error {
     Spawn,
 }
 #[derive(Clone)]
-pub(crate) struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(Arc<AtomicBool>);
 impl Cancellation {
     pub fn cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
@@ -99,15 +99,15 @@ struct Response<T> {
     _slot: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
 }
-pub(crate) struct Credits {
+pub struct Credits {
     _slot: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
 }
-pub(crate) struct Retained<T> {
+pub struct Retained<T> {
     pub value: T,
     pub credits: Credits,
 }
-pub(crate) struct Pending<T> {
+pub struct Pending<T> {
     receiver: oneshot::Receiver<Response<T>>,
     cancel: Cancellation,
 }
@@ -149,8 +149,8 @@ impl<T> Drop for Pending<T> {
     }
 }
 #[derive(Clone)]
-pub(crate) struct Pool(Arc<Inner>);
-pub(crate) struct Reservation {
+pub struct Pool(Arc<Inner>);
+pub struct Reservation {
     pool: Pool,
     slot: OwnedSemaphorePermit,
     bytes: OwnedSemaphorePermit,

@@ -32,6 +32,7 @@ dependencies = [
  "base64 0.22.1",
  "bs58",
  "hex",
+ "num-bigint",
  "serde_json",
 ]
 

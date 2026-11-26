@@ -1,6 +1,8 @@
 use super::*;
 #[path = "http/info.rs"]
 mod info;
+#[path = "http/post.rs"]
+mod post;
 use ae_node::http::{Config, Error};
 use std::net::SocketAddr;
 use tokio::{

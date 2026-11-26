@@ -3,6 +3,7 @@
 pub mod api;
 pub mod headers;
 pub mod idna;
+pub mod jsx;
 pub mod name_pointer;
 pub mod object;
 pub mod rlp;

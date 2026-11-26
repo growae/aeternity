@@ -147,6 +147,9 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
+    PostTransaction {
+        v3: bool,
+    },
     Current {
         height: bool,
     },
@@ -178,6 +181,12 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         _ => return None,
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    if suffix.as_slice() == [b"transactions".as_slice()] {
+        return config
+            .groups
+            .contains("transaction")
+            .then_some((v3, Operation::PostTransaction { v3 }));
+    }
     if let Some(operation) = super::transactions::route(&suffix) {
         return config
             .groups
