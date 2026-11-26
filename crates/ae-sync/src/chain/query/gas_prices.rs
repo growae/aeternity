@@ -231,15 +231,22 @@ impl Cache {
         // Values retained by a response/reader keep their memory charge until
         // the last Arc drops, even after eviction or owner shutdown.
     }
-    fn check(
+    fn check_context(
         &self,
-        deadline: Instant,
         check: &mut impl FnMut() -> Result<(), super::super::Error>,
     ) -> Result<(), Error> {
         check().map_err(Error::Check)?;
         if self.state.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(Error::Closed);
         }
+        Ok(())
+    }
+    fn check(
+        &self,
+        deadline: Instant,
+        check: &mut impl FnMut() -> Result<(), super::super::Error>,
+    ) -> Result<(), Error> {
+        self.check_context(check)?;
         if Instant::now() >= deadline {
             return Err(Error::Timeout);
         }
@@ -286,8 +293,11 @@ impl Cache {
             flight.waiters.fetch_add(1, Ordering::AcqRel);
             let _waiter = Request(&flight.waiters);
             loop {
-                self.check(flight.deadline, &mut check)?;
+                self.check_context(&mut check)?;
                 let output = flight.result.lock().unwrap_or_else(|e| e.into_inner());
+                // Native receives an already queued reply even if the caller
+                // resumes after its timeout. Owner checks reject late fills;
+                // caller cancellation/recovery and cache close still win.
                 if let Some(result) = output.as_ref() {
                     return result.clone();
                 }
@@ -295,6 +305,9 @@ impl Cache {
                     .deadline
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(10));
+                if wait.is_zero() {
+                    return Err(Error::Timeout);
+                }
                 drop(
                     flight
                         .wake

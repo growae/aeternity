@@ -309,6 +309,149 @@ fn timed_out_fill_keeps_ownership_until_return_and_cannot_publish_late() {
     );
 }
 
+// Pause a registered waiter in its caller check, finish its fill before the
+// deadline, and resume the waiter after the deadline. Every worker is joined.
+fn completed_before_waiter_resumes(
+    kind: &str,
+    context_error: Option<super::super::super::Error>,
+    close: bool,
+) -> (ResultValue, ResultValue, Arc<Cache>) {
+    let cache = Arc::new(
+        Cache::new(Config {
+            timeout: Duration::from_secs(1),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let (started, entered) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let c = cache.clone();
+    let kind = kind.to_owned();
+    let owner = thread::spawn(move || {
+        c.get_or_fill(
+            key(1),
+            || Ok(()),
+            |deadline| {
+                started.send(deadline).unwrap();
+                blocked.recv().unwrap();
+                match kind.as_str() {
+                    "positive" => Ok(stats(7)),
+                    "negative" => Err(gas::Error::MissingState(key(1))),
+                    "exception" => Err(gas::Error::Arithmetic),
+                    _ => panic!("unknown captured outcome"),
+                }
+            },
+        )
+    });
+    let deadline = entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (paused, waiting) = mpsc::channel();
+    let (resume, suspended) = mpsc::channel();
+    let c = cache.clone();
+    let waiter = thread::spawn(move || {
+        let mut checks = 0;
+        c.get_or_fill(
+            key(1),
+            || {
+                checks += 1;
+                if checks == 2 {
+                    paused.send(()).unwrap();
+                    suspended.recv().unwrap();
+                    if let Some(error) = context_error.clone() {
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            },
+            |_| panic!("duplicate fill"),
+        )
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(cache.info().waiters, 1);
+    release.send(()).unwrap();
+    let owner = owner.join().unwrap();
+    let completed_on_time = Instant::now() < deadline;
+    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    assert!(Instant::now() >= deadline);
+    if close {
+        cache.close();
+    }
+    resume.send(()).unwrap();
+    let waiter = waiter.join().unwrap();
+    assert!(completed_on_time, "fixture must finish before its deadline");
+    assert_eq!(cache.info().pending, 0);
+    assert_eq!(cache.info().requests, 0);
+    (owner, waiter, cache)
+}
+
+#[test]
+fn original_completed_outcomes_survive_delayed_waiter_scheduling() {
+    let fixture: Json = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/erlang_gas_cache_waiters.json"
+    ))
+    .unwrap();
+    for row in fixture["rows"].as_array().unwrap() {
+        assert_eq!(row["reply_queued_before_deadline"], true);
+        assert_eq!(row["resumed_after_deadline"], true);
+        let kind = row["kind"].as_str().unwrap();
+        let (owner, waiter, cache) = completed_before_waiter_resumes(kind, None, false);
+        let actual = match (owner, waiter) {
+            (Ok(owner), Ok(waiter)) => {
+                assert!(Arc::ptr_eq(&owner, &waiter));
+                assert_eq!(cache.info().entries, 1);
+                match waiter.data() {
+                    Data::Observed(s) => {
+                        assert_eq!(s.minimum, Some(7.into()));
+                        json!(["ok", 7])
+                    }
+                    Data::MissingState => value(&waiter),
+                }
+            }
+            (Err(Error::Fill(owner)), Err(Error::Fill(waiter))) => {
+                assert!(Arc::ptr_eq(&owner, &waiter));
+                assert!(matches!(waiter.as_ref(), gas::Error::Arithmetic));
+                assert_eq!(cache.info().entries, 0);
+                // Native removes the pending key and replies notfound on a
+                // generator exception; Rust retains the typed fill failure.
+                json!("notfound")
+            }
+            pair => panic!("unexpected delayed results: {pair:?}"),
+        };
+        assert_eq!(actual, row["result"], "{kind}");
+    }
+}
+
+#[test]
+fn completed_outcomes_do_not_bypass_waiter_cancellation_recovery_or_close() {
+    use super::super::super::Error as ChainError;
+    for (context, close) in [
+        (Some(ChainError::Cancelled), false),
+        (Some(ChainError::RecoveryRequired), false),
+        (None, true),
+        (Some(ChainError::RecoveryRequired), true),
+    ] {
+        let (owner, waiter, cache) =
+            completed_before_waiter_resumes("positive", context.clone(), close);
+        let owner = owner.unwrap();
+        match context {
+            Some(ChainError::Cancelled) => {
+                assert!(matches!(waiter, Err(Error::Check(ChainError::Cancelled))));
+            }
+            Some(ChainError::RecoveryRequired) => assert!(matches!(
+                waiter,
+                Err(Error::Check(ChainError::RecoveryRequired))
+            )),
+            None => assert!(matches!(waiter, Err(Error::Closed))),
+            _ => unreachable!(),
+        }
+        assert_eq!(cache.info().entries, usize::from(!close));
+        if close {
+            assert!(cache.info().retained_bytes > 0);
+            drop(owner);
+            assert_eq!(cache.info().retained_bytes, 0);
+        }
+    }
+}
+
 #[test]
 fn eviction_and_shutdown_keep_memory_charged_until_last_reader_releases_it() {
     let bytes = weight(&Data::Observed(stats(1))).unwrap();
