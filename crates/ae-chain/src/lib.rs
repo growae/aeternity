@@ -7,6 +7,7 @@ pub mod contract;
 pub mod execution;
 pub mod forks;
 pub mod fraud;
+pub mod gas_prices;
 pub mod gossip;
 pub mod hyperchain;
 pub mod instrumentation;

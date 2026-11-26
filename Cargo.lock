@@ -20,6 +20,7 @@ dependencies = [
  "ae-vm-fate",
  "hex",
  "num-bigint",
+ "num-traits",
  "serde_json",
 ]
 

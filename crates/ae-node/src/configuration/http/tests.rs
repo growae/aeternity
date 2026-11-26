@@ -7,6 +7,63 @@ use crate::configuration::{
 use std::path::Path;
 
 #[test]
+fn original_gas_reporting_overrides_and_scalar_floor_use_nested_precedence() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_gas_reporting.json"
+    ))
+    .unwrap();
+    let rows = fixture.as_array().unwrap();
+    assert_eq!(rows.len(), 44);
+    let integer = |v: &Value| v.as_number().unwrap().as_str().parse::<BigInt>().unwrap();
+    for r in rows {
+        let mut context = Context::new(Directories {
+            home: "/release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        let app: Vec<Value> = r["application"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| json!([k, v]))
+            .collect();
+        context
+            .set("aehttp".into(), "gas_price".into(), Value::Array(app))
+            .unwrap();
+        let config = Configuration {
+            value: json!({"http":{"gas_price":r["user"]}}),
+        };
+        let reporting = GasReporting::resolve(&config.resolve(&context).unwrap()).unwrap();
+        let expected = &r["result"]["value"];
+        assert_eq!(
+            reporting.price,
+            (!expected["floor"].is_null()).then(|| integer(&expected["floor"])),
+            "{r}"
+        );
+        assert_eq!(
+            Some(u64::from(reporting.utilization)),
+            expected["utilization"].as_u64(),
+            "{r}"
+        );
+        for sample in expected["samples"].as_array().unwrap() {
+            let mut row = ae_chain::gas_prices::Summary {
+                minutes: 1,
+                minimum: integer(&sample["observed"]),
+                utilization: integer(&sample["used"]),
+            };
+            assert_eq!(
+                reporting.apply_price(row.minimum.clone()),
+                integer(&sample["scalar_price"])
+            );
+            reporting.apply(&mut row);
+            assert_eq!(row.minimum, integer(&sample["pair_price"]));
+            assert_eq!(row.utilization, integer(&sample["pair_utilization"]));
+        }
+    }
+}
+
+#[test]
 fn original_protocol_parameter_micro_cycle_lookup_matches_native_precedence() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/erlang_http_protocol_parameters.json"
