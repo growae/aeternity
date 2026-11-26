@@ -19,6 +19,8 @@ use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[cfg(test)]
+mod info_tests;
 mod model;
 #[cfg(test)]
 mod tests;
@@ -26,12 +28,14 @@ mod tests;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
     Hash(Vec<u8>),
+    Info(Vec<u8>),
     Micro(Vec<u8>),
     Index { hash: Vec<u8>, index: Vec<u8> },
 }
 pub(super) fn route(parts: &[&[u8]]) -> Option<Operation> {
     Some(match parts {
         [b"transactions", hash] => Operation::Hash((*hash).into()),
+        [b"transactions", hash, b"info"] => Operation::Info((*hash).into()),
         [b"micro-blocks", b"hash", hash, b"transactions"] => Operation::Micro((*hash).into()),
         [
             b"micro-blocks",
@@ -73,12 +77,13 @@ impl Operation {
     fn name(&self) -> &'static str {
         match self {
             Self::Hash(_) => "GetTransactionByHash",
+            Self::Info(_) => "GetTransactionInfoByHash",
             Self::Micro(_) => "GetMicroBlockTransactionsByHash",
             Self::Index { .. } => "GetMicroBlockTransactionByHashAndIndex",
         }
     }
     pub(super) fn group(&self) -> &'static str {
-        if matches!(self, Self::Hash(_)) {
+        if matches!(self, Self::Hash(_) | Self::Info(_)) {
             "transaction"
         } else {
             "chain"
@@ -94,6 +99,10 @@ impl Operation {
         let hash = super::blocks::hash;
         Ok(match self {
             Self::Hash(raw) => Request::Hash(hash(raw, ApiType::TxHash, true)?),
+            Self::Info(raw) => Request::Info(
+                hash(raw, ApiType::TxHash, false)
+                    .map_err(|_| Response::json(400, json!({"reason":"Invalid hash: hash"})))?,
+            ),
             Self::Micro(raw) => Request::Micro(hash(raw, ApiType::MicroBlockHash, true)?),
             Self::Index {
                 hash: raw,
@@ -124,6 +133,13 @@ fn location(header: Option<&Header>) -> Result<transaction::Location, Response> 
 }
 fn body(operation: &Operation, reply: Reply) -> Result<Value, Response> {
     match reply {
+        Reply::Info { kind, info } => match info {
+            Ok(info) => {
+                transaction::calls::info(&info, kind, limits()).map_err(|_| Response::internal())
+            }
+            Err(error) => Err(info_error(error)),
+        },
+        Reply::NotMined => Err(Response::json(404, json!({"reason":"Tx not mined"}))),
         Reply::Transaction {
             transaction: tx,
             header,
@@ -150,6 +166,36 @@ fn body(operation: &Operation, reply: Reply) -> Result<Value, Response> {
             400,
             json!({"reason":"Invalid hash or index"}),
         )),
+    }
+}
+fn info_error(error: ae_chain::transaction_info::Error) -> Response {
+    use ae_chain::transaction_info::Error;
+    let (code, reason) = match error {
+        Error::WithoutInfo => (400, "Tx has no info"),
+        Error::NoStateTrees => (400, "no_state_trees"),
+        Error::CallNotFound => (400, "call_not_found"),
+        Error::GarbageCollected => (
+            410,
+            "State data at the requested height has been garbage-collected",
+        ),
+        _ => return Response::internal(),
+    };
+    Response::json(code, json!({"reason":reason}))
+}
+fn render(operation: &Operation, reply: Reply, v3: bool, strings: bool) -> Response {
+    match body(operation, reply) {
+        Ok(body) => finish(operation, body, v3, strings),
+        Err(response) if matches!(operation, Operation::Info(_)) && response.status == 410 => {
+            // v2 has no 410 response schema; the original handler's validation
+            // failure becomes a Cowboy stream-level 500 with no application body.
+            let value: Value = serde_json::from_slice(&response.body).expect("JSON error response");
+            if model::valid("GetTransactionInfoByHash:410", &value, v3) {
+                response
+            } else {
+                Response::invalid_response()
+            }
+        }
+        Err(response) => response,
     }
 }
 pub(super) fn finish(operation: &Operation, mut body: Value, v3: bool, strings: bool) -> Response {
@@ -183,10 +229,7 @@ pub(super) async fn query(
     let request = operation.request()?;
     let operation = operation.clone();
     let ticket = permit
-        .submit(request, move |reply| match body(&operation, reply) {
-            Ok(body) => finish(&operation, body, v3, strings),
-            Err(response) => response,
-        })
+        .submit(request, move |reply| render(&operation, reply, v3, strings))
         .map_err(super::transport::failure)?;
     let result = tokio::time::timeout(config.timeout, ticket.wait_retained())
         .await

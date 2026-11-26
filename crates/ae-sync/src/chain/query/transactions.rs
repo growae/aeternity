@@ -8,12 +8,18 @@ use ae_storage::pool::Stored;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     Hash(Hash256),
+    Info(Hash256),
     Micro(Hash256),
     // None denotes a positive index larger than usize, never a wrapped value.
     MicroIndex { hash: Hash256, index: Option<usize> },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
+    Info {
+        kind: ae_tx::TransactionKind,
+        info: Result<ae_chain::transaction_info::Info, ae_chain::transaction_info::Error>,
+    },
+    NotMined,
     Transaction {
         transaction: Box<Signed>,
         header: Option<Header>,
@@ -29,11 +35,31 @@ pub enum Reply {
 
 pub fn read<S: Read>(view: View<S>, request: Request) -> Result<Reply, repository::Error> {
     let hash = match request {
-        Request::Hash(hash) => {
+        Request::Hash(hash) | Request::Info(hash) => {
             let stored = Stored::load(view)?;
             return match stored.find_transaction(hash)? {
                 None => Ok(Reply::MissingTransaction),
                 Some((location, transaction)) => {
+                    if matches!(request, Request::Info(_)) {
+                        let Location::Block(block) = location else {
+                            return Ok(Reply::NotMined);
+                        };
+                        use ae_chain::transaction_info as info;
+                        let result =
+                            info::repository::Reader::new(stored.chain(), Default::default())
+                                .and_then(|mut provider| {
+                                    info::select(
+                                        &transaction,
+                                        block,
+                                        &mut provider,
+                                        Default::default(),
+                                    )
+                                });
+                        return Ok(Reply::Info {
+                            kind: transaction.transaction().view().kind(),
+                            info: result,
+                        });
+                    }
                     let header = match location {
                         Location::Pool => None,
                         Location::Block(block) => Some(stored.chain().require_header(block)?),
@@ -75,7 +101,7 @@ pub fn read<S: Read>(view: View<S>, request: Request) -> Result<Reply, repositor
                 header: Some(header),
             })
         }
-        Request::Hash(_) => unreachable!(),
+        Request::Hash(_) | Request::Info(_) => unreachable!(),
     }
 }
 

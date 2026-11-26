@@ -1,4 +1,6 @@
 use super::*;
+#[path = "http/info.rs"]
+mod info;
 use ae_node::http::{Config, Error};
 use std::net::SocketAddr;
 use tokio::{
@@ -147,6 +149,8 @@ async fn http_transaction_queries_follow_pool_mining_rollback_and_worker_replace
     }
     for path in [
         format!("/v3/transactions/{encoded_hash}"),
+        format!("/v3/transactions/{encoded_hash}/info"),
+        "/v3/transactions/bad/info".into(),
         "/v3/transactions/bad".into(),
         "/v3/micro-blocks/hash/bad/transactions".into(),
     ] {

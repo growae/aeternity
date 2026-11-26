@@ -7,6 +7,7 @@ use num_bigint::BigUint;
 use serde_json::{Map, Value};
 use std::cell::Cell;
 
+pub mod calls;
 mod channels;
 mod leaf;
 
@@ -32,6 +33,7 @@ impl Default for Limits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     ResourceLimit,
+    InvalidInfo,
     State(ae_state::transport::Error),
 }
 impl std::fmt::Display for Error {

@@ -24,6 +24,10 @@ async fn transaction_queries_follow_mainnet_records_and_keep_reply_capacity_unti
         query(Request::Hash(hash)).wait().await.unwrap(),
         Reply::MissingTransaction
     );
+    assert_eq!(
+        query(Request::Info(hash)).wait().await.unwrap(),
+        Reply::MissingTransaction
+    );
     for block in &blocks[..2] {
         importer
             .import_block(block.encode().unwrap(), NOW)
@@ -47,6 +51,16 @@ async fn transaction_queries_follow_mainnet_records_and_keep_reply_capacity_unti
     assert!(matches!(importer.transaction_query(1), Err(Error::Busy)));
     drop(held.credits);
     assert_eq!(importer.available(), (1, 128 << 20));
+    let held = query(Request::Info(hash)).wait_retained().await.unwrap();
+    assert_eq!(
+        held.value,
+        Reply::Info {
+            kind: transaction.transaction().view().kind(),
+            info: Err(ae_chain::transaction_info::Error::WithoutInfo)
+        }
+    );
+    assert!(matches!(importer.transaction_query(1), Err(Error::Busy)));
+    drop(held);
     assert_eq!(
         query(Request::Micro(block_hash)).wait().await.unwrap(),
         Reply::Transactions {

@@ -13,3 +13,4 @@ pub mod publication;
 pub mod repository;
 pub mod resilience;
 pub mod rewards;
+pub mod transaction_info;
