@@ -146,6 +146,7 @@ dependencies = [
  "ae-types",
  "ae-vm-aevm",
  "ae-vm-fate",
+ "base64 0.22.1",
  "fancy-regex",
  "hex",
  "httparse",

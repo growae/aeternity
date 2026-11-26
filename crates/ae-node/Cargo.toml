@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 ae-hyperchain.workspace = true
 fancy-regex.workspace = true
 zeroize.workspace = true

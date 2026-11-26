@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, fmt};
 pub mod auxiliary;
 pub mod chain;
 pub mod consensus;
+pub mod currency;
 pub mod discovery;
 pub mod execution;
 mod files;
