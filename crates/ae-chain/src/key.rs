@@ -25,6 +25,7 @@ pub mod candidate;
 #[derive(Debug, Clone)]
 pub struct Rules {
     pub admission: admission::PowRules,
+    pub expected_mine_rate: ae_consensus::target::MineRate,
     pub reward_delay: u64,
     pub genesis_hash: Hash256,
     pub reward_policy: Option<rewards::Policy>,
@@ -38,6 +39,7 @@ impl Rules {
     pub fn new(admission: admission::PowRules, genesis_hash: Hash256) -> Self {
         Self {
             admission,
+            expected_mine_rate: Default::default(),
             genesis_hash,
             reward_delay: coinbase::REWARD_DELAY,
             reward_policy: None,
@@ -70,6 +72,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
 impl<A, C> Error<A, C> {
     pub fn is_operational(&self) -> bool {
         match self {
+            Self::Header(headers::Error::Target(TargetError::InvalidRate)) => true,
             Self::Admission(admission::PowError::Header(headers::Error::Protocol(e)))
             | Self::Header(headers::Error::Protocol(e))
                 if e.is_operational() =>
@@ -434,8 +437,13 @@ fn execute_key<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     if on_demand {
         headers::validate_linkage(&block.header(), &parent.headers).map_err(Error::Header)?;
     } else {
-        headers::validate_context(&block.header(), &parent.headers, &rules.checkpoints)
-            .map_err(Error::Header)?;
+        headers::validate_context_with_rate(
+            &block.header(),
+            &parent.headers,
+            &rules.checkpoints,
+            &rules.expected_mine_rate,
+        )
+        .map_err(Error::Header)?;
     }
     if trees.roots().hash().0 != parent.headers.previous.common().state_hash {
         return Err(Error::ParentState);

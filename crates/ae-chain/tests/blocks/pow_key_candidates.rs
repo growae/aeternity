@@ -150,6 +150,84 @@ fn input(row: &J) -> candidate::Input {
     }
 }
 #[test]
+fn prepared_key_candidates_retain_interval_and_match_native_adjustment_outcomes() {
+    use ae_consensus::target::MineRate;
+    let source = NATIVE["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["result"]["error"].is_null() && r["height"].as_u64().unwrap() > 18)
+        .unwrap();
+    let native: J = serde_json::from_str(include_str!(
+        "../../../ae-consensus/tests/fixtures/erlang_retarget_rate.json"
+    ))
+    .unwrap();
+    configured(
+        source,
+        &NATIVE["profile"],
+        |parent, history, execution, original_rules| {
+            let trees = trees(&source["before"]);
+            let roots = trees.roots();
+            let mut count = 0;
+            for row in native["rows"].as_array().unwrap().iter().filter(|r| {
+                r["input"]["order"] == "ascending"
+                    && ["steady", "negative_clip", "mainnet_ceres"]
+                        .iter()
+                        .any(|name| r["input"]["case"] == *name)
+            }) {
+                let mut rules = original_rules.clone();
+                rules.expected_mine_rate = row["input"]["rate"]
+                    .as_number()
+                    .and_then(|n| n.as_str().parse().ok())
+                    .map_or(MineRate::NonInteger, MineRate::Integer);
+                let candidate =
+                    Candidate::prepare(&trees, parent, history, execution, &rules, input(source))
+                        .unwrap();
+                let state = candidate.trees().roots();
+                rules.expected_mine_rate = MineRate::Integer(42.into());
+                // These native arithmetic windows are inputs to finalization, not
+                // asserted to be the prepared state's authenticated parent chain.
+                let adjustment: Vec<_> = row["input"]["samples"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| {
+                        let mut h = parent.headers.previous_key.clone();
+                        h.common.height = s["height"].as_u64().unwrap();
+                        h.time = s["time"].as_u64().unwrap();
+                        h.target = s["target"].as_u64().unwrap().try_into().unwrap();
+                        h
+                    })
+                    .collect();
+                let actual = candidate.finish(
+                    source["clocks"][1].as_u64().unwrap(),
+                    HIGHEST_TARGET,
+                    &adjustment,
+                );
+                if let Some(expected) = row["recalculate"].get("ok") {
+                    if let Some(target) = expected.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                        assert_eq!(actual.unwrap().target, target, "{}", row["input"]);
+                    } else {
+                        assert!(matches!(
+                            actual,
+                            Err(candidate::Error::Target(TargetError::OutsideHeaderDomain))
+                        ));
+                    }
+                } else {
+                    assert!(matches!(
+                        actual,
+                        Err(candidate::Error::Target(TargetError::InvalidRate))
+                    ));
+                }
+                assert_eq!(candidate.trees().roots(), state);
+                assert_eq!(trees.roots(), roots);
+                count += 1;
+            }
+            assert_eq!(count, 42);
+        },
+    );
+}
+#[test]
 fn original_pow_key_candidates_match_temporary_and_final_bytes_and_all_state_trees() {
     let mut cases = 0;
     for profile in ["profile", "repeat_profile"] {

@@ -30,6 +30,54 @@ fn fixture() -> (Vec<KeyHeader>, Header, Header) {
     )
 }
 #[test]
+fn saved_mainnet_header_uses_the_explicit_interval_and_preserves_its_actual_proof() {
+    use ae_consensus::target::{MineRate, Target, TargetError};
+    let (keys, previous, _) = fixture();
+    let ctx = Context {
+        previous: &previous,
+        previous_key: &keys[17],
+        recent_keys: &keys[..18],
+    };
+    let candidate = Header::Key(keys[18].clone());
+    let native: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/erlang_retarget_rate.json")).unwrap();
+    let mut checked = 0;
+    for row in native["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["input"]["case"] == "mainnet_ceres" && r["input"]["order"] == "ascending")
+    {
+        let rate = row["input"]["rate"]
+            .as_number()
+            .and_then(|n| n.as_str().parse().ok())
+            .map_or(MineRate::NonInteger, MineRate::Integer);
+        let actual = headers::validate_header_with_rate(
+            &candidate,
+            &NetworkProfile::mainnet(),
+            keys[18].time,
+            &ctx,
+            &Checkpoints::new(),
+            &rate,
+        );
+        let expected = if let Some(target) = row["recalculate"]["ok"].as_u64() {
+            if target == u64::from(keys[18].target) {
+                Ok(())
+            } else {
+                Err(Error::WrongTarget {
+                    actual: Target(keys[18].target),
+                    expected: Target(target.try_into().unwrap()),
+                })
+            }
+        } else {
+            Err(Error::Target(TargetError::InvalidRate))
+        };
+        assert_eq!(actual, expected, "{}", row["input"]["rate"]);
+        checked += 1;
+    }
+    assert_eq!(checked, 14);
+}
+#[test]
 fn mainnet_ceres_boundary_has_matching_context_work_and_micro_signatures() {
     let (keys, previous, micro_previous) = fixture();
     let ctx = Context {

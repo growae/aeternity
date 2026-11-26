@@ -5,6 +5,95 @@ use ae_types::Hash256;
 mod on_demand;
 static KEY: LazyLock<J> =
     LazyLock::new(|| unpack_fixture(include_str!("../fixtures/erlang_key_transition.json")));
+#[test]
+fn saved_mainnet_key_admission_uses_captured_rate_before_state_execution() {
+    use ae_consensus::{
+        headers,
+        target::{MineRate, TargetError},
+    };
+    let data: J = serde_json::from_str(include_str!(
+        "../../../ae-consensus/tests/fixtures/mainnet_context.json"
+    ))
+    .unwrap();
+    let keys: Vec<_> = data["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| key_header(&r["hex"]))
+        .collect();
+    let previous =
+        Header::decode(&bytes(&data["previous"]["hex"]), HeaderMode::ProofOfWork).unwrap();
+    let parent = ex::Parent {
+        headers: headers::Context {
+            previous: &previous,
+            previous_key: &keys[17],
+            recent_keys: &keys[..18],
+        },
+        previous_generation: ex::PreviousGeneration::Unavailable,
+        fees: 0.into(),
+        reported_fraud: false,
+    };
+    let net = NetworkProfile::mainnet();
+    let execution = transactions::Config::primitives(&net);
+    let mut rules = transition::Rules::new(super::rules(), Hash256::ZERO);
+    rules.admission.now_ms = keys[18].time;
+    let mut state: Trees = Trees {
+        accounts: Default::default(),
+        contracts: Default::default(),
+        calls: Default::default(),
+        channels: Default::default(),
+        names: Default::default(),
+        oracles: Default::default(),
+    };
+    let roots = state.roots();
+    assert_ne!(roots.hash().0, previous.common().state_hash);
+    for rate in [
+        MineRate::Integer(179999.into()),
+        MineRate::default(),
+        MineRate::Integer(180001.into()),
+        MineRate::Integer(1000.into()),
+        MineRate::Integer(0.into()),
+        MineRate::NonInteger,
+    ] {
+        rules.expected_mine_rate = rate.clone();
+        // The real saved seal/linkage/target are checked. The unavailable
+        // historical state is deliberately not claimed as an accepted block.
+        let error = transition::pow_key(
+            &keys[18],
+            &mut state,
+            &parent,
+            &Default::default(),
+            &execution,
+            &rules,
+        )
+        .unwrap_err();
+        match rate {
+            MineRate::NonInteger => {
+                assert!(matches!(
+                    error,
+                    transition::Error::Header(headers::Error::Target(TargetError::InvalidRate))
+                ));
+                assert!(error.is_operational());
+            }
+            MineRate::Integer(n) if n == 0.into() => {
+                assert!(matches!(
+                    error,
+                    transition::Error::Header(headers::Error::Target(TargetError::InvalidRate))
+                ));
+                assert!(error.is_operational());
+            }
+            MineRate::Integer(n) if n == 1000.into() => {
+                assert!(matches!(
+                    error,
+                    transition::Error::Header(headers::Error::WrongTarget { .. })
+                ));
+                assert!(!error.is_operational());
+            }
+            _ => assert!(matches!(error, transition::Error::ParentState)),
+        }
+        assert_eq!(state.roots(), roots);
+    }
+}
 fn unsigned(v: &J) -> Unsigned {
     Unsigned::from_decimal(v.as_str().unwrap()).unwrap()
 }

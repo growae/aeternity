@@ -2,7 +2,9 @@
 // Copyright (c) 2018, Aeternity Anstalt. ISC: repository LICENSE.
 use super::*;
 use ae_codec::headers::CommonHeader;
-use ae_consensus::target::{DIFFICULTY_WINDOW, HIGHEST_TARGET, Target, WorkSample, retarget};
+use ae_consensus::target::{
+    DIFFICULTY_WINDOW, HIGHEST_TARGET, MineRate, Target, WorkSample, retarget_with_rate,
+};
 use ae_types::AccountPublicKey;
 
 #[derive(Debug, Clone, Copy)]
@@ -25,6 +27,7 @@ pub enum Error<A = MemoryStore, C = MemoryStore> {
 }
 pub struct Candidate<A = MemoryStore, C = MemoryStore> {
     on_demand: bool,
+    expected_mine_rate: MineRate,
     temporary: KeyHeader,
     prepared: super::Prepared<A, C>,
     final_info: Option<[u8; 4]>,
@@ -154,6 +157,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
             .or(temporary.info);
         Ok(Self {
             on_demand,
+            expected_mine_rate: rules.expected_mine_rate.clone(),
             temporary,
             prepared,
             final_info,
@@ -203,7 +207,9 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> Candidate<A, C> {
                     target: Target(k.target),
                 })
                 .collect();
-            retarget(&samples).map_err(Error::Target)?.0
+            retarget_with_rate(&samples, &self.expected_mine_rate)
+                .map_err(Error::Target)?
+                .0
         };
         Ok(header)
     }

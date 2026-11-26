@@ -37,6 +37,10 @@ fn expected_mine_rate_preserves_precedence_large_integers_and_chain_identity() {
     let default =
         Settings::resolve(&empty.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
     assert_eq!(default.expected_mine_rate(), &json!(180_000));
+    assert_eq!(
+        default.retarget_rate(),
+        ae_consensus::target::MineRate::default()
+    );
     let identity = default.identity(Hash256::ZERO, Hash256::ZERO).unwrap();
     for value in [
         json!(7),
@@ -52,6 +56,10 @@ fn expected_mine_rate_preserves_precedence_large_integers_and_chain_identity() {
             Settings::resolve(&empty.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
         assert_eq!(app.expected_mine_rate(), &value);
         assert_eq!(
+            app.retarget_rate(),
+            ae_consensus::target::MineRate::Integer(int(&value))
+        );
+        assert_eq!(
             app.identity(Hash256::ZERO, Hash256::ZERO).unwrap(),
             identity
         );
@@ -60,6 +68,10 @@ fn expected_mine_rate_preserves_precedence_large_integers_and_chain_identity() {
         let chosen =
             Settings::resolve(&user.resolve(&ctx).unwrap(), Some(b"mine-rate-test")).unwrap();
         assert_eq!(chosen.expected_mine_rate(), &json!(1234));
+        assert_eq!(
+            chosen.retarget_rate(),
+            ae_consensus::target::MineRate::Integer(1234.into())
+        );
         assert_eq!(
             chosen.identity(Hash256::ZERO, Hash256::ZERO).unwrap(),
             identity

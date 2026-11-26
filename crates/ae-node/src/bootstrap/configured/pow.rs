@@ -115,6 +115,7 @@ impl Open {
             self.chain().identity().genesis,
         );
         rules.checkpoints = self.checkpoints();
+        rules.expected_mine_rate = self.chain().settings().retarget_rate();
         rules
     }
 }
@@ -140,6 +141,7 @@ impl Prepared {
         ) || open.chain().identity().execution_profile != open.execution().fingerprint()
             || rules.genesis_hash != expected.genesis_hash
             || rules.checkpoints != expected.checkpoints
+            || rules.expected_mine_rate != expected.expected_mine_rate
             || rules.admission.configured_gas_limit != expected.admission.configured_gas_limit
         {
             return Err(Box::new(PreparationError {

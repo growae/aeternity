@@ -8,6 +8,20 @@ use std::fmt;
 pub const HIGHEST_TARGET: Target = Target(0x2100ffff);
 pub const DIFFICULTY_WINDOW: usize = 17;
 
+// Captured governance input, never a lookup of mutable process configuration.
+// Files require a positive integer; application settings can supply other
+// values. Retain their arithmetic behavior when adjustment is actually used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MineRate {
+    Integer(BigInt),
+    NonInteger,
+}
+impl Default for MineRate {
+    fn default() -> Self {
+        Self::Integer(180_000.into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +30,7 @@ pub enum TargetError {
     InvalidWindow,
     OutsideHeaderDomain,
     ZeroCapacity,
+    InvalidRate,
 }
 impl fmt::Display for TargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,6 +103,9 @@ pub struct WorkSample {
 // The context supplies the 18 preceding key headers. Sorting and integer
 // division, including negative solve-time truncation, follow the reference.
 pub fn retarget(samples: &[WorkSample]) -> Result<Target, TargetError> {
+    retarget_with_rate(samples, &MineRate::default())
+}
+pub fn retarget_with_rate(samples: &[WorkSample], rate: &MineRate) -> Result<Target, TargetError> {
     if samples.len() != DIFFICULTY_WINDOW + 1 {
         return Err(TargetError::InvalidWindow);
     }
@@ -105,15 +123,31 @@ pub fn retarget(samples: &[WorkSample]) -> Result<Target, TargetError> {
     if capacity.is_zero() {
         return Err(TargetError::ZeroCapacity);
     }
-    let elapsed: i128 = ordered
+    let MineRate::Integer(rate) = rate else {
+        return Err(TargetError::InvalidRate);
+    };
+    if rate.is_zero() {
+        return Err(TargetError::InvalidRate);
+    }
+    let minimum = BigInt::from(-540_000);
+    let maximum = rate * 6;
+    let elapsed: BigInt = ordered
         .windows(2)
         .map(|s| {
-            (i128::from(s[1].timestamp) - i128::from(s[0].timestamp)).clamp(-540_000, 1_080_000)
+            let time = BigInt::from(s[1].timestamp) - BigInt::from(s[0].timestamp);
+            // Preserve the native branch order even for a negative application
+            // value whose upper bound falls below the fixed lower bound.
+            if time < minimum {
+                minimum.clone()
+            } else if time > maximum {
+                maximum.clone()
+            } else {
+                time
+            }
         })
         .sum();
-    let tempered = 3 * DIFFICULTY_WINDOW as i128 * 180_000 / 4 + 2523 * elapsed / 10000;
-    let integer =
-        BigInt::from(tempered) * BigInt::from(k) / (BigInt::from(180_000) * BigInt::from(capacity));
+    let tempered = rate * (3 * DIFFICULTY_WINDOW) / 4 + 2523 * elapsed / 10000;
+    let integer = tempered * BigInt::from(k) / (rate * BigInt::from(capacity));
     let sci = compact(integer).min(BigInt::from(HIGHEST_TARGET.0));
     sci.to_u32()
         .map(Target)

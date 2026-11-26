@@ -3,7 +3,7 @@
 // Copyright (c) 2020, Aeternity Anstalt. ISC notice in repository LICENSE.
 use crate::{
     cuckoo,
-    target::{Target, TargetError, WorkSample, retarget},
+    target::{MineRate, Target, TargetError, WorkSample, retarget_with_rate},
 };
 use ae_codec::headers::{Header, HeaderError, KeyHeader};
 use ae_crypto::verify_ed25519;
@@ -79,8 +79,25 @@ pub fn validate_header(
     ctx: &Context<'_>,
     checkpoints: &Checkpoints,
 ) -> Result<(), Error> {
+    validate_header_with_rate(
+        header,
+        network,
+        now_ms,
+        ctx,
+        checkpoints,
+        &MineRate::default(),
+    )
+}
+pub fn validate_header_with_rate(
+    header: &Header,
+    network: &NetworkProfile,
+    now_ms: u64,
+    ctx: &Context<'_>,
+    checkpoints: &Checkpoints,
+    rate: &MineRate,
+) -> Result<(), Error> {
     validate_standalone(header, network, now_ms)?;
-    validate_context(header, ctx, checkpoints)
+    validate_context_with_rate(header, ctx, checkpoints, rate)
 }
 pub fn validate_standalone(
     header: &Header,
@@ -118,6 +135,29 @@ pub fn validate_context_with_cycle(
     ctx: &Context<'_>,
     checkpoints: &Checkpoints,
     micro_cycle_ms: u64,
+) -> Result<(), Error> {
+    validate_context_inner(
+        header,
+        ctx,
+        checkpoints,
+        micro_cycle_ms,
+        &MineRate::default(),
+    )
+}
+pub fn validate_context_with_rate(
+    header: &Header,
+    ctx: &Context<'_>,
+    checkpoints: &Checkpoints,
+    rate: &MineRate,
+) -> Result<(), Error> {
+    validate_context_inner(header, ctx, checkpoints, 3000, rate)
+}
+fn validate_context_inner(
+    header: &Header,
+    ctx: &Context<'_>,
+    checkpoints: &Checkpoints,
+    micro_cycle_ms: u64,
+    rate: &MineRate,
 ) -> Result<(), Error> {
     validate_linkage(header, ctx)?;
     let common = header.common();
@@ -177,7 +217,7 @@ pub fn validate_context_with_cycle(
                         target: Target(k.target),
                     })
                     .collect();
-                retarget(&samples)?
+                retarget_with_rate(&samples, rate)?
             };
             if Target(k.target) != expected {
                 return Err(Error::WrongTarget {

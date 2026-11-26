@@ -59,6 +59,16 @@ impl Lab {
         resources: Resources,
         gas: u64,
     ) -> configured::Prepared {
+        self.prepare_with_mine_rate(kind, system, resources, gas, None)
+    }
+    fn prepare_with_mine_rate(
+        &self,
+        kind: &str,
+        system: Value,
+        resources: Resources,
+        gas: u64,
+        mine_rate: Option<Value>,
+    ) -> configured::Prepared {
         let mut sys = system.as_object().unwrap().clone();
         sys.insert("custom_prefunded_accs_file".into(), json!("alloc.json"));
         let cfg = Configuration::from_value(
@@ -66,12 +76,16 @@ impl Lab {
             "system":sys,"chain":{"hard_forks":{"1":0,"6":1},"consensus":{"0":{"type":kind}}}}),
         )
         .unwrap();
-        let ctx = Context::new(Directories {
+        let mut ctx = Context::new(Directories {
             home: "release".into(),
             data: "data".into(),
             log: "log".into(),
         })
         .unwrap();
+        if let Some(rate) = mine_rate {
+            ctx.set("aecore".into(), "expected_mine_rate".into(), rate)
+                .unwrap();
+        }
         configured::Prepared::load(
             &cfg.resolve(&ctx).unwrap(),
             None,
@@ -297,6 +311,56 @@ fn configured_service_rules_reject_mismatched_gas_genesis_and_checkpoints() {
         assert_eq!(open.chain().database().view().unwrap().status().revision, 1);
     }
 }
+#[test]
+fn configured_retarget_rules_are_bound_and_reopen_without_changing_chain_identity() {
+    use ae_consensus::target::MineRate;
+    for kind in ["pow_cuckoo", "on_demand"] {
+        let lab = Lab::new();
+        let mut identity = None;
+        for rate in [
+            json!(1000),
+            serde_json::from_str("1000000000000000000000000000000").unwrap(),
+            json!(0),
+            json!(-1),
+            json!("invalid"),
+            json!(7.0),
+        ] {
+            let expected = rate
+                .as_number()
+                .and_then(|n| n.as_str().parse().ok())
+                .map_or(MineRate::NonInteger, MineRate::Integer);
+            for _ in 0..2 {
+                let open = lab
+                    .prepare_with_mine_rate(
+                        kind,
+                        json!({}),
+                        Default::default(),
+                        6_000_000,
+                        Some(rate.clone()),
+                    )
+                    .open("chain", Default::default())
+                    .unwrap();
+                let current = open.chain().identity().clone();
+                assert_eq!(current, *identity.get_or_insert_with(|| current.clone()));
+                assert_eq!(open.chain().database().view().unwrap().status().revision, 1);
+                let rules = open.pow_rules(3000, Default::default());
+                assert_eq!(rules.expected_mine_rate, expected);
+                let mut wrong = rules.clone();
+                wrong.expected_mine_rate = MineRate::default();
+                let Err(failure) =
+                    Prepared::try_new(open, wrong, Default::default(), Default::default())
+                else {
+                    panic!("mismatched retarget interval was accepted")
+                };
+                assert!(matches!(failure.error, pow::Error::Binding));
+                let prepared =
+                    Prepared::new(failure.open, rules, Default::default(), Default::default())
+                        .unwrap();
+                assert_eq!(prepared.rules().expected_mine_rate, expected);
+            }
+        }
+    }
+}
 #[tokio::test]
 async fn shared_configured_importer_survives_connection_restart_and_joined_shutdown() {
     let lab = Lab::new();
@@ -378,7 +442,18 @@ async fn shared_configured_importer_survives_connection_restart_and_joined_shutd
 #[tokio::test]
 async fn configured_on_demand_owner_produces_and_reopens_real_chain() {
     let lab = Lab::new();
-    let s = lab.services("on_demand", json!({"dev_mode":true}), Default::default());
+    let open = lab
+        .prepare_with_mine_rate(
+            "on_demand",
+            json!({"dev_mode":true}),
+            Default::default(),
+            6_000_000,
+            Some(json!("invalid")),
+        )
+        .open("chain", Default::default())
+        .unwrap();
+    let rules = open.pow_rules(3000, Default::default());
+    let s = Prepared::new(open, rules, Default::default(), Default::default()).unwrap();
     let (w, wt) = start_workers(&lab, &s, Default::default()).await;
     let s = s.activate(&w).unwrap();
     let bindings = w.bindings();
@@ -395,7 +470,7 @@ async fn configured_on_demand_owner_produces_and_reopens_real_chain() {
     let result = tokio::task::spawn_blocking(move || {
         let mut controller = controller;
         let r = controller.execute(on_demand::control::Command::Blocks {
-            count: 2,
+            count: 20,
             kind: on_demand::control::Kind::Key,
         });
         (r, controller.retire())
@@ -404,7 +479,7 @@ async fn configured_on_demand_owner_produces_and_reopens_real_chain() {
     .unwrap();
     let (report, retired) = result;
     assert!(report.command.result.is_ok(), "{:?}", report.command.result);
-    assert_eq!(report.admissions.len(), 2);
+    assert_eq!(report.admissions.len(), 20);
     assert!(report.admissions.iter().all(|r| r.result.is_ok()));
     assert!(!retired.pending_pool());
     let tip = s

@@ -70,7 +70,7 @@ impl Settings {
             profile,
             consensus,
             genesis_time,
-            // This operational value is not part of canonical chain identity.
+            // This governance value is not part of canonical chain identity.
             // Preserve the original consumer's user/application/default order
             // and integer domain; status arithmetic handles invalid app values.
             expected_mine_rate: resolved
@@ -91,6 +91,12 @@ impl Settings {
     }
     pub fn expected_mine_rate(&self) -> &serde_json::Value {
         &self.expected_mine_rate
+    }
+    pub fn retarget_rate(&self) -> ae_consensus::target::MineRate {
+        protocols::integer(&self.expected_mine_rate).map_or(
+            ae_consensus::target::MineRate::NonInteger,
+            ae_consensus::target::MineRate::Integer,
+        )
     }
     pub fn genesis_header(&self, state_hash: Hash256) -> KeyHeader {
         let target = match self.consensus.genesis().kind() {
