@@ -15,6 +15,8 @@ mod names;
 mod oracles;
 #[path = "http/post.rs"]
 mod post;
+#[path = "http/settings.rs"]
+mod settings;
 use ae_node::http::{Config, Error};
 use std::net::SocketAddr;
 use tokio::{

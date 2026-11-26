@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::mpsc;
 mod accounts;
 mod gossip;
+mod policy_settings;
 mod retirement;
 
 fn settings() -> Settings {

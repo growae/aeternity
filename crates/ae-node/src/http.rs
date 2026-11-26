@@ -18,6 +18,7 @@ mod oracles;
 mod pending;
 mod post;
 mod response;
+mod settings;
 mod status;
 mod sync;
 mod text;

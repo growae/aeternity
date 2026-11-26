@@ -13,7 +13,7 @@ impl Budget {
             settings,
         })
     }
-    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Credits, Error> {
+    pub(super) fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Credits, Error> {
         if bytes > self.settings.single_request_bytes {
             return Err(Error::RequestTooLarge);
         }
@@ -53,6 +53,7 @@ pub struct Retained<T> {
     pub credits: Credits,
 }
 impl Client {
+    // Includes policy-settings reads sharing the same retained reply budget.
     pub fn account_query_usage(&self) -> (usize, usize) {
         *self
             .shared

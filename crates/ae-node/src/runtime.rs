@@ -25,6 +25,8 @@ mod configuration;
 mod launch;
 mod metrics;
 pub(crate) struct Information {
+    pub block_gas_limit: ae_types::Unsigned,
+    pub dry_run_gas_limit: Result<Arc<serde_json::Value>, crate::configuration::resolution::Error>,
     pub started: std::time::Instant,
     pub build: ae_sync::peer::info::Metadata,
     pub expected_mine_rate: serde_json::Value,

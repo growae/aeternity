@@ -10,7 +10,8 @@ mod service;
 pub mod sync;
 pub mod worker;
 pub use service::{
-    Config, FailedTransaction, Failure, Inspection, Maintenance, Service, Submission,
+    Config, FailedTransaction, Failure, Inspection, Maintenance, PolicySettings, Service,
+    Submission,
 };
 pub const RECORDS: u8 = 16;
 pub const MEMBERS: u8 = 17;

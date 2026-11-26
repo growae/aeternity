@@ -62,6 +62,13 @@ pub struct Inspection {
     pub maintenance: Maintenance,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicySettings {
+    pub minimum_miner_gas_price: ae_types::Unsigned,
+    pub maximum_auth_gas: ae_types::Unsigned,
+    pub nonce_offset: ae_types::Unsigned,
+    pub tx_ttl: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
     pub outcome: policy::PushOutcome,
     pub chain: Status,
@@ -460,6 +467,33 @@ impl Service {
             return Err(Failure::RestartRequired);
         }
         Ok(self.inspection())
+    }
+    pub(super) fn read_policy_settings(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<PolicySettings, Failure> {
+        if self.uncertain {
+            return Err(Failure::RestartRequired);
+        }
+        let p = &self.config.policy;
+        let bytes = [
+            &p.minimum_miner_gas_price,
+            &p.maximum_auth_gas,
+            &p.nonce_offset,
+        ]
+        .into_iter()
+        .try_fold(std::mem::size_of::<PolicySettings>(), |size, n| {
+            size.checked_add(n.as_bytes().len())
+        })
+        .filter(|n| *n <= maximum_bytes)
+        .ok_or(policy::Error::ResourceLimit)?;
+        debug_assert!(bytes <= maximum_bytes);
+        Ok(PolicySettings {
+            minimum_miner_gas_price: p.minimum_miner_gas_price.clone(),
+            maximum_auth_gas: p.maximum_auth_gas.clone(),
+            nonce_offset: p.nonce_offset.clone(),
+            tx_ttl: p.tx_ttl,
+        })
     }
     pub fn push(
         &mut self,

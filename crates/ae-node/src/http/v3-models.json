@@ -1796,6 +1796,82 @@
           "type": "string"
         }
       }
+    },
+    "NodeSettings": {
+      "type": "object",
+      "properties": {
+        "min_miner_gas_price": {
+          "type": "string"
+        },
+        "max_auth_fun_gas": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "mempool_tx_ttl": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "mempool_nonce_offset": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "dry_run_gas_limit": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "block_gas_limit": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "min_miner_gas_price",
+        "max_auth_fun_gas",
+        "mempool_tx_ttl",
+        "mempool_nonce_offset",
+        "dry_run_gas_limit",
+        "block_gas_limit"
+      ]
     }
   },
   "operations": {
@@ -1864,6 +1940,9 @@
     },
     "GetCurrency": {
       "$ref": "#/definitions/Currency"
+    },
+    "GetNodeSettings": {
+      "$ref": "#/definitions/NodeSettings"
     }
   }
 }

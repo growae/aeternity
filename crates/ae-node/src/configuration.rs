@@ -10,6 +10,7 @@ pub mod currency;
 pub mod discovery;
 pub mod execution;
 mod files;
+pub mod http;
 pub mod metrics;
 pub mod network;
 pub mod presets;

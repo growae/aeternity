@@ -14,6 +14,7 @@ pub async fn start(running: &mut runtime::Running) -> http::Handle {
         .listen_http(http::Config {
             listen: ([127, 0, 0, 1], 0).into(),
             timeout: Duration::from_secs(2),
+            groups: ["chain".into(), "node_info".into(), "node_settings".into()].into(),
             ..Default::default()
         })
         .await
@@ -112,6 +113,18 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         .wait()
         .await
         .unwrap();
+    for (path, body) in [
+        (
+            "/v3/node-settings",
+            json!({"min_miner_gas_price":"1000000000","max_auth_fun_gas":50000,"mempool_tx_ttl":6720,"mempool_nonce_offset":5,"dry_run_gas_limit":6000000,"block_gas_limit":6000000}),
+        ),
+        (
+            "/v3/node-settings?int-as-string=true",
+            json!({"min_miner_gas_price":"1000000000","max_auth_fun_gas":"50000","mempool_tx_ttl":"6720","mempool_nonce_offset":"5","dry_run_gas_limit":"6000000","block_gas_limit":"6000000"}),
+        ),
+    ] {
+        assert_eq!(block_get(http, path).await, (200, body));
+    }
     let network_name = match selected.network.network_id() {
         b"ae_mainnet" => "Mainnet",
         b"ae_uat" => "Testnet",

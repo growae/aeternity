@@ -225,6 +225,33 @@ impl Context {
         // $env references. The interpreter adds names at that later boundary.
         expand::State::new(self).value(app, value, &[], 0).map(Some)
     }
+    // aeu_env:get_env/2 with a key path traverses ordered Erlang property lists,
+    // not maps. Represent each property tuple as a JSON array, preserving order
+    // and duplicate keys; an object is deliberately not a property list.
+    pub fn application_path(&self, app: &str, path: &[&str]) -> Result<Option<Value>, Error> {
+        let (key, rest) = path.split_first().ok_or(Error::Lookup)?;
+        if path.len() > MAX_DEPTH {
+            return Err(Error::Limit);
+        }
+        let Some(mut value) = self.application(app, key)? else {
+            return Ok(None);
+        };
+        for key in rest {
+            let Some(list) = value.as_array() else {
+                return Ok(None);
+            };
+            let pair = list
+                .iter()
+                .filter_map(Value::as_array)
+                .find(|p| p.first().and_then(Value::as_str) == Some(*key));
+            let Some(pair) = pair else { return Ok(None) };
+            if pair.len() != 2 {
+                return Err(Error::Lookup);
+            }
+            value = pair[1].clone();
+        }
+        Ok(Some(value))
+    }
     fn validate(&self) -> Result<(), Error> {
         let mut bytes =
             self.directories.home.len() + self.directories.data.len() + self.directories.log.len();
@@ -275,6 +302,7 @@ impl Context {
 pub enum Strategy<'a> {
     User,
     Application { app: &'a str, key: &'a str },
+    ApplicationPath { app: &'a str, path: &'a [&'a str] },
     SchemaDefault,
     Value(&'a Value),
 }
@@ -340,6 +368,9 @@ impl Resolved<'_> {
             let value = match s {
                 Strategy::User => self.get(path)?.cloned(),
                 Strategy::Application { app, key } => self.context.application(app, key)?,
+                Strategy::ApplicationPath { app, path } => {
+                    self.context.application_path(app, path)?
+                }
                 Strategy::SchemaDefault => schema_default(path).cloned(),
                 Strategy::Value(v) => Some((*v).clone()),
             };

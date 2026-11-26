@@ -447,6 +447,7 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
     .unwrap();
     // This inventory grows as actual endpoint implementations are connected.
     let implemented = [
+        "GetNodeSettings",
         "GetCurrency",
         "GetAccountByPubkey",
         "GetAccountByPubkeyAndHash",
@@ -489,13 +490,13 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 37);
+    assert_eq!(implemented.len(), 38);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        70
+        71
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;
@@ -1010,6 +1011,83 @@ fn original_currency_wrapper_matches_integer_modes_required_fields_and_errors() 
             req.query
         );
         if let Ok((Operation::Currency, strings)) = &planned {
+            assert_eq!(json!({"int-as-string":strings}), row["logic_params"]);
+        }
+        let code = input["code"].as_u64().unwrap() as u16;
+        let result = if code == 200 {
+            Ok(input["body"].clone())
+        } else {
+            let mut r = Response::json(code, input["body"].clone());
+            for (k, v) in input["headers"].as_object().unwrap() {
+                r.headers.insert(k.clone(), v.as_str().unwrap().into());
+            }
+            Err(r)
+        };
+        let mut r = super::dispatch(planned, result);
+        r.stamp(&cfg, &req.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            u64::from(r.status),
+            expected["code"].as_u64().unwrap(),
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(r.body.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap(),
+                expected["body"],
+                "{} {} {}",
+                row["id"],
+                row["module"],
+                req.query
+            );
+        }
+        for name in ["access-control-allow-origin", "x-ae-height", "retry-after"] {
+            assert_eq!(
+                r.headers.get(name).map(String::as_str),
+                expected["headers"][name].as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn original_node_settings_wrapper_matches_integer_modes_required_fields_and_errors() {
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_node_settings_schema.json"
+    ))
+    .unwrap();
+    let inputs = f["inputs"].as_array().unwrap();
+    let rows = f["schema"].as_array().unwrap();
+    assert_eq!(inputs.len(), 165);
+    assert_eq!(rows.len(), 1320);
+    let cfg = Config {
+        groups: ["node_settings".into()].into(),
+        ..Default::default()
+    };
+    for row in rows {
+        let input = &inputs[row["id"].as_u64().unwrap() as usize];
+        assert_eq!(row["module"], "oas_endpoints");
+        let req = Request {
+            method: "GET".into(),
+            path: "/v3/node-settings".into(),
+            query: row["query"]["query"].as_str().unwrap().into(),
+            headers: Headers::from([("origin".into(), "https://client.example".into())]),
+        };
+        let planned = plan(&req, &cfg);
+        assert_eq!(
+            usize::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap() as usize,
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if let Ok((Operation::Settings, strings)) = &planned {
             assert_eq!(json!({"int-as-string":strings}), row["logic_params"]);
         }
         let code = input["code"].as_u64().unwrap() as u16;

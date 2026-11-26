@@ -33,6 +33,8 @@ pub struct Prepared {
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
     currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
+    dry_run_gas_limit:
+        Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error>,
 }
 pub struct Open {
     cwd: PathBuf,
@@ -41,6 +43,8 @@ pub struct Open {
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
     currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
+    dry_run_gas_limit:
+        Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error>,
 }
 impl Prepared {
     #[allow(clippy::too_many_arguments)]
@@ -59,6 +63,8 @@ impl Prepared {
         // Metadata resolution failures belong to the request boundary. They
         // must not prevent a chain from opening or change its durable identity.
         let currency = currency::Plan::resolve(resolved, settings.profile().network_id(), cwd)
+            .map(std::sync::Arc::new);
+        let dry_run_gas_limit = crate::configuration::http::external_dry_run_gas_limit(resolved)
             .map(std::sync::Arc::new);
         let auxiliary = auxiliary::Plan::resolve(resolved, settings.profile().network_id(), cwd)
             .map_err(Error::Auxiliary)?
@@ -96,6 +102,7 @@ impl Prepared {
             execution,
             auxiliary,
             currency,
+            dry_run_gas_limit,
         })
     }
     pub fn genesis(&self) -> &genesis::Prepared {
@@ -117,10 +124,16 @@ impl Prepared {
             execution: self.execution,
             auxiliary: self.auxiliary,
             currency: self.currency,
+            dry_run_gas_limit: self.dry_run_gas_limit,
         })
     }
 }
 impl Open {
+    pub fn external_dry_run_gas_limit(
+        &self,
+    ) -> &Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error> {
+        &self.dry_run_gas_limit
+    }
     pub(crate) fn currency(&self) -> &Result<std::sync::Arc<currency::Plan>, currency::Error> {
         &self.currency
     }

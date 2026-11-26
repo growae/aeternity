@@ -13,6 +13,7 @@ mod client;
 pub mod events;
 mod gossip;
 mod reply;
+mod settings;
 pub use client::{Client, Clock, SelectOptions};
 pub use gossip::{
     CacheConfigurationError, CacheController, CacheHandle, CacheOwner, GossipCache, LifecycleError,
