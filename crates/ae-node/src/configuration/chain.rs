@@ -16,6 +16,7 @@ pub enum Error {
     Consensus(consensus::Error),
     Protocols(protocols::Error),
     GenesisTime,
+    MicroCycle,
     Genesis,
 }
 impl fmt::Display for Error {
@@ -30,6 +31,7 @@ pub struct Settings {
     consensus: Checked,
     genesis_time: u64,
     expected_mine_rate: serde_json::Value,
+    micro_cycle_ms: u64,
 }
 impl Settings {
     pub fn resolve(
@@ -70,6 +72,11 @@ impl Settings {
             profile,
             consensus,
             genesis_time,
+            micro_cycle_ms: micro_block_cycle(resolved)
+                .map_err(Error::Resolution)?
+                .as_u64()
+                .filter(|v| *v <= 86_400_000)
+                .ok_or(Error::MicroCycle)?,
             // This governance value is not part of canonical chain identity.
             // Preserve the original consumer's user/application/default order
             // and integer domain; status arithmetic handles invalid app values.
@@ -91,6 +98,9 @@ impl Settings {
     }
     pub fn expected_mine_rate(&self) -> &serde_json::Value {
         &self.expected_mine_rate
+    }
+    pub fn micro_cycle_ms(&self) -> u64 {
+        self.micro_cycle_ms
     }
     pub fn retarget_rate(&self) -> ae_consensus::target::MineRate {
         protocols::integer(&self.expected_mine_rate).map_or(
@@ -157,4 +167,17 @@ impl Settings {
             algorithm,
         ))
     }
+}
+
+// aec_governance:micro_block_cycle reads user configuration, application
+// environment, then the governance default (not the schema default).
+pub fn micro_block_cycle(
+    resolved: &Resolved<'_>,
+) -> Result<serde_json::Value, super::resolution::Error> {
+    resolved.user_or_application(
+        &["mining", "micro_block_cycle"],
+        "aecore",
+        "micro_block_cycle",
+        &serde_json::json!(3000),
+    )
 }

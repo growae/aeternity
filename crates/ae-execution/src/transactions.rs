@@ -112,7 +112,7 @@ fn big(n: &Unsigned) -> BigInt {
     BigInt::from_bytes_be(Sign::Plus, n.as_bytes())
 }
 fn size_gas(n: usize) -> BigInt {
-    BigInt::from(n) * 20
+    BigInt::from(n) * ae_protocol::gas::TRANSACTION_BYTE
 }
 fn unsigned<A, C>(n: BigInt) -> Result<Unsigned, Error<A, C>> {
     if n.sign() == Sign::Minus {

@@ -113,6 +113,51 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         .wait()
         .await
         .unwrap();
+    let accepted = root
+        .importer()
+        .unwrap()
+        .current_header(0, |h| h)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    for (path, strings) in [
+        ("/v3/protocol-parameters", false),
+        ("/v3/protocol-parameters?int-as-string=true", true),
+    ] {
+        let (code, body) = block_get(http, path).await;
+        assert_eq!(code, 200);
+        let number = |n: u64| {
+            if strings {
+                json!(n.to_string())
+            } else {
+                json!(n)
+            }
+        };
+        assert_eq!(
+            body["network_id"],
+            std::str::from_utf8(selected.network.network_id()).unwrap()
+        );
+        assert_eq!(
+            body["current_protocol_version"],
+            number(u64::from(accepted.version))
+        );
+        if root.status().family == runtime::Family::Hyperchain {
+            assert_eq!(body["micro_block_cycle"], number(1));
+            assert_eq!(body["child_block_time"], number(4));
+            assert!(body.get("expected_block_mine_rate").is_none());
+        } else {
+            assert_eq!(body["micro_block_cycle"], number(3000));
+            assert_eq!(body["expected_block_mine_rate"], number(180000));
+            assert!(body.get("child_block_time").is_none());
+        }
+        let row = &body["protocols"][0];
+        assert_eq!(row["version"], number(u64::from(accepted.version)));
+        assert_eq!(row["gas_per_byte"], number(20));
+        assert_eq!(row["store_byte_gas"], number(5));
+        assert_eq!(row["name_claim_fees"].as_array().unwrap().len(), 31);
+        assert_eq!(row["name_auction_timeouts"].as_array().unwrap().len(), 12);
+    }
     for (path, body) in [
         (
             "/v3/node-settings",
@@ -386,7 +431,7 @@ pub async fn verify_blocks(http: &http::Handle, database: &ae_storage::Database)
         }
     }
 }
-async fn block_get(http: &http::Handle, path: &str) -> (u16, Value) {
+pub(super) async fn block_get(http: &http::Handle, path: &str) -> (u16, Value) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut socket = TcpStream::connect(http.status().address).await.unwrap();
         socket

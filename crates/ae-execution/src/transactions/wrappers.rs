@@ -176,7 +176,8 @@ fn payer<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         &next.channels,
     )?;
     Ok(Frame::Payer {
-        gas: BigInt::from(3_000) + size_gas(tx.wire_size()) - size_gas(inner.wire_size()),
+        gas: BigInt::from(ae_protocol::gas::PAYING_FOR) + size_gas(tx.wire_size())
+            - size_gas(inner.wire_size()),
         events: vec![Event::Primitive(crate::Event::FeeDebit {
             account: fee_payer,
             amount: payer.fee.clone(),

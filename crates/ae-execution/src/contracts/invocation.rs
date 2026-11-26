@@ -102,8 +102,8 @@ impl<'a> Invocation<'a> {
             Self::Contract(t) => t.used_gas(n),
             Self::Attach(t) => t.used_gas(n),
             Self::Auth(_, size) => Unsigned::from(size as u64)
-                .mul_u64(20)
-                .add(&75_000.into())
+                .mul_u64(ae_protocol::gas::TRANSACTION_BYTE)
+                .add(&ae_protocol::contracts::CREATE_BASE_GAS.into())
                 .add(n),
         }
     }

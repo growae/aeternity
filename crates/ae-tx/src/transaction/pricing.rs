@@ -20,7 +20,7 @@ fn number(n: &Unsigned) -> BigInt {
     BigInt::from_bytes_be(Sign::Plus, n.as_bytes())
 }
 fn size_gas(size: usize) -> BigInt {
-    BigInt::from(size) * 20
+    BigInt::from(size) * ae_protocol::gas::TRANSACTION_BYTE
 }
 fn price(fee: &Unsigned, gas: &BigInt) -> BigInt {
     if gas.is_zero() {
@@ -36,10 +36,10 @@ impl TransactionRef<'_> {
     pub fn pricing(self, height: &Unsigned, protocol: Protocol) -> Pricing {
         let base = match self.leaf {
             TransactionLeaf::Contract(t) => t.base_gas(),
-            TransactionLeaf::GaAttach(_) => 75_000,
+            TransactionLeaf::GaAttach(_) => ae_protocol::contracts::CREATE_BASE_GAS,
             TransactionLeaf::HcVote(_) => 0,
             TransactionLeaf::Channel(t) => t.base_gas(protocol),
-            _ => 15_000,
+            _ => ae_protocol::gas::TRANSACTION,
         };
         let size = self.leaf.wire_size();
         let base_and_size = if base == 0 {
@@ -90,19 +90,21 @@ impl TransactionRef<'_> {
             let size = layer.wire_size;
             let (base, fee, gas_price, gas_limit) = match &layer.wrapper {
                 Wrapper::GaMeta(m) => (
-                    75_000,
+                    ae_protocol::contracts::CREATE_BASE_GAS,
                     &m.fee,
                     Some(&m.gas_price),
-                    BigInt::from(75_000)
+                    BigInt::from(ae_protocol::contracts::CREATE_BASE_GAS)
                         + size_gas(size)
                         + number(&m.gas)
                         + &result.inner_gas_limit,
                 ),
                 Wrapper::PayingFor(p) => (
-                    3_000,
+                    ae_protocol::gas::PAYING_FOR,
                     &p.fee,
                     None,
-                    BigInt::from(3_000) + size_gas(size) - size_gas(inner_size) + &result.gas_limit,
+                    BigInt::from(ae_protocol::gas::PAYING_FOR) + size_gas(size)
+                        - size_gas(inner_size)
+                        + &result.gas_limit,
                 ),
             };
             let fee_gas = if protocol >= Protocol::Iris {

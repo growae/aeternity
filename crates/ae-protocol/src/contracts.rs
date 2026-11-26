@@ -24,9 +24,13 @@ pub fn serialization_available(
         _ => Err(SerializationError::UnsupportedAbi),
     }
 }
-pub const CREATE_BASE_GAS: u64 = 75_000;
+pub const CREATE_BASE_GAS: u64 = 5 * crate::gas::TRANSACTION;
 pub fn call_base_gas(abi: &Unsigned) -> u64 {
-    if *abi == 3.into() { 180_000 } else { 450_000 }
+    if *abi == 3.into() {
+        12 * crate::gas::TRANSACTION
+    } else {
+        30 * crate::gas::TRANSACTION
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,6 +13,8 @@ mod info;
 mod names;
 #[path = "http/oracles.rs"]
 mod oracles;
+#[path = "http/parameters.rs"]
+mod parameters;
 #[path = "http/post.rs"]
 mod post;
 #[path = "http/settings.rs"]
@@ -73,7 +75,12 @@ pub(super) async fn get(
         ),
     )
     .await;
-    (code, headers, serde_json::from_slice(&body).unwrap())
+    (
+        code,
+        headers,
+        serde_json::from_slice(&body)
+            .unwrap_or_else(|error| panic!("GET {path}: status {code}, invalid JSON: {error}")),
+    )
 }
 
 #[tokio::test]

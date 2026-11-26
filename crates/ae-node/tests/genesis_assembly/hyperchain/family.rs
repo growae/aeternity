@@ -13,7 +13,7 @@ mod network_settings;
 
 fn prepare(lab: &Hc, resources: Resources) -> node::Prepared {
     let mut options = node::Preparation::default();
-    options.hyperchain.micro_cycle_ms = 1;
+    options.hyperchain.micro_cycle_ms = Some(1);
     node::Prepared::new(lab.open(resources, "chain"), options).unwrap()
 }
 fn settings(
@@ -47,6 +47,37 @@ async fn ready(h: &mut node::Handle) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn protocol_parameters_report_configured_hyperchain_timing_from_active_rules() {
+    let parent = Parent::start();
+    let mut lab = Hc::new(8, json!({"dev_mode":true}), &parent);
+    let mut value = lab.config.user_map().clone();
+    value["mining"] = json!({"micro_block_cycle":17,"name_claim_bid_timeout":23});
+    lab.config = Configuration::from_value(value).unwrap();
+    let p = node::Prepared::new(lab.open(Default::default(), "chain"), Default::default()).unwrap();
+    assert_eq!(p.hyperchain().unwrap().execution().rules.micro_cycle_ms, 17);
+    let clock = Clock::new();
+    let s = settings(&lab, &p, Arc::new(move |_| Ok(clock.clone())));
+    let mut running = p.launch(s, || Ok(Default::default())).unwrap();
+    let mut h = running.handle();
+    ready(&mut h).await;
+    let http = http_checks::start(&mut running).await;
+    let (code, body) = http_checks::block_get(&http, "/v3/protocol-parameters").await;
+    assert_eq!(code, 200);
+    assert_eq!(body["micro_block_cycle"], 17);
+    assert_eq!(body["child_block_time"], 4);
+    assert!(body.get("expected_block_mine_rate").is_none());
+    assert_eq!(body["current_protocol_version"], 8);
+    assert_eq!(body["protocols"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body["protocols"][0]["name_auction_timeouts"][0]["bid_timeout"],
+        23
+    );
+    let exit = running.shutdown().await.unwrap();
+    assert!(exit.status().joined && exit.status().failure.is_none());
+    http_checks::joined(&http).await;
 }
 
 #[tokio::test]
@@ -415,7 +446,7 @@ async fn dispatch_hyperchain_failures_retry_with_the_same_bound_chain_and_drop_r
     ));
     assert!(Arc::ptr_eq(&db, failure.open.chain().database()));
     let mut options = node::Preparation::default();
-    options.hyperchain.micro_cycle_ms = 1;
+    options.hyperchain.micro_cycle_ms = Some(1);
     let p = node::Prepared::new(failure.open, options).unwrap();
     let clocks: Arc<dyn supervision::Factory + Sync> = Arc::new(|_| Ok(Clock::new()));
     let mut s = settings(&lab, &p, clocks.clone());

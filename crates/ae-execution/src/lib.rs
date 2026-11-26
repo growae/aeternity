@@ -178,7 +178,9 @@ pub struct Receipt {
     pub events: Vec<Event>,
 }
 fn simple_gas(size: usize) -> Unsigned {
-    Unsigned::from(size as u64).mul_u64(20).add(&15000.into())
+    Unsigned::from(size as u64)
+        .mul_u64(ae_protocol::gas::TRANSACTION_BYTE)
+        .add(&ae_protocol::gas::TRANSACTION.into())
 }
 fn simple_minimum_fee(size: usize, context: &Context) -> Unsigned {
     let size = if context.origin == Origin::Generalized && context.protocol < Protocol::Iris {

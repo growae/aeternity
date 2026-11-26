@@ -5,6 +5,7 @@ use ae_types::Hash256;
 
 pub mod coinbase;
 pub mod contracts;
+pub mod gas;
 pub mod names;
 pub mod oracles;
 pub mod signaling;

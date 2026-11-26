@@ -80,7 +80,7 @@ impl WritePlan {
         for update in self.updates {
             work.budget.visit(0)?;
             let bytes = work.update(update, &self.old_metadata, &self.gc_cache)?;
-            work.charge(bytes * 5)?;
+            work.charge(bytes * ae_protocol::gas::STORE_BYTE)?;
         }
         let mut meta = Map::new();
         for (id, entry) in std::mem::take(&mut work.metadata) {
@@ -97,7 +97,7 @@ impl WritePlan {
             );
         }
         let bytes = work.push(0.into(), Value::Map(meta))?;
-        work.charge(bytes * 5)?;
+        work.charge(bytes * ae_protocol::gas::STORE_BYTE)?;
         let remaining_limits = work.limits();
         Ok(Written {
             store: work.store,

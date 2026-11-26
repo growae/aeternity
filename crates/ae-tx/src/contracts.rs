@@ -172,7 +172,7 @@ impl ContractTransaction {
     }
     fn fee_gas_for_size(&self, size: usize) -> Unsigned {
         Unsigned::from(size as u64)
-            .mul_u64(20)
+            .mul_u64(ae_protocol::gas::TRANSACTION_BYTE)
             .add(&self.base_gas().into())
     }
     pub fn fee_gas(&self) -> Unsigned {

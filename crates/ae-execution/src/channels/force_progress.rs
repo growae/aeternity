@@ -86,7 +86,7 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                 tx.wire_size()
             };
         let fee = Unsigned::from(tx.base_gas(context.protocol))
-            .add(&Unsigned::from(size as u64).mul_u64(20))
+            .add(&Unsigned::from(size as u64).mul_u64(ae_protocol::gas::TRANSACTION_BYTE))
             .mul_u64(context.protocol.minimum_gas_price());
         if tx.fee() < &fee {
             return Err(crate::Error::TooLowFee.into());
@@ -342,7 +342,7 @@ pub fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     Ok(Receipt {
         transaction_hash: None,
         gas: Unsigned::from(tx.base_gas(context.protocol))
-            .add(&Unsigned::from(tx.wire_size() as u64).mul_u64(20))
+            .add(&Unsigned::from(tx.wire_size() as u64).mul_u64(ae_protocol::gas::TRANSACTION_BYTE))
             .add(gas),
         call: Some(receipt_call),
         events,

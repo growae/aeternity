@@ -25,6 +25,7 @@ mod configuration;
 mod launch;
 mod metrics;
 pub(crate) struct Information {
+    pub protocol_parameters: http::parameters::Bound,
     pub block_gas_limit: ae_types::Unsigned,
     pub dry_run_gas_limit: Result<Arc<serde_json::Value>, crate::configuration::resolution::Error>,
     pub started: std::time::Instant,
@@ -51,25 +52,17 @@ impl Family {
         }
     }
 }
+#[derive(Default)]
 pub struct PowPreparation {
-    pub micro_cycle_ms: u64,
+    // None uses the resolved governance setting. Some is an explicit embedding
+    // override; the active rule, not the unused configuration, is reported.
+    pub micro_cycle_ms: Option<u64>,
     pub body: ae_chain::admission::Limits,
     // Some supplies the complete checked rule policy. Otherwise micro_cycle_ms
     // and body select the defaults derived from this exact opened chain.
     pub rules: Option<ae_chain::key::Rules>,
     pub importer: chain::Config,
     pub snapshots: ae_storage::snapshots::Config,
-}
-impl Default for PowPreparation {
-    fn default() -> Self {
-        Self {
-            micro_cycle_ms: 3000,
-            body: Default::default(),
-            rules: None,
-            importer: Default::default(),
-            snapshots: Default::default(),
-        }
-    }
 }
 #[derive(Default)]
 pub struct Preparation {
@@ -127,9 +120,13 @@ impl Prepared {
         match family {
             Family::Cuckoo | Family::OnDemand => {
                 let p = config.pow;
-                let rules = p
-                    .rules
-                    .unwrap_or_else(|| open.pow_rules(p.micro_cycle_ms, p.body));
+                let rules = p.rules.unwrap_or_else(|| {
+                    open.pow_rules(
+                        p.micro_cycle_ms
+                            .unwrap_or(open.chain().settings().micro_cycle_ms()),
+                        p.body,
+                    )
+                });
                 configured_pow::Prepared::try_new(open, rules, p.importer, p.snapshots)
                     .map(|p| Self(PreparedInner::Pow(Box::new(p)), None))
                     .map_err(|f| {

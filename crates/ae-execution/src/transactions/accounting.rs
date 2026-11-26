@@ -85,11 +85,14 @@ pub fn used_gas<A: NodeReader, C: NodeReader>(
         let inner = tx.inner().expect("wrapper inner");
         match layer.wrapper() {
             Wrapper::PayingFor(_) => {
-                gas += BigInt::from(3_000) + size_gas(tx.wire_size()) - size_gas(inner.wire_size())
+                gas += BigInt::from(ae_protocol::gas::PAYING_FOR) + size_gas(tx.wire_size())
+                    - size_gas(inner.wire_size())
             }
             Wrapper::GaMeta(meta) => {
                 let result = auth(meta, trees)?;
-                gas += BigInt::from(75_000) + size_gas(tx.wire_size()) + big(&result.gas_used);
+                gas += BigInt::from(ae_protocol::contracts::CREATE_BASE_GAS)
+                    + size_gas(tx.wire_size())
+                    + big(&result.gas_used);
                 if !succeeded(&result)? {
                     return Ok(gas);
                 }
@@ -119,7 +122,7 @@ pub fn used_gas<A: NodeReader, C: NodeReader>(
             t.owner(),
             t.nonce(),
             contract_id(t.owner(), Nonce::Number(t.nonce())).0,
-            75_000,
+            ae_protocol::contracts::CREATE_BASE_GAS,
             false,
         ),
         _ => return Ok(gas + tx.pricing(height, protocol).gas_limit),

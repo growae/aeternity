@@ -48,13 +48,19 @@ async fn ready(h: &mut node::Handle) {
     .await
 }
 fn transfer(open: &configured::Open) -> Arc<ae_tx::SignedTransaction<ae_tx::Transaction>> {
+    transfer_with_nonce(open, 1)
+}
+fn transfer_with_nonce(
+    open: &configured::Open,
+    nonce: u64,
+) -> Arc<ae_tx::SignedTransaction<ae_tx::Transaction>> {
     use ae_tx::CanonicalTransaction;
     let mut tx = ae_tx::Spend::new(
         payer().public_key(),
         ae_types::Id::new(ae_types::IdTag::Account, [43; 32]),
     )
     .unwrap();
-    tx.set_nonce(1.into());
+    tx.set_nonce(nonce.into());
     tx.set_amount(7.into());
     tx.set_fee(100_000_000_000_000u64.into());
     let mut bytes = open.chain().settings().profile().signing_prefix(false);

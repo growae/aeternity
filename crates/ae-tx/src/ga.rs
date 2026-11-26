@@ -112,12 +112,12 @@ impl GaAttachTransaction {
     }
     pub fn fee_gas(&self) -> Unsigned {
         Unsigned::from(self.wire_size as u64)
-            .mul_u64(20)
-            .add(&75_000.into())
+            .mul_u64(ae_protocol::gas::TRANSACTION_BYTE)
+            .add(&ae_protocol::contracts::CREATE_BASE_GAS.into())
     }
     pub fn minimum_fee(&self, protocol: Protocol, generalized: bool) -> Unsigned {
         let gas = if generalized && protocol < Protocol::Iris {
-            75_000.into()
+            ae_protocol::contracts::CREATE_BASE_GAS.into()
         } else {
             self.fee_gas()
         };

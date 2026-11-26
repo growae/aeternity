@@ -8,6 +8,10 @@ pub const PRECLAIM_DELAY: u64 = 1;
 pub const PROTECTION_PERIOD: u64 = 2016;
 pub const LEGACY_LOCKED_FEE: u64 = 3;
 pub const BID_INCREMENT_PERCENT: u64 = 5;
+pub const MAX_AUCTION_LENGTH: usize = 12;
+pub const MAX_FEE_LENGTH: usize = 31;
+pub const POINTERS_MAX_COUNT: usize = 32;
+pub const POINTER_MAX_KEY_SIZE: usize = 256;
 
 pub fn max_expiration(protocol: Protocol) -> u64 {
     if protocol < Protocol::Iris {
@@ -37,7 +41,7 @@ pub fn bid_timeout(size: usize, protocol: Protocol, development_override: Option
 pub fn bid_extension(size: usize, protocol: Protocol, development_override: Option<u64>) -> u64 {
     if protocol < Protocol::Ceres {
         bid_timeout(size, protocol, development_override)
-    } else if size <= 12 {
+    } else if size <= MAX_AUCTION_LENGTH {
         240
     } else {
         0
@@ -73,7 +77,7 @@ pub fn claim_fee(size: std::num::NonZeroUsize, protocol: Protocol) -> Unsigned {
         return 0.into();
     }
     let (mut a, mut b) = (2u64, 3u64);
-    for _ in size.get().min(31)..31 {
+    for _ in size.get().min(MAX_FEE_LENGTH)..MAX_FEE_LENGTH {
         (a, b) = (b, a + b);
     }
     Unsigned::from(b).mul_u64(100_000_000_000_000)

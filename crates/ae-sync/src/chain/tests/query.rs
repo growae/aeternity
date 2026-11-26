@@ -1,6 +1,113 @@
 use super::*;
 
 #[tokio::test]
+async fn current_header_cancelled_render_keeps_capacity_until_joined_shutdown() {
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let capacity = importer.available();
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let ticket = importer
+        .current_header(1 << 20, move |head| {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            head
+        })
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let held = importer.available();
+    assert_eq!(held.0, 0);
+    assert!(held.1 < capacity.1);
+    drop(ticket);
+    assert_eq!(importer.available(), held);
+    importer.stop();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), importer.join())
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), importer.join())
+        .await
+        .unwrap();
+    assert!(matches!(
+        importer.current_header(0, |h| h),
+        Err(Error::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn current_header_rendering_tracks_micro_tops_and_retains_bounded_snapshot_work() {
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let original = importer
+        .current_header(1 << 20, |head| head)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let capacity = importer.available();
+    assert!(matches!(
+        importer.current_header(usize::MAX, |h| h),
+        Err(Error::Busy)
+    ));
+    for block in &fixtures::blocks(&NetworkProfile::mainnet())[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let held = importer
+            .current_header(1 << 20, |h| h)
+            .unwrap()
+            .wait_retained()
+            .await
+            .unwrap();
+        assert_eq!(held.value.version, block.header().common().version);
+        assert_eq!(held.value.selected.top, block.hash().unwrap());
+        assert_eq!(held.value.network, NetworkProfile::mainnet());
+        assert!(matches!(
+            importer.current_header(1, |h| h),
+            Err(Error::Busy)
+        ));
+        drop(held);
+        assert_eq!(importer.available(), capacity);
+    }
+    importer
+        .database()
+        .rollback(repository::rollback::Target::Height(0), Default::default())
+        .unwrap();
+    let rolled = importer
+        .current_header(0, |h| h)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(rolled.version, original.version);
+    assert_eq!(rolled.selected.top, original.selected.top);
+    assert!(rolled.selected.revision > original.selected.revision);
+    *importer.context.recovery.lock().unwrap() = Some(Error::RecoveryRequired);
+    assert!(matches!(
+        importer.current_header(0, |h| h),
+        Err(Error::RecoveryRequired)
+    ));
+    importer.stop();
+    importer.join().await;
+    assert!(matches!(
+        importer.current_header(0, |h| h),
+        Err(Error::Closed)
+    ));
+}
+
+#[tokio::test]
 async fn transaction_queries_follow_mainnet_records_and_keep_reply_capacity_until_drop() {
     use crate::chain::query::transactions::{Reply, Request};
     let (_temp, importer) = setup(Config {

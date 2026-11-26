@@ -66,6 +66,7 @@ impl Prepared {
         }
         let metrics_config = self.1.clone();
         let information = Arc::new(Information {
+            protocol_parameters: http::parameters::Bound::capture(&self),
             block_gas_limit: self.configured().execution().effective_gas_limit().clone(),
             dry_run_gas_limit: self.configured().external_dry_run_gas_limit().clone(),
             currency: self.configured().currency().clone(),

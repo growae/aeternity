@@ -7,6 +7,79 @@ use crate::configuration::{
 use std::path::Path;
 
 #[test]
+fn original_protocol_parameter_micro_cycle_lookup_matches_native_precedence() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_protocol_parameters.json"
+    ))
+    .unwrap();
+    let mut compared = 0;
+    for row in fixture["rows"].as_array().unwrap() {
+        if row["code"] != 200 {
+            continue;
+        }
+        let mut context = Context::new(Directories {
+            home: "/release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        for (app, values) in row["applications"].as_object().unwrap() {
+            for (key, value) in values.as_object().unwrap() {
+                context
+                    .set(app.clone(), key.clone(), value.clone())
+                    .unwrap();
+            }
+        }
+        let configuration = Configuration {
+            value: row["user"].clone(),
+        };
+        let resolved = configuration.resolve(&context).unwrap();
+        assert_eq!(
+            crate::configuration::chain::micro_block_cycle(&resolved).unwrap(),
+            row["body"]["micro_block_cycle"],
+            "{}",
+            row["name"]
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 138);
+    for (value, expected) in [
+        (json!(0), Some(0)),
+        (json!(17), Some(17)),
+        (json!(86_400_000), Some(86_400_000)),
+        (json!(86_400_001), None),
+        (json!(-1), None),
+        (json!(false), None),
+        (json!("17"), None),
+        (Value::Null, None),
+    ] {
+        let mut context = Context::new(Directories {
+            home: "/release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        context
+            .set("aecore".into(), "micro_block_cycle".into(), value.clone())
+            .unwrap();
+        let config = Configuration::empty();
+        let resolved = config.resolve(&context).unwrap();
+        let settings = crate::configuration::chain::Settings::resolve(&resolved, None);
+        assert_eq!(
+            settings.as_ref().ok().map(|s| s.micro_cycle_ms()),
+            expected,
+            "{value}"
+        );
+        if expected.is_none() {
+            assert_eq!(
+                settings.unwrap_err(),
+                crate::configuration::chain::Error::MicroCycle
+            );
+        }
+    }
+}
+
+#[test]
 fn original_settings_lookup_matches_nested_application_precedence_and_typed_pool_policy() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/erlang_http_node_settings.json"

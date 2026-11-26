@@ -62,7 +62,7 @@ impl<S: CachedSubtreeBackend, O: MapOrder, H: Host<S::Error>> Step<'_, '_, S, O,
             }
         };
         if let Value::ContractBytearray(bytes) = &source {
-            self.spend(BigInt::from(bytes.len()) * 5u64)?;
+            self.spend(BigInt::from(bytes.len()) * ae_protocol::gas::STORE_BYTE)?;
         }
         let key = self
             .host

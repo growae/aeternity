@@ -1872,6 +1872,473 @@
         "dry_run_gas_limit",
         "block_gas_limit"
       ]
+    },
+    "ProtocolParameters": {
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "current_protocol_version": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "locked_coins_holder_account": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EncodedPubkey"
+            }
+          ]
+        },
+        "expected_block_mine_rate": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "child_block_time": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "micro_block_cycle": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "protocols": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/ProtocolConsensusParameters"
+          }
+        }
+      },
+      "required": [
+        "network_id",
+        "current_protocol_version",
+        "locked_coins_holder_account",
+        "micro_block_cycle",
+        "protocols"
+      ]
+    },
+    "ProtocolConsensusParameters": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Protocol"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "minimum_gas_price": {
+              "type": "string"
+            },
+            "gas_per_byte": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "store_byte_gas": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "tx_base_gas": {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709552000
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "contract_tx_base_gas": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ContractTxBaseGas"
+              }
+            },
+            "state_gas_per_block": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/definitions/StateGasPerBlock"
+              }
+            },
+            "name_claim_fees": {
+              "type": "array",
+              "minItems": 31,
+              "maxItems": 31,
+              "items": {
+                "type": "string"
+              }
+            },
+            "name_auction_timeouts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/NameAuctionTimeout"
+              }
+            },
+            "name_claim_bid_increment": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_max_length_starting_auction": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_claim_max_expiration": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_registrars": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "name_pointers_max_count": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_pointer_max_key_size": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_preclaim_expiration": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_claim_preclaim_delta": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_protection_period": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "name_claim_locked_fee": {
+              "type": "string"
+            },
+            "allowed_contract_versions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ContractVersion"
+              }
+            },
+            "allowed_oracle_abi_versions": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "minimum_gas_price",
+            "gas_per_byte",
+            "store_byte_gas",
+            "tx_base_gas",
+            "contract_tx_base_gas",
+            "state_gas_per_block",
+            "name_claim_fees",
+            "name_auction_timeouts",
+            "name_claim_bid_increment",
+            "name_max_length_starting_auction",
+            "name_claim_max_expiration",
+            "name_registrars",
+            "name_preclaim_expiration",
+            "name_claim_preclaim_delta",
+            "name_protection_period",
+            "name_claim_locked_fee",
+            "allowed_contract_versions",
+            "allowed_oracle_abi_versions"
+          ]
+        }
+      ]
+    },
+    "ContractVersion": {
+      "type": "object",
+      "properties": {
+        "vm_version": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "abi_version": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "vm_version",
+        "abi_version"
+      ]
+    },
+    "NameAuctionTimeout": {
+      "type": "object",
+      "properties": {
+        "length": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "bid_timeout": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "bid_extension": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "length",
+        "bid_timeout",
+        "bid_extension"
+      ]
+    },
+    "StateGasPerBlock": {
+      "type": "object",
+      "properties": {
+        "part": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "whole": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "part",
+        "whole"
+      ]
+    },
+    "ContractTxBaseGas": {
+      "type": "object",
+      "properties": {
+        "tx_type": {
+          "type": "string"
+        },
+        "abi_version": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "tx_base_gas": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709552000
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "tx_type",
+        "abi_version",
+        "tx_base_gas"
+      ]
+    },
+    "Protocol": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/definitions/UInt32"
+        },
+        "effective_at_height": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "version",
+        "effective_at_height"
+      ]
     }
   },
   "operations": {
@@ -1943,6 +2410,9 @@
     },
     "GetNodeSettings": {
       "$ref": "#/definitions/NodeSettings"
+    },
+    "GetProtocolParameters": {
+      "$ref": "#/definitions/ProtocolParameters"
     }
   }
 }

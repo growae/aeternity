@@ -52,8 +52,8 @@ pub fn sanitize_pointers(pointers: &[Pointer]) -> Vec<Pointer> {
     let mut seen = std::collections::BTreeSet::new();
     pointers
         .iter()
-        .filter(|p| p.key.len() <= 256 && seen.insert(&p.key))
-        .take(32)
+        .filter(|p| p.key.len() <= ae_protocol::names::POINTER_MAX_KEY_SIZE && seen.insert(&p.key))
+        .take(ae_protocol::names::POINTERS_MAX_COUNT)
         .cloned()
         .collect()
 }

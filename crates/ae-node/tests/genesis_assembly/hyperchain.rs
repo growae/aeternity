@@ -126,7 +126,7 @@ impl Hc {
         startup::Prepared::new(
             self.open(resources, path),
             startup::Limits {
-                micro_cycle_ms: 1,
+                micro_cycle_ms: Some(1),
                 ..Default::default()
             },
         )

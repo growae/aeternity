@@ -22,11 +22,13 @@ impl Ttl {
         Ok(height.add(&self.delta(height)?))
     }
 }
+pub const STATE_GAS_PART: u64 = 32_000;
+pub const STATE_GAS_WHOLE: u64 = 175_200;
 pub fn state_gas(delta: &Unsigned) -> Unsigned {
     delta
-        .mul_u64(32_000)
-        .add(&175_199.into())
-        .div_rem_u64(175_200)
+        .mul_u64(STATE_GAS_PART)
+        .add(&(STATE_GAS_WHOLE - 1).into())
+        .div_rem_u64(STATE_GAS_WHOLE)
         .expect("nonzero denominator")
         .0
 }

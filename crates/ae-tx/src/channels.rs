@@ -280,8 +280,8 @@ impl ChannelTransaction {
     pub fn base_gas(&self, p: Protocol) -> u64 {
         match self.operation {
             Operation::Offchain { .. } => 0,
-            Operation::ForceProgress { .. } if p >= Protocol::Fortuna => 450_000,
-            _ => 15_000,
+            Operation::ForceProgress { .. } => ae_protocol::gas::channel_force_progress(p),
+            _ => ae_protocol::gas::TRANSACTION,
         }
     }
     pub fn valid_at_protocol(&self, p: Protocol) -> Result<bool, Error> {

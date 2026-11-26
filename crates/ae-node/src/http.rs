@@ -15,6 +15,7 @@ mod key;
 mod model;
 mod names;
 mod oracles;
+pub(crate) mod parameters;
 mod pending;
 mod post;
 mod response;

@@ -23,7 +23,7 @@ pub struct Limits {
     pub ledger: repo::Limits,
     pub leader: ae_hyperchain::leader::Limits,
     pub body: ae_chain::admission::Limits,
-    pub micro_cycle_ms: u64,
+    pub micro_cycle_ms: Option<u64>,
     pub reward_delay: u64,
 }
 impl Default for Limits {
@@ -32,7 +32,7 @@ impl Default for Limits {
             ledger: Default::default(),
             leader: Default::default(),
             body: Default::default(),
-            micro_cycle_ms: 3000,
+            micro_cycle_ms: None,
             reward_delay: ae_protocol::coinbase::REWARD_DELAY,
         }
     }
@@ -60,12 +60,15 @@ pub struct Active {
 impl Prepared {
     pub fn new(open: Open, limits: Limits) -> Result<Self, Box<Failure>> {
         let build = || {
+            let micro_cycle_ms = limits
+                .micro_cycle_ms
+                .unwrap_or(open.chain().settings().micro_cycle_ms());
             let identity = open.chain().identity();
             if identity.algorithm != ConsensusAlgorithm::Hyperchain
                 || identity.execution_profile != open.execution().fingerprint()
                 || open.execution().execution().consensus() != ConsensusType::Pos
                 || limits.ledger.history == 0
-                || limits.micro_cycle_ms > 86_400_000
+                || micro_cycle_ms > 86_400_000
             {
                 return Err(Error::Binding);
             }
@@ -90,7 +93,7 @@ impl Prepared {
                     cache_limits: limits.leader,
                 },
             );
-            rules.micro_cycle_ms = limits.micro_cycle_ms;
+            rules.micro_cycle_ms = micro_cycle_ms;
             rules.configured_gas_limit = open.execution().effective_gas_limit().clone();
             rules.body_limits = limits.body;
             rules.reward_delay = limits.reward_delay;
