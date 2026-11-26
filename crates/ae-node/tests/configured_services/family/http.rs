@@ -5,6 +5,8 @@ mod accounts;
 mod channels;
 #[path = "http/contracts.rs"]
 mod contracts;
+#[path = "http/currency.rs"]
+mod currency;
 #[path = "http/info.rs"]
 mod info;
 #[path = "http/names.rs"]

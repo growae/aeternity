@@ -10,6 +10,7 @@ mod accounts;
 mod blocks;
 mod channels;
 mod contracts;
+mod currency;
 mod key;
 mod model;
 mod names;

@@ -5,7 +5,7 @@ use crate::configuration::{
     auxiliary,
     chain::Settings,
     consensus::Kind,
-    execution, presets,
+    currency, execution, presets,
     resolution::{Mode, Resolved},
 };
 use ae_state::Trees;
@@ -32,6 +32,7 @@ pub struct Prepared {
     genesis: genesis::Prepared,
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
+    currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
 }
 pub struct Open {
     cwd: PathBuf,
@@ -39,6 +40,7 @@ pub struct Open {
     chain: Opened,
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
+    currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
 }
 impl Prepared {
     #[allow(clippy::too_many_arguments)]
@@ -54,6 +56,10 @@ impl Prepared {
         auxiliary_limits: auxiliary::Limits,
     ) -> Result<Self, Error> {
         let settings = Settings::resolve(resolved, network).map_err(Error::Chain)?;
+        // Metadata resolution failures belong to the request boundary. They
+        // must not prevent a chain from opening or change its durable identity.
+        let currency = currency::Plan::resolve(resolved, settings.profile().network_id(), cwd)
+            .map(std::sync::Arc::new);
         let auxiliary = auxiliary::Plan::resolve(resolved, settings.profile().network_id(), cwd)
             .map_err(Error::Auxiliary)?
             .load(auxiliary_limits)
@@ -89,6 +95,7 @@ impl Prepared {
             genesis,
             execution,
             auxiliary,
+            currency,
         })
     }
     pub fn genesis(&self) -> &genesis::Prepared {
@@ -109,10 +116,14 @@ impl Prepared {
             chain,
             execution: self.execution,
             auxiliary: self.auxiliary,
+            currency: self.currency,
         })
     }
 }
 impl Open {
+    pub(crate) fn currency(&self) -> &Result<std::sync::Arc<currency::Plan>, currency::Error> {
+        &self.currency
+    }
     pub fn startup_directory(&self) -> &Path {
         &self.cwd
     }

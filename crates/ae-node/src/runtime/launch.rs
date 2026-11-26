@@ -66,6 +66,7 @@ impl Prepared {
         }
         let metrics_config = self.1.clone();
         let information = Arc::new(Information {
+            currency: self.configured().currency().clone(),
             started: std::time::Instant::now(),
             build: ae_sync::peer::info::Metadata::current(),
             expected_mine_rate: self

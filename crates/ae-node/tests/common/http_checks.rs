@@ -112,6 +112,29 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         .wait()
         .await
         .unwrap();
+    let network_name = match selected.network.network_id() {
+        b"ae_mainnet" => "Mainnet",
+        b"ae_uat" => "Testnet",
+        other => std::str::from_utf8(other).unwrap(),
+    };
+    for (path, units) in [
+        ("/v3/currency", json!(1_000_000_000_000_000_000u64)),
+        (
+            "/v3/currency?int-as-string=true",
+            json!("1000000000000000000"),
+        ),
+    ] {
+        assert_eq!(
+            block_get(http, path).await,
+            (
+                200,
+                json!({
+                    "name":"aeternity", "symbol":"AE", "subunit":"aetto", "subunits_per_unit":units,
+                    "primary_colour":"#f7296e", "secondary_colour":"#1e1e1e", "network_name":network_name
+                })
+            )
+        );
+    }
     let bindings = match root.pow() {
         Some(pow) => pow.workers().unwrap().bindings(),
         None => root.hyperchain().unwrap().workers().unwrap().bindings(),

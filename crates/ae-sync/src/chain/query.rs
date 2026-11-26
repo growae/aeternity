@@ -8,6 +8,8 @@ pub mod channels;
 pub mod contracts;
 pub mod names;
 pub mod oracles;
+mod service;
+pub use service::ServiceWork;
 pub mod transactions;
 
 pub(super) struct Height {

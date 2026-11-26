@@ -1740,6 +1740,62 @@
         "lock_period",
         "locked_until"
       ]
+    },
+    "Currency": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "subunit": {
+          "type": "string"
+        },
+        "subunits_per_unit": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fiat_converstion_url": {
+          "type": "string",
+          "deprecated": true
+        },
+        "fiat_conversion_url": {
+          "type": "string"
+        },
+        "logo": {
+          "$ref": "#/definitions/Image"
+        },
+        "primary_colour": {
+          "type": "string"
+        },
+        "secondary_colour": {
+          "type": "string"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "symbol",
+        "subunit",
+        "subunits_per_unit",
+        "primary_colour",
+        "secondary_colour",
+        "network_name"
+      ]
+    },
+    "Image": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        }
+      }
     }
   },
   "operations": {
@@ -1805,6 +1861,9 @@
     },
     "GetChannelByPubkey": {
       "$ref": "#/definitions/Channel"
+    },
+    "GetCurrency": {
+      "$ref": "#/definitions/Currency"
     }
   }
 }

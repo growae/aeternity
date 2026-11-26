@@ -29,6 +29,8 @@ pub(crate) struct Information {
     pub build: ae_sync::peer::info::Metadata,
     pub expected_mine_rate: serde_json::Value,
     pub order: Otp26,
+    pub currency:
+        Result<Arc<crate::configuration::currency::Plan>, crate::configuration::currency::Error>,
 }
 pub use launch::{Cuckoo, Hyperchain, OnDemand, Settings, StartError};
 
