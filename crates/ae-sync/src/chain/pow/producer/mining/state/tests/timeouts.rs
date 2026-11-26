@@ -283,6 +283,7 @@ fn completed_receipt_observed_after_deadline_keeps_its_exact_result() {
 #[test]
 fn a_public_proof_replayed_after_timeout_is_retained_but_never_selected() {
     let node = Node::new();
+    let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
     let importer = importer(&node);
     let header = header();
     let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
@@ -316,6 +317,7 @@ fn a_public_proof_replayed_after_timeout_is_retained_but_never_selected() {
     assert!(mining.solution.is_none() && mining.admission.is_none());
     assert_eq!(node.db.view().unwrap().status().revision, 1);
     retire(mining);
+    assert_eq!(metrics.counts(), (0, 0));
 }
 
 #[test]

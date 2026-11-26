@@ -273,6 +273,71 @@ async fn finish(f: Fixture) {
 }
 
 #[tokio::test]
+async fn missing_key_retry_counts_after_native_sleep_and_cancellation_suppresses_the_reply() {
+    use crate::test_support::mining_metrics::MiningMetrics;
+    for cancel in [false, true] {
+        let node = Node::new(1);
+        let mut f = fixture(&node);
+        let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
+        let mut attempt = f
+            .owner
+            .begin_production(f.accepted.producer(), f.pool.client(), Default::default())
+            .unwrap();
+        // Exercise the sealing failure boundary with a real preset-key worker
+        // whose key map is empty. No consensus admission or key is fabricated.
+        let block = node
+            .blocks()
+            .into_iter()
+            .find(|b| matches!(b, Block::Key(_)))
+            .unwrap();
+        attempt.block = Some(block);
+        attempt.phase = Phase::Seal;
+        let now = Instant::now();
+        let end = now + Duration::from_secs(5);
+        while attempt.deadline().is_none() {
+            assert!(Instant::now() < end);
+            f.owner.step().unwrap();
+            attempt.step(&mut f.owner, &f.importer, 1000, now).unwrap();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let deadline = attempt.deadline().unwrap();
+        assert_eq!(deadline.duration_since(now), Duration::from_secs(1));
+        assert_eq!(metrics.counts(), (0, 0));
+        assert_eq!(
+            attempt
+                .step(
+                    &mut f.owner,
+                    &f.importer,
+                    1999,
+                    deadline - Duration::from_nanos(1)
+                )
+                .unwrap(),
+            Progress::Waiting
+        );
+        if cancel {
+            attempt.cancel();
+            assert_eq!(
+                attempt.step(&mut f.owner, &f.importer, 2000, deadline),
+                Err(Error::Cancelled)
+            );
+            assert_eq!(metrics.counts(), (0, 0));
+        } else {
+            attempt
+                .step(&mut f.owner, &f.importer, 2000, deadline)
+                .unwrap();
+            assert_eq!(metrics.counts(), (0, 1));
+            attempt
+                .step(&mut f.owner, &f.importer, 2000, deadline)
+                .unwrap();
+            assert_eq!(metrics.counts(), (0, 1));
+        }
+        drop(attempt);
+        finish(f).await;
+        assert_eq!(metrics.counts(), (0, u64::from(!cancel)));
+    }
+}
+
+#[tokio::test]
 async fn micro_cache_receipts_keep_success_rejection_and_unknown_after_join() {
     for index in [1, 3, 5] {
         for mode in 0..3 {

@@ -496,7 +496,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                     Wake::Done => Phase::Done,
                     Wake::Micro => Phase::MicroStart,
                     Wake::FinishKey => Phase::FinishKey,
-                    Wake::Seal => Phase::Seal,
+                    Wake::Seal => {
+                        use ae_chain::instrumentation::{Counter, Event};
+                        // The native missing-key reply is no_solution only
+                        // after its one-second sleep completes.
+                        importer
+                            .database()
+                            .instrumentation()
+                            .event(Event::Counter(Counter::MiningRetries, 1));
+                        Phase::Seal
+                    }
                     Wake::Reconsider => {
                         let db = owner.source.database.upgrade().ok_or(Error::Closed)?;
                         self.parent = db
@@ -750,6 +759,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Attempt<O> {
                 self.signatures.key = None;
                 self.key = None;
                 self.phase = Phase::Submit(Kind::Key);
+                importer.database().instrumentation().event(
+                    ae_chain::instrumentation::Event::Counter(
+                        ae_chain::instrumentation::Counter::BlocksMined,
+                        1,
+                    ),
+                );
                 Ok(Progress::Signed(Kind::Key))
             }
             Phase::Submit(kind) => {

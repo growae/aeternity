@@ -58,6 +58,14 @@ fn committed_event_payloads_preserve_real_execution_and_original_origin_rules() 
             }
             if receipt.change().old_tip != Some(receipt.change().new_tip) {
                 expected.push(ae_chain::instrumentation::Event::TopChanged);
+                if let Block::Key(header) = &block {
+                    expected.push(ae_chain::instrumentation::Event::Gauge(
+                        ae_chain::instrumentation::Gauge::KeyInfo,
+                        ae_chain::instrumentation::Value::Integer(
+                            header.info.map(u32::from_be_bytes).unwrap_or(0).into(),
+                        ),
+                    ));
+                }
             }
             assert_eq!(
                 std::mem::take(&mut *observations.0.lock().unwrap()),
@@ -170,7 +178,20 @@ fn source_overflow_and_oversized_records_report_exact_gaps_without_rejecting_com
         let receipt = insert(&db, &all[1], ledger::Origin::Gossip);
         assert_eq!(
             *observations.0.lock().unwrap(),
-            vec![ae_chain::instrumentation::Event::TopChanged; 2]
+            all[..2]
+                .iter()
+                .flat_map(|block| {
+                    use ae_chain::instrumentation::{Event, Gauge, Value};
+                    let mut events = vec![Event::TopChanged];
+                    if let Block::Key(header) = block {
+                        events.push(Event::Gauge(
+                            Gauge::KeyInfo,
+                            Value::Integer(header.info.map(u32::from_be_bytes).unwrap_or(0).into()),
+                        ));
+                    }
+                    events
+                })
+                .collect::<Vec<_>>()
         );
         let events::Error::Gap { missed, resume } = reader.after(&cursor, 10).unwrap_err() else {
             panic!()

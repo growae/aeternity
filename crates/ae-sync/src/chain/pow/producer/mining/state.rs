@@ -2,6 +2,7 @@ use super::*;
 
 pub(in crate::chain::pow::producer) struct Mining<O> {
     builder: preparation::Builder<O>,
+    instrumentation: ae_chain::instrumentation::Publisher,
     config: Config,
     clock: Arc<dyn generator::Clock>,
     epoch: u64,
@@ -52,6 +53,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
         }
         Ok(Self {
             builder,
+            instrumentation: importer.database().instrumentation().clone(),
             config,
             clock,
             cpus,
@@ -247,6 +249,22 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             selected,
             timed_out: job.timed_out,
         });
+        // Observe a live reply once, before any admission or strict-parent
+        // rejection. Resource bounds, cancellation and retirement are not
+        // the native no_solution/runtime retry result.
+        if sealed.is_ok() && !job.timed_out && !self.candidates.is_empty() {
+            use ae_chain::instrumentation::{Counter, Event};
+            let counter = if selected {
+                Some(Counter::BlocksMined)
+            } else if retry_reply(&result.result) {
+                Some(Counter::MiningRetries)
+            } else {
+                None
+            };
+            if let Some(counter) = counter {
+                self.instrumentation.event(Event::Counter(counter, 1));
+            }
+        }
         if let Some(header) = sealed?
             && selected
         {
@@ -395,6 +413,24 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             output: self.output,
         }
     }
+}
+
+fn retry_reply(result: &Result<miner::Outcome, miner::Error>) -> bool {
+    use miner::external::{Error, Operation};
+    matches!(
+        result,
+        Ok(miner::Outcome::NoSolution | miner::Outcome::Exhausted)
+            | Err(miner::Error::External(
+                Error::BadNonce | Error::BadEdge | Error::BadSize
+            ))
+            | Err(miner::Error::External(Error::Io {
+                operation: Operation::Runtime
+                    | Operation::Pipe
+                    | Operation::Spawn
+                    | Operation::Read,
+                ..
+            }))
+    )
 }
 
 #[cfg(test)]

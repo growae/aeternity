@@ -2,6 +2,7 @@
 pub mod hyperchain;
 pub mod import;
 pub mod ledger_fixtures;
+pub mod mining_metrics;
 use ae_chain::repository::{Identity, ledger};
 use ae_codec::{
     api::{self, ApiType},

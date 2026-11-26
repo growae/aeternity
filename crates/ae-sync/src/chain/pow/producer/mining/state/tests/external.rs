@@ -35,6 +35,7 @@ fn poll(mining: &mut Mining<Otp26>, header: &KeyHeader, now: Instant) {
 #[tokio::test]
 async fn external_public_proofs_pass_canonical_verification_and_durable_admission() {
     let node = Node::new();
+    let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
     let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let importer = importer(&node);
     let mut count = 0;
@@ -72,6 +73,7 @@ async fn external_public_proofs_pass_canonical_verification_and_durable_admissio
         );
         assert_eq!(result.external.unwrap().phase, Phase::Reaped);
         assert_eq!(result.attempts, None);
+        assert_eq!(metrics.counts(), (count + 1, 0));
         mining
             .act(&importer, context(header, true, count % 2 == 0))
             .unwrap();
@@ -105,6 +107,7 @@ async fn external_public_proofs_pass_canonical_verification_and_durable_admissio
         count += 1;
     }
     assert_eq!(count, 6);
+    assert_eq!(metrics.counts(), (6, 0));
 }
 
 struct Pause {

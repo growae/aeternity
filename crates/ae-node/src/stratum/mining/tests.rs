@@ -41,6 +41,9 @@ use ae_sync::chain::pow::{preparation, stratum::Prepared};
 use ae_types::{AccountPublicKey, Hash256};
 #[path = "../../../../ae-sync/tests/common/ledger_fixtures.rs"]
 pub(super) mod fixture;
+#[path = "../../../../ae-sync/tests/common/mining_metrics.rs"]
+mod mining_metrics;
+use mining_metrics::MiningMetrics;
 const WALL: u64 = u64::MAX - 600_000;
 struct ClockValue(i128);
 impl Clock for ClockValue {
@@ -294,6 +297,7 @@ fn six_saved_mainnet_keys_cross_preparation_journal_accounting_and_created_admis
 fn busy_admission_survives_dropped_completions_shutdown_and_new_epochs_without_reaccounting() {
     let t = Temp::new();
     let db = open(&t);
+    let (metrics, _binding) = MiningMetrics::bind(db.instrumentation());
     let importer = importer(&db, 1);
     // Unread accepted ticket retains the only importer slot, even if finished.
     let mut pressure = importer.import_created_block(vec![0], WALL).unwrap();
@@ -313,6 +317,7 @@ fn busy_admission_survives_dropped_completions_shutdown_and_new_epochs_without_r
             .is_some_and(|r| r.attempts > 0 && r.state == journal::State::Ready)
     });
     let saved = client.get(id).unwrap().unwrap();
+    assert_eq!(metrics.counts(), (1, 0));
     let counts = db.stratum(Default::default()).unwrap().info().counts;
     let report = owner.shutdown();
     assert!(report.failure.is_none());
@@ -338,6 +343,11 @@ fn busy_admission_survives_dropped_completions_shutdown_and_new_epochs_without_r
         counts
     );
     assert!(next.shutdown().failure.is_none());
+    assert_eq!(metrics.counts(), (1, 0));
+    assert_eq!(
+        metrics.key_info(),
+        vec![ae_chain::instrumentation::Value::Integer(0)]
+    );
     stop(importer);
 }
 #[test]

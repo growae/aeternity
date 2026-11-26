@@ -111,6 +111,7 @@ pub struct Update {
     consensus_events: Vec<ae_hyperchain::block::Event>,
     publication: crate::publication::Context,
     publication_body: Option<std::sync::Arc<[u8]>>,
+    key_info: Option<u32>,
     key_fraud: Option<(KeyHeader, KeyHeader)>,
     proof: Option<fraud::Proof>,
 }
@@ -133,6 +134,7 @@ impl Update {
                 events: vec![],
                 consensus_events: vec![],
                 publication_body: None,
+                key_info: None,
                 publication: crate::publication::Context {
                     origin: crate::publication::Origin::Rollback,
                     block: None,
@@ -147,6 +149,10 @@ impl Update {
     }
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+    // Ephemeral observation data, excluded from canonical and journal bytes.
+    pub fn key_info(&self) -> Option<u32> {
+        self.key_info
     }
     pub fn source_id(&self) -> u64 {
         self.source_id
@@ -451,6 +457,7 @@ pub fn bootstrap<S: Read>(
             events: vec![],
             consensus_events: vec![],
             publication_body: None,
+            key_info: None,
             publication: crate::publication::Context {
                 origin: crate::publication::Origin::Bootstrap,
                 block: Some(crate::publication::BlockInfo::of(&block, hash)),
@@ -984,6 +991,10 @@ fn finish<S: Read>(
             events,
             consensus_events,
             publication_body,
+            key_info: match block {
+                Block::Key(header) => Some(header.info.map(u32::from_be_bytes).unwrap_or(0)),
+                Block::Micro(_) => None,
+            },
             publication: crate::publication::Context {
                 origin,
                 block: Some(crate::publication::BlockInfo::of(block, current)),

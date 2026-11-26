@@ -1,6 +1,9 @@
 use super::*;
 use crate::tests::{Temp, identity, plan};
 use ae_stratum::{ingress::Solution, nonce::Nonce};
+#[path = "../../../../ae-sync/tests/common/mining_metrics.rs"]
+mod mining_metrics;
+use mining_metrics::MiningMetrics;
 fn open(t: &Temp) -> Arc<Database> {
     let db = Arc::new(Database::open(&t.0, identity()).unwrap());
     if db.view().unwrap().status().tip.is_none() {
@@ -94,6 +97,7 @@ fn accept(w: &mut Writer, e: &Epoch, i: &ingress::Epoch, n: u64) -> Receipt {
 fn atomic_receipts_convert_the_current_share_and_consume_all_active_candidates() {
     let t = Temp::new();
     let db = open(&t);
+    let (metrics, _binding) = MiningMetrics::bind(db.instrumentation());
     let status = db.view().unwrap().status();
     let mut w = writer(&db);
     let (e, i) = setup(&mut w);
@@ -123,6 +127,7 @@ fn atomic_receipts_convert_the_current_share_and_consume_all_active_candidates()
         .accept_mining(&i, 1, share, Default::default(), &e, Default::default())
         .unwrap();
     let receipt = accept(&mut w, &e, &i, 2);
+    assert_eq!(metrics.counts(), (1, 0));
     let r = record(&db, receipt.id);
     let after = rows(&db);
     assert_eq!(r.state, State::Ready);
@@ -165,11 +170,14 @@ fn atomic_receipts_convert_the_current_share_and_consume_all_active_candidates()
         .0;
     assert!(matches!(&old[0],core::Record::Share(s)if s.hash==candidate().hash()));
     assert_eq!(db.view().unwrap().status(), status);
+    assert_eq!(metrics.counts(), (1, 0));
+    assert!(metrics.key_info().is_empty());
 }
 #[test]
 fn missing_cache_and_inactive_work_keep_native_accounting_order_and_closeout_replays() {
     let t = Temp::new();
     let db = open(&t);
+    let (metrics, _binding) = MiningMetrics::bind(db.instrumentation());
     let mut w = writer(&db);
     let (e, i) = setup(&mut w);
     let v = w.version().unwrap();
@@ -183,6 +191,7 @@ fn missing_cache_and_inactive_work_keep_native_accounting_order_and_closeout_rep
     let lost = accept(&mut w, &e, &i, 1);
     let lost = record(&db, lost.id);
     assert_eq!(lost.state, State::Done(Outcome::MissingCandidate));
+    assert_eq!(metrics.counts(), (0, 0));
     assert!(lost.accounted_key.is_none());
     assert_eq!(
         db.stratum(Default::default())
@@ -228,6 +237,7 @@ fn missing_cache_and_inactive_work_keep_native_accounting_order_and_closeout_rep
     let late = accept(&mut w, &e, &i, 3);
     let late = record(&db, late.id);
     assert_eq!(late.state, State::Done(Outcome::Inactive));
+    assert_eq!(metrics.counts(), (1, 0));
     assert_eq!(late.accounted_key, Some(late.receipt.share_key));
     w.acknowledge_solution(&done, Default::default()).unwrap();
     w.acknowledge_solution(&late, Default::default()).unwrap();
@@ -388,6 +398,7 @@ fn uncertain_atomic_intents_are_reconciled_without_repeating_accounting_or_activ
     for applied in [false, true] {
         let t = Temp::new();
         let db = open(&t);
+        let (metrics, _binding) = MiningMetrics::bind(db.instrumentation());
         let mut w = writer(&db);
         let (e, i) = setup(&mut w);
         let before = rows(&db);
@@ -413,11 +424,13 @@ fn uncertain_atomic_intents_are_reconciled_without_repeating_accounting_or_activ
             assert_eq!(rows(&db), before);
         }
         let receipt = accept(&mut w, &e, &i, 1);
+        assert_eq!(metrics.counts(), (u64::from(!applied), 0));
         let r = record(&db, receipt.id);
         let after = rows(&db);
         assert_eq!(r.accounted_key, Some(receipt.share_key));
         assert_eq!(r.state, State::Ready);
         assert_eq!(accept(&mut w, &e, &i, 1), receipt);
+        assert_eq!(metrics.counts(), (u64::from(!applied), 0));
         assert_eq!(rows(&db), after);
         let mut running = r.clone();
         running.state = State::Submitting;

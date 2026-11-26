@@ -1,0 +1,634 @@
+[
+  {
+    "case_name": "current",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "current",
+    "reason": "runtime",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "current_stale",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [
+        "create_key_block_candidate"
+      ],
+      "candidates": [
+        {
+          "nonce": 12,
+          "parent": 6,
+          "refs": 0,
+          "sealing": 20
+        }
+      ],
+      "effects": [],
+      "instances": [
+        {
+          "busy": false,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "beneficiary": 2,
+          "kind": "prepare",
+          "miner": 1,
+          "top": 8
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "create_key_block_candidate"
+      ]
+    }
+  },
+  {
+    "case_name": "current_stale",
+    "reason": "runtime",
+    "result": {
+      "blocked": [
+        "create_key_block_candidate"
+      ],
+      "candidates": [
+        {
+          "nonce": 12,
+          "parent": 6,
+          "refs": 0,
+          "sealing": 20
+        }
+      ],
+      "effects": [],
+      "instances": [
+        {
+          "busy": false,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "beneficiary": 2,
+          "kind": "prepare",
+          "miner": 1,
+          "top": 8
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "create_key_block_candidate"
+      ]
+    }
+  },
+  {
+    "case_name": "old_one",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "old_one",
+    "reason": "runtime",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "old_two",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        },
+        {
+          "nonce": 12,
+          "parent": 6,
+          "refs": 1,
+          "sealing": 19
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "old_two",
+    "reason": "runtime",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        },
+        {
+          "nonce": 12,
+          "parent": 6,
+          "refs": 1,
+          "sealing": 19
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "missing",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "missing",
+    "reason": "runtime",
+    "result": {
+      "blocked": [],
+      "candidates": [
+        {
+          "nonce": 13,
+          "parent": 8,
+          "refs": 1,
+          "sealing": 20
+        }
+      ],
+      "effects": [
+        {
+          "event": "start_mining",
+          "kind": "event"
+        }
+      ],
+      "instances": [
+        {
+          "busy": true,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "instance": 0,
+          "kind": "mining",
+          "nonce": 12,
+          "repeats": 1,
+          "sealing": 20
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [
+        {
+          "name": [
+            "ae",
+            "epoch",
+            "aecore",
+            "mining",
+            "retries"
+          ],
+          "value": 1
+        }
+      ],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "mining"
+      ]
+    }
+  },
+  {
+    "case_name": "invalidated",
+    "reason": "no_solution",
+    "result": {
+      "blocked": [
+        "create_key_block_candidate"
+      ],
+      "candidates": null,
+      "effects": [],
+      "instances": [
+        {
+          "busy": false,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "beneficiary": 2,
+          "kind": "prepare",
+          "miner": 1,
+          "top": 8
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "create_key_block_candidate"
+      ]
+    }
+  },
+  {
+    "case_name": "invalidated",
+    "reason": "runtime",
+    "result": {
+      "blocked": [
+        "create_key_block_candidate"
+      ],
+      "candidates": null,
+      "effects": [],
+      "instances": [
+        {
+          "busy": false,
+          "id": 0
+        }
+      ],
+      "jobs": [
+        {
+          "beneficiary": 2,
+          "kind": "prepare",
+          "miner": 1,
+          "top": 8
+        }
+      ],
+      "key": 7,
+      "keys_ready": true,
+      "leader": true,
+      "metrics": [],
+      "running": true,
+      "top": 8,
+      "workers": [
+        "create_key_block_candidate"
+      ]
+    }
+  }
+]

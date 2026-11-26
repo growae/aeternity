@@ -215,6 +215,8 @@ fn parsed_instances_dispatch_in_native_order_and_preserve_spawn_failure_receipts
 #[test]
 fn external_spawn_failures_retry_through_the_public_producer_and_join_on_stop() {
     let node = Node::new(1, false);
+    let (metrics, _binding) =
+        common::mining_metrics::MiningMetrics::bind(node.db.instrumentation());
     let mut mining = config(2);
     mining.instances[1].external = Some(miner::external::Config::new(
         std::env::temp_dir().join(format!("missing-ae-miner-{}", rand::random::<u128>())),
@@ -264,6 +266,8 @@ fn external_spawn_failures_retry_through_the_public_producer_and_join_on_stop() 
     assert_eq!(failures[0].id.worker, failures[1].id.worker);
     assert_ne!(failures[0].id.sequence, failures[1].id.sequence);
     assert_ne!(failures[0].work.nonces, failures[1].work.nonces);
+    assert_eq!(metrics.counts().0, 0);
+    assert!(metrics.counts().1 >= failures.len() as u64);
     client.set_enabled(false).unwrap();
     let report = finish(worker);
     assert!(report.status.failure.is_none());

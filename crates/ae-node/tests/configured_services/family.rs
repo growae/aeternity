@@ -266,6 +266,10 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
         let db = p.configured().chain().database().clone();
         let metrics = metrics_settings::Metrics::new().await;
         let mut settings = commands(&lab);
+        let node::Settings::OnDemand(ref mut command_settings) = settings else {
+            panic!()
+        };
+        command_settings.config.production.controller.release_info = u32::MAX;
         metrics.configure(&mut p, &mut settings);
         let running = p.launch(settings, || Ok(Default::default())).unwrap();
         let mut h = running.handle();
@@ -348,6 +352,21 @@ async fn dispatch_on_demand_keeps_real_transfer_and_unread_command_receipts_in_a
         })
         .await;
         let before = db.view().unwrap().status();
+        for (name, expected) in [
+            ("mining.blocks_mined", 0u64),
+            ("mining.retries", 0),
+            ("blocks.key.info", u32::MAX.into()),
+        ] {
+            assert_eq!(
+                registry
+                    .get_value(&predefined::name(name), &points)
+                    .unwrap(),
+                Reading::Values(vec![(
+                    ae_sync::routing::Part::atom("value"),
+                    Value::Integer(expected.into())
+                )])
+            );
+        }
         let exit = within(running.shutdown()).await.unwrap();
         assert!(exit.status().joined && exit.status().failure.is_none());
         assert!(exit.configured().is_some());

@@ -583,7 +583,7 @@ impl Database {
     }
     fn observe_commit(&self, update: &Update) {
         use ae_chain::{
-            instrumentation::Event,
+            instrumentation::{Event, Gauge, Value},
             publication::{Kind, Origin},
         };
         let context = update.publication();
@@ -602,6 +602,12 @@ impl Database {
         ) && update.change().old_tip != Some(update.change().new_tip)
         {
             self.instrumentation.event(Event::TopChanged);
+            if update.identity().consensus == ae_protocol::ConsensusType::Pow
+                && let Some(info) = update.key_info()
+            {
+                self.instrumentation
+                    .event(Event::Gauge(Gauge::KeyInfo, Value::Integer(info.into())));
+            }
         }
     }
     fn write_commit(&self, batch: WriteBatch) -> Result<(), Error> {

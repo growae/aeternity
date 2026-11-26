@@ -230,6 +230,7 @@ fn original_pow_branch_traces_match_work_ties_locations_and_requeue_order() {
             );
             let pending = publish(
                 Update {
+                    key_info: None,
                     publication_body: crate::publication::wire(
                         &b,
                         crate::publication::Origin::Received,

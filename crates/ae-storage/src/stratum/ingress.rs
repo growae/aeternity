@@ -534,6 +534,7 @@ impl Writer {
         }];
         let mut checks = vec![];
         let mut work_revision = None;
+        let mut mined = false;
         if let Some((_, mining_limits)) = mining
             && receipt.input.solution.is_some()
         {
@@ -544,6 +545,7 @@ impl Writer {
                 Some(receipt.share_key),
                 mining_limits,
             )?;
+            mined = prepared.record.state == super::mining::State::Ready;
             commands.extend(prepared.commands);
             extra.extend(prepared.extra);
             checks = prepared.checks;
@@ -559,6 +561,15 @@ impl Writer {
         debug_assert!(
             matches!(done.replies.first(),Some(core::Reply::Record(r)) if matches!(&**r,core::Record::Share(s) if s.key==receipt.share_key))
         );
+        if mined {
+            use ae_chain::instrumentation::{Counter, Event};
+            // Count only acknowledged live consumption of an active candidate.
+            // Receipt replay, ambiguous-write recovery and submission retries
+            // do not pass this boundary again.
+            self.db
+                .instrumentation()
+                .event(Event::Counter(Counter::BlocksMined, 1));
+        }
         Ok(receipt)
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::mining_metrics::MiningMetrics;
 use crate::test_support::{Node, ledger_fixtures as fixtures};
 use ae_protocol::NetworkProfile;
 use ae_vm_fate::maps::order::Otp26;
@@ -238,6 +239,7 @@ fn proof_binding_rejects_wrong_job_work_nonce_and_edges_before_admission() {
 async fn strict_stale_replay_is_rejected_and_ordinary_duplicate_keeps_its_receipt() {
     for strict in [false, true] {
         let node = Node::new();
+        let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
         let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
         let importer = importer(&node);
         let blocks = fixtures::blocks(&NetworkProfile::mainnet());
@@ -250,6 +252,7 @@ async fn strict_stale_replay_is_rejected_and_ordinary_duplicate_keeps_its_receip
             .searched(0, Arc::new(replay), Instant::now())
             .unwrap();
         mining.take_output();
+        assert_eq!(metrics.counts(), (1, 0));
         // A competing admission wins before this result is submitted.
         for block in &blocks[..2] {
             importer
@@ -283,8 +286,97 @@ async fn strict_stale_replay_is_rejected_and_ordinary_duplicate_keeps_its_receip
             assert!(result.is_ok(), "{result:?}");
         }
         assert_eq!(node.db.view().unwrap().status(), before);
+        assert_eq!(metrics.counts(), (1, 0));
     }
 }
 
 mod external;
 mod timeouts;
+
+#[test]
+fn native_retry_replies_follow_live_candidate_ownership_not_backoff_or_receipt_replay() {
+    let rows: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/erlang_metrics_mining_retry.json"
+    )))
+    .unwrap();
+    let node = Node::new();
+    let importer = importer(&node);
+    let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
+    let Block::Key(header) = &fixtures::blocks(&NetworkProfile::mainnet())[0] else {
+        panic!()
+    };
+    let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
+    let mut expected = 0;
+    for row in rows.as_array().unwrap() {
+        let mut mining = prepare(&importer, snapshots.clone(), header);
+        let mut result = replay(&mining, header);
+        result.result = if row["reason"] == "no_solution" {
+            Ok(miner::Outcome::NoSolution)
+        } else {
+            Err(miner::Error::External(miner::external::Error::Io {
+                operation: miner::external::Operation::Spawn,
+                kind: std::io::ErrorKind::NotFound,
+            }))
+        };
+        match row["case_name"].as_str().unwrap() {
+            "invalidated" => mining.invalidate().unwrap(),
+            "missing" | "old_one" | "old_two" => {
+                // Another real preparation supplies a distinct candidate id.
+                // The outstanding result remains bound to the old CPU job.
+                let mut fresh = ready(&importer, snapshots.clone(), header, configuration(header));
+                if row["case_name"] == "missing" {
+                    mining.candidates.clear();
+                }
+                mining.candidates.insert(0, fresh.candidates.remove(0));
+                retire(fresh);
+            }
+            "current" | "current_stale" => (),
+            _ => panic!("unexpected native case"),
+        }
+        let count: u64 = row["result"]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["name"][3] == "mining" && m["name"][4] == "retries")
+            .map(|m| m["value"].as_u64().unwrap())
+            .sum();
+        expected += count;
+        mining
+            .searched(0, Arc::new(result), Instant::now())
+            .unwrap();
+        assert_eq!(metrics.counts(), (0, expected), "{row:?}");
+        retire(mining);
+        assert_eq!(metrics.counts(), (0, expected));
+    }
+    assert_eq!(expected, 10);
+}
+
+#[test]
+fn actual_resource_failure_and_retired_external_replies_are_not_native_retries() {
+    let node = Node::new();
+    let importer = importer(&node);
+    let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
+    let Block::Key(header) = &fixtures::blocks(&NetworkProfile::mainnet())[0] else {
+        panic!()
+    };
+    let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
+    let mut mining = prepare(&importer, snapshots.clone(), header);
+    let actual = mining.cpus[0].job.as_ref().unwrap().ticket.blocking_wait();
+    assert!(matches!(actual.result, Err(miner::Error::Solve { .. })));
+    mining.searched(0, actual, Instant::now()).unwrap();
+    retire(mining);
+    let mut config = configuration(header);
+    config.instances[0].external = Some(miner::external::Config::new(
+        std::env::temp_dir().join(format!("missing-metrics-miner-{}", rand::random::<u128>())),
+        std::env::temp_dir(),
+    ));
+    let mut mining = ready(&importer, snapshots, header, config);
+    mining.act(&importer, context(header, true, false)).unwrap();
+    let actual = mining.cpus[0].job.as_ref().unwrap().ticket.blocking_wait();
+    assert!(matches!(actual.result, Err(miner::Error::External(_))));
+    // Retirement joins and retains this exact reply without processing it
+    // through the live conductor's retry boundary.
+    retire(mining);
+    assert_eq!(metrics.counts(), (0, 0));
+}

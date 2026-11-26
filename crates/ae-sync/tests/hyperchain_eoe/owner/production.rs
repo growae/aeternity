@@ -5,6 +5,7 @@ use ae_sync::chain::{
     hyperchain::{delivery, eoe::owner::production},
 };
 use common::hyperchain::parents::Pair;
+use common::mining_metrics::MiningMetrics;
 use production::{Attempt, Config, Kind, Outcome, Progress};
 use std::time::Instant;
 fn config() -> Config {
@@ -46,6 +47,7 @@ fn drive<O: ae_vm_fate::maps::MapOrder + Clone + Send + Sync + 'static>(
 async fn empty_micro_is_skipped_and_real_producer_seals_and_admits_a_key() {
     for index in [1, 3, 5, 6] {
         let node = Node::new(index);
+        let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
         let source = source(&node);
         let pair = Pair::new(false);
         let (importer, accepted) = Importer::new_hyperchain_scoped(
@@ -102,6 +104,8 @@ async fn empty_micro_is_skipped_and_real_producer_seals_and_admits_a_key() {
         assert_eq!(block.common.previous_hash, original.0);
         assert_eq!(block.common.height, 1);
         ae_hyperchain::signing::verify_key(&block).unwrap();
+        assert_eq!(metrics.counts(), (1, 0));
+        assert!(metrics.key_info().is_empty());
         drop(
             owner
                 .begin_production(producer, pool.client(), config())
@@ -470,6 +474,7 @@ async fn delayed_and_immediate_holes_build_one_key_without_micro_or_pool_selecti
 #[tokio::test]
 async fn admission_backpressure_retains_signed_block_and_explicit_retry_submits_it_once() {
     let node = Node::new(1);
+    let (metrics, _binding) = MiningMetrics::bind(node.db.instrumentation());
     let source = source(&node);
     let pair = Pair::new(false);
     let (importer, accepted) = Importer::new_hyperchain_scoped(
@@ -504,10 +509,13 @@ async fn admission_backpressure_retains_signed_block_and_explicit_retry_submits_
     assert!(!attempt.admission_in_flight());
     let signed = attempt.pending_block().unwrap().clone();
     assert_eq!(node.db.view().unwrap().status(), before);
+    assert_eq!(metrics.counts(), (1, 0));
     held.wait().await.unwrap();
     attempt.retry().unwrap();
     drive(&mut owner, &importer, &mut attempt, &mut parents, 1003).unwrap();
     let done = attempt.finish().unwrap();
+    assert_eq!(metrics.counts(), (1, 0));
+    assert!(metrics.key_info().is_empty());
     let Outcome::Produced { key, .. } = done.outcome else {
         panic!()
     };
