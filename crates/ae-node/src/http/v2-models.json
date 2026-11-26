@@ -577,6 +577,29 @@
       "items": {
         "$ref": "#/definitions/EncodedPubkey"
       }
+    },
+    "GasPrices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "min_gas_price": {
+            "$ref": "#/definitions/UInt"
+          },
+          "utilization": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "minutes": {
+            "$ref": "#/definitions/UInt64"
+          }
+        },
+        "required": [
+          "min_gas_price",
+          "minutes"
+        ]
+      }
     }
   },
   "operations": {
@@ -644,6 +667,9 @@
       "items": {
         "$ref": "#/definitions/EncodedHash"
       }
+    },
+    "GetRecentGasPrices": {
+      "$ref": "#/definitions/GasPrices"
     }
   }
 }

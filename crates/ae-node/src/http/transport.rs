@@ -332,6 +332,12 @@ pub(super) fn dispatch(
     result: Result<serde_json::Value, Response>,
 ) -> Response {
     match (plan, result) {
+        (Ok((Operation::GasPrices { v3 }, strings)), Ok(body)) => {
+            super::gas::finish(body, v3, strings)
+        }
+        (Ok((Operation::GasPrices { .. }, _)), Err(response)) if response.status == 404 => {
+            Response::invalid_response()
+        }
         (Ok((Operation::ChainEnds { v3 }, strings)), Ok(body)) => {
             super::ends::finish(body, v3, strings)
         }
@@ -442,6 +448,16 @@ pub(super) async fn exchange(
     let mut pending_candidate = None;
     let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::GasPrices { v3 }, strings)) => {
+            match super::gas::query(&parent, &config, captured.as_ref(), *v3, *strings).await {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::ChainEnds { v3 }, strings)) => {
             match super::ends::query(&parent, &config, captured.as_ref(), *v3, *strings).await {
                 Ok(reply) => {

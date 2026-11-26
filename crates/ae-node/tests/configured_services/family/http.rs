@@ -9,6 +9,8 @@ mod contracts;
 mod currency;
 #[path = "http/ends.rs"]
 mod ends;
+#[path = "http/gas.rs"]
+mod gas;
 #[path = "http/info.rs"]
 mod info;
 #[path = "http/names.rs"]

@@ -12,6 +12,7 @@ mod channels;
 mod contracts;
 mod currency;
 mod ends;
+pub(crate) mod gas;
 mod key;
 mod model;
 mod names;

@@ -33,6 +33,10 @@ pub struct Prepared {
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
     currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
+    gas_reporting: Result<
+        std::sync::Arc<crate::configuration::http::GasReporting>,
+        crate::configuration::resolution::Error,
+    >,
     dry_run_gas_limit:
         Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error>,
 }
@@ -43,6 +47,10 @@ pub struct Open {
     execution: execution::Bound,
     auxiliary: auxiliary::Loaded,
     currency: Result<std::sync::Arc<currency::Plan>, currency::Error>,
+    gas_reporting: Result<
+        std::sync::Arc<crate::configuration::http::GasReporting>,
+        crate::configuration::resolution::Error,
+    >,
     dry_run_gas_limit:
         Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error>,
 }
@@ -66,6 +74,8 @@ impl Prepared {
             .map(std::sync::Arc::new);
         let dry_run_gas_limit = crate::configuration::http::external_dry_run_gas_limit(resolved)
             .map(std::sync::Arc::new);
+        let gas_reporting =
+            crate::configuration::http::GasReporting::resolve(resolved).map(std::sync::Arc::new);
         let auxiliary = auxiliary::Plan::resolve(resolved, settings.profile().network_id(), cwd)
             .map_err(Error::Auxiliary)?
             .load(auxiliary_limits)
@@ -103,6 +113,7 @@ impl Prepared {
             execution,
             auxiliary,
             currency,
+            gas_reporting,
             dry_run_gas_limit,
         })
     }
@@ -125,11 +136,20 @@ impl Prepared {
             execution: self.execution,
             auxiliary: self.auxiliary,
             currency: self.currency,
+            gas_reporting: self.gas_reporting,
             dry_run_gas_limit: self.dry_run_gas_limit,
         })
     }
 }
 impl Open {
+    pub(crate) fn gas_reporting(
+        &self,
+    ) -> &Result<
+        std::sync::Arc<crate::configuration::http::GasReporting>,
+        crate::configuration::resolution::Error,
+    > {
+        &self.gas_reporting
+    }
     pub fn external_dry_run_gas_limit(
         &self,
     ) -> &Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error> {

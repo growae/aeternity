@@ -447,6 +447,7 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
     .unwrap();
     // This inventory grows as actual endpoint implementations are connected.
     let implemented = [
+        "GetRecentGasPrices",
         "GetChainEnds",
         "GetProtocolParameters",
         "GetNodeSettings",
@@ -492,13 +493,13 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 40);
+    assert_eq!(implemented.len(), 41);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        74
+        76
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;
@@ -1244,6 +1245,90 @@ fn original_chain_ends_wrapper_matches_both_versions_integer_modes_and_errors() 
             req.query
         );
         if let Ok((Operation::ChainEnds { .. }, strings)) = &planned {
+            assert_eq!(
+                if v3 {
+                    json!({"int-as-string":strings})
+                } else {
+                    json!({})
+                },
+                row["logic_params"]
+            );
+        }
+        let code = input["code"].as_u64().unwrap() as u16;
+        let result = if code == 200 {
+            Ok(input["body"].clone())
+        } else {
+            let mut r = Response::json(code, input["body"].clone());
+            for (k, v) in input["headers"].as_object().unwrap() {
+                r.headers.insert(k.clone(), v.as_str().unwrap().into());
+            }
+            Err(r)
+        };
+        let mut r = super::dispatch(planned, result);
+        r.stamp(&cfg, &req.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            u64::from(r.status),
+            expected["code"].as_u64().unwrap(),
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(r.body.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap(),
+                expected["body"],
+                "{} {} {}",
+                row["id"],
+                row["module"],
+                req.query
+            );
+        }
+        for name in ["access-control-allow-origin", "x-ae-height", "retry-after"] {
+            assert_eq!(
+                r.headers.get(name).map(String::as_str),
+                expected["headers"][name].as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn original_recent_gas_wrapper_matches_both_versions_integer_modes_and_errors() {
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_recent_gas_schema.json"
+    ))
+    .unwrap();
+    let inputs = f["inputs"].as_array().unwrap();
+    let rows = f["schema"].as_array().unwrap();
+    assert_eq!(inputs.len(), 152);
+    assert_eq!(rows.len(), 2432);
+    let cfg = Config {
+        groups: ["transaction".into()].into(),
+        ..Default::default()
+    };
+    for row in rows {
+        let input = &inputs[row["id"].as_u64().unwrap() as usize];
+        let v3 = row["module"] == "oas_endpoints";
+        let req = Request {
+            method: "GET".into(),
+            path: format!("/{}/recent-gas-prices", if v3 { "v3" } else { "v2" }),
+            query: row["query"]["query"].as_str().unwrap().into(),
+            headers: Headers::from([("origin".into(), "https://client.example".into())]),
+        };
+        let planned = plan(&req, &cfg);
+        assert_eq!(
+            usize::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap() as usize,
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            req.query
+        );
+        if let Ok((Operation::GasPrices { .. }, strings)) = &planned {
             assert_eq!(
                 if v3 {
                     json!({"int-as-string":strings})

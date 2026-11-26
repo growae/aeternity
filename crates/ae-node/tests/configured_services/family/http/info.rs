@@ -5,7 +5,15 @@ use ae_tx::{
 use ae_types::{Id, IdTag};
 
 pub(super) fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transaction>> {
-    // Reuse the canonical original Ceres init transaction from the independent
+    contract_at(open, 6, 1, 100000)
+}
+pub(super) fn contract_at(
+    open: &configured::Open,
+    protocol: u32,
+    nonce: u64,
+    gas: u64,
+) -> Arc<SignedTransaction<Transaction>> {
+    // Reuse the canonical original historical init transaction from the independent
     // execution corpus. Adapt owner, nonce, fee and miner gas price for this chain.
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../ae-execution/tests/fixtures/erlang_contract_create.json"
@@ -24,7 +32,7 @@ pub(super) fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transac
         .iter()
         .map(|r| resolve(r, pool))
         .find(|r| {
-            r["protocol"] == 6
+            r["protocol"] == protocol
                 && r["case_id"] == 0
                 && r["gas"] == 100000
                 && resolve(&r["result"], pool)["kind"] == "ok"
@@ -38,9 +46,9 @@ pub(super) fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transac
         old.operation().clone(),
     )
     .unwrap();
-    tx.set_nonce(1.into());
+    tx.set_nonce(nonce.into());
     tx.set_fee(100_000_000_000_000u64.into());
-    tx.set_gas(old.gas().clone());
+    tx.set_gas(gas.into());
     tx.set_gas_price(1_000_000_000u64.into());
     let mut payload = open.chain().settings().profile().signing_prefix(false);
     payload.extend(tx.encode());

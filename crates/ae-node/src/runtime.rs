@@ -25,6 +25,11 @@ mod configuration;
 mod launch;
 mod metrics;
 pub(crate) struct Information {
+    pub gas_reporting: Result<
+        Arc<crate::configuration::http::GasReporting>,
+        crate::configuration::resolution::Error,
+    >,
+    pub gas_cache: Arc<chain::query::gas_prices::Cache>,
     pub protocol_parameters: http::parameters::Bound,
     pub block_gas_limit: ae_types::Unsigned,
     pub dry_run_gas_limit: Result<Arc<serde_json::Value>, crate::configuration::resolution::Error>,
@@ -362,6 +367,7 @@ impl Handle {
         Ok(self.status())
     }
     pub fn request_shutdown(&self) {
+        self.information.gas_cache.close();
         if let Some(http) = &self.http {
             http.request_shutdown();
         }
@@ -481,6 +487,7 @@ enum RunningInner {
     Hyperchain(hyperchain::Running<Otp26>),
 }
 pub struct Running {
+    gas_cache_owner: http::gas::Owner,
     inner: RunningInner,
     mode: ApplicationMode,
     metrics: Option<metrics::Owner>,
@@ -513,6 +520,8 @@ impl Running {
         }
     }
     pub async fn wait(self) -> Result<Exit, Error> {
+        // This guard also closes the cache if the waiting future is dropped.
+        let _gas_cache_owner = self.gas_cache_owner;
         let mut metrics = self.metrics;
         let http = self.http;
         let exit = match self.inner {
@@ -532,6 +541,7 @@ impl Running {
                 .map(|e| Exit::Hyperchain(Box::new(e)))
                 .map_err(|error| Error::Hyperchain(Box::new(error))),
         };
+        self.information.gas_cache.close();
         if let Some(metrics) = &mut metrics {
             metrics.finish().await;
         }

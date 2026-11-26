@@ -66,6 +66,11 @@ impl Prepared {
         }
         let metrics_config = self.1.clone();
         let information = Arc::new(Information {
+            gas_reporting: self.configured().gas_reporting().clone(),
+            gas_cache: Arc::new(
+                chain::query::gas_prices::Cache::new(Default::default())
+                    .expect("default gas cache"),
+            ),
             protocol_parameters: http::parameters::Bound::capture(&self),
             block_gas_limit: self.configured().execution().effective_gas_limit().clone(),
             dry_run_gas_limit: self.configured().external_dry_run_gas_limit().clone(),
@@ -209,6 +214,7 @@ impl Prepared {
             _ => unreachable!("checked family and prepared identity"),
         };
         let mut running = Running {
+            gas_cache_owner: http::gas::Owner(information.gas_cache.clone()),
             mode,
             information,
             inner: running,
