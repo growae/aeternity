@@ -9,6 +9,7 @@ use ae_state::{
 use std::sync::{Mutex, atomic::AtomicU64};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+mod query;
 struct Temporary(std::path::PathBuf);
 impl Drop for Temporary {
     fn drop(&mut self) {

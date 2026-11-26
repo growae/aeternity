@@ -1,0 +1,333 @@
+use super::{
+    Config,
+    response::{self, Headers, Response},
+};
+use crate::runtime;
+use ae_sync::chain::{self, query::Current};
+use serde_json::json;
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+
+struct Request {
+    method: String,
+    path: String,
+    query: String,
+    headers: Headers,
+}
+async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut request = httparse::Request::new(&mut headers);
+        match request.parse(&bytes) {
+            Ok(httparse::Status::Complete(_)) => {
+                let method = request.method.ok_or(400u16)?.to_owned();
+                let uri = request.path.ok_or(400u16)?;
+                if !uri.starts_with('/') || uri.contains('#') {
+                    return Err(400);
+                }
+                let (path, query) = uri.split_once('?').unwrap_or((uri, ""));
+                let path = decode(path, false).ok_or(400u16)?;
+                let mut fields = Headers::new();
+                for header in request.headers {
+                    let key = header.name.to_ascii_lowercase();
+                    let value = std::str::from_utf8(header.value)
+                        .map_err(|_| 400u16)?
+                        .to_owned();
+                    if let Some(previous) = fields.get_mut(&key) {
+                        if matches!(
+                            key.as_str(),
+                            "host" | "content-length" | "transfer-encoding"
+                        ) {
+                            return Err(400);
+                        }
+                        previous.push_str(", ");
+                        previous.push_str(&value);
+                    } else {
+                        fields.insert(key, value);
+                    }
+                }
+                if request.version == Some(1) && fields.get("host").is_none_or(String::is_empty) {
+                    return Err(400);
+                }
+                if fields.contains_key("transfer-encoding") {
+                    return Err(if fields.contains_key("content-length") {
+                        400
+                    } else {
+                        501
+                    });
+                }
+                if let Some(length) = fields.get("content-length") {
+                    if length.is_empty() || !length.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err(400);
+                    }
+                    let length = length.parse::<u64>().map_err(|_| 413u16)?;
+                    if length > config.body_bytes as u64 {
+                        return Err(413);
+                    }
+                }
+                return Ok(Request {
+                    method,
+                    path,
+                    query: query.into(),
+                    headers: fields,
+                });
+            }
+            Ok(httparse::Status::Partial) => (),
+            Err(httparse::Error::TooManyHeaders) => return Err(431),
+            Err(_) => return Err(400),
+        }
+        if bytes.len() == config.header_bytes {
+            return Err(431);
+        }
+        let mut chunk = [0; 2048];
+        let count = (config.header_bytes - bytes.len()).min(chunk.len());
+        let n = stream.read(&mut chunk[..count]).await.map_err(|_| 400u16)?;
+        if n == 0 {
+            return Err(400);
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+}
+fn decode(value: &str, plus: bool) -> Option<String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'%' => {
+                let high = char::from(bytes.next()?).to_digit(16)?;
+                let low = char::from(bytes.next()?).to_digit(16)?;
+                decoded.push((high * 16 + low) as u8);
+            }
+            b'+' if plus => decoded.push(b' '),
+            b => decoded.push(b),
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+fn strings(query: &str) -> Result<bool, Response> {
+    let mut selected = None;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair
+            .split_once('=')
+            .map_or((pair, None), |(k, v)| (k, Some(v)));
+        let key = decode(key, true).ok_or_else(|| Response::empty(400))?;
+        let value = match value {
+            Some(v) => Some(decode(v, true).ok_or_else(|| Response::empty(400))?),
+            None => None,
+        };
+        if key == "int-as-string" && selected.is_none() {
+            selected = Some(value);
+        }
+    }
+    match selected {
+        None => Ok(false),
+        Some(None) => Ok(true),
+        Some(Some(value)) if value.eq_ignore_ascii_case("true") => Ok(true),
+        Some(Some(value)) if value.eq_ignore_ascii_case("false") => Ok(false),
+        Some(Some(value)) => Err(Response::json(
+            400,
+            json!({"reason":"validation_error", "parameter":"int-as-string", "info":{"error":"wrong_type", "data":value}}),
+        )),
+    }
+}
+fn accepts_json(headers: &Headers) -> bool {
+    let Some(value) = headers.get("accept") else {
+        return true;
+    };
+    let mut selected: Option<(u8, u16)> = None;
+    for part in value.split(',') {
+        let mut fields = part.trim().split(';');
+        let media = fields.next().unwrap_or_default().trim();
+        let specificity = if media.eq_ignore_ascii_case("application/json") {
+            2
+        } else if media.eq_ignore_ascii_case("application/*") {
+            1
+        } else if media == "*/*" {
+            0
+        } else {
+            continue;
+        };
+        let mut weight = 1000;
+        let mut matched = true;
+        let mut weighted = false;
+        for field in fields {
+            let Some((key, value)) = field.trim().split_once('=') else {
+                matched = false;
+                break;
+            };
+            if key.eq_ignore_ascii_case("q") {
+                weighted = true;
+                weight = quality(value).unwrap_or(0);
+            } else if !weighted {
+                matched = false;
+            }
+        }
+        if matched
+            && selected.is_none_or(|(s, w)| specificity > s || (specificity == s && weight > w))
+        {
+            selected = Some((specificity, weight));
+        }
+    }
+    selected.is_some_and(|(_, weight)| weight > 0)
+}
+fn quality(value: &str) -> Option<u16> {
+    let (integer, decimal) = value.trim().split_once('.').unwrap_or((value.trim(), ""));
+    if decimal.len() > 3 || !decimal.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match integer {
+        "1" if decimal.bytes().all(|b| b == b'0') => Some(1000),
+        "0" => {
+            let mut weight = 0;
+            let mut place = 100;
+            for b in decimal.bytes() {
+                weight += u16::from(b - b'0') * place;
+                place /= 10;
+            }
+            Some(weight)
+        }
+        _ => None,
+    }
+}
+async fn selected(
+    parent: &runtime::Handle,
+    config: &Config,
+    captured: Option<&Arc<chain::Importer>>,
+) -> Result<Current, Response> {
+    if !parent.status().ready {
+        return Err(Response::unavailable(false));
+    }
+    let importer = captured.ok_or_else(|| Response::unavailable(false))?;
+    let read = async {
+        let value = importer.current()?.wait().await?;
+        if !parent.status().ready
+            || parent
+                .importer()
+                .is_none_or(|live| !Arc::ptr_eq(&live, importer))
+        {
+            return Err(chain::Error::Stale);
+        }
+        Ok(value)
+    };
+    match tokio::time::timeout(config.timeout, read).await {
+        Ok(Ok(current)) => Ok(current),
+        Ok(Err(error)) => Err(failure(error)),
+        Err(_) => Err(failure(chain::Error::Timeout)),
+    }
+}
+fn failure(error: chain::Error) -> Response {
+    match error {
+        chain::Error::Busy => Response::unavailable(true),
+        chain::Error::Storage(_) => Response::json(500, json!({"reason":"Internal server error"})),
+        _ => Response::unavailable(false),
+    }
+}
+fn plan(request: &Request, config: &Config) -> Result<(bool, bool), Response> {
+    if request.method == "OPTIONS" {
+        return Err(Response::empty(200));
+    }
+    let Some((v3, height)) = response::current(&request.path, config) else {
+        return Err(Response::empty(404));
+    };
+    if request.method != "GET" {
+        let mut response = Response::empty(405);
+        response.headers.insert("allow".into(), "GET".into());
+        return Err(response);
+    }
+    if !accepts_json(&request.headers) {
+        return Err(Response::empty(406));
+    }
+    let strings = if v3 { strings(&request.query)? } else { false };
+    Ok((height, strings))
+}
+fn dispatch(plan: Result<(bool, bool), Response>, selected: Result<Current, Response>) -> Response {
+    match (plan, selected) {
+        (Err(response), _) | (_, Err(response)) => response,
+        (Ok((height, strings)), Ok(current)) => response::answer(current, height, strings),
+    }
+}
+pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, config: Arc<Config>) {
+    let request = match tokio::time::timeout(config.timeout, read(&mut stream, &config)).await {
+        Ok(result) => result,
+        Err(_) => Err(408),
+    };
+    // Capture one owner before the header marker. Cached height does not need
+    // a read-work slot, so preflight and overload responses keep their marker.
+    let captured = parent.importer().filter(|_| parent.status().ready);
+    let mut height = captured.as_ref().and_then(|i| i.cached_height());
+    let (plan, headers) = match request {
+        Ok(request) => (plan(&request, &config), request.headers),
+        Err(status) => (Err(Response::empty(status)), Headers::new()),
+    };
+    let selected = if plan.is_ok() || height.is_none() {
+        selected(&parent, &config, captured.as_ref()).await
+    } else {
+        Err(Response::unavailable(false))
+    };
+    if height.is_none() {
+        height = selected.as_ref().ok().map(|s| s.height);
+    }
+    let mut response = dispatch(plan, selected);
+    response.stamp(&config, &headers, height);
+    if matches!(
+        tokio::time::timeout(config.timeout, write(&mut stream, response)).await,
+        Ok(Ok(()))
+    ) {
+        // Half-close the response first. Bounded draining gives the client a
+        // chance to receive the error before unread request bytes cause a TCP
+        // reset (notably a header rejected at the configured byte limit).
+        let _ = tokio::time::timeout(
+            config.timeout.min(std::time::Duration::from_millis(100)),
+            async {
+                let mut remaining = config.header_bytes + config.body_bytes;
+                let mut buffer = [0; 2048];
+                while remaining > 0 {
+                    let size = remaining.min(buffer.len());
+                    match stream.read(&mut buffer[..size]).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => remaining -= n,
+                    }
+                }
+            },
+        )
+        .await;
+    }
+}
+async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Result<()> {
+    let phrase = match response.status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        408 => "Request Timeout",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    response.headers.insert("connection".into(), "close".into());
+    response
+        .headers
+        .insert("content-length".into(), response.body.len().to_string());
+    let mut header = format!("HTTP/1.1 {} {phrase}\r\n", response.status);
+    for (name, value) in response.headers {
+        header.push_str(&format!("{name}: {value}\r\n"));
+    }
+    header.push_str("\r\n");
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&response.body).await?;
+    stream.shutdown().await
+}
+
+#[cfg(test)]
+mod tests;

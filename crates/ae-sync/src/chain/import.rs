@@ -111,7 +111,7 @@ impl<O: MapOrder> Context<O> {
                 error,
             })
     }
-    fn check(
+    pub(super) fn check(
         &self,
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,

@@ -33,6 +33,7 @@ pub mod on_demand;
 pub mod packing;
 mod policy;
 pub mod pow;
+pub mod query;
 mod strategy;
 pub mod sync;
 #[cfg(test)]
@@ -180,6 +181,7 @@ struct Context<O> {
     stopped: AtomicBool,
     shutdown: tokio::sync::watch::Sender<bool>,
     recovery: Mutex<Option<Error>>,
+    height: query::Height,
     #[cfg(test)]
     commit_hook: Option<CommitHook>,
     #[cfg(test)]
@@ -392,6 +394,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     ) -> Result<Self, Error> {
         Self::validate_config(&config)?;
         let policy_scope = db.policy_scope()?;
+        let height = query::Height::new(&db)?;
         let jobs = blocking::Pool::named("ae-chain-import", 1, config.jobs, config.bytes)?;
         Ok(Self {
             context: Arc::new(Context {
@@ -402,6 +405,7 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
                 stopped: AtomicBool::new(false),
                 shutdown: tokio::sync::watch::channel(false).0,
                 recovery: Mutex::new(None),
+                height,
                 #[cfg(test)]
                 commit_hook: None,
                 #[cfg(test)]

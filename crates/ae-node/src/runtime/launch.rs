@@ -189,6 +189,7 @@ impl Prepared {
         let mut running = Running {
             inner: running,
             metrics: None,
+            http: None,
             notice_next: Arc::new(AtomicBool::new(false)),
         };
         if let Some(application) = &mut application {

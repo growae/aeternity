@@ -3,7 +3,7 @@
 use crate::{
     bootstrap::configured::{self, hyperchain as hc, pow as configured_pow},
     configuration::consensus::Kind,
-    hyperchain, pow,
+    http, hyperchain, pow,
 };
 use ae_protocol::{ConsensusAlgorithm, ConsensusType};
 use ae_sync::{
@@ -175,6 +175,7 @@ pub enum Error {
     },
     UnsupportedControl,
     Metrics(observe::Error),
+    Http(http::Error),
     Pow(Box<pow::Error>),
     Hyperchain(Box<hyperchain::Error>),
 }
@@ -189,6 +190,7 @@ pub struct Status {
     pub family: Family,
     pub metrics: Option<observe::SinkInfo>,
     pub metrics_error: Option<observe::Error>,
+    pub http: Option<http::Status>,
     pub running: bool,
     pub ready: bool,
     pub joined: bool,
@@ -201,6 +203,7 @@ impl Status {
             family,
             metrics: None,
             metrics_error: None,
+            http: None,
             running: status.running,
             ready: status.ready,
             joined: status.joined,
@@ -220,6 +223,7 @@ impl Status {
             family: Family::Hyperchain,
             metrics: None,
             metrics_error: None,
+            http: None,
             running: status.running,
             ready: status.ready,
             joined: status.joined,
@@ -238,6 +242,10 @@ pub enum Output {
     HyperchainProduction(conductor::runtime::supervision::Notice),
 }
 pub enum Exit {
+    Http {
+        inner: Box<Exit>,
+        status: http::Status,
+    },
     Application {
         inner: Box<Exit>,
         metrics: observe::SinkInfo,
@@ -250,6 +258,7 @@ pub enum Exit {
 impl Exit {
     pub fn status(&self) -> Status {
         match self {
+            Self::Http { inner, status } => apply_http(inner.status(), status.clone()),
             Self::Application {
                 inner,
                 metrics,
@@ -270,6 +279,7 @@ impl Exit {
     }
     pub fn configured(&self) -> Option<&configured::Open> {
         match self {
+            Self::Http { inner, .. } => inner.configured(),
             Self::Application { inner, .. } => inner.configured(),
             Self::Cuckoo(e) | Self::OnDemand(e) => e
                 .services
@@ -290,6 +300,7 @@ enum HandleInner {
 pub struct Handle {
     inner: HandleInner,
     metrics: Option<metrics::View>,
+    http: Option<http::Handle>,
     notice_next: Arc<AtomicBool>,
 }
 impl Handle {
@@ -299,13 +310,20 @@ impl Handle {
             HandleInner::OnDemand(h) => Status::pow(h.status(), Family::OnDemand),
             HandleInner::Hyperchain(h) => Status::hyperchain(h.status()),
         };
-        match &self.metrics {
+        let status = match &self.metrics {
             Some(metrics) => metrics.apply(status),
+            None => status,
+        };
+        match &self.http {
+            Some(http) => apply_http(status, http.status()),
             None => status,
         }
     }
     pub fn metrics(&self) -> Option<observe::statsd::Client> {
         self.metrics.as_ref().map(|m| m.client.clone())
+    }
+    pub fn http(&self) -> Option<http::Handle> {
+        self.http.clone()
     }
     pub async fn changed(&mut self) -> Result<Status, Error> {
         let changed = async {
@@ -323,10 +341,17 @@ impl Handle {
             }
             Ok::<_, Error>(())
         };
-        tokio::select! { result = changed => result?, _ = async { self.metrics.as_mut().expect("configured metrics").changed().await }, if self.metrics.is_some() => () }
+        tokio::select! {
+            result = changed => result?,
+            _ = async { self.metrics.as_mut().expect("configured metrics").changed().await }, if self.metrics.is_some() => (),
+            result = async { self.http.as_mut().expect("configured HTTP").changed().await }, if self.http.as_ref().is_some_and(|h| !h.status().joined) => { result.map_err(Error::Http)?; },
+        }
         Ok(self.status())
     }
     pub fn request_shutdown(&self) {
+        if let Some(http) = &self.http {
+            http.request_shutdown();
+        }
         if let Some(metrics) = &self.metrics {
             metrics.stop();
             if !metrics.done() {
@@ -401,6 +426,9 @@ impl Handle {
         }
     }
     pub fn take_exit(&self) -> Option<Exit> {
+        if self.http.as_ref().is_some_and(|h| !h.status().joined) {
+            return None;
+        }
         if self.metrics.as_ref().is_some_and(|m| !m.done()) {
             return None;
         }
@@ -409,8 +437,15 @@ impl Handle {
             HandleInner::OnDemand(h) => h.take_exit().map(|e| Exit::OnDemand(Box::new(e))),
             HandleInner::Hyperchain(h) => h.take_exit().map(|e| Exit::Hyperchain(Box::new(e))),
         }?;
-        Some(match &self.metrics {
+        let exit = match &self.metrics {
             Some(m) => m.exit(exit),
+            None => exit,
+        };
+        Some(match &self.http {
+            Some(http) => Exit::Http {
+                inner: Box::new(exit),
+                status: http.status(),
+            },
             None => exit,
         })
     }
@@ -423,9 +458,19 @@ enum RunningInner {
 pub struct Running {
     inner: RunningInner,
     metrics: Option<metrics::Owner>,
+    http: Option<http::Running>,
     notice_next: Arc<AtomicBool>,
 }
 impl Running {
+    pub async fn listen_http(&mut self, config: http::Config) -> Result<http::Handle, http::Error> {
+        if self.http.is_some() {
+            return Err(http::Error::AlreadyListening);
+        }
+        let server = http::Running::start(self.handle(), config).await?;
+        let handle = server.handle();
+        self.http = Some(server);
+        Ok(handle)
+    }
     pub fn handle(&self) -> Handle {
         Handle {
             inner: match &self.inner {
@@ -435,10 +480,12 @@ impl Running {
             },
             notice_next: self.notice_next.clone(),
             metrics: self.metrics.as_ref().map(metrics::Owner::view),
+            http: self.http.as_ref().map(http::Running::handle),
         }
     }
     pub async fn wait(self) -> Result<Exit, Error> {
         let mut metrics = self.metrics;
+        let http = self.http;
         let exit = match self.inner {
             RunningInner::Cuckoo(r) => r
                 .wait()
@@ -459,13 +506,35 @@ impl Running {
         if let Some(metrics) = &mut metrics {
             metrics.finish().await;
         }
-        exit.map(|e| match &metrics {
+        let exit = exit.map(|e| match &metrics {
             Some(m) => m.view().exit(e),
             None => e,
+        });
+        let http = match http {
+            Some(http) => Some(http.finish().await),
+            None => None,
+        };
+        exit.map(|inner| match http {
+            Some(status) => Exit::Http {
+                inner: Box::new(inner),
+                status,
+            },
+            None => inner,
         })
     }
     pub async fn shutdown(self) -> Result<Exit, Error> {
         self.handle().request_shutdown();
         self.wait().await
     }
+}
+
+fn apply_http(mut status: Status, http: http::Status) -> Status {
+    status.ready &= http.running;
+    status.joined &= http.joined;
+    status.running |= http.running;
+    if let Some(error) = &http.failure {
+        status.failure = Some(Error::Http(error.clone()));
+    }
+    status.http = Some(http);
+    status
 }

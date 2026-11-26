@@ -146,6 +146,7 @@ dependencies = [
  "ae-vm-fate",
  "fancy-regex",
  "hex",
+ "httparse",
  "jsonschema",
  "num-bigint",
  "rustix",

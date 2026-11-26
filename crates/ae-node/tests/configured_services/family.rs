@@ -6,6 +6,10 @@ use ae_sync::chain::on_demand::control::{Command, Kind};
 mod core;
 #[path = "family/discovery.rs"]
 mod discovery;
+#[path = "family/http.rs"]
+mod http;
+#[path = "../common/http_checks.rs"]
+mod http_checks;
 #[path = "../common/network_settings.rs"]
 mod network_settings;
 
@@ -779,12 +783,17 @@ async fn application_metrics_outlive_connection_generations_in_both_pow_families
             };
             let metrics = metrics_settings::Metrics::new().await;
             metrics.configure(&mut p, &mut s);
-            let running = p.launch(s, || Ok(Default::default())).unwrap();
+            let database = p.configured().chain().database().clone();
+            let mut running = p.launch(s, || Ok(Default::default())).unwrap();
             let mut handle = running.handle();
             ready(&mut handle).await;
+            let http = http_checks::start(&mut running).await;
+            http_checks::verify(&http, &database).await;
             let client = metrics.verify(&handle, normal).await;
             metrics.replace_logger(&handle).await;
+            http_checks::verify(&http, &database).await;
             let exit = running.shutdown().await.unwrap();
+            http_checks::joined(&http).await;
             assert!(exit.status().joined && exit.status().failure.is_none());
             assert!(client.info().joined && !client.info().running);
             assert!(exit.status().metrics.unwrap().joined);
