@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod info_tests;
-mod model;
+use super::model;
 #[cfg(test)]
 mod tests;
 

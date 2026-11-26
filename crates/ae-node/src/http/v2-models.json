@@ -217,6 +217,41 @@
         "topics",
         "data"
       ]
+    },
+    "Account": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "balance": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "payable": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "basic",
+            "generalized"
+          ]
+        },
+        "contract_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "auth_fun": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "balance",
+        "nonce"
+      ]
     }
   },
   "operations": {
@@ -231,6 +266,26 @@
     },
     "GetTransactionInfoByHash": {
       "$ref": "#/definitions/TxInfoObject"
+    },
+    "GetAccountByPubkey": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountByPubkeyAndHash": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountByPubkeyAndHeight": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountNextNonce": {
+      "type": "object",
+      "properties": {
+        "next_nonce": {
+          "type": "integer"
+        }
+      }
+    },
+    "GetPendingAccountTransactionsByPubkey": {
+      "$ref": "#/definitions/GenericTxs"
     }
   }
 }

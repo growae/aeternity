@@ -142,6 +142,15 @@ fn decode_bytes(value: &str, plus: bool) -> Option<Vec<u8>> {
     Some(decoded)
 }
 pub(super) fn strings(query: &str) -> Result<bool, Response> {
+    match query_value(query, b"int-as-string")? {
+        None => Ok(false),
+        Some(None) => Ok(true),
+        Some(Some(value)) if value.eq_ignore_ascii_case(b"true") => Ok(true),
+        Some(Some(value)) if value.eq_ignore_ascii_case(b"false") => Ok(false),
+        Some(Some(_)) => Err(Response::stream_error(500)),
+    }
+}
+pub(super) fn query_value(query: &str, name: &[u8]) -> Result<Option<Option<Vec<u8>>>, Response> {
     let mut selected = None;
     for pair in query.split('&') {
         if pair.is_empty() {
@@ -158,19 +167,11 @@ pub(super) fn strings(query: &str) -> Result<bool, Response> {
             Some(v) => Some(decode_bytes(v, true).ok_or_else(|| Response::stream_error(400))?),
             None => None,
         };
-        if key == b"int-as-string" && selected.is_none() {
+        if key == name && selected.is_none() {
             selected = Some(value);
         }
     }
-    match selected {
-        None => Ok(false),
-        Some(None) => Ok(true),
-        Some(Some(value)) if value.eq_ignore_ascii_case(b"true") => Ok(true),
-        Some(Some(value)) if value.eq_ignore_ascii_case(b"false") => Ok(false),
-        // The original schema wrapper's invalid-boolean error cannot be
-        // encoded by JSX; the request process emits an empty stream error.
-        Some(Some(_)) => Err(Response::stream_error(500)),
-    }
+    Ok(selected)
 }
 fn accepts_json(headers: &Headers) -> bool {
     let Some(value) = headers.get("accept") else {
@@ -271,7 +272,7 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if path_segments(&request.path).is_none() {
         return Err(Response::empty(400));
     }
-    let Some((v3, operation)) = response::route(&request.path, config) else {
+    let Some((v3, mut operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
     };
     let method = if matches!(operation, Operation::PostTransaction { .. }) {
@@ -311,6 +312,9 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if let Operation::Transactions { operation, .. } = &operation {
         operation.validate_path()?;
     }
+    if let Operation::Accounts { operation, v3 } = &mut operation {
+        operation.validate(*v3, &request.query)?;
+    }
     Ok((operation, strings))
 }
 pub(super) fn dispatch(
@@ -318,6 +322,9 @@ pub(super) fn dispatch(
     result: Result<serde_json::Value, Response>,
 ) -> Response {
     match (plan, result) {
+        (Ok((Operation::Accounts { operation, v3 }, strings)), Ok(body)) => {
+            super::accounts::finish(&operation, body, v3, strings)
+        }
         (Err(response), _) | (_, Err(response)) => response,
         (Ok((Operation::Transactions { operation, v3 }, strings)), Ok(body)) => {
             super::transactions::finish(&operation, body, v3, strings)
@@ -403,7 +410,28 @@ pub(super) async fn exchange(
     let mut rendered = None;
     let mut post_credits = None;
     let mut pending_candidate = None;
+    let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::Accounts { operation, v3 }, strings)) => {
+            match super::accounts::query(
+                &parent,
+                &config,
+                captured.as_ref(),
+                operation,
+                *v3,
+                *strings,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    account_pool_credits = reply.value.pool_credits;
+                    rendered = Some(reply.value.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::PendingKey, _)) => {
             match super::pending::query(&parent, &config, captured.as_ref()).await {
                 Ok(reply) => {
@@ -471,6 +499,7 @@ pub(super) async fn exchange(
     drop(retained);
     drop(post_credits);
     drop(pending_candidate);
+    drop(account_pool_credits);
     if written {
         // Half-close the response first. Bounded draining gives the client a
         // chance to receive the error before unread request bytes cause a TCP

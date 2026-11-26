@@ -61,7 +61,7 @@ fn validators(v3: bool) -> &'static BTreeMap<String, Validator> {
         } else {
             include_str!("v2-models.json")
         })
-        .expect("bundled transaction models");
+        .expect("bundled HTTP models");
         adapt(&mut document);
         document["operations"]
             .as_object()
@@ -86,7 +86,7 @@ fn validators(v3: bool) -> &'static BTreeMap<String, Validator> {
                         }))
                     })
                     .build(&root)
-                    .expect("local transaction schema compiles");
+                    .expect("local HTTP schema compiles");
                 (name.clone(), validator)
             })
             .collect()

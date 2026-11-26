@@ -8,6 +8,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+pub mod accounts;
 mod client;
 pub mod events;
 mod gossip;
@@ -132,6 +133,7 @@ struct Control {
     feed: events::Feed,
 }
 pub(crate) struct Shared {
+    accounts: Arc<accounts::Budget>,
     database: std::sync::Weak<Database>,
     instrumentation: ae_chain::instrumentation::Publisher,
     control: Mutex<Control>,
@@ -195,6 +197,7 @@ impl Worker {
         }
         let service = Service::start(db.clone(), network, config)?;
         let shared = Arc::new(Shared {
+            accounts: accounts::Budget::new(settings),
             database: Arc::downgrade(&db),
             instrumentation: db.instrumentation().clone(),
             control: Mutex::new(Control {

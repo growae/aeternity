@@ -1426,6 +1426,52 @@
         "topics",
         "data"
       ]
+    },
+    "NextNonceResponse": {
+      "type": "object",
+      "properties": {
+        "next_nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "next_nonce"
+      ]
+    },
+    "Account": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "balance": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "payable": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "basic",
+            "generalized"
+          ]
+        },
+        "contract_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "auth_fun": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "balance",
+        "nonce"
+      ]
     }
   },
   "operations": {
@@ -1443,6 +1489,24 @@
     },
     "GetTransactionInfoByHash:410": {
       "$ref": "#/definitions/Error"
+    },
+    "GetAccountByPubkey": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountByPubkeyAndHash": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountByPubkeyAndHeight": {
+      "$ref": "#/definitions/Account"
+    },
+    "GetAccountByPubkeyAndHeight:410": {
+      "$ref": "#/definitions/Error"
+    },
+    "GetAccountNextNonce": {
+      "$ref": "#/definitions/NextNonceResponse"
+    },
+    "GetPendingAccountTransactionsByPubkey": {
+      "$ref": "#/definitions/SignedTxs"
     }
   }
 }

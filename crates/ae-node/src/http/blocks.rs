@@ -47,7 +47,7 @@ pub(super) fn route(v3: bool, parts: &[&[u8]]) -> Option<Operation> {
     })
 }
 
-fn height(raw: &[u8], v3: bool) -> Result<u128, Response> {
+pub(super) fn height(raw: &[u8], v3: bool) -> Result<u128, Response> {
     let integer = std::str::from_utf8(raw).ok().and_then(|raw| {
         let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
         (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))

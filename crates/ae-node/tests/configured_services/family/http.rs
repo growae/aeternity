@@ -1,4 +1,6 @@
 use super::*;
+#[path = "http/accounts.rs"]
+mod accounts;
 #[path = "http/info.rs"]
 mod info;
 #[path = "http/post.rs"]

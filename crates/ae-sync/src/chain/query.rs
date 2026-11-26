@@ -2,6 +2,7 @@ use super::*;
 use ae_codec::headers::Header;
 use ae_storage::events::{Cursor, Reader};
 
+pub mod accounts;
 pub mod blocks;
 pub mod transactions;
 

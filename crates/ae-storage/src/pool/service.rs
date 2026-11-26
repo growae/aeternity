@@ -572,6 +572,31 @@ impl Service {
         self.finish(&stored, plan, || Ok(()))?;
         Ok(value)
     }
+    // Native peek/max_nonce read the active/visited account index without a
+    // reconciliation write. The owning worker serializes these after earlier
+    // accepted commands and holds response credit independently of its mailbox.
+    pub fn pending_account(
+        &self,
+        owner: AccountPublicKey,
+        limits: policy::accounts::Limits,
+    ) -> Result<Vec<Arc<Signed>>, Failure> {
+        self.live
+            .pool
+            .pending_account(owner, limits)
+            .map_err(Into::into)
+    }
+    pub fn account_nonce(
+        &self,
+        owner: AccountPublicKey,
+        state: &Unsigned,
+        strategy: policy::accounts::Strategy,
+        limits: policy::accounts::Limits,
+    ) -> Result<Unsigned, Failure> {
+        self.live
+            .pool
+            .account_nonce(owner, state, strategy, limits)
+            .map_err(Into::into)
+    }
     pub fn minimum_miner_gas_price(&self) -> Unsigned {
         self.live.pool.config().minimum_miner_gas_price.clone()
     }

@@ -230,8 +230,8 @@ pub fn signed(
 ) -> Result<Value, Error> {
     signed_with(tx, location, &Budget::new(tx.transaction().view(), limits)?)
 }
-pub(super) fn list(
-    txs: &[SignedTransaction<Transaction>],
+pub(super) fn list<T: std::borrow::Borrow<SignedTransaction<Transaction>>>(
+    txs: &[T],
     location: Location,
     limits: Limits,
 ) -> Result<Value, Error> {
@@ -243,6 +243,7 @@ pub(super) fn list(
     out.insert(
         "transactions",
         budget.array(txs, |tx| {
+            let tx = tx.borrow();
             budget.input(tx.transaction().view(), limits)?;
             signed_with(tx, location, &budget)
         })?,
