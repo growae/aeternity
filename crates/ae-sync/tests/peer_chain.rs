@@ -151,6 +151,168 @@ fn request(row: &Json) -> Message {
 }
 
 #[test]
+fn generation_summaries_match_native_full_generations_in_both_consensus_families() {
+    let native = fixture();
+    let mut checked = 0;
+    for profile in native["profiles"].as_array().unwrap() {
+        for scenario in profile["scenarios"].as_array().unwrap() {
+            let view = View::load_with_config(
+                database(profile, scenario),
+                ReadConfig {
+                    mode: mode(profile),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for row in scenario["rows"].as_array().unwrap() {
+                let request = request(row);
+                if request.kind() != Kind::GetGeneration {
+                    continue;
+                }
+                let Value::Binary(raw) = &request.fields()["hash"] else {
+                    panic!()
+                };
+                let Value::Boolean(forward) = request.fields()["forward"] else {
+                    panic!()
+                };
+                let result = match raw.as_slice().try_into() {
+                    Ok(hash) => repo::serving::generation_summary(
+                        &view,
+                        Hash256(hash),
+                        forward,
+                        repo::serving::Limits {
+                            items: 4096,
+                            bytes: 16 << 20,
+                        },
+                    ),
+                    Err(_) => Ok(None), // same malformed-wire-hash boundary as the peer adapter
+                };
+                if row["result"]["kind"] != "response" {
+                    assert!(matches!(result, Err(Error::Uninitialized)));
+                    continue;
+                }
+                let response =
+                    Message::decode_packet(&bytes(&row["result"]["packet"]), Default::default())
+                        .unwrap();
+                let ae_p2p::message::Details::Response { message, .. } = response.details() else {
+                    panic!()
+                };
+                match message {
+                    Some(Ok(body)) => {
+                        let summary = result.unwrap().unwrap();
+                        let Value::Binary(raw) = &body.fields()["key_block"] else {
+                            panic!()
+                        };
+                        let expected = Block::decode(
+                            raw,
+                            ae_chain::block::DecodeConfig {
+                                mode: mode(profile),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(Block::Key(summary.key), expected);
+                        let Value::List(micros) = &body.fields()["micro_blocks"] else {
+                            panic!()
+                        };
+                        let expected: Vec<_> = micros
+                            .iter()
+                            .map(|v| {
+                                let Value::Binary(b) = v else { panic!() };
+                                Block::decode(
+                                    b,
+                                    ae_chain::block::DecodeConfig {
+                                        mode: mode(profile),
+                                        ..Default::default()
+                                    },
+                                )
+                                .unwrap()
+                                .hash()
+                                .unwrap()
+                            })
+                            .collect();
+                        assert_eq!(summary.micros, expected);
+                    }
+                    _ => assert!(result.unwrap().is_none()),
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100);
+    eprintln!("Native full generation summaries: {checked}");
+}
+
+#[test]
+fn block_queries_distinguish_missing_rows_and_read_only_the_predecessor_header() {
+    use ae_codec::rlp::{self, Rlp};
+    use ae_sync::chain::query::blocks::{self, Missing, Reply, Request};
+    let data = fixture();
+    let mut checked = 0;
+    for profile in data["profiles"].as_array().unwrap() {
+        let scenario = profile["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "k2" && s["omitted"].as_array().unwrap().is_empty())
+            .unwrap();
+        let mut store = database(profile, scenario);
+        let cfg = ReadConfig {
+            mode: mode(profile),
+            ..Default::default()
+        };
+        let view = View::load_with_config(store.clone(), cfg.clone()).unwrap();
+        let top = view.status().tip.unwrap();
+        let header = view.require_header(top).unwrap();
+        let height = header.common().height;
+        let prev = Hash256(header.common().previous_hash);
+        let ph = view.require_header(prev).unwrap();
+        assert!(matches!(ph, ae_codec::headers::Header::Micro(_)));
+        let limits = repo::serving::Limits {
+            items: 4096,
+            bytes: 16 << 20,
+        };
+        let expected = blocks::read(&view, Request::KeyHash(top), limits).unwrap();
+        assert!(matches!(expected, Reply::Header(_)));
+        let wire = ph.encode().unwrap();
+        let mut corrupted = b"\0aeblock\x01".to_vec();
+        corrupted.extend(rlp::encode(&Rlp::List(vec![
+            Rlp::Bytes(&wire),
+            Rlp::List(vec![]),
+            Rlp::Bytes(b"invalid proof"),
+        ])));
+        Arc::make_mut(&mut store.values).insert(key(repo::BLOCKS, prev.0), corrupted);
+        let view = View::load_with_config(store.clone(), cfg.clone()).unwrap();
+        assert!(view.require_block(prev).is_err());
+        assert_eq!(
+            blocks::read(&view, Request::KeyHash(top), limits).unwrap(),
+            expected
+        );
+        assert!(blocks::read(&view, Request::MicroHeader(prev), limits).is_err());
+        Arc::make_mut(&mut store.values).remove(&key(repo::BLOCKS, prev.0));
+        let view = View::load_with_config(store.clone(), cfg.clone()).unwrap();
+        assert_eq!(
+            blocks::read(&view, Request::KeyHeight(height as u128), limits).unwrap(),
+            Reply::Missing(Missing::Previous)
+        );
+        Arc::make_mut(&mut store.values).remove(&key(repo::BLOCKS, top.0));
+        let view = View::load_with_config(store.clone(), cfg.clone()).unwrap();
+        assert_eq!(
+            blocks::read(&view, Request::KeyHeight(height as u128), limits).unwrap(),
+            Reply::Missing(Missing::Block)
+        );
+        Arc::make_mut(&mut store.values).remove(&key(repo::KEYS, height.to_be_bytes()));
+        let view = View::load_with_config(store, cfg).unwrap();
+        assert_eq!(
+            blocks::read(&view, Request::KeyHeight(height as u128), limits).unwrap(),
+            Reply::Missing(Missing::ChainTooShort)
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2);
+}
+
+#[test]
 fn original_successor_and_generation_traversal_matches_complete_wire_responses() {
     let native = fixture();
     let mut counts = [0; 3];

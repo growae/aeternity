@@ -2,6 +2,8 @@ use super::*;
 use ae_codec::headers::Header;
 use ae_storage::events::{Cursor, Reader};
 
+pub mod blocks;
+
 pub(super) struct Height {
     reader: Reader,
     records: usize,

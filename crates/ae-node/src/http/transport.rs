@@ -30,7 +30,7 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
                     return Err(400);
                 }
                 let (path, query) = uri.split_once('?').unwrap_or((uri, ""));
-                let path = decode(path, false).ok_or(400u16)?;
+                let path = path.to_owned();
                 let mut fields = Headers::new();
                 for header in request.headers {
                     let key = header.name.to_ascii_lowercase();
@@ -92,8 +92,27 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Request, u16> {
         bytes.extend_from_slice(&chunk[..n]);
     }
 }
-fn decode(value: &str, plus: bool) -> Option<String> {
-    String::from_utf8(decode_bytes(value, plus)?).ok()
+pub(super) fn path_segments(path: &str) -> Option<Vec<Vec<u8>>> {
+    // Cowboy splits before percent-decoding: an encoded slash remains inside
+    // one binding. A trailing separator is ignored, interior empty segments
+    // remain, and decoded dot segments are removed before route matching.
+    let mut raw: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    if raw.last() == Some(&"") {
+        raw.pop();
+    }
+    let mut parts = Vec::new();
+    for segment in raw {
+        let bytes = decode_bytes(segment, false)?;
+        match bytes.as_slice() {
+            b"." => (),
+            b".." => {
+                parts.pop();
+            }
+            // Preserve bindings exactly; JSON cleaning belongs at emission.
+            _ => parts.push(bytes),
+        }
+    }
+    Some(parts)
 }
 fn decode_bytes(value: &str, plus: bool) -> Option<Vec<u8>> {
     let mut decoded = Vec::with_capacity(value.len());
@@ -227,7 +246,7 @@ async fn selected(
         Err(_) => Err(failure(chain::Error::Timeout)),
     }
 }
-fn failure(error: chain::Error) -> Response {
+pub(super) fn failure(error: chain::Error) -> Response {
     match error {
         chain::Error::Busy => Response::unavailable(true),
         chain::Error::Storage(_) => Response::json(500, json!({"reason":"Internal server error"})),
@@ -237,6 +256,9 @@ fn failure(error: chain::Error) -> Response {
 fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Response> {
     if request.method == "OPTIONS" {
         return Err(Response::empty(200));
+    }
+    if path_segments(&request.path).is_none() {
+        return Err(Response::empty(400));
     }
     let Some((v3, operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
@@ -254,6 +276,9 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     } else {
         false
     };
+    if let Operation::Blocks { operation, v3 } = &operation {
+        operation.validate_path(*v3)?;
+    }
     Ok((operation, strings))
 }
 pub(super) fn dispatch(
@@ -279,7 +304,13 @@ pub(super) fn dispatch(
                 Response::invalid_response()
             }
         }
-        (Ok((Operation::Current { .. } | Operation::PeerPublicKey, strings)), Ok(mut body)) => {
+        (
+            Ok((
+                Operation::Current { .. } | Operation::PeerPublicKey | Operation::Blocks { .. },
+                strings,
+            )),
+            Ok(mut body),
+        ) => {
             if strings {
                 response::integers_as_strings(&mut body);
             }
@@ -313,6 +344,9 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
         Ok((Operation::PeerPublicKey, _)) => super::key::query(&parent, &config).await,
         Ok((Operation::Status { .. }, _)) => super::status::query(&parent, &config).await,
+        Ok((Operation::Blocks { operation, v3 }, _)) => {
+            super::blocks::query(&parent, &config, captured.as_ref(), operation, *v3).await
+        }
         Err(_) => Err(Response::unavailable(false)),
     };
     let mut response = dispatch(plan, result);

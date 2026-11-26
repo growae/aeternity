@@ -145,29 +145,48 @@ pub(super) fn integers_as_strings(value: &mut Value) {
         _ => (),
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
-    Current { height: bool },
-    SyncStatus { v3: bool },
+    Current {
+        height: bool,
+    },
+    SyncStatus {
+        v3: bool,
+    },
     PeerPublicKey,
-    Status { v3: bool },
+    Status {
+        v3: bool,
+    },
+    Blocks {
+        operation: super::blocks::Operation,
+        v3: bool,
+    },
 }
 pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     if config.target != Target::External {
         return None;
     }
-    let (v3, suffix) = if let Some(p) = path.strip_prefix("/v3") {
-        (true, p)
-    } else {
-        (false, path.strip_prefix("/v2")?)
-    };
-    let (operation, group) = match suffix {
-        "/key-blocks/current/height" => (Operation::Current { height: true }, "chain"),
-        "/key-blocks/current/hash" => (Operation::Current { height: false }, "chain"),
-        "/sync-status" => (Operation::SyncStatus { v3 }, "node_info"),
-        "/peers/pubkey" => (Operation::PeerPublicKey, "node_info"),
-        "/status" => (Operation::Status { v3 }, "node_info"),
+    let segments = super::transport::path_segments(path)?;
+    let (version, suffix) = segments.split_first()?;
+    let v3 = match version.as_slice() {
+        b"v3" => true,
+        b"v2" => false,
         _ => return None,
+    };
+    let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    let (operation, group) = match suffix.as_slice() {
+        [b"key-blocks", b"current", b"height"] => (Operation::Current { height: true }, "chain"),
+        [b"key-blocks", b"current", b"hash"] => (Operation::Current { height: false }, "chain"),
+        [b"sync-status"] => (Operation::SyncStatus { v3 }, "node_info"),
+        [b"peers", b"pubkey"] => (Operation::PeerPublicKey, "node_info"),
+        [b"status"] => (Operation::Status { v3 }, "node_info"),
+        _ => (
+            Operation::Blocks {
+                operation: super::blocks::route(v3, &suffix)?,
+                v3,
+            },
+            "chain",
+        ),
     };
     config
         .groups

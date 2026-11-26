@@ -13,6 +13,11 @@ pub struct Generation {
     pub key: Block,
     pub micros: Vec<Block>,
 }
+#[derive(Debug)]
+pub struct GenerationSummary {
+    pub key: ae_codec::headers::KeyHeader,
+    pub micros: Vec<Hash256>,
+}
 fn key_block<S: Read>(view: &View<S>, hash: Hash256) -> Result<Block, Error> {
     let block = view.require_block(hash)?;
     if !matches!(block, Block::Key(_)) {
@@ -83,8 +88,44 @@ pub fn generation<S: Read>(
     view: &View<S>,
     hash: Hash256,
     forward: bool,
-    mut limits: Limits,
+    limits: Limits,
 ) -> Result<Option<Generation>, Error> {
+    let mut micros = Vec::new();
+    let key = walk_generation(view, hash, forward, limits, |block| {
+        micros.push(block);
+        Ok(())
+    })?;
+    micros.reverse();
+    Ok(key.map(|key| Generation { key, micros }))
+}
+
+// Preserve full-block availability and traversal semantics while retaining
+// only hashes. Large decoded transaction bodies are released at each step.
+pub fn generation_summary<S: Read>(
+    view: &View<S>,
+    hash: Hash256,
+    forward: bool,
+    limits: Limits,
+) -> Result<Option<GenerationSummary>, Error> {
+    let mut micros = Vec::new();
+    let key = walk_generation(view, hash, forward, limits, |block| {
+        micros.push(block.hash().map_err(|_| Error::Corrupt("micro hash"))?);
+        Ok(())
+    })?;
+    let Some(Block::Key(key)) = key else {
+        return Ok(None);
+    };
+    micros.reverse();
+    Ok(Some(GenerationSummary { key, micros }))
+}
+
+fn walk_generation<S: Read>(
+    view: &View<S>,
+    hash: Hash256,
+    forward: bool,
+    mut limits: Limits,
+    mut visit: impl FnMut(Block) -> Result<(), Error>,
+) -> Result<Option<Block>, Error> {
     let Some(block @ Block::Key(_)) = view.block(hash)? else {
         return Ok(None);
     };
@@ -127,7 +168,6 @@ pub fn generation<S: Read>(
         (HeaderMode::ProofOfWork, true) | (HeaderMode::Hyperchain, false) => Some(height),
         (HeaderMode::Hyperchain, true) => Some(height.checked_add(1).ok_or(Error::ResourceLimit)?),
     };
-    let mut micros = Vec::new();
     if let Some(mb_height) = mb_height {
         let mut cursor = last;
         loop {
@@ -147,9 +187,8 @@ pub fn generation<S: Read>(
             };
             cursor = Hash256(micro.header.common.previous_hash);
             charge(&block, &mut limits)?;
-            micros.push(block);
+            visit(block)?;
         }
     }
-    micros.reverse();
-    Ok(Some(Generation { key: block, micros }))
+    Ok(Some(block))
 }

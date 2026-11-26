@@ -1,6 +1,196 @@
 use super::*;
 
 #[tokio::test]
+async fn block_queries_follow_admitted_mainnet_keys_micros_and_rollback() {
+    use crate::chain::query::blocks::{Kind, Missing, Reply, Request};
+    let (_temp, importer) = setup(Default::default());
+    let genesis = importer.current().unwrap().wait().await.unwrap().key;
+    let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+    for block in &blocks[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let hash = block.hash().unwrap();
+        let Reply::Header(top) = importer.blocks(Request::Top).unwrap().wait().await.unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(top.header, block.header());
+        assert_eq!(top.previous, Kind::Key);
+        let Reply::Header(key) = importer
+            .blocks(Request::CurrentKey)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(key.header, blocks[0].header());
+        let Reply::Generation { key, micros } = importer
+            .blocks(Request::CurrentGeneration)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(key.header, blocks[0].header());
+        assert_eq!(
+            micros,
+            if matches!(block, Block::Micro(_)) {
+                vec![hash]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            importer
+                .blocks(Request::KeyHeight(1))
+                .unwrap()
+                .wait()
+                .await
+                .unwrap(),
+            Reply::Header(key)
+        );
+        if let Block::Micro(m) = block {
+            assert_eq!(
+                importer
+                    .blocks(Request::MicroCount(hash))
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap(),
+                Reply::Count(m.transactions.len())
+            );
+            assert_eq!(
+                importer
+                    .blocks(Request::MicroHeader(hash))
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap(),
+                Reply::Header(top)
+            );
+            assert_eq!(
+                importer
+                    .blocks(Request::KeyHash(hash))
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap(),
+                Reply::Missing(Missing::Key)
+            );
+        }
+    }
+    for request in [
+        Request::KeyHeight(u64::MAX as u128 + 1),
+        Request::GenerationHeight(u64::MAX as u128 + 385),
+    ] {
+        assert_eq!(
+            importer.blocks(request).unwrap().wait().await.unwrap(),
+            Reply::Missing(Missing::ChainTooShort)
+        );
+    }
+    assert_eq!(
+        importer
+            .blocks(Request::MicroHeader(genesis))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        Reply::Missing(Missing::Micro)
+    );
+    assert_eq!(
+        importer
+            .blocks(Request::GenerationHash(Hash256::ZERO))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        Reply::Missing(Missing::NotOnChain)
+    );
+    importer
+        .database()
+        .rollback(repository::rollback::Target::Height(0), Default::default())
+        .unwrap();
+    let Reply::Generation { key, micros } = importer
+        .blocks(Request::CurrentGeneration)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(key.header.hash().unwrap(), genesis);
+    assert!(micros.is_empty());
+    importer.stop();
+    assert!(matches!(importer.blocks(Request::Top), Err(Error::Closed)));
+    importer.join().await;
+}
+
+#[tokio::test]
+async fn block_queries_cancel_queued_reads_share_capacity_and_apply_generation_limits() {
+    use crate::chain::query::blocks::{Reply, Request};
+    let (_temp, importer) = setup(Config {
+        jobs: 2,
+        blocks: 1,
+        ..Default::default()
+    });
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let active = importer
+        .jobs
+        .submit(1, move |_| {
+            entered_tx.send(()).unwrap();
+            blocked.recv().unwrap();
+        })
+        .unwrap();
+    entered.await.unwrap();
+    let queued = importer.blocks(Request::Top).unwrap();
+    assert!(matches!(
+        importer.blocks(Request::CurrentGeneration),
+        Err(Error::Busy)
+    ));
+    drop(queued);
+    release.send(()).unwrap();
+    active.await.unwrap();
+    importer.jobs.drain().await;
+    for block in &fixtures::blocks(&NetworkProfile::mainnet())[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        importer
+            .blocks(Request::CurrentGeneration)
+            .unwrap()
+            .wait()
+            .await,
+        Err(Error::Storage(repository::Error::ResourceLimit))
+    ));
+    assert!(matches!(
+        importer.blocks(Request::Top).unwrap().wait().await.unwrap(),
+        Reply::Header(_)
+    ));
+    *importer.context.recovery.lock().unwrap() = Some(Error::RecoveryRequired);
+    assert!(matches!(
+        importer.blocks(Request::Top),
+        Err(Error::RecoveryRequired)
+    ));
+    importer.stop();
+    importer.join().await;
+}
+
+#[tokio::test]
 async fn header_queries_fit_beside_a_pending_generation_with_default_budgets() {
     let (_temp, importer) = setup(Default::default());
     let pending_download = importer.reserve().unwrap();

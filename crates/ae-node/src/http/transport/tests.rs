@@ -1,6 +1,161 @@
 use super::*;
 use ae_types::Hash256;
 
+#[test]
+fn original_cowboy_paths_preserve_segment_boundaries_dots_and_error_bodies() {
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_paths.json"
+    ))
+    .unwrap();
+    let rows = corpus["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 252);
+    for pair in rows.chunks_exact(2) {
+        let row = if pair[0]["tokens"][0] == "7633" {
+            &pair[1]
+        } else {
+            &pair[0]
+        };
+        let raw = row["input"]["path"].as_str().unwrap();
+        let parts = path_segments(raw);
+        if row["tokens"] == "badrequest" {
+            assert!(parts.is_none());
+        } else {
+            let expected: Vec<_> = row["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| hex::decode(p.as_str().unwrap()).unwrap())
+                .collect();
+            assert_eq!(parts, Some(expected), "{row}");
+        }
+        let request = Request {
+            method: "GET".into(),
+            path: raw.into(),
+            query: String::new(),
+            headers: Headers::new(),
+        };
+        let planned = plan(&request, &Config::default());
+        let expected = &row["result"];
+        if let Some(error) = expected["route_error"].as_str() {
+            assert_eq!(
+                planned.unwrap_err().status,
+                if error == "badrequest" { 400 } else { 404 },
+                "{row}"
+            );
+            continue;
+        }
+        let (_, route) = response::route(raw, &Config::default()).unwrap();
+        match route {
+            Operation::Blocks { operation, .. } => {
+                use super::super::blocks::Operation as B;
+                let (name, binding) = match operation {
+                    B::Top { envelope: true } => ("GetTopBlock", None),
+                    B::Top { envelope: false } => ("GetTopHeader", None),
+                    B::CurrentKey => ("GetCurrentKeyBlock", None),
+                    B::KeyHash(h) => ("GetKeyBlockByHash", Some(("hash", h))),
+                    B::KeyHeight(h) => ("GetKeyBlockByHeight", Some(("height", h))),
+                    B::MicroHeader(h) => ("GetMicroBlockHeaderByHash", Some(("hash", h))),
+                    B::MicroCount(h) => ("GetMicroBlockTransactionsCountByHash", Some(("hash", h))),
+                    B::CurrentGeneration => ("GetCurrentGeneration", None),
+                    B::GenerationHash(h) => ("GetGenerationByHash", Some(("hash", h))),
+                    B::GenerationHeight(h) => ("GetGenerationByHeight", Some(("height", h))),
+                };
+                assert_eq!(expected["operation"], name);
+                if let Some((name, value)) = binding {
+                    assert_eq!(
+                        value,
+                        hex::decode(expected["bindings"][name].as_str().unwrap()).unwrap()
+                    );
+                }
+            }
+            Operation::Status { .. } => assert_eq!(expected["operation"], "GetStatus"),
+            _ => panic!("unexpected captured route"),
+        }
+        assert_eq!(planned.is_ok(), expected["logic_reads"] == 1, "{row}");
+        let response = super::dispatch(
+            planned,
+            Err(Response::json(500, json!({"reason":"controlled provider"}))),
+        );
+        assert_eq!(
+            response.status,
+            expected["result"]["response"]["code"].as_u64().unwrap() as u16,
+            "{row}"
+        );
+        if expected["result"]["kind"] == "stream_error" {
+            assert!(response.body.is_empty());
+            assert!(response.headers.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                expected["result"]["response"]["body"],
+                "{row}"
+            );
+        }
+    }
+}
+
+#[test]
+fn original_block_request_coercion_and_schema_wrappers_match_both_versions() {
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_block_schema.json"
+    ))
+    .unwrap();
+    let mut checked = 0;
+    for row in corpus["rows"].as_array().unwrap() {
+        let input = corpus["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == row["id"])
+            .unwrap();
+        let Some(operation) = super::super::blocks::tests::operation(
+            input["operation"].as_str().unwrap(),
+            &input["bindings"],
+        ) else {
+            continue;
+        };
+        let v3 = row["module"] == "oas_endpoints";
+        // The native capture provides parsed Cowboy bindings directly. This
+        // tests schema processing, including empty bindings, independently of
+        // path matching (covered by the original Cowboy path fixture above).
+        let plan = (|| {
+            let strings = if v3 {
+                strings(row["query"]["query"].as_str().unwrap())?
+            } else {
+                false
+            };
+            operation.validate_path(v3)?;
+            Ok((Operation::Blocks { operation, v3 }, strings))
+        })();
+        assert_eq!(plan.is_ok(), row["logic_reads"] == 1, "{row}");
+        let code = input["code"].as_u64().unwrap() as u16;
+        let body = input["body"].clone();
+        let result = if code == 200 {
+            Ok(body)
+        } else {
+            Err(Response::json(code, body))
+        };
+        let response = super::dispatch(plan, result);
+        assert_eq!(
+            response.status,
+            row["result"]["response"]["code"].as_u64().unwrap() as u16,
+            "{row}"
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(response.body.is_empty(), "{row}");
+            assert!(response.headers.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                row["result"]["response"]["body"],
+                "{row}"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 2436);
+}
+
 fn dispatch(request: &Request, config: &Config, selected: Result<Current, Response>) -> Response {
     let plan = plan(request, config);
     let height = matches!(plan, Ok((Operation::Current { height: true }, _)));

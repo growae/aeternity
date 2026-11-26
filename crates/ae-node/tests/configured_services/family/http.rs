@@ -165,6 +165,7 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
     }
     assert_eq!(checked, 260);
     let generation = workers.status().keys_generation;
+    let command_generation = handle.commands().unwrap().number;
     assert_eq!(
         workers
             .restart(ae_sync::runtime::workers::Child::Keys, generation)
@@ -174,7 +175,25 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
             .unwrap(),
         generation + 1
     );
-    ready(&mut handle).await;
+    // Worker replacement is acknowledged before the root necessarily notices
+    // it. Wait for the dependent command owner to rebind as well; a retained
+    // ready publication from the previous generation is not this barrier.
+    within(async {
+        loop {
+            let status = handle.status();
+            assert!(status.running && status.failure.is_none(), "{status:?}");
+            if status.ready
+                && handle
+                    .commands()
+                    .is_some_and(|c| c.number > command_generation)
+            {
+                break;
+            }
+            handle.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert_eq!(handle.commands().unwrap().number, command_generation + 1);
     let current = workers.bindings().keys.unwrap().current().unwrap();
     assert!(!old.same_worker(&current));
     assert!(matches!(
@@ -448,6 +467,73 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     let http = running.listen_http(config()).await.unwrap();
     let address = http.status().address;
     assert!(running.handle().http().is_some());
+    super::http_checks::verify_blocks(&http, &db).await;
+    for path in [
+        "/v3/key-blocks/current/",
+        "/v3/a/../key-blocks/current",
+        "/%76%33/key-blocks/current",
+    ] {
+        let (code, _, body) = get(address, path).await;
+        assert_eq!(code, 200, "{path}: {body}");
+        assert_eq!(
+            body["hash"],
+            api::encode(ApiType::KeyBlockHash, genesis.as_ref())
+        );
+    }
+    for path in [
+        "/v3/key-blocks/hash/a%2Fb",
+        "/v3/key-blocks/hash/%FF",
+        "/v3/key-blocks/hash//",
+    ] {
+        let (code, _, body) = get(address, path).await;
+        assert_eq!(
+            (code, body),
+            (400, json!({"reason":"Invalid hash"})),
+            "{path}"
+        );
+    }
+    for path in ["/v3%2Fstatus", "/v2/headers/top", "/v3/blocks/top"] {
+        let (code, _, body) = request(
+            address,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(code, 404);
+        assert!(body.is_empty());
+    }
+    for v3 in [false, true] {
+        for (encoded, expected) in [
+            ("%FF", "�"),
+            ("%C0%80", "�"),
+            ("%ED%A0%41", "�"),
+            ("%ED%A0%80", "�"),
+            ("%F5%80%80%80", "�"),
+            ("%ED%FF%2F", "�"),
+            ("1%ED%A0%32", "1�"),
+        ] {
+            let path = format!(
+                "/{}/key-blocks/height/{encoded}",
+                if v3 { "v3" } else { "v2" }
+            );
+            let (code, headers, body) = request(
+                address,
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            )
+            .await;
+            if v3 {
+                assert_eq!(code, 500);
+                assert!(body.is_empty());
+                assert!(!headers.contains_key("x-ae-height"));
+            } else {
+                assert_eq!(code, 400);
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"reason":"validation_error","parameter":"height","info":{"error":"wrong_type","data":expected}})
+                );
+            }
+        }
+    }
     for version in ["v2", "v3"] {
         let (code, headers, body) =
             get(address, &format!("/{version}/key-blocks/current/height")).await;
@@ -481,6 +567,9 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
     assert_eq!(headers["retry-after"], "3");
     assert_eq!(headers["x-ae-height"], "0");
+    let (code, headers, body) = get(address, "/v3/key-blocks/hash/invalid").await;
+    assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
+    assert_eq!(headers["retry-after"], "3");
     let (code, headers, _) =
         request(address, "OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
     assert_eq!(code, 200);
@@ -536,6 +625,7 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
         )
     };
     assert!(height > 0);
+    super::http_checks::verify_blocks(&http, &db).await;
     let pool = h
         .pow()
         .unwrap()
@@ -587,6 +677,7 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
         .unwrap();
     assert!(completion.result.as_ref().unwrap().command.result.is_ok());
     let height = height + 70;
+    super::http_checks::verify_blocks(&http, &db).await;
     let (code, headers, body) = get(address, "/v3/key-blocks/current/height").await;
     assert_eq!((code, body), (200, json!({"height":height})));
     assert_eq!(headers["x-ae-height"], height.to_string());

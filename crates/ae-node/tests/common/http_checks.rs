@@ -227,6 +227,148 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         );
         let _ = uptime_ms(body["uptime"].as_str().unwrap());
     }
+    verify_blocks(http, database).await;
+}
+
+pub async fn verify_blocks(http: &http::Handle, database: &ae_storage::Database) {
+    let (top_hash, top, key_hash, key, generation) = {
+        let view = database.view().unwrap();
+        let hash = view.status().tip.unwrap();
+        let top = view.require_block(hash).unwrap();
+        let key_hash = match &top {
+            Block::Key(_) => hash,
+            Block::Micro(m) => Hash256(m.header.common.previous_key_hash),
+        };
+        let key = view.require_block(key_hash).unwrap().header();
+        let generation = if view
+            .canonical_key(top.header().common().height)
+            .unwrap()
+            .is_some()
+        {
+            let mut hashes = vec![];
+            let mut cursor = hash;
+            while cursor != key_hash {
+                let Block::Micro(m) = view.require_block(cursor).unwrap() else {
+                    panic!()
+                };
+                hashes.push(api::encode(ApiType::MicroBlockHash, cursor.as_ref()));
+                cursor = Hash256(m.header.common.previous_hash);
+            }
+            hashes.reverse();
+            Some(hashes)
+        } else {
+            None
+        };
+        (hash, top, key_hash, key, generation)
+    };
+    let key_encoded = api::encode(ApiType::KeyBlockHash, key_hash.as_ref());
+    let top_encoded = api::encode(
+        if matches!(top, Block::Key(_)) {
+            ApiType::KeyBlockHash
+        } else {
+            ApiType::MicroBlockHash
+        },
+        top_hash.as_ref(),
+    );
+    let key_height = key.common().height;
+    for v3 in [false, true] {
+        let version = if v3 { "v3" } else { "v2" };
+        for suffix in [
+            "/key-blocks/current".to_owned(),
+            format!("/key-blocks/hash/{key_encoded}"),
+            format!("/key-blocks/height/{key_height}"),
+        ] {
+            let path = format!("/{version}{suffix}?int-as-string=true");
+            let (code, body) = block_get(http, &path).await;
+            assert_eq!(code, 200, "{path}: {body}");
+            assert_eq!(body["hash"], key_encoded);
+            assert_eq!(
+                body["height"],
+                if v3 {
+                    json!(key_height.to_string())
+                } else {
+                    json!(key_height)
+                }
+            );
+            assert_eq!(
+                api::decode_as(
+                    ApiType::BlockStateHash,
+                    body["state_hash"].as_str().unwrap()
+                )
+                .unwrap(),
+                key.common().state_hash
+            );
+        }
+        let path = if v3 {
+            "/v3/headers/top"
+        } else {
+            "/v2/blocks/top"
+        };
+        let (code, body) = block_get(http, path).await;
+        assert_eq!(code, 200, "{body}");
+        let header = if v3 {
+            &body
+        } else if matches!(top, Block::Key(_)) || top.header().common().height == 0 {
+            &body["key_block"]
+        } else {
+            &body["micro_block"]
+        };
+        assert_eq!(header["hash"], top_encoded);
+        for suffix in [
+            "/generations/current".to_owned(),
+            format!("/generations/hash/{key_encoded}"),
+            format!("/generations/height/{}", top.header().common().height),
+        ] {
+            let path = format!("/{version}{suffix}");
+            let (code, body) = block_get(http, &path).await;
+            if let Some(expected) = &generation {
+                assert_eq!(code, 200, "{path}: {body}");
+                assert_eq!(body["key_block"]["hash"], key_encoded);
+                assert_eq!(body["micro_blocks"], json!(expected));
+            } else {
+                assert_eq!(
+                    code,
+                    if suffix.contains("/hash/") { 400 } else { 404 },
+                    "{path}: {body}"
+                );
+            }
+        }
+        if let Block::Micro(m) = &top {
+            let (code, body) = block_get(
+                http,
+                &format!("/{version}/micro-blocks/hash/{top_encoded}/header"),
+            )
+            .await;
+            assert_eq!(code, 200, "{body}");
+            assert_eq!(body["hash"], top_encoded);
+            let (code, body) = block_get(
+                http,
+                &format!("/{version}/micro-blocks/hash/{top_encoded}/transactions/count"),
+            )
+            .await;
+            assert_eq!((code, body), (200, json!({"count":m.transactions.len()})));
+        }
+    }
+}
+async fn block_get(http: &http::Handle, path: &str) -> (u16, Value) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut socket = TcpStream::connect(http.status().address).await.unwrap();
+        socket
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut bytes = vec![];
+        socket.read_to_end(&mut bytes).await.unwrap();
+        let mut fields = [httparse::EMPTY_HEADER; 64];
+        let mut response = httparse::Response::new(&mut fields);
+        let end = response.parse(&bytes).unwrap().unwrap();
+        (
+            response.code.unwrap(),
+            serde_json::from_slice(&bytes[end..]).unwrap(),
+        )
+    })
+    .await
+    .unwrap()
 }
 pub fn uptime_ms(value: &str) -> u128 {
     value

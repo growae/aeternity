@@ -609,7 +609,7 @@ impl<S: Read> View<S> {
     }
     pub fn block(&self, h: Hash256) -> Result<Option<Block>, Error> {
         self.source
-            .get(&key(BLOCKS, h.0))?
+            .get_bounded(&key(BLOCKS, h.0), self.config.max_block_bytes)?
             .map(|b| {
                 let block = blocks::decode(self, &b)?;
                 if block.hash().map_err(|_| Error::Corrupt("block hash"))? != h {
@@ -641,7 +641,16 @@ impl<S: Read> View<S> {
         hash: Hash256,
     ) -> Result<Option<ae_tx::SignedTransaction<ae_tx::Transaction>>, Error> {
         self.source
-            .get(&key(TRANSACTIONS, hash.0))?
+            .get_bounded(
+                &key(TRANSACTIONS, hash.0),
+                self.config.max_transaction_record_bytes,
+            )
+            .map_err(|error| match error {
+                // Keep the transaction-record error contract when the backend
+                // rejects an oversized value before allocating its copy.
+                Error::ResourceLimit => ae_tx::storage::Error::ResourceLimit.into(),
+                error => error,
+            })?
             .map(|b| {
                 let config = self.config.transaction_record();
                 if b.len() > config.max_record_bytes {

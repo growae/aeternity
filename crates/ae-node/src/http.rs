@@ -6,10 +6,12 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+mod blocks;
 mod key;
 mod response;
 mod status;
 mod sync;
+mod text;
 mod transport;
 pub use response::Cors;
 
