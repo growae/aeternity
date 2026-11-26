@@ -5,7 +5,11 @@ use ae_p2p::{
 };
 use ae_storage::Database;
 use ae_types::{PeerPublicKey, Unsigned};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 pub mod capabilities;
@@ -246,9 +250,16 @@ pub struct Handle {
     target: watch::Sender<u64>,
     status: watch::Receiver<Status>,
     capabilities: CapabilityStore,
+    sync: Arc<OnceLock<crate::chain::sync::PeerSet>>,
 }
 type CapabilityStore = capability_worker::Binding;
 impl Handle {
+    pub(crate) fn bind_sync(&self, peers: crate::chain::sync::PeerSet) -> Result<(), Error> {
+        if *self.stop.borrow() || !self.status.borrow().running {
+            return Err(Error::Closed);
+        }
+        self.sync.set(peers).map_err(|_| Error::Configuration)
+    }
     pub fn shutdown(&self) {
         self.stop.send_replace(true);
     }
@@ -321,6 +332,7 @@ struct Context {
     progress: watch::Sender<Counts>,
     storage_bytes: Arc<Semaphore>,
     capabilities: CapabilityStore,
+    sync: Arc<OnceLock<crate::chain::sync::PeerSet>>,
 }
 struct Lane {
     client: net::Client,
@@ -426,6 +438,7 @@ pub(crate) fn create_bound(
     };
     let (status, observed) = watch::channel(current.clone());
     let (progress, _) = watch::channel(Counts::default());
+    let sync = Arc::new(OnceLock::new());
     let context = Context {
         analytics,
         db: db.clone(),
@@ -436,6 +449,7 @@ pub(crate) fn create_bound(
         target: targets,
         progress,
         capabilities: capabilities.clone(),
+        sync: sync.clone(),
     };
     Ok((
         Handle {
@@ -444,6 +458,7 @@ pub(crate) fn create_bound(
             target,
             status: observed,
             capabilities,
+            sync,
         },
         Events(events),
         Service::new(

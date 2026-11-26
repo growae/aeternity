@@ -1,5 +1,83 @@
 use super::*;
 
+#[test]
+fn scheduled_ping_membership_matches_native_active_and_retained_suspect_tasks() {
+    struct Owner(Book<Otp26>);
+    impl PeerMembership for Owner {
+        fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
+            Ok(self.0.peers_in_sync())
+        }
+    }
+    fn peer(n: u8) -> PeerPublicKey {
+        let mut bytes = [0; 32];
+        bytes[31] = n;
+        PeerPublicKey(bytes)
+    }
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/erlang_sync_ping.json"
+    ))
+    .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 12);
+    for row in rows.as_array().unwrap() {
+        let mut book = Book::<Otp26>::new();
+        let specs: &[(u8, bool, u64)] = match row["mode"].as_str().unwrap() {
+            "empty" => &[],
+            "active" => &[(1, false, 100)],
+            "suspect" => &[(1, true, 100)],
+            "mixed" => &[(1, true, 100), (2, false, 200)],
+            _ => panic!("unknown native case"),
+        };
+        for &(id, suspect, height) in specs {
+            let limits = coordination::Limits::default();
+            let chain = Chain::new(
+                id.into(),
+                vec![peer(id)],
+                vec![Point {
+                    height,
+                    hash: Hash256([0; 32]),
+                }],
+                limits,
+            )
+            .unwrap();
+            let mut state = Scheduler::new(chain.clone(), limits)
+                .unwrap()
+                .state()
+                .clone();
+            state.suspect = suspect;
+            // Native membership is in the chain, not the active workers.
+            assert!(state.workers.is_empty());
+            book.groups.push(Group {
+                model: Scheduler::restore(state, limits).unwrap(),
+                statistics: statistics::Task::new(chain.id(), chain.target(), limits.items)
+                    .unwrap(),
+                statistics_failure: None,
+                members: BTreeMap::new(),
+                payloads: BTreeMap::new(),
+                agreed: None,
+                cursor: None,
+                selected: None,
+                finished: false,
+                failed: None,
+            });
+        }
+        let owner: Arc<dyn PeerMembership> = Arc::new(Owner(book));
+        let peers = PeerSet(Arc::downgrade(&owner));
+        let key = peer(row["peer"].as_u64().unwrap().try_into().unwrap());
+        let actual = if peers.contains(key) {
+            serde_json::json!({"kind":"log_ping", "outcome":"ok"})
+        } else {
+            serde_json::json!({"kind":"job", "queue":"sync_ping"})
+        };
+        assert_eq!(actual, row["event"], "{row}");
+        assert_eq!(Arc::strong_count(&owner), 1);
+        drop(owner);
+        // A different live owner cannot revive the connection's old binding.
+        let _replacement: Arc<dyn PeerMembership> = Arc::new(Owner(Book::new()));
+        assert_eq!(peers.peers(), Err(Error::Closed));
+        assert!(!peers.contains(key));
+    }
+}
+
 #[tokio::test]
 async fn rejected_workers_publish_native_completion_order_and_only_idle_completion_latches_gc() {
     use crate::events::Delivery;

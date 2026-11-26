@@ -1556,6 +1556,8 @@ async fn output_capacity_and_abrupt_application_drop_close_owned_connections() {
 mod chain_sync;
 #[path = "peer_runtime/shared_sync.rs"]
 mod shared_sync;
+#[path = "peer_runtime/sync_ping.rs"]
+mod sync_ping;
 
 #[path = "peer_runtime/staged_download.rs"]
 mod staged_download;

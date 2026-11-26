@@ -325,6 +325,21 @@ impl Session {
                 if self.current().await?.token != ping.token {
                     return Err(Error::Stale);
                 }
+                if self
+                    .ctx
+                    .sync
+                    .get()
+                    .is_some_and(|peers| peers.contains(self.client.peer()))
+                {
+                    // aec_sync:schedule_ping logs success for every chain
+                    // member, including retained suspect tasks, without wire
+                    // traffic. Use the ordinary completion owner so its
+                    // counter and next timer are each advanced exactly once.
+                    if !ping.complete_and_wait(true).await && !self.client.is_disconnecting() {
+                        return Err(Error::Stale);
+                    }
+                    return Ok(());
+                }
                 let version = self.client.ping_version();
                 let message = self.ping(version, None).await?;
                 let ticket = self.client.request(&message, None)?;

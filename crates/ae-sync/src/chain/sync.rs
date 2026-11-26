@@ -316,7 +316,7 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct Handle {
-    membership: Weak<dyn PeerMembership>,
+    membership: PeerSet,
     database: std::sync::Weak<Database>,
     event_owner: Arc<()>,
     stop: watch::Sender<bool>,
@@ -327,10 +327,7 @@ pub struct Handle {
 }
 impl Handle {
     pub fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
-        self.membership
-            .upgrade()
-            .ok_or(Error::Closed)?
-            .peers_in_sync()
+        self.membership.peers()
     }
     pub fn events(&self) -> crate::events::Feed<lifecycle::Event> {
         self.events.clone()
@@ -398,6 +395,19 @@ struct Context<O> {
 }
 trait PeerMembership: Send + Sync {
     fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error>;
+}
+// A connection group binds to one synchronizer. Readers must not keep that
+// owner alive, or acquire a replacement through an unrelated global slot.
+#[derive(Clone)]
+pub(crate) struct PeerSet(Weak<dyn PeerMembership>);
+impl PeerSet {
+    fn peers(&self) -> Result<Vec<PeerPublicKey>, Error> {
+        self.0.upgrade().ok_or(Error::Closed)?.peers_in_sync()
+    }
+    pub(crate) fn contains(&self, peer: PeerPublicKey) -> bool {
+        // An unavailable owner provides no evidence for suppressing a ping.
+        self.peers().is_ok_and(|peers| peers.contains(&peer))
+    }
 }
 impl<O: MapOrder + Send + Sync + 'static> PeerMembership for Context<O> {
     fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
@@ -503,9 +513,13 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
         headers: Mutex::new(BTreeMap::new()),
     });
     let membership: Arc<dyn PeerMembership> = context.clone();
+    let membership = PeerSet(Arc::downgrade(&membership));
+    application
+        .bind_sync(membership.clone())
+        .map_err(|_| Error::Configuration)?;
     Ok((
         Handle {
-            membership: Arc::downgrade(&membership),
+            membership,
             database,
             event_owner: event_owner.clone(),
             stop,

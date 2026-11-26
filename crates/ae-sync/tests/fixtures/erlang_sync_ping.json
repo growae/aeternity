@@ -1,0 +1,98 @@
+[
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "empty",
+    "peer": 1
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "empty",
+    "peer": 2
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "empty",
+    "peer": 3
+  },
+  {
+    "event": {
+      "kind": "log_ping",
+      "outcome": "ok"
+    },
+    "mode": "active",
+    "peer": 1
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "active",
+    "peer": 2
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "active",
+    "peer": 3
+  },
+  {
+    "event": {
+      "kind": "log_ping",
+      "outcome": "ok"
+    },
+    "mode": "suspect",
+    "peer": 1
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "suspect",
+    "peer": 2
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "suspect",
+    "peer": 3
+  },
+  {
+    "event": {
+      "kind": "log_ping",
+      "outcome": "ok"
+    },
+    "mode": "mixed",
+    "peer": 1
+  },
+  {
+    "event": {
+      "kind": "log_ping",
+      "outcome": "ok"
+    },
+    "mode": "mixed",
+    "peer": 2
+  },
+  {
+    "event": {
+      "kind": "job",
+      "queue": "sync_ping"
+    },
+    "mode": "mixed",
+    "peer": 3
+  }
+]
