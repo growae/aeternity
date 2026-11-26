@@ -11,6 +11,7 @@ pub mod hyperchain;
 pub mod instrumentation;
 pub mod interchange;
 pub mod key;
+pub mod oracle;
 pub mod publication;
 pub mod repository;
 pub mod resilience;

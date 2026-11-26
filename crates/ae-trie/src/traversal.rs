@@ -181,6 +181,13 @@ impl<S: NodeReader> Iterator for TrieIterator<'_, S> {
             return None;
         }
         while let Some((mut path, reference)) = self.stack.pop() {
+            // Seek past whole subtrees below an exclusive cursor. A prefix of
+            // the cursor still needs traversal to find its later descendants.
+            if self.options.after.as_ref().is_some_and(|after| {
+                path.as_slice() < after.as_slice() && !after.as_slice().starts_with(&path)
+            }) {
+                continue;
+            }
             if self.options.max_nibbles.is_some_and(|n| path.len() > n) {
                 continue;
             }
@@ -283,6 +290,90 @@ mod tests {
             None
         );
         assert!(tree.read_only_subtree(&Nibbles(vec![0, 1])).is_err());
+    }
+    #[test]
+    fn exclusive_cursor_seeks_without_reading_earlier_subtrees() {
+        use std::cell::Cell;
+        struct Counted {
+            store: MemoryStore,
+            reads: Cell<usize>,
+        }
+        impl NodeReader for Counted {
+            fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, Error> {
+                self.reads.set(self.reads.get() + 1);
+                self.store.node(hash)
+            }
+        }
+        let mut tree = Trie::default();
+        for n in 0u16..4096 {
+            tree.put(
+                &Nibbles::from_bytes(&n.to_be_bytes()),
+                Value::Bytes(vec![42; 64]),
+            )
+            .unwrap();
+        }
+        let counted = Counted {
+            store: tree.store().clone(),
+            reads: Cell::new(0),
+        };
+        let tree = Trie::from_root(tree.root_hash(), counted).unwrap();
+        tree.store().reads.set(0);
+        let rows = tree
+            .iter_with_options(IteratorOptions {
+                after: Some(Nibbles::from_bytes(&4090u16.to_be_bytes())),
+                ..Default::default()
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            (4091u16..4096)
+                .map(|n| Nibbles::from_bytes(&n.to_be_bytes()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            tree.store().reads.get() < 20,
+            "{}",
+            tree.store().reads.get()
+        );
+        let small = fixture();
+        let all = small.iter().collect::<Result<Vec<_>, _>>().unwrap();
+        for cursor in [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![1, 1],
+            vec![1, 2],
+            vec![1, 2, 2],
+            vec![1, 2, 3],
+            vec![1, 2, 3, 0],
+            vec![1, 4],
+            vec![2],
+            vec![3],
+        ] {
+            for prefix in [None, Some(Nibbles(vec![1])), Some(Nibbles(vec![1, 2]))] {
+                for max in [None, Some(1), Some(2), Some(3)] {
+                    let expected = all
+                        .iter()
+                        .filter(|(k, _)| {
+                            k.0 > cursor
+                                && prefix.as_ref().is_none_or(|p| k.0.starts_with(&p.0))
+                                && max.is_none_or(|m| k.0.len() <= m)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let got = small
+                        .iter_with_options(IteratorOptions {
+                            after: Some(Nibbles(cursor.clone())),
+                            prefix: prefix.clone(),
+                            max_nibbles: max,
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    assert_eq!(got, expected, "{cursor:?} {prefix:?} {max:?}");
+                }
+            }
+        }
     }
     #[test]
     fn reachability_drops_obsolete_nodes_without_losing_current_values() {
