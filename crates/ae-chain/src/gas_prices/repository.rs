@@ -16,6 +16,7 @@ use num_bigint::BigInt;
 pub struct ReadLimits {
     pub reads: point::Limits,
     pub observations: Limits,
+    pub proof_bytes: usize,
 }
 impl Default for ReadLimits {
     fn default() -> Self {
@@ -27,6 +28,7 @@ impl Default for ReadLimits {
                 ..Default::default()
             },
             observations: Limits::default(),
+            proof_bytes: 16 << 20,
         }
     }
 }
@@ -37,13 +39,21 @@ pub struct Reader<S> {
 }
 impl<S: Read> Reader<S> {
     pub fn new(view: &View<S>, block_gas_limit: BigInt, limits: ReadLimits) -> Result<Self, Error> {
+        Self::with_config(view, block_gas_limit, limits, view.config().clone())
+    }
+    fn with_config(
+        view: &View<S>,
+        block_gas_limit: BigInt,
+        limits: ReadLimits,
+        config: repo::ReadConfig,
+    ) -> Result<Self, Error> {
         Stats {
             total: block_gas_limit.clone(),
             ..Default::default()
         }
         .check(limits.observations)?;
         Ok(Self {
-            view: point::view(view, limits.reads)?,
+            view: point::view_with_config(view, limits.reads, config)?,
             limits,
             block_gas_limit,
         })
@@ -61,7 +71,9 @@ impl<S: Read> Reader<S> {
         mut checkpoint: impl FnMut() -> Result<(), Error>,
     ) -> Result<Stats, Error> {
         // Native evaluates both accessors even if either returns missing.
-        let block = self.view.stream_block(hash, &mut checkpoint)?;
+        let block = self
+            .view
+            .stream_block(hash, self.limits.proof_bytes, &mut checkpoint)?;
         checkpoint()?;
         let bytes = self.view.source().get(&repo::key(repo::RECORDS, hash.0))?;
         let trees = bytes
@@ -102,6 +114,9 @@ impl<S: Read> Reader<S> {
         Ok(stats)
     }
 }
+
+mod service;
+pub use service::service_read_weight;
 impl<S: Read> Source for Reader<S> {
     fn header(&mut self, hash: Hash256) -> Result<Option<Header>, Error> {
         Ok(self.view.header(hash)?.map(|header| {

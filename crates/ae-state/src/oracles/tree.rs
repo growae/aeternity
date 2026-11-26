@@ -158,7 +158,10 @@ impl<S: NodeWriter, C: NodeWriter> Oracles<S, C> {
     ) -> Result<Self, crate::transport::Error> {
         use crate::transport::Error as E;
         use ae_codec::object::ObjectTag;
-        let mut cache_tree = Trie::new(cache_store);
+        let mut cache_tree = Trie::new(crate::transport::WriteBudget {
+            store: cache_store,
+            budget,
+        });
         for row in tree.iter() {
             let (key, value) = row?;
             let key = crate::transport::byte_key(&key)?;
@@ -192,7 +195,7 @@ impl<S: NodeWriter, C: NodeWriter> Oracles<S, C> {
         }
         Ok(Self {
             tree,
-            cache: cache_tree,
+            cache: crate::transport::finish_import(cache_tree)?,
         })
     }
     pub fn transaction<T, E>(

@@ -2,6 +2,8 @@ use super::*;
 use ae_codec::rlp::{self, Rlp};
 use ae_tx::{SignedTransaction, Transaction};
 
+mod canonical;
+
 // The block envelope is retained, but decoded transaction records are not.
 // Construction validates the entire block before callers can read its state;
 // accounting then makes another metered pass through the same snapshot.
@@ -22,6 +24,7 @@ impl<S: Read> View<S> {
     pub(crate) fn stream_block<E: From<Error>>(
         &self,
         hash: Hash256,
+        proof_bytes: usize,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<StreamBlock<'_, S>>, E> {
         checkpoint()?;
@@ -48,14 +51,14 @@ impl<S: Read> View<S> {
                     return Err(Error::Corrupt("legacy block encoding").into());
                 }
             }
-            envelope.validate_proof(&self.config)?;
+            envelope.validate_proof(&self.config, proof_bytes)?;
             if !envelope.canonical {
                 return Err(Error::Corrupt("legacy block encoding").into());
             }
         }
         envelope.visit(self, checkpoint, |_| Ok(()))?;
         if envelope.modern {
-            envelope.validate_proof(&self.config)?;
+            envelope.validate_proof(&self.config, proof_bytes)?;
             if !envelope.canonical {
                 return Err(Error::Corrupt("block record encoding").into());
             }
@@ -91,13 +94,19 @@ impl<S: Read> StreamBlock<'_, S> {
     }
 }
 impl Envelope<'_> {
-    fn validate_proof(&self, config: &ReadConfig) -> Result<(), Error> {
+    fn validate_proof(&self, config: &ReadConfig, proof_bytes: usize) -> Result<(), Error> {
         if !self.proof_shape {
             return Err(Error::Corrupt("stored fraud proof"));
         }
         if !self.proof.is_empty() {
+            let limits = rlp::DecodeLimits {
+                max_input_bytes: config.body.max_input_bytes.min(proof_bytes),
+                // tag, version and three binary fields in one list.
+                max_items: config.body.max_items.min(6),
+                max_depth: config.body.max_depth.min(1),
+            };
             let proof =
-                fraud::Proof::decode(self.proof, config.mode, config.body).map_err(fraud_error)?;
+                fraud::Proof::decode(self.proof, config.mode, limits).map_err(fraud_error)?;
             if proof.encode().map_err(fraud_error)? != self.proof {
                 return Err(Error::Corrupt("stored fraud proof"));
             }
@@ -235,7 +244,7 @@ fn parse<'a>(bytes: &'a [u8], config: &ReadConfig) -> Result<Envelope<'a>, Error
             Error::Corrupt("block record RLP")
         }
     })?;
-    let canonical = canonical_header && rlp::encode(&value) == payload;
+    let canonical = canonical_header && canonical::matches(&value, payload)?;
     let Rlp::List(mut fields) = value else {
         return Err(Error::Corrupt("block record fields"));
     };

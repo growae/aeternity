@@ -1,6 +1,175 @@
 use super::*;
 
 #[tokio::test]
+async fn recent_gas_reads_fit_default_pool_retain_capacity_and_preserve_partial_cache_fills() {
+    use crate::chain::query::gas_prices::{Cache, Config as CacheConfig, Data, QueryError};
+    use ae_chain::gas_prices as gas;
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let cache = Arc::new(Cache::new(CacheConfig::default()).unwrap());
+    let capacity = importer.available();
+    let held = importer
+        .recent_gas_prices(
+            cache.clone(),
+            i128::from(NOW),
+            6_000_000.into(),
+            1 << 20,
+            |r| r,
+        )
+        .unwrap()
+        .wait_retained()
+        .await
+        .unwrap();
+    let result = held.value.as_ref().unwrap();
+    for (row, minutes) in result.iter().zip(gas::WINDOWS) {
+        assert_eq!(row.minutes, minutes);
+        assert_eq!(row.minimum, 0.into());
+        assert_eq!(row.utilization, 0.into());
+    }
+    assert_eq!(importer.available().0, 0);
+    assert!(matches!(
+        importer.recent_gas_prices(cache.clone(), 0, 6_000_000.into(), 0, |r| r),
+        Err(Error::Busy)
+    ));
+    drop(held);
+    assert_eq!(importer.available(), capacity);
+    assert!(matches!(
+        importer.recent_gas_prices(cache.clone(), 0, 6_000_000.into(), usize::MAX, |r| r),
+        Err(Error::Busy)
+    ));
+    let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+    for block in &blocks[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    }
+    let Block::Micro(micro) = &blocks[1] else {
+        panic!("fixture micro")
+    };
+    let reply = importer
+        .recent_gas_prices(cache.clone(), 0, 6_000_000.into(), 1 << 20, |r| r)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    // A deliberately early observation clock includes genesis (time zero),
+    // reaching its absent predecessor after a successful micro observation.
+    assert!(matches!(
+        reply,
+        Err(QueryError::Observation(gas::Error::MissingHeader(_)))
+    ));
+    let hash = blocks[1].hash().unwrap();
+    let value = cache
+        .get_or_fill(hash, || Ok(()), |_| panic!("warm fill lost"))
+        .unwrap();
+    let Data::Observed(stats) = value.data() else {
+        panic!("expected observed micro")
+    };
+    let prices: Vec<_> = micro
+        .transactions
+        .iter()
+        .map(|tx| {
+            tx.transaction().view().pricing(
+                &micro.header.common.height.into(),
+                ae_protocol::Protocol::try_from(micro.header.common.version).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stats.minimum,
+        prices.iter().map(|p| p.minimum_gas_price.clone()).min()
+    );
+    assert_eq!(stats.used, prices.into_iter().map(|p| p.gas_limit).sum());
+    assert_eq!(stats.total, 6_000_000.into());
+    let rows = importer
+        .recent_gas_prices(
+            cache.clone(),
+            i128::from(micro.header.time),
+            6_000_000.into(),
+            1 << 20,
+            |r| r,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .unwrap();
+    for (row, minutes) in rows.iter().zip(gas::WINDOWS) {
+        assert_eq!(*row, stats.summary(minutes).unwrap());
+    }
+    cache.close();
+    let reply = importer
+        .recent_gas_prices(
+            cache,
+            i128::from(micro.header.time),
+            6_000_000.into(),
+            1 << 20,
+            |r| r,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply,
+        Err(QueryError::Cache(
+            crate::chain::query::gas_prices::Error::Closed
+        ))
+    ));
+    *importer.context.recovery.lock().unwrap() = Some(Error::RecoveryRequired);
+    let fresh = Arc::new(Cache::new(CacheConfig::default()).unwrap());
+    assert!(matches!(
+        importer.recent_gas_prices(fresh, 0, 6_000_000.into(), 0, |r| r),
+        Err(Error::RecoveryRequired)
+    ));
+    importer.stop();
+    importer.join().await;
+}
+
+#[tokio::test]
+async fn recent_gas_cancelled_render_keeps_read_credits_until_joined_shutdown() {
+    use crate::chain::query::gas_prices::{Cache, Config as CacheConfig};
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let cache = Arc::new(Cache::new(CacheConfig::default()).unwrap());
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let ticket = importer
+        .recent_gas_prices(
+            cache,
+            i128::from(NOW),
+            6_000_000.into(),
+            1 << 20,
+            move |result| {
+                result.unwrap();
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+            },
+        )
+        .unwrap();
+    within(entered).await.unwrap();
+    let held = importer.available();
+    assert_eq!(held.0, 0);
+    drop(ticket);
+    assert_eq!(importer.available(), held);
+    importer.stop();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), importer.join())
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    within(importer.join()).await;
+}
+
+#[tokio::test]
 async fn chain_ends_keep_key_tips_across_micro_blocks_rollback_and_retained_reads() {
     let (_temp, importer) = setup(Config {
         jobs: 1,

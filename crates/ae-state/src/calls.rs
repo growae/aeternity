@@ -283,7 +283,11 @@ impl<S: NodeReader> Calls<S> {
             .tree
             .get(&Nibbles::from_bytes(&[namespace, &id].concat()))?
         {
-            Some(ae_trie::Value::Bytes(b)) => Ok(Some(Call::deserialize(id, &b)?)),
+            Some(ae_trie::Value::Bytes(b)) => {
+                ae_codec::rlp::decode_with_limits(&b, self.tree.store().decode_limits())
+                    .map_err(|e| Error::Object(object::ObjectError::Rlp(e)))?;
+                Ok(Some(Call::deserialize(id, &b)?))
+            }
             None => Ok(None),
             _ => Err(Error::InvalidValue),
         }

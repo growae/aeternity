@@ -231,7 +231,11 @@ impl<S: NodeReader> Accounts<S> {
     pub fn lookup(&self, key: AccountPublicKey) -> Result<Option<Account>, AccountError> {
         match self.tree.get(&Nibbles::from_bytes(key.as_ref()))? {
             None => Ok(None),
-            Some(ae_trie::Value::Bytes(bytes)) => Ok(Some(Account::deserialize(key, &bytes)?)),
+            Some(ae_trie::Value::Bytes(bytes)) => {
+                ae_codec::rlp::decode_with_limits(&bytes, self.tree.store().decode_limits())
+                    .map_err(|e| AccountError::Object(object::ObjectError::Rlp(e)))?;
+                Ok(Some(Account::deserialize(key, &bytes)?))
+            }
             Some(_) => Err(AccountError::InvalidAccountValue),
         }
     }

@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod reader;
+pub use reader::QueryError;
+
 #[derive(Debug, Clone)]
 pub enum Error {
     Configuration,

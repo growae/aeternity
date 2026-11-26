@@ -58,7 +58,7 @@ pub(super) fn deserialize<S: NodeWriter>(
     let Some(V::List(values)) = content.next() else {
         return Err(Error::InvalidValue);
     };
-    let mut tree = Trie::new(store);
+    let mut tree = Trie::new(WriteBudget { store, budget: b });
     for v in values {
         let V::Binary(bytes) = v else {
             return Err(Error::InvalidValue);
@@ -76,5 +76,5 @@ pub(super) fn deserialize<S: NodeWriter>(
         }
         tree.put(&key, ae_trie::Value::Bytes(value))?;
     }
-    Ok(tree)
+    finish_import(tree)
 }

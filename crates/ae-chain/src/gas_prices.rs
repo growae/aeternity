@@ -32,7 +32,13 @@ impl From<crate::repository::Error> for Error {
             E::ResourceLimit
             | E::Trie(ae_trie::Error::ResourceLimit)
             | E::Trie(ae_trie::Error::Decode(ae_codec::rlp::DecodeError::ResourceLimit))
-            | E::TransactionStorage(ae_tx::storage::Error::ResourceLimit) => Self::ResourceLimit,
+            | E::TransactionStorage(ae_tx::storage::Error::ResourceLimit)
+            | E::TransactionStorage(ae_tx::storage::Error::Transaction(
+                ae_tx::Error::ResourceLimit,
+            ))
+            | E::TransactionStorage(ae_tx::storage::Error::Transaction(ae_tx::Error::Object(
+                ae_codec::object::ObjectError::Rlp(ae_codec::rlp::DecodeError::ResourceLimit),
+            ))) => Self::ResourceLimit,
             error => Self::Backend(error),
         }
     }

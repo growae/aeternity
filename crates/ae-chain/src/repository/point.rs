@@ -100,11 +100,18 @@ impl<S: Read> Read for Meter<S> {
     }
 }
 pub(crate) fn view<S: Read>(view: &View<S>, limits: Limits) -> Result<View<Meter<S>>, repo::Error> {
+    view_with_config(view, limits, view.config().clone())
+}
+pub(crate) fn view_with_config<S: Read>(
+    view: &View<S>,
+    limits: Limits,
+    config: repo::ReadConfig,
+) -> Result<View<Meter<S>>, repo::Error> {
     let source = Meter {
         source: view.source().clone(),
         bytes: Rc::new(Cell::new(limits.read_bytes)),
         reads: Rc::new(Cell::new(limits.reads)),
         limits,
     };
-    View::load_with_config(source, view.config().clone())
+    View::load_with_config(source, config)
 }

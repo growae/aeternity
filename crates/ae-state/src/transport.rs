@@ -7,6 +7,8 @@ use ae_codec::{
 use ae_trie::{Nibbles, NodeReader, NodeWriter, Trie};
 use std::{cell::Cell, collections::BTreeSet};
 
+#[cfg(test)]
+mod budget_tests;
 mod mtree;
 pub mod proof;
 mod trees;
@@ -203,6 +205,51 @@ pub(crate) fn byte_key(key: &Nibbles) -> Result<Vec<u8>, Error> {
 pub(crate) struct ReadBudget<'a, S> {
     pub(crate) store: &'a S,
     pub(crate) budget: &'a Budget,
+}
+
+// State import creates content-addressed nodes, including obsolete nodes from
+// intermediate roots. Count their allocation capacity and map overhead before
+// handing them to the backend; serialized input size alone does not bound them.
+pub(crate) struct WriteBudget<'a, S> {
+    pub(crate) store: S,
+    pub(crate) budget: &'a Budget,
+}
+impl<S: NodeReader> NodeReader for WriteBudget<'_, S> {
+    fn node(&self, hash: &ae_types::Hash256) -> Result<Option<Vec<u8>>, ae_trie::Error> {
+        ReadBudget {
+            store: &self.store,
+            budget: self.budget,
+        }
+        .node(hash)
+    }
+    fn decode_limits(&self) -> rlp::DecodeLimits {
+        self.budget.decode_limits()
+    }
+    fn verify_node_hashes(&self) -> bool {
+        self.store.verify_node_hashes()
+    }
+}
+impl<S: NodeWriter> NodeWriter for WriteBudget<'_, S> {
+    fn put_node(&mut self, hash: ae_types::Hash256, bytes: Vec<u8>) -> Result<(), ae_trie::Error> {
+        let charge = bytes
+            .capacity()
+            .checked_add(128)
+            .ok_or(ae_trie::Error::ResourceLimit)?;
+        self.budget
+            .charge(charge)
+            .map_err(|_| ae_trie::Error::ResourceLimit)?;
+        self.store.put_node(hash, bytes)
+    }
+}
+pub(crate) fn finish_import<S: NodeReader>(
+    tree: Trie<WriteBudget<'_, S>>,
+) -> Result<Trie<S>, Error> {
+    let root = tree.root_hash();
+    let store = tree.into_store();
+    // The final root is created by this import. Verify it under the same read
+    // limits before returning the caller's original backend type.
+    let checked = Trie::from_root(root, store)?;
+    Ok(Trie::from_root(root, checked.into_store().store)?)
 }
 impl<S: NodeReader> NodeReader for ReadBudget<'_, S> {
     fn verify_node_hashes(&self) -> bool {

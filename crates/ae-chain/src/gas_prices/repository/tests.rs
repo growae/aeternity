@@ -201,32 +201,37 @@ fn original_micro_statistics_use_historical_pricing_and_resulting_call_state() {
             if modern {
                 modernize(&mut db, hash);
             }
-            let mut read = reader(db);
-            assert_eq!(read.tip(), Some(hash));
-            let header = read.header(hash).unwrap().unwrap();
-            assert!(header.micro);
-            assert_eq!(header.time, 42);
-            let result = read.uncached_stats(hash, header.protocol, || Ok(()));
-            if r["result"]["kind"] == "ok" {
-                let got = result.unwrap();
-                let want = &r["result"]["value"];
-                assert_eq!(
-                    got.minimum,
-                    (!want["minimum"].is_null()).then(|| number(&want["minimum"])),
-                    "{r}"
-                );
-                assert_eq!(got.used, number(&want["used"]), "{r}");
-                assert_eq!(got.total, number(&want["total"]), "{r}");
-            } else {
-                assert!(
-                    matches!(
-                        result,
-                        Err(Error::Accounting(
-                            ae_execution::transactions::accounting::Error::MissingCall { .. }
-                        ))
-                    ),
-                    "{r}: {result:?}"
-                );
+            let readers = [
+                reader(db.clone()),
+                Reader::service(&View::load(db).unwrap(), 6_000_000.into()).unwrap(),
+            ];
+            for mut read in readers {
+                assert_eq!(read.tip(), Some(hash));
+                let header = read.header(hash).unwrap().unwrap();
+                assert!(header.micro);
+                assert_eq!(header.time, 42);
+                let result = read.uncached_stats(hash, header.protocol, || Ok(()));
+                if r["result"]["kind"] == "ok" {
+                    let got = result.unwrap();
+                    let want = &r["result"]["value"];
+                    assert_eq!(
+                        got.minimum,
+                        (!want["minimum"].is_null()).then(|| number(&want["minimum"])),
+                        "{r}"
+                    );
+                    assert_eq!(got.used, number(&want["used"]), "{r}");
+                    assert_eq!(got.total, number(&want["total"]), "{r}");
+                } else {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(Error::Accounting(
+                                ae_execution::transactions::accounting::Error::MissingCall { .. }
+                            ))
+                        ),
+                        "{r}: {result:?}"
+                    );
+                }
             }
         }
     }
@@ -466,7 +471,7 @@ fn streamed_metadata_accounting_uses_two_metered_passes_and_can_cancel_between_t
         let (db, h, txkey, record_bytes) = metadata_block(modern);
         let view = View::load(db.clone()).unwrap();
         let block = view
-            .stream_block(h, &mut || Ok::<_, repo::Error>(()))
+            .stream_block(h, 16 << 20, &mut || Ok::<_, repo::Error>(()))
             .unwrap()
             .unwrap();
         let mut seen = 0;
@@ -574,7 +579,7 @@ fn streamed_modern_records_enforce_canonical_transport_size_and_identity() {
         )
         .unwrap();
         let full = view.block(h);
-        let streamed = view.stream_block(h, &mut || Ok::<_, repo::Error>(()));
+        let streamed = view.stream_block(h, 16 << 20, &mut || Ok::<_, repo::Error>(()));
         assert_eq!(full.is_ok(), streamed.is_ok());
         assert_eq!(streamed.is_ok(), limit == wire.len());
     }
@@ -585,7 +590,7 @@ fn streamed_modern_records_enforce_canonical_transport_size_and_identity() {
     );
     let view = View::load(db.clone()).unwrap();
     assert!(matches!(
-        view.stream_block(wrong, &mut || Ok::<_, repo::Error>(())),
+        view.stream_block(wrong, 16 << 20, &mut || Ok::<_, repo::Error>(())),
         Err(repo::Error::Corrupt("block identity"))
     ));
     let mut bytes = db.data[&repo::key(repo::BLOCKS, h.0)].clone();
@@ -593,7 +598,7 @@ fn streamed_modern_records_enforce_canonical_transport_size_and_identity() {
     db.put(repo::key(repo::BLOCKS, h.0), bytes);
     let view = View::load(db).unwrap();
     assert!(matches!(
-        view.stream_block(h, &mut || Ok::<_, repo::Error>(())),
+        view.stream_block(h, 16 << 20, &mut || Ok::<_, repo::Error>(())),
         Err(repo::Error::Corrupt("block record version"))
     ));
 }
@@ -669,7 +674,7 @@ fn streamed_proofs_and_noncanonical_envelopes_are_validated_before_state() {
     let view = View::load(db).unwrap();
     assert!(matches!(view.block(h), Err(repo::Error::Corrupt(_))));
     assert!(matches!(
-        view.stream_block(h, &mut || Ok::<_, repo::Error>(())),
+        view.stream_block(h, 16 << 20, &mut || Ok::<_, repo::Error>(())),
         Err(repo::Error::Corrupt(_))
     ));
 }
