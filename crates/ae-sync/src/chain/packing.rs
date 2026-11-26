@@ -213,7 +213,16 @@ impl<O: MapOrder + Clone> Packing<O> {
         if let Some(e) = &self.failure {
             return Err(e.clone());
         }
+        let expired = self.core.expired();
         let result = self.advance();
+        // Native report_deadline_expired runs once when packing terminates,
+        // before final root construction. An expired nonempty selection alone
+        // does not terminate the build; it must first be applied and drained.
+        if !expired && self.core.expired() {
+            self.pool
+                .instrumentation()
+                .counter(ae_chain::instrumentation::Counter::MicroCandidateExpired, 1);
+        }
         if let Err(e) = &result {
             self.failure = Some(e.clone());
         }

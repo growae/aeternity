@@ -88,6 +88,9 @@ impl Client {
     pub fn info(&self) -> Info {
         self.shared.lock().info.clone()
     }
+    pub fn instrumentation(&self) -> &ae_chain::instrumentation::Publisher {
+        &self.shared.instrumentation
+    }
     pub fn wait_for_change(&self, version: u64, timeout: Duration) -> Info {
         let (c, _) = self
             .shared

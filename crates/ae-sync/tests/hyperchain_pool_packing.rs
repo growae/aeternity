@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/expiry_metrics.rs"]
+mod expiry_metrics;
 use ae_chain::{
     block::Block,
     hyperchain::candidate as core,
@@ -21,6 +23,9 @@ use std::{
 };
 static DATA: LazyLock<J> = LazyLock::new(|| {
     serde_json::from_str(include_str!("fixtures/erlang_hc_pool_packing.json")).unwrap()
+});
+static METRICS: LazyLock<J> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("fixtures/erlang_metrics_expiry.json")).unwrap()
 });
 fn bytes(j: &J) -> Vec<u8> {
     hex::decode(j.as_str().unwrap()).unwrap()
@@ -129,6 +134,7 @@ fn original_pool_and_builder_match_after_selected_top_advance_in_both_profiles()
             for parent in row["parents"].as_array().unwrap() {
                 for c in parent["cases"].as_array().unwrap() {
                     let mut node = Node::new(row["corpus_index"].as_u64().unwrap() as usize);
+                    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
                     Arc::make_mut(&mut node.config.profile).order =
                         common::hyperchain::order(&DATA[profile]);
                     let owner = hyperchain::Owner::start(
@@ -204,6 +210,21 @@ fn original_pool_and_builder_match_after_selected_top_advance_in_both_profiles()
                     assert_eq!(selected, c["requests"].as_array().unwrap().len());
                     assert_eq!(reported, c["failures"].as_array().unwrap().len());
                     assert_eq!(packing.expired(), c["expired"].as_bool().unwrap());
+                    let native = METRICS["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|m| {
+                            m["corpus_index"] == row["corpus_index"]
+                                && m["parent_count"] == parent["count"]
+                                && m["name"] == c["name"]
+                        })
+                        .unwrap();
+                    let expected = native["events"].as_array().unwrap().len() as u64;
+                    assert_eq!(metrics.count(), expected);
+                    packing.retry().unwrap();
+                    assert_eq!(packing.step(), Ok(Progress::Finished));
+                    assert_eq!(metrics.count(), expected);
                     pool_state(&node, &client, &c["final"]);
                     let prepared = packing.finish().unwrap();
                     assert_eq!(prepared.effects, effects);

@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/expiry_metrics.rs"]
+mod expiry_metrics;
 use ae_chain::{
     block::{Block, MicroBlock},
     hyperchain::candidate as core,
@@ -140,6 +142,7 @@ fn check(p: &owned::Prepared<Otp26>, original: &MicroBlock) -> Block {
 #[test]
 fn live_pow_pool_packs_saved_public_microblock_for_ordinary_admission() {
     let (node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let input = prepare(&node, &owner, &m, Default::default());
     let metadata = input.metadata.clone();
@@ -176,6 +179,7 @@ fn live_pow_pool_packs_saved_public_microblock_for_ordinary_admission() {
     );
     drop(packed);
     assert_eq!(owner.live_snapshots(), 0);
+    assert_eq!(metrics.count(), 0);
 }
 #[test]
 fn accepted_selection_keeps_parent_snapshot_across_real_top_advance() {
@@ -208,6 +212,7 @@ fn accepted_selection_keeps_parent_snapshot_across_real_top_advance() {
 #[test]
 fn cancelled_pow_selection_keeps_its_accepted_receipt_and_releases_snapshot_after_settlement() {
     let (node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let client = node.client();
     wait(
@@ -229,10 +234,12 @@ fn cancelled_pow_selection_keeps_its_accepted_receipt_and_releases_snapshot_afte
     assert_eq!(report.failure_reports, None);
     assert_eq!(client.info().submitted, submitted);
     assert_eq!(owner.live_snapshots(), 0);
+    assert_eq!(metrics.count(), 0);
 }
 #[test]
 fn cancelled_pow_failure_report_is_recorded_once_without_replaying_the_mutation() {
     let (node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let client = node.client();
     let bad = common::invalid_signature(&m.transactions[0]);
@@ -261,6 +268,7 @@ fn cancelled_pow_failure_report_is_recorded_once_without_replaying_the_mutation(
     assert_eq!(wait(client.inspect(bad.hash()).unwrap()).failures, 1);
     assert_eq!(node.db.view().unwrap().status(), before);
     assert_eq!(owner.live_snapshots(), 0);
+    assert_eq!(metrics.count(), 0);
 }
 #[test]
 fn foreign_pool_and_changed_binding_return_the_exact_original_pow_input() {
@@ -295,6 +303,7 @@ fn foreign_pool_and_changed_binding_return_the_exact_original_pow_input() {
 #[test]
 fn stopped_pow_pool_is_not_replaced_or_replayed_by_a_new_worker() {
     let (mut node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let client = node.client();
     let input = prepare(&node, &owner, &m, Default::default());
@@ -321,10 +330,12 @@ fn stopped_pow_pool_is_not_replaced_or_replayed_by_a_new_worker() {
     let report = retire(p.cancel());
     assert_eq!(report.selection, None);
     replacement.shutdown().unwrap();
+    assert_eq!(metrics.count(), 0);
 }
 #[test]
 fn expired_pow_candidate_finishes_empty_without_submitting_pool_work() {
     let (node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let client = node.client();
     wait(
@@ -347,12 +358,122 @@ fn expired_pow_candidate_finishes_empty_without_submitting_pool_work() {
     std::thread::sleep(Duration::from_millis(5));
     assert_eq!(p.step(), Ok(Progress::Finished));
     assert!(p.expired());
+    for _ in 0..5 {
+        p.retry().unwrap();
+        assert_eq!(p.step(), Ok(Progress::Finished));
+        assert_eq!(metrics.count(), 1);
+    }
     assert_eq!(bytes(&p.finish().unwrap()), original);
     assert_eq!(client.info().submitted, submitted);
+}
+
+#[test]
+fn packed_candidate_expiry_reaches_the_predefined_registry_before_finalization() {
+    use ae_sync::observe::{registry, reporter::Points};
+    use ae_sync::routing::Part;
+    let (node, m) = setup();
+    let store = Arc::new(registry::Store::new(Default::default()).unwrap());
+    let registry_owner = registry::Owner::spawn(store.clone()).unwrap();
+    let feed = registry::predefined::Feed::install(store.clone()).unwrap();
+    let binding = node.db.instrumentation().bind(feed.clone()).unwrap();
+    let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
+    let client = node.client();
+    wait(
+        client
+            .force_push(Arc::new(m.transactions[0].clone()))
+            .unwrap(),
+    );
+    let mut p = Packing::start(
+        prepare(&node, &snapshots, &m, Default::default()),
+        client.clone(),
+        packing::Config {
+            timeout: core::Timeout::Milliseconds(1),
+            window_ms: 30_000,
+        },
+    )
+    .unwrap();
+    // The bound cannot stop an empty build; the pool still selects the one
+    // transaction. The following pass then terminates a nonempty candidate.
+    std::thread::sleep(Duration::from_millis(5));
+    until(
+        &mut p,
+        Progress::Applied {
+            accepted: 1,
+            rejected: 0,
+        },
+    );
+    let name = registry::predefined::name("mining.micro_candidate_expired");
+    let point = Part::atom("value");
+    let points = Points::One(point.clone());
+    let value = |n: u64| {
+        registry::Reading::Values(vec![(point.clone(), registry::Value::Integer(n.into()))])
+    };
+    assert_eq!(store.get_value(&name, &points).unwrap(), value(0));
+    assert!(!p.expired());
+    let submitted = client.info().submitted;
+    assert_eq!(p.step(), Ok(Progress::Finished));
+    assert!(p.expired());
+    assert_eq!(store.get_value(&name, &points).unwrap(), value(1));
+    for _ in 0..5 {
+        p.retry().unwrap();
+        assert_eq!(p.step(), Ok(Progress::Finished));
+    }
+    let packed = p.finish().unwrap();
+    assert_eq!(
+        packed.value.candidate.block().transactions,
+        vec![m.transactions[0].clone()]
+    );
+    assert_eq!(store.get_value(&name, &points).unwrap(), value(1));
+    assert_eq!(client.info().submitted, submitted);
+    assert_eq!(feed.info().rejected, 0);
+    drop((binding, packed));
+    assert_eq!(snapshots.live_snapshots(), 0);
+    drop(registry_owner);
+}
+
+#[test]
+fn expired_build_does_not_replay_a_panicking_observation_to_a_replacement_sink() {
+    use ae_chain::instrumentation::{self, Counter, Event, Sink};
+    struct Panics;
+    impl Sink for Panics {
+        fn event(&self, event: Event) {
+            if matches!(event, Event::Counter(Counter::MicroCandidateExpired, 1)) {
+                panic!("expiry callback failure");
+            }
+        }
+        fn start(&self, _: instrumentation::Stage) -> Option<Box<dyn instrumentation::Span>> {
+            None
+        }
+    }
+    let (node, m) = setup();
+    let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
+    let input = prepare(&node, &owner, &m, Default::default());
+    let original = bytes(&input);
+    let binding = node.db.instrumentation().bind(Arc::new(Panics)).unwrap();
+    let mut p = Packing::start(
+        input,
+        node.client(),
+        packing::Config {
+            timeout: core::Timeout::Milliseconds(1),
+            window_ms: 1,
+        },
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(p.step(), Ok(Progress::Finished));
+    assert_eq!(node.db.instrumentation().panics(), 1);
+    drop(binding);
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
+    p.retry().unwrap();
+    assert_eq!(p.step(), Ok(Progress::Finished));
+    assert_eq!(metrics.count(), 0);
+    assert_eq!(node.db.instrumentation().panics(), 1);
+    assert_eq!(bytes(&p.finish().unwrap()), original);
 }
 #[test]
 fn execution_resource_failure_retains_selection_and_never_rerequests_or_reports_it() {
     let (node, m) = setup();
+    let (metrics, _binding) = expiry_metrics::Expiry::bind(&node.db);
     let owner = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
     let client = node.client();
     wait(
@@ -391,6 +512,7 @@ fn execution_resource_failure_retains_selection_and_never_rerequests_or_reports_
     assert_eq!(report.failure_reports, None);
     assert_eq!(report.discarded_failures, 0);
     assert_eq!(owner.live_snapshots(), 0);
+    assert_eq!(metrics.count(), 0);
 }
 
 #[test]
