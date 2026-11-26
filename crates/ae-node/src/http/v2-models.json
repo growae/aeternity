@@ -424,6 +424,73 @@
         "ttl",
         "abi_version"
       ]
+    },
+    "NameEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedValue"
+        },
+        "owner": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "pointers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamePointer"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "ttl",
+        "pointers"
+      ]
+    },
+    "NamePointer": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        }
+      },
+      "required": [
+        "key",
+        "id"
+      ]
+    },
+    "AuctionEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedValue"
+        },
+        "started_at": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "ends_at": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "highest_bidder": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "highest_bid": {
+          "$ref": "#/definitions/UInt"
+        }
+      },
+      "required": [
+        "id",
+        "started_at",
+        "ends_at",
+        "highest_bidder",
+        "highest_bid"
+      ]
     }
   },
   "operations": {
@@ -476,6 +543,12 @@
     },
     "GetOracleQueryByPubkeyAndQueryId": {
       "$ref": "#/definitions/OracleQuery"
+    },
+    "GetAuctionEntryByName": {
+      "$ref": "#/definitions/AuctionEntry"
+    },
+    "GetNameEntryByName": {
+      "$ref": "#/definitions/NameEntry"
     }
   }
 }

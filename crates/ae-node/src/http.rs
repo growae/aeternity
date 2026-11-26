@@ -11,6 +11,7 @@ mod blocks;
 mod contracts;
 mod key;
 mod model;
+mod names;
 mod oracles;
 mod pending;
 mod post;

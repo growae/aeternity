@@ -5,6 +5,8 @@ mod accounts;
 mod contracts;
 #[path = "http/info.rs"]
 mod info;
+#[path = "http/names.rs"]
+mod names;
 #[path = "http/oracles.rs"]
 mod oracles;
 #[path = "http/post.rs"]

@@ -272,9 +272,16 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if path_segments(&request.path).is_none() {
         return Err(Response::empty(400));
     }
-    let Some((v3, mut operation)) = response::route(&request.path, config) else {
+    let Some((v3, operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
     };
+    plan_routed(request, v3, operation)
+}
+fn plan_routed(
+    request: &Request,
+    v3: bool,
+    mut operation: Operation,
+) -> Result<(Operation, bool), Response> {
     let method = if matches!(operation, Operation::PostTransaction { .. }) {
         "POST"
     } else {
@@ -325,6 +332,9 @@ pub(super) fn dispatch(
     result: Result<serde_json::Value, Response>,
 ) -> Response {
     match (plan, result) {
+        (Ok((Operation::Names { operation, v3 }, strings)), Ok(body)) => {
+            super::names::finish(&operation, body, v3, strings)
+        }
         (Ok((Operation::Oracles { operation, v3 }, strings)), Ok(body)) => {
             super::oracles::finish(&operation, body, v3, strings)
         }
@@ -421,6 +431,25 @@ pub(super) async fn exchange(
     let mut pending_candidate = None;
     let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::Names { operation, v3 }, strings)) => {
+            match super::names::query(
+                &parent,
+                &config,
+                captured.as_ref(),
+                operation,
+                *v3,
+                *strings,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::Oracles { operation, v3 }, strings)) => {
             match super::oracles::query(
                 &parent,

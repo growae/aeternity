@@ -1620,6 +1620,67 @@
         "ttl",
         "abi_version"
       ]
+    },
+    "NameEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedNameId"
+        },
+        "owner": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "pointers": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/NamePointer"
+              },
+              {
+                "required": [
+                  "encoded_key"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "ttl",
+        "pointers"
+      ]
+    },
+    "AuctionEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedNameId"
+        },
+        "started_at": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "ends_at": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "highest_bidder": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "highest_bid": {
+          "$ref": "#/definitions/UInt"
+        }
+      },
+      "required": [
+        "id",
+        "started_at",
+        "ends_at",
+        "highest_bidder",
+        "highest_bid"
+      ]
     }
   },
   "operations": {
@@ -1673,6 +1734,15 @@
     },
     "GetOracleQueryByPubkeyAndQueryId": {
       "$ref": "#/definitions/OracleQuery"
+    },
+    "GetAuctionEntryByName": {
+      "$ref": "#/definitions/AuctionEntry"
+    },
+    "GetNameEntryByName": {
+      "$ref": "#/definitions/NameEntry"
+    },
+    "GetNameEntryByNameHash": {
+      "$ref": "#/definitions/NameEntry"
     }
   }
 }

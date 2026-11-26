@@ -455,6 +455,9 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         "GetContract",
         "GetContractCode",
         "GetContractPoI",
+        "GetNameEntryByName",
+        "GetNameEntryByNameHash",
+        "GetAuctionEntryByName",
         "GetOracleByPubkey",
         "GetOracleQueriesByPubkey",
         "GetOracleQueryByPubkeyAndQueryId",
@@ -484,13 +487,13 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 32);
+    assert_eq!(implemented.len(), 35);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        62
+        67
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;
@@ -768,6 +771,118 @@ fn original_oracle_http_wrapper_matches_all_parameters_schemas_versions_and_erro
             );
         }
         for name in ["access-control-allow-origin", "x-ae-height"] {
+            assert_eq!(
+                response.headers.get(name).map(String::as_str),
+                expected["headers"][name].as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn original_name_http_wrapper_matches_all_raw_bindings_schemas_versions_and_errors() {
+    use super::super::names;
+    use ae_chain::name::Kind;
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_name_schema.json"
+    ))
+    .unwrap();
+    let inputs = f["inputs"].as_array().unwrap();
+    let rows = f["schema"].as_array().unwrap();
+    assert_eq!(inputs.len(), 747);
+    assert_eq!(rows.len(), 11024);
+    let config = Config {
+        groups: ["name_service".into()].into(),
+        ..Default::default()
+    };
+    for row in rows {
+        let input = &inputs[row["id"].as_u64().unwrap() as usize];
+        let v3 = row["module"] == "oas_endpoints";
+        let (kind, field, suffix) = match input["operation"].as_str().unwrap() {
+            "GetNameEntryByName" => (Kind::Name, "name", "names"),
+            "GetNameEntryByNameHash" => (Kind::Hash, "name_hash", "names/hash"),
+            _ => (Kind::Auction, "name", "auctions"),
+        };
+        assert!(v3 || kind != Kind::Hash);
+        let raw = hex::decode(input["bindings_hex"][field].as_str().unwrap()).unwrap();
+        let encoded: String = raw.iter().map(|b| format!("%{b:02X}")).collect();
+        let request = Request {
+            method: "GET".into(),
+            path: format!("/{}/{suffix}/{encoded}", if v3 { "v3" } else { "v2" }),
+            query: row["query"]["query"].as_str().unwrap().into(),
+            headers: Headers::from([("origin".into(), "https://client.example".into())]),
+        };
+        let operation = Operation::Names {
+            operation: names::Operation {
+                input: raw.clone(),
+                kind,
+            },
+            v3,
+        };
+        // The native wrapper harness injects bindings after Cowboy routing.
+        // Empty/dot bindings cannot be produced by these literal URL paths;
+        // test their wrapper behavior without changing router normalization.
+        let planned = if matches!(raw.as_slice(), b"" | b"." | b"..") {
+            assert!(response::route(&request.path, &config).is_none());
+            super::plan_routed(&request, v3, operation)
+        } else {
+            let routed = response::route(&request.path, &config).unwrap();
+            assert_eq!(routed, (v3, operation));
+            plan(&request, &config)
+        };
+        assert_eq!(
+            usize::from(planned.is_ok()),
+            row["logic_reads"].as_u64().unwrap() as usize,
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            request.query
+        );
+        if let Ok((Operation::Names { operation, .. }, strings)) = &planned {
+            let mut params = serde_json::Map::new();
+            params.insert(
+                field.into(),
+                json!(super::super::text::binary(&operation.input)),
+            );
+            if v3 {
+                params.insert("int-as-string".into(), json!(strings));
+            }
+            assert_eq!(serde_json::Value::Object(params), row["logic_params"]);
+        }
+        let code = input["code"].as_u64().unwrap() as u16;
+        let controlled = if code == 200 {
+            Ok(input["body"].clone())
+        } else {
+            let mut r = Response::json(code, input["body"].clone());
+            for (k, v) in input["headers"].as_object().unwrap() {
+                r.headers.insert(k.clone(), v.as_str().unwrap().into());
+            }
+            Err(r)
+        };
+        let mut response = super::dispatch(planned, controlled);
+        response.stamp(&config, &request.headers, Some(99));
+        let expected = &row["result"]["response"];
+        assert_eq!(
+            u64::from(response.status),
+            expected["code"].as_u64().unwrap(),
+            "{} {} {}",
+            row["id"],
+            row["module"],
+            request.query
+        );
+        if row["result"]["kind"] == "stream_error" {
+            assert!(response.body.is_empty());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                expected["body"],
+                "{} {} {}",
+                row["id"],
+                row["module"],
+                request.query
+            );
+        }
+        for name in ["access-control-allow-origin", "x-ae-height", "retry-after"] {
             assert_eq!(
                 response.headers.get(name).map(String::as_str),
                 expected["headers"][name].as_str()
