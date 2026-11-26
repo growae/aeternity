@@ -486,3 +486,50 @@ fn killed_key_owner_releases_lease_and_reopens_same_peer_with_fresh_signing_keys
         );
     }
 }
+
+#[test]
+fn candidate_public_queries_follow_queued_promotions_and_drain_the_captured_worker() {
+    let temp = Temp::new();
+    let mut config = temp.config();
+    config.requests = 4;
+    let worker = Worker::spawn(config.clone()).unwrap();
+    let client = worker.client();
+    let initial = client.info().keys.candidate;
+    let (ready, release) = worker::pause(&client);
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let before = client.candidate_public_key().unwrap();
+    let promoted = client.promote_candidate(initial).unwrap();
+    let after = client.candidate_public_key().unwrap();
+    assert_eq!(client.info().keys.candidate, initial);
+    assert!(matches!(client.candidate_public_key(), Err(Error::Busy)));
+    worker.request_shutdown();
+    assert!(matches!(client.candidate_public_key(), Err(Error::Stopped)));
+    release.send(()).unwrap();
+    worker.shutdown().unwrap();
+    assert_eq!(before.blocking_wait().unwrap(), initial);
+    let promoted = promoted.blocking_wait().unwrap();
+    assert_eq!(promoted.signing, initial);
+    assert_ne!(promoted.candidate, initial);
+    assert_eq!(after.blocking_wait().unwrap(), promoted.candidate);
+    assert_eq!(
+        (
+            client.info().submitted,
+            client.info().completed,
+            client.info().pending
+        ),
+        (4, 4, 0)
+    );
+    let replacement = Worker::spawn(config).unwrap();
+    let current = replacement.client();
+    assert!(!client.same_worker(&current));
+    assert_ne!(
+        current
+            .candidate_public_key()
+            .unwrap()
+            .blocking_wait()
+            .unwrap(),
+        promoted.candidate
+    );
+    assert!(matches!(client.candidate_public_key(), Err(Error::Stopped)));
+    replacement.shutdown().unwrap();
+}

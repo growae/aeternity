@@ -695,6 +695,12 @@ fn assert_root_joined(exit: &root::Exit) {
     if let Some(c) = &exit.status.connections {
         assert!(c.joined && !c.running, "{c:?}");
     }
+    if let Some(pending) = &exit.status.pending_key {
+        assert!(
+            pending.joined && !pending.running && !pending.accepting,
+            "{pending:?}"
+        );
+    }
     if let Some(p) = &exit.production {
         assert!(p.as_ref().unwrap().is_settled());
     }
@@ -1025,6 +1031,7 @@ async fn configured_cuckoo_root_permanent_child_exit_is_terminal_without_root_re
         root::Child::Workers,
         root::Child::Connections,
         root::Child::Production,
+        root::Child::PendingKey,
     ] {
         let lab = Lab::new();
         let running = launch_root(&lab, lab.public());
@@ -1034,6 +1041,7 @@ async fn configured_cuckoo_root_permanent_child_exit_is_terminal_without_root_re
             root::Child::Workers => h.workers().unwrap().shutdown(),
             root::Child::Connections => h.connections().unwrap().shutdown(),
             root::Child::Production => h.production().unwrap().request_shutdown(),
+            root::Child::PendingKey => h.pending_key().unwrap().request_shutdown(),
         }
         let exit = within(running.wait()).await.unwrap();
         assert_root_joined(&exit);

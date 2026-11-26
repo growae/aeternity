@@ -9,6 +9,7 @@ use ae_storage::{pool::worker as pool, snapshots};
 use ae_sync::{
     chain::{
         self, on_demand,
+        pending::service as pending,
         pow::{generator, group, packing, producer},
     },
     keys, observe,
@@ -319,6 +320,14 @@ impl Services {
     pub async fn stop_and_join(&self) {
         self.importer.stop();
         self.importer.join().await;
+    }
+    pub fn pending_key(
+        &self,
+        keys: ae_sync::bindings::Binding<keys::Client>,
+        config: pending::Config,
+        clock: Arc<dyn generator::Clock>,
+    ) -> Result<pending::Worker, pending::Error> {
+        pending::Worker::spawn(&self.importer, self.snapshots.clone(), keys, clock, config)
     }
     pub fn generator(
         &self,

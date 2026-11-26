@@ -94,6 +94,41 @@ pub struct Retained<T> {
     pub value: T,
     pub credits: ReadCredits,
 }
+// Reserve the header reader before requesting candidate construction. The
+// reservation and resulting receipt remain bound to this exact importer.
+pub struct PendingHeader<O> {
+    context: Arc<Context<O>>,
+    reservation: blocking::Reservation,
+    timeout: Duration,
+}
+impl<O: MapOrder + Send + Sync + 'static> PendingHeader<O> {
+    pub fn submit(
+        self,
+        header: Arc<ae_codec::headers::KeyHeader>,
+    ) -> Result<Ticket<Option<blocks::ClientHeader>>, Error> {
+        let context = self.context;
+        let pending = self.reservation.submit(move |cancel| {
+            context.check(&cancel, None)?;
+            let view = context.db.view()?;
+            let Some(previous) = view.header(Hash256(header.common.previous_hash))? else {
+                return Ok(None);
+            };
+            let previous = match previous {
+                Header::Key(_) => blocks::Kind::Key,
+                Header::Micro(_) => blocks::Kind::Micro,
+            };
+            context.check(&cancel, None)?;
+            Ok(Some(blocks::ClientHeader {
+                header: Header::Key(header.as_ref().clone()),
+                previous,
+            }))
+        })?;
+        Ok(Ticket {
+            pending,
+            timeout: self.timeout,
+        })
+    }
+}
 impl<T> Ticket<T> {
     pub async fn wait_retained(self) -> Result<Retained<T>, Error> {
         let held = tokio::time::timeout(self.timeout, self.pending.retained())
@@ -115,6 +150,13 @@ impl<T> Ticket<T> {
     }
 }
 impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
+    pub fn pending_header_query(&self) -> Result<PendingHeader<O>, Error> {
+        Ok(PendingHeader {
+            context: self.context.clone(),
+            reservation: self.reserve_header()?,
+            timeout: self.context.config.timeout,
+        })
+    }
     fn reserve_header(&self) -> Result<blocking::Reservation, Error> {
         self.check_open()?;
         let weight = self.context.db.read_config().header_read_weight()?;

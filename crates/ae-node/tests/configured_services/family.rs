@@ -12,6 +12,8 @@ mod http;
 mod http_checks;
 #[path = "../common/network_settings.rs"]
 mod network_settings;
+#[path = "family/pending.rs"]
+mod pending;
 
 fn prepare(p: Prepared) -> node::Prepared {
     node::Prepared::new(p.into_open(), Default::default()).unwrap()

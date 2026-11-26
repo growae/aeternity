@@ -381,6 +381,12 @@ impl Handle {
             HandleInner::Hyperchain(h) => h.importer(),
         }
     }
+    pub fn pending_key(&self) -> Option<chain::pending::service::Client> {
+        match &self.inner {
+            HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => h.pending_key(),
+            HandleInner::Hyperchain(h) => h.pending_key(),
+        }
+    }
     pub fn connections(&self) -> Option<connection::Handle> {
         match &self.inner {
             HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => h.connections(),

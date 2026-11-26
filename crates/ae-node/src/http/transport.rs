@@ -344,6 +344,7 @@ pub(super) fn dispatch(
                 Operation::Current { .. }
                 | Operation::PeerPublicKey
                 | Operation::Blocks { .. }
+                | Operation::PendingKey
                 | Operation::PostTransaction { .. },
                 strings,
             )),
@@ -401,7 +402,18 @@ pub(super) async fn exchange(
     let mut retained = None;
     let mut rendered = None;
     let mut post_credits = None;
+    let mut pending_candidate = None;
     let result = match &plan {
+        Ok((Operation::PendingKey, _)) => {
+            match super::pending::query(&parent, &config, captured.as_ref()).await {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    pending_candidate = Some(reply.candidate);
+                    Ok(reply.value)
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::PostTransaction { v3 }, _)) => {
             match post(
                 &mut stream,
@@ -458,6 +470,7 @@ pub(super) async fn exchange(
     );
     drop(retained);
     drop(post_credits);
+    drop(pending_candidate);
     if written {
         // Half-close the response first. Bounded draining gives the client a
         // chance to receive the error before unread request bytes cause a TCP

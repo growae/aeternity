@@ -8,6 +8,7 @@ use tokio::{
 
 mod blocks;
 mod key;
+mod pending;
 mod post;
 mod response;
 mod status;

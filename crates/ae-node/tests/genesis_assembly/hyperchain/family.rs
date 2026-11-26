@@ -50,6 +50,68 @@ async fn ready(h: &mut node::Handle) {
 }
 
 #[tokio::test]
+async fn pending_hyperchain_requests_preserve_native_errors_and_root_availability() {
+    use ae_sync::chain::pending::service::Error;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+    let parent = Parent::start();
+    for block_producer in [false, true] {
+        let lab = Hc::new(8, json!({"dev_mode":true}), &parent);
+        let p = prepare(&lab, Default::default());
+        let db = p.configured().chain().database().clone();
+        let initial = db.view().unwrap().status();
+        let clock = Clock::new();
+        let mut s = settings(&lab, &p, Arc::new(move |_| Ok(clock.clone())));
+        let node::Settings::Hyperchain(config) = &mut s else {
+            unreachable!()
+        };
+        config.runtime.block_producer = block_producer;
+        config.runtime.producing = false;
+        let mut running = p.launch(s, || Ok(Default::default())).unwrap();
+        let mut handle = running.handle();
+        ready(&mut handle).await;
+        let pending = handle.pending_key().unwrap();
+        let expected = if block_producer {
+            Error::BeneficiaryNotApplicable
+        } else {
+            Error::BeneficiaryNotConfigured
+        };
+        for _ in 0..2 {
+            let receipt = pending.get().unwrap().await.unwrap();
+            assert_eq!(receipt.result, Err(expected.clone()));
+        }
+        let http = http_checks::start(&mut running).await;
+        for version in ["v2", "v3"] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut stream = TcpStream::connect(http.status().address).await.unwrap();
+                stream.write_all(format!("GET /{version}/key-blocks/pending HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+                let mut bytes = vec![];
+                stream.read_to_end(&mut bytes).await.unwrap();
+                let mut fields = [httparse::EMPTY_HEADER;64];
+                let mut response = httparse::Response::new(&mut fields);
+                let end = response.parse(&bytes).unwrap().unwrap();
+                assert_eq!(response.code, Some(if block_producer { 500 } else { 400 }));
+                assert_eq!(serde_json::from_slice::<Value>(&bytes[end..]).unwrap(), if block_producer {
+                    json!({"reason":"Internal server error"})
+                } else {
+                    json!({"reason":"Beneficiary not configured","error_code":"beneficiary_not_configured"})
+                });
+            }).await.unwrap();
+        }
+        assert!(handle.status().ready && handle.status().failure.is_none());
+        assert_eq!(pending.status().accepted, 4);
+        assert_eq!(pending.status().completed, 4);
+        assert!(pending.status().cached_parent.is_none());
+        assert_eq!(db.view().unwrap().status(), initial);
+        let exit = running.shutdown().await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        assert!(pending.status().joined && http.status().joined);
+    }
+}
+
+#[tokio::test]
 async fn configured_network_reaches_hyperchain_owner_and_respects_application_modes() {
     let parent = Parent::start();
     for mode in [

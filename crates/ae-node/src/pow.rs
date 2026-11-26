@@ -6,6 +6,7 @@ use ae_storage::pool::worker::GossipCache;
 use ae_sync::{
     chain::{
         on_demand::service,
+        pending::service as pending,
         pow::{generator, group},
     },
     observe,
@@ -26,6 +27,7 @@ pub struct Config<P = configured::Production> {
     pub workers: workers::Config,
     pub connections: connection::Config,
     pub production: P,
+    pub pending_key: pending::Limits,
     pub cache_entries: usize,
     pub cache_limit: usize,
     pub startup_timeout: Duration,
@@ -43,6 +45,7 @@ impl<P> Config<P> {
             workers: Default::default(),
             connections: Default::default(),
             production,
+            pending_key: Default::default(),
             cache_entries: 1000,
             cache_limit: 100_000,
             startup_timeout: Duration::from_secs(30),
@@ -57,6 +60,7 @@ impl<P> Config<P> {
                 workers: self.workers,
                 connections: self.connections,
                 production: (),
+                pending_key: self.pending_key,
                 cache_entries: self.cache_entries,
                 cache_limit: self.cache_limit,
                 startup_timeout: self.startup_timeout,
@@ -84,6 +88,7 @@ pub enum Child {
     Workers,
     Connections,
     Production,
+    PendingKey,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -99,6 +104,7 @@ pub enum Error {
     Connections(connection::Error),
     Production(group::Error),
     Commands(service::Error),
+    PendingKey(pending::Error),
     ChildStopped(Child),
     ChildTask(Child),
     Unsettled,
@@ -115,6 +121,7 @@ pub struct Status {
     pub connections: Option<connection::Status>,
     pub production: Option<group::Status>,
     pub commands: Option<service::Status>,
+    pub pending_key: Option<pending::Status>,
     pub production_starts: u64,
 }
 pub enum Output {
@@ -143,6 +150,7 @@ struct Controls {
     connections: Option<connection::Handle>,
     production: Option<group::Client<ae_vm_fate::maps::order::Otp26>>,
     commands: Option<CommandGeneration>,
+    pending_key: Option<pending::Client>,
     enabled: Option<bool>,
 }
 struct Shared {
@@ -175,6 +183,9 @@ impl Handle {
     // before the root publishes its terminal receipt, including retained clones.
     pub fn importer(&self) -> Option<Arc<ae_sync::chain::Importer>> {
         lock(&self.shared.controls).importer.clone()
+    }
+    pub fn pending_key(&self) -> Option<pending::Client> {
+        lock(&self.shared.controls).pending_key.clone()
     }
     pub fn connections(&self) -> Option<connection::Handle> {
         lock(&self.shared.controls).connections.clone()
@@ -260,6 +271,7 @@ struct Owner {
     connections: Option<connection::Handle>,
     connection_task: Option<JoinHandle<connection::Status>>,
     production: Option<Live>,
+    pending_key: Option<pending::Worker>,
     pending_retirement: Option<Retirement>,
     dependencies: (u64, u64),
 }
@@ -319,6 +331,7 @@ where
         || config.startup_timeout.is_zero()
         || config.startup_timeout > Duration::from_secs(300)
         || !(1..=128).contains(&config.outputs)
+        || !config.pending_key.valid()
     {
         Some(Error::Configuration)
     } else if let Err(error) = input.validate(prepared.rules().admission.micro_cycle_ms) {
@@ -341,6 +354,7 @@ where
         connections: None,
         production: None,
         commands: None,
+        pending_key: None,
         production_starts: 0,
     };
     let (published, observed) = watch::channel(status.clone());
@@ -354,6 +368,7 @@ where
             connections: None,
             production: None,
             commands: None,
+            pending_key: None,
             enabled: input.enabled(),
         }),
         outputs: Mutex::new(VecDeque::new()),
@@ -376,6 +391,7 @@ where
         connections: None,
         connection_task: None,
         production: None,
+        pending_key: None,
         pending_retirement: None,
         dependencies: (0, 0),
     };
@@ -403,12 +419,20 @@ impl Owner {
     fn publish(&mut self) {
         self.status.workers = self.workers.as_ref().map(workers::Handle::status);
         self.status.connections = self.connections.as_ref().map(connection::Handle::status);
+        if let Some(pending) = &self.pending_key {
+            self.status.pending_key = Some(pending.client().status());
+        }
         if let Some(p) = &self.production {
             p.update(&mut self.status);
         }
         self.status.ready = self.status.phase == Phase::Running
             && self.status.workers.as_ref().is_some_and(|w| w.ready)
             && self.status.connections.as_ref().is_none_or(|c| c.ready)
+            && self
+                .status
+                .pending_key
+                .as_ref()
+                .is_some_and(|p| p.running && p.accepting)
             && self.production.as_ref().is_some_and(Live::ready);
         self.shared.published.send_replace(self.status.clone());
     }
@@ -429,6 +453,15 @@ impl Owner {
         }
     }
     fn worker_health(&self) -> Result<(), Error> {
+        if let Some(pending) = &self.pending_key {
+            let status = pending.client().status();
+            if let Some(error) = status.failure {
+                return Err(Error::PendingKey(error));
+            }
+            if !status.running {
+                return Err(Error::ChildStopped(Child::PendingKey));
+            }
+        }
         let w = self.workers.as_ref().ok_or(Error::NotReady)?.status();
         if let Some(e) = w.error {
             return Err(Error::Workers(e));
@@ -520,6 +553,22 @@ impl Owner {
                 return Err(Error::Start(format!("{error:?}")));
             }
         }
+        let keys = self
+            .workers
+            .as_ref()
+            .unwrap()
+            .bindings()
+            .keys
+            .ok_or(Error::NotReady)?;
+        let (config, clock) = self.input.pending(self.config.pending_key);
+        let pending = self
+            .services
+            .as_ref()
+            .unwrap()
+            .pending_key(keys, config, clock)
+            .map_err(Error::PendingKey)?;
+        lock(&self.shared.controls).pending_key = Some(pending.client());
+        self.pending_key = Some(pending);
         if let Some(controller) = controller {
             self.phase(Phase::Identity);
             let keys = self
@@ -725,6 +774,29 @@ impl Owner {
     async fn finish(&mut self) {
         self.phase(Phase::Stopping);
         let mut joined = true;
+        if let Some(production) = &self.production {
+            production.request_shutdown();
+        }
+        if let Some(pending) = self.pending_key.take() {
+            pending.request_shutdown();
+            match tokio::task::spawn_blocking(move || pending.shutdown()).await {
+                Ok(status) => {
+                    joined &= status.joined;
+                    if let Some(error) = &status.failure {
+                        self.status
+                            .failure
+                            .get_or_insert(Error::PendingKey(error.clone()));
+                    }
+                    self.status.pending_key = Some(status);
+                }
+                Err(_) => {
+                    joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::PendingKey));
+                }
+            }
+        }
         let mut production_failure = None;
         let mut command_failure = None;
         if let Err(e) = self.stop_production().await {
@@ -824,6 +896,9 @@ impl Owner {
 // additionally joins them and retains the single terminal receipt.
 impl Drop for Owner {
     fn drop(&mut self) {
+        if let Some(pending) = &self.pending_key {
+            pending.request_shutdown();
+        }
         if let Some(p) = &self.production {
             p.request_shutdown();
         }

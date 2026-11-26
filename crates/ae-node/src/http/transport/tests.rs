@@ -189,12 +189,13 @@ fn original_block_request_coercion_and_schema_wrappers_match_both_versions() {
             .iter()
             .find(|i| i["id"] == row["id"])
             .unwrap();
-        let Some(operation) = super::super::blocks::tests::operation(
+        let operation = super::super::blocks::tests::operation(
             input["operation"].as_str().unwrap(),
             &input["bindings"],
-        ) else {
+        );
+        if operation.is_none() && input["operation"] != "GetPendingKeyBlock" {
             continue;
-        };
+        }
         let v3 = row["module"] == "oas_endpoints";
         // The native capture provides parsed Cowboy bindings directly. This
         // tests schema processing, including empty bindings, independently of
@@ -205,8 +206,12 @@ fn original_block_request_coercion_and_schema_wrappers_match_both_versions() {
             } else {
                 false
             };
-            operation.validate_path(v3)?;
-            Ok((Operation::Blocks { operation, v3 }, strings))
+            if let Some(operation) = operation {
+                operation.validate_path(v3)?;
+                Ok((Operation::Blocks { operation, v3 }, strings))
+            } else {
+                Ok((Operation::PendingKey, strings))
+            }
         })();
         assert_eq!(plan.is_ok(), row["logic_reads"] == 1, "{row}");
         let code = input["code"].as_u64().unwrap() as u16;
@@ -234,7 +239,7 @@ fn original_block_request_coercion_and_schema_wrappers_match_both_versions() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 2436);
+    assert_eq!(checked, 2616);
 }
 
 fn dispatch(request: &Request, config: &Config, selected: Result<Current, Response>) -> Response {

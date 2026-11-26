@@ -31,6 +31,7 @@ pub mod hyperchain;
 mod import;
 pub mod on_demand;
 pub mod packing;
+pub mod pending;
 mod policy;
 pub mod pow;
 pub mod query;

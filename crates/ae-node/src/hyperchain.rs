@@ -6,6 +6,7 @@ use ae_p2p::noise;
 use ae_storage::pool::worker::CacheController;
 use ae_sync::{
     chain::hyperchain::conductor::{self, Conductor, Output, runtime as producer},
+    chain::pending::service as pending,
     observe,
     runtime::{connection, workers},
 };
@@ -33,6 +34,7 @@ pub struct Config {
     pub workers: workers::hyperchain::Config,
     pub connections: connection::Config,
     pub producer: producer::Settings,
+    pub pending_key: pending::Limits,
     pub startup_timeout: Duration,
     pub poll: Duration,
     pub outputs: usize,
@@ -43,6 +45,7 @@ impl Default for Config {
             workers: Default::default(),
             connections: Default::default(),
             producer: Default::default(),
+            pending_key: Default::default(),
             startup_timeout: Duration::from_secs(30),
             poll: Duration::from_millis(10),
             outputs: 16,
@@ -65,6 +68,7 @@ pub enum Child {
     Workers,
     Connections,
     Producer,
+    PendingKey,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -82,6 +86,7 @@ pub enum Error {
     Production(production::Error),
     ProducerSpawn(String),
     ProducerCleanup,
+    PendingKey(pending::Error),
     ChildStopped(Child),
     ChildTask(Child),
     RootTask,
@@ -97,6 +102,7 @@ pub struct Status {
     pub connections: Option<connection::Status>,
     pub producer: Option<conductor::Status>,
     pub production: Option<production::Status>,
+    pub pending_key: Option<pending::Status>,
 }
 pub struct Exit<O> {
     pub configured: Option<configured::Open>,
@@ -108,6 +114,7 @@ pub struct Exit<O> {
 }
 struct Controls<O> {
     importer: Option<Arc<ae_sync::chain::Importer<O>>>,
+    pending_key: Option<pending::Client>,
     producer: Option<producer::Handle>,
     connections: Option<connection::Handle>,
     workers: Option<workers::hyperchain::Handle<O>>,
@@ -127,6 +134,14 @@ impl<O> Clone for Handle<O> {
     }
 }
 impl<O> Handle<O> {
+    pub fn pending_key(&self) -> Option<pending::Client> {
+        self.0
+            .controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_key
+            .clone()
+    }
     pub fn importer(&self) -> Option<Arc<ae_sync::chain::Importer<O>>> {
         self.0
             .controls
@@ -275,6 +290,7 @@ struct Owner<O: MapOrder + Clone + Send + Sync + 'static> {
     worker_task: Option<JoinHandle<workers::Status>>,
     connection: Option<connection::Handle>,
     connection_task: Option<JoinHandle<connection::Status>>,
+    pending_key: Option<pending::Worker>,
 }
 pub fn launch<O, F>(
     inputs: Inputs<O>,
@@ -334,6 +350,7 @@ fn validate(config: &Config) -> Option<Error> {
         || config.startup_timeout.is_zero()
         || config.startup_timeout > Duration::from_secs(300)
         || !(1..=65536).contains(&config.outputs)
+        || !config.pending_key.valid()
     {
         Some(Error::Configuration)
     } else if tokio::runtime::Handle::try_current().is_err() {
@@ -436,6 +453,7 @@ where
         connections: None,
         producer: inputs.conductor.as_ref().map(Conductor::status),
         production: None,
+        pending_key: None,
     };
     let (published, observed) = watch::channel(status.clone());
     let (stop, stopped) = watch::channel(false);
@@ -444,6 +462,7 @@ where
         published,
         controls: Mutex::new(Controls {
             importer: None,
+            pending_key: None,
             producer: None,
             connections: None,
             workers: None,
@@ -467,6 +486,7 @@ where
         worker_task: None,
         connection: None,
         connection_task: None,
+        pending_key: None,
     };
     let task = tokio::spawn(async move {
         if let Err(error) = owner
@@ -488,6 +508,9 @@ where
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
     fn publish(&mut self) {
+        if let Some(pending) = &self.pending_key {
+            self.status.pending_key = Some(pending.client().status());
+        }
         if let Some(w) = &self.worker {
             self.status.workers = Some(w.status());
         }
@@ -500,6 +523,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         }
         if self.status.phase == Phase::Running {
             self.status.ready = self.status.workers.as_ref().is_some_and(|s| s.ready)
+                && self
+                    .status
+                    .pending_key
+                    .as_ref()
+                    .is_some_and(|s| s.running && s.accepting)
                 && (!self.network || self.status.connections.as_ref().is_some_and(|s| s.ready))
                 && self
                     .status
@@ -562,6 +590,19 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         }
         self.startup_check(end)?;
         self.phase(Phase::Workers);
+        let conductor = self.conductor.as_ref().expect("startup conductor");
+        let pending = pending::Worker::spawn_hyperchain(
+            &conductor.importer(),
+            conductor.status().block_producer,
+            self.config.pending_key,
+        )
+        .map_err(Error::PendingKey)?;
+        self.shared
+            .controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_key = Some(pending.client());
+        self.pending_key = Some(pending);
         self.shared
             .controls
             .lock()
@@ -696,6 +737,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         Ok(())
     }
     fn worker_health(&self) -> Result<(), Error> {
+        if let Some(pending) = &self.pending_key {
+            let status = pending.client().status();
+            if let Some(error) = status.failure {
+                return Err(Error::PendingKey(error));
+            }
+            if !status.running {
+                return Err(Error::ChildStopped(Child::PendingKey));
+            }
+        }
         let w = self
             .worker
             .as_ref()
@@ -789,6 +839,27 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         self.status.ready = false;
         self.phase(Phase::Stopping);
         self.shared.stop.send_replace(true);
+        let mut pending_joined = true;
+        if let Some(pending) = self.pending_key.take() {
+            pending.request_shutdown();
+            match tokio::task::spawn_blocking(move || pending.shutdown()).await {
+                Ok(status) => {
+                    pending_joined = status.joined;
+                    if let Some(error) = &status.failure {
+                        self.status
+                            .failure
+                            .get_or_insert(Error::PendingKey(error.clone()));
+                    }
+                    self.status.pending_key = Some(status);
+                }
+                Err(_) => {
+                    pending_joined = false;
+                    self.status
+                        .failure
+                        .get_or_insert(Error::ChildTask(Child::PendingKey));
+                }
+            }
+        }
         if let Some(control) = self.producer.as_ref().map(|p| p.handle()) {
             // The fence has independent capacity, so unread control receipts
             // and a blocked producer clock cannot prevent service quiescence.
@@ -808,7 +879,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
         if let Some(c) = &self.connection {
             c.shutdown();
         }
-        let mut joined = !matches!(self.status.failure, Some(Error::ChildTask(_)));
+        let mut joined =
+            pending_joined && !matches!(self.status.failure, Some(Error::ChildTask(_)));
         if let Some(task) = self.connection_task.take() {
             match task.await {
                 Ok(status) => {
@@ -956,6 +1028,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Owner<O> {
 
 impl<O: MapOrder + Clone + Send + Sync + 'static> Drop for Owner<O> {
     fn drop(&mut self) {
+        if let Some(pending) = &self.pending_key {
+            pending.request_shutdown();
+        }
         if self.status.phase != Phase::Stopped {
             self.shared.stop.send_replace(true);
             if let Some(c) = &self.connection {

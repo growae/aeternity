@@ -55,6 +55,9 @@ enum Command {
     PeerPublicKey {
         reply: oneshot::Sender<Result<PeerPublicKey, Error>>,
     },
+    CandidatePublicKey {
+        reply: oneshot::Sender<Result<AccountPublicKey, Error>>,
+    },
 }
 struct Queue {
     commands: VecDeque<Command>,
@@ -149,6 +152,11 @@ impl Client {
     }
     pub fn peer_public_key(&self) -> Result<Ticket<PeerPublicKey>, Error> {
         self.submit(|reply| Command::PeerPublicKey { reply })
+    }
+    // Unlike an Info snapshot, this reads after earlier queued promotions.
+    // The ticket stays bound to this worker even if its owner replaces it.
+    pub fn candidate_public_key(&self) -> Result<Ticket<AccountPublicKey>, Error> {
+        self.submit(|reply| Command::CandidatePublicKey { reply })
     }
 }
 pub struct Worker {
@@ -288,6 +296,11 @@ fn run(shared: &Shared, mut state: keeper::State, mut rng: keeper::Os) {
             }
             Command::PeerPublicKey { reply } => {
                 let result = state.public().peer;
+                shared.complete(state.public(), false, None);
+                let _ = reply.send(Ok(result));
+            }
+            Command::CandidatePublicKey { reply } => {
+                let result = state.public().candidate;
                 shared.complete(state.public(), false, None);
                 let _ = reply.send(Ok(result));
             }

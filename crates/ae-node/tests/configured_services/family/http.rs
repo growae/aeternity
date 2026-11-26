@@ -48,7 +48,7 @@ async fn request(
     })
     .await
 }
-async fn get(
+pub(super) async fn get(
     address: SocketAddr,
     path: &str,
 ) -> (u16, std::collections::BTreeMap<String, String>, Value) {

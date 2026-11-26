@@ -4,6 +4,7 @@ use ae_storage::pool::worker as pool;
 use ae_sync::{
     chain::{
         on_demand::{runtime, service},
+        pending::service as pending,
         pow::{generator, group},
     },
     keys,
@@ -41,6 +42,31 @@ pub(super) enum Input {
     },
 }
 impl Input {
+    pub fn pending(&self, limits: pending::Limits) -> (pending::Config, Arc<dyn generator::Clock>) {
+        match self {
+            Self::Cuckoo { config, clocks } => (
+                pending::Config {
+                    beneficiary: config.mining.as_ref().map(|m| m.beneficiary),
+                    release_info: config.mining.as_ref().map_or(0, |m| m.release_info),
+                    key: config
+                        .mining
+                        .as_ref()
+                        .map_or(config.generator.key, |m| m.preparation),
+                    limits,
+                },
+                clocks.preparation(0),
+            ),
+            Self::Commands { config, clock } => (
+                pending::Config {
+                    beneficiary: Some(config.controller.beneficiary),
+                    release_info: config.controller.release_info,
+                    key: config.controller.key,
+                    limits,
+                },
+                clock.clone(),
+            ),
+        }
+    }
     pub fn algorithm(&self) -> ConsensusAlgorithm {
         match self {
             Self::Cuckoo { .. } => ConsensusAlgorithm::Cuckoo,

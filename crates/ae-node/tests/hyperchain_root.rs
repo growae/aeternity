@@ -250,6 +250,9 @@ fn clean(exit: &root::Exit<Otp26>) {
     if let Some(c) = &exit.status.connections {
         assert!(c.joined);
     }
+    if let Some(pending) = &exit.status.pending_key {
+        assert!(pending.joined && !pending.running && !pending.accepting);
+    }
     let p = exit.producer.as_ref().unwrap().as_ref().unwrap();
     assert!(
         p.pool.is_ok()
@@ -370,6 +373,7 @@ async fn permanent_group_exit_matches_original_zero_restart_root_policy() {
         root::Child::Workers,
         root::Child::Connections,
         root::Child::Producer,
+        root::Child::PendingKey,
     ] {
         let node = Node::new(1);
         let clock = Clock::new();
@@ -393,6 +397,7 @@ async fn permanent_group_exit_matches_original_zero_restart_root_policy() {
             root::Child::Workers => h.workers().unwrap().shutdown(),
             root::Child::Connections => h.connections().unwrap().shutdown(),
             root::Child::Producer => clock.fail.store(true, Ordering::Release),
+            root::Child::PendingKey => h.pending_key().unwrap().request_shutdown(),
         }
         let exit = within(running.wait()).await.unwrap();
         clean(&exit);
