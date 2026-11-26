@@ -147,6 +147,9 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
+    ChainEnds {
+        v3: bool,
+    },
     Parameters,
     Settings,
     Currency,
@@ -229,6 +232,7 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
             .then_some((v3, Operation::Transactions { operation, v3 }));
     }
     let (operation, group) = match suffix.as_slice() {
+        [b"status", b"chain-ends"] => (Operation::ChainEnds { v3 }, "chain"),
         [b"protocol-parameters"] if v3 => (Operation::Parameters, "node_info"),
         [b"node-settings"] if v3 => (Operation::Settings, "node_settings"),
         [b"currency"] if v3 => (Operation::Currency, "node_info"),

@@ -774,11 +774,19 @@ impl<S: Read> View<S> {
             .collect()
     }
     pub fn chain_ends(&self, limit: usize) -> Result<Vec<Hash256>, Error> {
+        let mut ends = Vec::new();
         self.source
-            .prefix(&[ENDS], limit)?
-            .into_iter()
-            .map(|(k, _)| fixed_hash(&k[1..]))
-            .collect()
+            .visit_range(&[ENDS], &[ENDS + 1], limit, &mut |k, v| {
+                if k.len() != 33 || k[0] != ENDS || !v.is_empty() {
+                    return Err(Error::Corrupt("chain end"));
+                }
+                if ends.len() >= limit {
+                    return Err(Error::ResourceLimit);
+                }
+                ends.push(fixed_hash(&k[1..])?);
+                Ok(())
+            })?;
+        Ok(ends)
     }
     pub fn verify_tip(&self) -> Result<(), Error> {
         self.finalized_height()?;

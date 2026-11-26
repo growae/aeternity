@@ -11,6 +11,7 @@ mod blocks;
 mod channels;
 mod contracts;
 mod currency;
+mod ends;
 mod key;
 mod model;
 mod names;

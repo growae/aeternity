@@ -638,6 +638,12 @@
     },
     "GetChannelByPubkey": {
       "$ref": "#/definitions/Channel"
+    },
+    "GetChainEnds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EncodedHash"
+      }
     }
   }
 }

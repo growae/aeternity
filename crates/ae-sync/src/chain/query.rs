@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod blocks;
 pub mod channels;
 pub mod contracts;
+mod ends;
 mod header;
 pub mod names;
 pub mod oracles;

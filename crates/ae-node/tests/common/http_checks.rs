@@ -44,7 +44,19 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         };
         (key, block.header().common().height)
     };
+    let ends = json!(
+        database
+            .view()
+            .unwrap()
+            .chain_ends(100)
+            .unwrap()
+            .into_iter()
+            .map(|h| api::encode(ApiType::KeyBlockHash, h.as_ref()))
+            .collect::<Vec<_>>()
+    );
     for (path, code, body) in [
+        ("/v2/status/chain-ends", 200, ends.clone()),
+        ("/v3/status/chain-ends?int-as-string=true", 200, ends),
         (
             "/v2/peers/pubkey",
             200,

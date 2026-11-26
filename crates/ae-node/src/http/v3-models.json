@@ -2413,6 +2413,12 @@
     },
     "GetProtocolParameters": {
       "$ref": "#/definitions/ProtocolParameters"
+    },
+    "GetChainEnds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EncodedHash"
+      }
     }
   }
 }

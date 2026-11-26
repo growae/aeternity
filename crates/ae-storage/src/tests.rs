@@ -86,6 +86,91 @@ fn bounded_snapshot_reads_check_value_size_and_keep_snapshot_identity() {
 }
 
 #[test]
+fn chain_ends_match_original_database_sets_and_reject_incomplete_or_corrupt_results() {
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../ae-node/tests/fixtures/erlang_http_chain_ends.json"
+    ))
+    .unwrap();
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity()).unwrap();
+    let mut compared = 0;
+    for row in data["rows"].as_array().unwrap() {
+        let mut writes = WriteBatch::default();
+        for hash in db.view().unwrap().chain_ends(200).unwrap() {
+            writes.delete(repo::key(repo::ENDS, hash.0));
+        }
+        for action in row["actions"].as_array().unwrap() {
+            let hash = hex::decode(action[1].as_str().unwrap()).unwrap();
+            match action[0].as_str().unwrap() {
+                "mark" => writes.put(repo::key(repo::ENDS, hash), []),
+                "unmark" => writes.delete(repo::key(repo::ENDS, hash)),
+                "other" => writes.put(repo::key(127, hash), [7]),
+                // An aborted batch has no published writes. Atomic write-failure
+                // and ledger rollback tests independently cover commit behavior.
+                "abort" => (),
+                _ => panic!(),
+            }
+        }
+        db.db.write_opt(writes, &write_options()).unwrap();
+        let mut expected: Vec<_> = row["hashes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                Hash256(
+                    hex::decode(h.as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        // Native Mnesia uses a set; result order is backend-specific.
+        expected.sort();
+        let view = db.view().unwrap();
+        assert_eq!(
+            view.chain_ends(expected.len()).unwrap(),
+            expected,
+            "{}",
+            row["name"]
+        );
+        if !expected.is_empty() {
+            assert_eq!(
+                view.chain_ends(expected.len() - 1),
+                Err(Error::ResourceLimit)
+            );
+        }
+        let mut writes = WriteBatch::default();
+        writes.put(repo::key(repo::ENDS, [255; 32]), [1]);
+        db.db.write_opt(writes, &write_options()).unwrap();
+        assert_eq!(view.chain_ends(200).unwrap(), expected);
+        assert_eq!(
+            db.view().unwrap().chain_ends(200),
+            Err(Error::Corrupt("chain end"))
+        );
+        let mut writes = WriteBatch::default();
+        writes.delete(repo::key(repo::ENDS, [255; 32]));
+        if expected.contains(&Hash256([255; 32])) {
+            writes.put(repo::key(repo::ENDS, [255; 32]), []);
+        }
+        db.db.write_opt(writes, &write_options()).unwrap();
+        compared += 1;
+    }
+    assert_eq!(compared, 20);
+    let expected = db.view().unwrap().chain_ends(200).unwrap();
+    drop(db);
+    let db = Database::open(&dir.0, identity()).unwrap();
+    assert_eq!(db.view().unwrap().chain_ends(200).unwrap(), expected);
+    let mut writes = WriteBatch::default();
+    writes.put([repo::ENDS], []);
+    db.db.write_opt(writes, &write_options()).unwrap();
+    assert_eq!(
+        db.view().unwrap().chain_ends(200),
+        Err(Error::Corrupt("chain end"))
+    );
+}
+
+#[test]
 fn full_state_scan_detects_deep_damage_and_keeps_the_original_rocksdb_snapshot() {
     use ae_trie::scan::PageLimits;
     let dir = Temp::new();

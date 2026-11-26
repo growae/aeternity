@@ -1,6 +1,88 @@
 use super::*;
 
 #[tokio::test]
+async fn chain_ends_keep_key_tips_across_micro_blocks_rollback_and_retained_reads() {
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let genesis = importer.database().view().unwrap().identity().genesis;
+    let read = |limit| importer.chain_ends(limit, 1024, |h| h).unwrap();
+    assert_eq!(read(1).wait().await.unwrap(), vec![genesis]);
+    assert!(matches!(read(0).wait().await, Err(Error::Busy)));
+    assert!(matches!(
+        importer.chain_ends(usize::MAX, 0, |h| h),
+        Err(Error::Busy)
+    ));
+    let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+    let capacity = importer.available();
+    let mut key = genesis;
+    for block in &blocks[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        if matches!(block, Block::Key(_)) {
+            key = block.hash().unwrap();
+        }
+        let held = read(1).wait_retained().await.unwrap();
+        assert_eq!(held.value, vec![key]);
+        assert_eq!(importer.available().0, 0);
+        assert!(matches!(importer.chain_ends(1, 0, |h| h), Err(Error::Busy)));
+        drop(held);
+        assert_eq!(importer.available(), capacity);
+    }
+    importer
+        .database()
+        .rollback(repository::rollback::Target::Height(0), Default::default())
+        .unwrap();
+    assert_eq!(read(1).wait().await.unwrap(), vec![genesis]);
+    *importer.context.recovery.lock().unwrap() = Some(Error::RecoveryRequired);
+    assert!(matches!(
+        importer.chain_ends(1, 0, |h| h),
+        Err(Error::RecoveryRequired)
+    ));
+    importer.stop();
+    importer.join().await;
+    assert!(matches!(
+        importer.chain_ends(1, 0, |h| h),
+        Err(Error::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn chain_ends_cancelled_render_retains_capacity_until_joined_shutdown() {
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let ticket = importer
+        .chain_ends(10, 1024, move |hashes| {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            hashes
+        })
+        .unwrap();
+    within(entered).await.unwrap();
+    let held = importer.available();
+    drop(ticket);
+    assert_eq!(held.0, 0);
+    assert_eq!(importer.available(), held);
+    importer.stop();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), importer.join())
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    within(importer.join()).await;
+}
+
+#[tokio::test]
 async fn current_header_cancelled_render_keeps_capacity_until_joined_shutdown() {
     let (_temp, importer) = setup(Config {
         jobs: 1,
