@@ -158,7 +158,7 @@ fn limits() -> transaction::Limits {
         ..Default::default()
     }
 }
-fn number(n: &Unsigned) -> Result<Value, Response> {
+pub(super) fn number(n: &Unsigned) -> Result<Value, Response> {
     if n.as_bytes()
         .len()
         .checked_mul(n.as_bytes().len())

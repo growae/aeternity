@@ -1472,6 +1472,66 @@
         "balance",
         "nonce"
       ]
+    },
+    "PoI": {
+      "type": "object",
+      "properties": {
+        "poi": {
+          "$ref": "#/definitions/EncodedProofOfInclusion"
+        }
+      },
+      "required": [
+        "poi"
+      ]
+    },
+    "ByteCode": {
+      "type": "object",
+      "properties": {
+        "bytecode": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        }
+      },
+      "required": [
+        "bytecode"
+      ]
+    },
+    "ContractObject": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "owner_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "vm_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "referrer_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EncodedPubkey"
+          }
+        },
+        "deposit": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "id",
+        "owner_id",
+        "vm_version",
+        "abi_version",
+        "active",
+        "referrer_ids",
+        "deposit"
+      ]
     }
   },
   "operations": {
@@ -1507,6 +1567,15 @@
     },
     "GetPendingAccountTransactionsByPubkey": {
       "$ref": "#/definitions/SignedTxs"
+    },
+    "GetContract": {
+      "$ref": "#/definitions/ContractObject"
+    },
+    "GetContractCode": {
+      "$ref": "#/definitions/ByteCode"
+    },
+    "GetContractPoI": {
+      "$ref": "#/definitions/PoI"
     }
   }
 }

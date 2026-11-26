@@ -4,7 +4,7 @@ use ae_tx::{
 };
 use ae_types::{Id, IdTag};
 
-fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transaction>> {
+pub(super) fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transaction>> {
     // Reuse the canonical original Ceres init transaction from the independent
     // execution corpus. Adapt owner, nonce, fee and miner gas price for this chain.
     let fixture: Value = serde_json::from_str(include_str!(
@@ -49,7 +49,7 @@ fn contract(open: &configured::Open) -> Arc<SignedTransaction<Transaction>> {
         vec![payer().sign(&payload)],
     ))
 }
-async fn mine(h: &node::Handle, count: i64, kind: Kind) {
+pub(super) async fn mine(h: &node::Handle, count: i64, kind: Kind) {
     let done = h
         .commands()
         .unwrap()

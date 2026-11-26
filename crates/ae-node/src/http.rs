@@ -8,6 +8,7 @@ use tokio::{
 
 mod accounts;
 mod blocks;
+mod contracts;
 mod key;
 mod model;
 mod pending;

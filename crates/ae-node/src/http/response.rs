@@ -147,6 +147,10 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
+    Contracts {
+        operation: super::contracts::Operation,
+        v3: bool,
+    },
     Accounts {
         operation: super::accounts::Operation,
         v3: bool,
@@ -186,6 +190,10 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         _ => return None,
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    if let Some(operation) = super::contracts::route(&suffix) {
+        return (config.groups.contains("contract") || config.groups.contains("external"))
+            .then_some((v3, Operation::Contracts { operation, v3 }));
+    }
     if let Some(operation) = super::accounts::route(&suffix) {
         return (config.groups.contains("account") || config.groups.contains("external"))
             .then_some((v3, Operation::Accounts { operation, v3 }));

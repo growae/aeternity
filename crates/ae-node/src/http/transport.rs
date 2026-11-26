@@ -322,6 +322,9 @@ pub(super) fn dispatch(
     result: Result<serde_json::Value, Response>,
 ) -> Response {
     match (plan, result) {
+        (Ok((Operation::Contracts { operation, v3 }, strings)), Ok(body)) => {
+            super::contracts::finish(&operation, body, v3, strings)
+        }
         (Ok((Operation::Accounts { operation, v3 }, strings)), Ok(body)) => {
             super::accounts::finish(&operation, body, v3, strings)
         }
@@ -412,6 +415,25 @@ pub(super) async fn exchange(
     let mut pending_candidate = None;
     let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::Contracts { operation, v3 }, strings)) => {
+            match super::contracts::query(
+                &parent,
+                &config,
+                captured.as_ref(),
+                operation,
+                *v3,
+                *strings,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::Accounts { operation, v3 }, strings)) => {
             match super::accounts::query(
                 &parent,

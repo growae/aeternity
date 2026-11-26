@@ -1,6 +1,8 @@
 use super::*;
 #[path = "http/accounts.rs"]
 mod accounts;
+#[path = "http/contracts.rs"]
+mod contracts;
 #[path = "http/info.rs"]
 mod info;
 #[path = "http/post.rs"]
