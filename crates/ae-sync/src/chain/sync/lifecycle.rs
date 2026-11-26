@@ -46,7 +46,10 @@ pub fn progress(tasks: &[Task], top_target: u64, selected: u64) -> Result<Progre
     if target == 0 {
         return Err(Error::ZeroTarget);
     }
-    let percent = (10_000_000.0 * selected as f64 / target as f64).round() / 100_000.0;
+    // Erlang multiplies integers before '/' converts to floating point.
+    // Converting selected first changes rounding at large-height boundaries.
+    let scaled = 10_000_000u128 * u128::from(selected);
+    let percent = (scaled as f64 / target as f64).round() / 100_000.0;
     Ok(Progress {
         syncing,
         percent: if percent > 100.0 { 99.9 } else { percent },
@@ -139,6 +142,9 @@ pub(super) struct Signal {
     pub changes: u64,
 }
 impl Signal {
+    pub fn active(&self) -> bool {
+        self.active
+    }
     pub fn update(&mut self, active: bool) -> bool {
         let changed = self.active != active;
         if changed {

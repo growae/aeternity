@@ -199,7 +199,8 @@ fn snapshot_ownership_is_atomic_and_never_readds_cumulative_ping_counts() {
     let publisher = Publisher::default();
     let _binding = publisher.bind(feed.clone()).unwrap();
     publisher.counter(Counter::PingSuccess, 1);
-    let frame = snapshot(3, 400);
+    publisher.gauge(Gauge::Height, instrumentation::Value::Integer(3));
+    let frame = snapshot(999, 400);
     assert_eq!(store.publish(&frame), Err(StoreError::Configuration));
     assert!(
         !store
@@ -258,11 +259,11 @@ fn snapshot_ownership_is_atomic_and_never_readds_cumulative_ping_counts() {
     );
 }
 #[test]
-fn peer_metrics_callback_values_survive_periodic_frames_reset_and_disabled_updates() {
+fn callback_metrics_values_survive_periodic_frames_reset_and_disabled_updates() {
     let (store, _owner, feed) = setup();
     let publisher = Publisher::default();
     let _binding = publisher.bind(feed).unwrap();
-    let peers = &GAUGES[1..8];
+    let peers = &GAUGES[..9];
     let frame: Vec<_> = peers
         .iter()
         .map(|(_, suffix)| Metric {
@@ -320,19 +321,19 @@ fn peer_metrics_callback_values_survive_periodic_frames_reset_and_disabled_updat
         },
         values: vec![(Part::atom("value"), report::Value::Integer(42.into()))],
     };
-    let mut bad = frame[0].clone();
+    let mut bad = frame[1].clone();
     bad.values.clear();
     assert_eq!(
         store.put_frame(vec![height.clone(), bad], true),
         Err(StoreError::Configuration)
     );
-    let mut bad = frame[0].clone();
+    let mut bad = frame[1].clone();
     bad.values[0].1 = report::Value::Other;
     assert_eq!(
         store.put_frame(vec![height.clone(), bad], true),
         Err(StoreError::Configuration)
     );
-    store.remove(&name(peers[0].1)).unwrap();
+    store.remove(&name("peers.blocked")).unwrap();
     let mut incomplete = vec![height];
     incomplete.extend(frame);
     assert_eq!(

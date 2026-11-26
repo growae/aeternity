@@ -72,9 +72,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
         self.session_retirement = Some(previous);
         Ok(())
     }
-    pub(super) fn install_session(&mut self) {
+    pub(super) fn install_session(&mut self) -> Result<(), Error> {
         assert!(self.session.attempt.is_none() && self.retiring.is_none());
         assert!(self.pending.is_none());
+        self.services
+            .importer
+            .database()
+            .publish_selected_height()
+            .map_err(Error::Repository)?;
         let retired = self.session_retirement.take().expect("retired session");
         let generation = retired
             .generation
@@ -88,5 +93,6 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             retired,
             generation,
         });
+        Ok(())
     }
 }

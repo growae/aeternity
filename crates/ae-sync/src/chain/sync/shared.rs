@@ -118,6 +118,31 @@ impl<O> Book<O> {
             last_terminated: self.last_statistics.clone(),
         }
     }
+    pub fn metrics(&self) -> metrics::Snapshot {
+        metrics::Snapshot {
+            tasks: self
+                .groups
+                .iter()
+                .map(|g| {
+                    let s = g.model.state();
+                    metrics::Task {
+                        task: lifecycle::Task {
+                            id: s.chain.id(),
+                            target: s.chain.target().height,
+                            suspect: s.suspect,
+                        },
+                        pool: s.pool.len(),
+                        got: s.pool.iter().filter(|p| p.got.is_some()).count(),
+                        adding: s.adding.len(),
+                        pending: s.pending.iter().map(Vec::len).collect(),
+                        workers: s.workers.len(),
+                    }
+                })
+                .collect(),
+            top_target: self.top_target,
+            logging: self.lifecycle.active(),
+        }
+    }
     pub fn lifecycle(&self) -> (Vec<lifecycle::Task>, u64, u64) {
         (
             self.groups

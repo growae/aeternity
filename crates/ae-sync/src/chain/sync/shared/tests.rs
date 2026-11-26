@@ -520,3 +520,63 @@ async fn failed_statistics_do_not_reject_a_completed_post_or_retain_terminated_t
         Some(statistics::Error::Overflow)
     );
 }
+
+#[test]
+fn sync_metric_snapshot_preserves_task_counts_pending_order_and_separate_log_flag() {
+    let limits = coordination::Limits::default();
+    let peer = PeerPublicKey([1; 32]);
+    let point = Point {
+        height: 100,
+        hash: Hash256([1; 32]),
+    };
+    let chain = Chain::new(1, vec![peer], vec![point], limits).unwrap();
+    let mut state = Scheduler::new(chain.clone(), limits)
+        .unwrap()
+        .state()
+        .clone();
+    let missing = Item::missing(point);
+    let got = Item {
+        got: Some(Ready { peer, ticket: 1 }),
+        ..missing
+    };
+    state.pool = vec![missing, got];
+    state.adding = vec![got];
+    state.pending = VecDeque::from([vec![got; 3], vec![], vec![got; 2]]);
+    state.workers = vec![peer];
+    state.suspect = true;
+    let mut book = Book::<Otp26>::new();
+    book.groups.push(Group {
+        model: Scheduler::restore(state, limits).unwrap(),
+        statistics: statistics::Task::new(chain.id(), chain.target(), limits.items).unwrap(),
+        statistics_failure: None,
+        members: BTreeMap::new(),
+        payloads: BTreeMap::new(),
+        agreed: None,
+        cursor: None,
+        selected: None,
+        finished: false,
+        failed: None,
+    });
+    book.top_target = 99;
+    let snapshot = book.metrics();
+    assert!(!snapshot.logging);
+    assert_eq!(snapshot.top_target, 99);
+    assert_eq!(
+        snapshot.tasks,
+        vec![metrics::Task {
+            task: lifecycle::Task {
+                id: 1,
+                target: 100,
+                suspect: true
+            },
+            pool: 2,
+            got: 1,
+            adding: 1,
+            pending: vec![3, 0, 2],
+            workers: 1
+        }]
+    );
+    book.lifecycle.update(true);
+    assert!(book.metrics().logging);
+    assert!(book.metrics().tasks[0].task.suspect);
+}

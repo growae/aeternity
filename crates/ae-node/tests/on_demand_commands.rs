@@ -745,3 +745,44 @@ fn pinned_readers_keep_vm_limits_while_rebinding_block_environment() {
 
 #[path = "on_demand_commands/service.rs"]
 mod service;
+
+#[test]
+fn conductor_height_initialization_follows_on_demand_owner_lifetime() {
+    use ae_chain::instrumentation::{self, Event, Gauge, Value};
+    #[derive(Default)]
+    struct Sink(std::sync::Mutex<Vec<u64>>);
+    impl instrumentation::Sink for Sink {
+        fn event(&self, e: Event) {
+            if let Event::Gauge(Gauge::Height, Value::Integer(value)) = e {
+                self.0.lock().unwrap().push(value);
+            }
+        }
+        fn start(&self, _: instrumentation::Stage) -> Option<Box<dyn instrumentation::Span>> {
+            None
+        }
+    }
+    let node = Node::new();
+    let sink = Arc::new(Sink::default());
+    let _binding = node
+        .opened
+        .database()
+        .instrumentation()
+        .bind(sink.clone())
+        .unwrap();
+    let mut invalid = runtime::Config::new(leader());
+    invalid.result_bytes = 0;
+    assert!(matches!(
+        node.controller(invalid),
+        Err(runtime::Error::Configuration)
+    ));
+    assert!(sink.0.lock().unwrap().is_empty());
+    let mut owner = node.controller(runtime::Config::new(leader())).unwrap();
+    assert_eq!(*sink.0.lock().unwrap(), vec![0]);
+    assert!(node.controller(runtime::Config::new(leader())).is_err());
+    assert_eq!(*sink.0.lock().unwrap(), vec![0]);
+    assert!(owner.execute(Command::Key).command.result.is_ok());
+    assert_eq!(*sink.0.lock().unwrap(), vec![0, 1]);
+    drop(owner);
+    let _replacement = node.controller(runtime::Config::new(leader())).unwrap();
+    assert_eq!(*sink.0.lock().unwrap(), vec![0, 1, 1]);
+}

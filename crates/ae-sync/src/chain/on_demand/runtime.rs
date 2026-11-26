@@ -280,6 +280,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
         if owner.config.resume_current {
             owner.resume = Some(owner.leader(&selected)?);
         }
+        db.publish_selected_height().map_err(Error::Repository)?;
         Ok(owner)
     }
     pub fn stop_handle(&self) -> Stop {

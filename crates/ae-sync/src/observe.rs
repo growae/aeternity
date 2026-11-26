@@ -101,6 +101,7 @@ pub enum Error {
     Storage,
     Gc(ae_storage::gc::events::Error),
     GcClosed,
+    SyncLogs(crate::events::Error),
     RoutingClosed,
     Routing(crate::routing::Error),
     Sample,
@@ -136,6 +137,8 @@ pub struct Status {
     pub events: u64,
     pub gc_events: u64,
     pub gc_missed: u64,
+    pub sync_logs: u64,
+    pub sync_logs_missed: u64,
     pub samples: u64,
     pub sample_errors: u64,
     pub peer_count_samples: u64,
@@ -186,6 +189,7 @@ pub struct Service {
     admission: crate::bindings::Admission,
     routing: Option<crate::bindings::MetricsRouting>,
     incoming: sync::Events,
+    sync_logs: Option<crate::events::Subscription<sync::metrics::Log>>,
     gc: ae_storage::gc::events::Reader,
     gc_cursor: ae_storage::gc::events::Cursor,
     gc_pending: bool,
@@ -242,6 +246,7 @@ pub(crate) fn create_bound(
     {
         return Err(Error::Configuration);
     }
+    let sync_logs = sources.sync.subscribe_logs(None).map_err(Error::SyncLogs)?;
     let gc = db.gc_events();
     let gc_cursor = gc.cursor();
     gc.after(&gc_cursor, 1).map_err(Error::Gc)?;
@@ -272,6 +277,7 @@ pub(crate) fn create_bound(
             admission,
             routing,
             incoming,
+            sync_logs: Some(sync_logs),
             gc,
             gc_cursor,
             gc_pending: false,
@@ -527,6 +533,17 @@ impl Service {
                 _ = tokio::task::yield_now(), if self.gc_pending => (),
                 result = async { self.pending.as_mut().expect("active sample").await }, if self.pending.is_some() => {
                     self.pending = None; self.sampled(result);
+                },
+                log = async { self.sync_logs.as_mut().expect("open sync logs").recv().await }, if self.sync_logs.is_some() => match log {
+                    Some(crate::events::Delivery::Event(record)) => {
+                        self.current.sync_logs = self.current.sync_logs.saturating_add(1);
+                        self.record("sync", json!({"type":"status", "sequence":record.cursor.sequence(), "text":record.event.text()}));
+                    },
+                    Some(crate::events::Delivery::Gap { missed }) => {
+                        self.current.sync_logs_missed = self.current.sync_logs_missed.saturating_add(missed);
+                        self.record("sync", json!({"type":"status_gap", "missed":missed}));
+                    },
+                    None => { self.sync_logs = None; },
                 },
                 event = self.incoming.recv() => match event {
                     Some(event) => {

@@ -245,6 +245,18 @@ impl Metrics {
             Some(vec!["send".into()])
         );
         assert_eq!(connections.status().generation, generation.number);
+        // A connection/observer replacement must not initialize the stable
+        // conductor again, or overwrite its gauge through periodic sampling.
+        let height_name = ae_sync::observe::registry::predefined::name("chain.height");
+        let height_points =
+            ae_sync::observe::reporter::Points::One(ae_sync::routing::Part::atom("value"));
+        let Reading::Values(old_height) = registry.get_value(&height_name, &height_points).unwrap()
+        else {
+            panic!()
+        };
+        registry
+            .update(&height_name, &Value::Integer(987654.into()))
+            .unwrap();
         generation.peer.shutdown();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -261,6 +273,14 @@ impl Metrics {
         while !generation.observer.status().joined {
             generation.observer.changed().await.unwrap();
         }
+        assert_eq!(
+            registry.get_value(&height_name, &height_points).unwrap(),
+            Reading::Values(vec![(
+                ae_sync::routing::Part::atom("value"),
+                Value::Integer(987654.into())
+            )])
+        );
+        registry.update(&height_name, &old_height[0].1).unwrap();
         let next_reporter = reporter.reporters().unwrap().await.unwrap().remove(0);
         assert_eq!(next_reporter.generation, first.generation);
         assert!(Arc::ptr_eq(

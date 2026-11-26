@@ -58,6 +58,10 @@ fn committed_event_payloads_preserve_real_execution_and_original_origin_rules() 
             }
             if receipt.change().old_tip != Some(receipt.change().new_tip) {
                 expected.push(ae_chain::instrumentation::Event::TopChanged);
+                expected.push(ae_chain::instrumentation::Event::Gauge(
+                    ae_chain::instrumentation::Gauge::Height,
+                    ae_chain::instrumentation::Value::Integer(block.header().common().height),
+                ));
                 if let Block::Key(header) = &block {
                     expected.push(ae_chain::instrumentation::Event::Gauge(
                         ae_chain::instrumentation::Gauge::KeyInfo,
@@ -182,7 +186,13 @@ fn source_overflow_and_oversized_records_report_exact_gaps_without_rejecting_com
                 .iter()
                 .flat_map(|block| {
                     use ae_chain::instrumentation::{Event, Gauge, Value};
-                    let mut events = vec![Event::TopChanged];
+                    let mut events = vec![
+                        Event::TopChanged,
+                        Event::Gauge(
+                            Gauge::Height,
+                            Value::Integer(block.header().common().height),
+                        ),
+                    ];
                     if let Block::Key(header) = block {
                         events.push(Event::Gauge(
                             Gauge::KeyInfo,
@@ -298,4 +308,30 @@ fn real_chain_commits_rearm_gc_scanning_without_publishing_a_premature_completio
     while !scan.is_complete() {
         scan.next_page(Default::default()).unwrap();
     }
+}
+
+#[test]
+fn conductor_height_uses_fresh_tip_and_stays_silent_on_uninitialized_storage() {
+    use ae_chain::instrumentation::{Event, Gauge, Value};
+    let dir = Temp::new();
+    let db = Database::open(&dir.0, identity(Network::Mainnet)).unwrap();
+    let observations = std::sync::Arc::new(Observations::default());
+    let _binding = db.instrumentation().bind(observations.clone()).unwrap();
+    assert!(db.publish_selected_height().is_err());
+    assert!(observations.0.lock().unwrap().is_empty());
+    bootstrap(&db, Network::Mainnet);
+    assert_eq!(db.publish_selected_height().unwrap(), 0);
+    let stale = db.view().unwrap();
+    let all = blocks(Network::Mainnet);
+    for block in &all[..2] {
+        insert(&db, block, ledger::Origin::Gossip);
+        observations.0.lock().unwrap().clear();
+        let height = block.header().common().height;
+        assert_eq!(db.publish_selected_height().unwrap(), height);
+        assert_eq!(
+            *observations.0.lock().unwrap(),
+            vec![Event::Gauge(Gauge::Height, Value::Integer(height))]
+        );
+    }
+    assert_ne!(stale.status().tip, db.view().unwrap().status().tip);
 }

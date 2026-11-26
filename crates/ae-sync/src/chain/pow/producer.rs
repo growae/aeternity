@@ -304,6 +304,7 @@ impl Worker {
             lease,
             mining,
         );
+        db.publish_selected_height().map_err(Error::Repository)?;
         let thread = thread::Builder::new()
             .name("ae-pow-micro-producer".into())
             .spawn(move || service.run())

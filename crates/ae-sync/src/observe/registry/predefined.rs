@@ -238,9 +238,8 @@ impl instrumentation::Span for Timing {
     }
 }
 // These names appear in both the native catalog and the sampled observer.
-// Peer values now belong to acknowledged registry callbacks; ping values are
-// cumulative snapshots, never counter increments. Height/progress still use
-// the sampled path until their conductor/timer producers are connected.
+// Gauges belong to conductor, peer callbacks and the sync timer. Ping values
+// are cumulative snapshots, never counter increments.
 pub(super) fn sampled_kind(n: &Name) -> Option<Kind> {
     if GAUGES[..9].iter().any(|(_, suffix)| *n == name(suffix)) {
         Some(Kind::Gauge)
@@ -251,7 +250,7 @@ pub(super) fn sampled_kind(n: &Name) -> Option<Kind> {
     }
 }
 pub(super) fn callback_owned(n: &Name) -> bool {
-    GAUGES[1..8].iter().any(|(_, suffix)| *n == name(suffix))
+    GAUGES[..9].iter().any(|(_, suffix)| *n == name(suffix))
 }
 
 #[cfg(test)]

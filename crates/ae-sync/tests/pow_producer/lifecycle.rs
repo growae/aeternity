@@ -418,3 +418,37 @@ fn real_top_change_discards_a_signature_accepted_for_the_old_parent() {
     ));
     assert_eq!(node.db.view().unwrap().status().tip, Some(hash));
 }
+
+#[test]
+fn producer_height_initialization_belongs_to_each_owner_and_rejects_invalid_starts() {
+    let node = Node::new(1, false);
+    let (metrics, _binding) =
+        common::mining_metrics::MiningMetrics::bind(node.db.instrumentation());
+    let gate = Gate::new();
+    let mut invalid = node.config();
+    invalid.poll = Duration::ZERO;
+    assert!(matches!(
+        producer::Worker::spawn(
+            &node.importer,
+            node.generator(),
+            node.keys(),
+            invalid,
+            GateClock(gate.clone())
+        ),
+        Err(producer::Error::Configuration)
+    ));
+    assert!(metrics.heights().is_empty());
+    for enabled in [false, true] {
+        let gate = Gate::new();
+        let mut config = node.config();
+        config.enabled = enabled;
+        let worker = start(&node, config, &gate);
+        let _release = Release(gate.clone());
+        assert_eq!(
+            metrics.heights(),
+            if enabled { vec![1, 1] } else { vec![1] }
+        );
+        let report = stop(worker, &gate);
+        assert_eq!(report.status.admissions, 0);
+    }
+}

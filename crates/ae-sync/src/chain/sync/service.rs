@@ -25,6 +25,7 @@ pub struct Service<O: MapOrder + Send + Sync + 'static = Otp26> {
     target: u64,
     blocks: blocks::Owner<O>,
     lifecycle: lifecycle::Owner<O>,
+    metrics: metrics::Owner,
     policy_config: watch::Receiver<ae_chain::resilience::Config>,
     policy_changed: Option<watch::Receiver<()>>,
 }
@@ -32,6 +33,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         context: Arc<Context<O>>,
+        metrics: metrics::Owner,
         application: peer::Handle,
         incoming: peer::Events,
         forwarded: mpsc::Sender<peer::Event>,
@@ -42,6 +44,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         policy_config: watch::Receiver<ae_chain::resilience::Config>,
     ) -> Self {
         Self {
+            metrics,
             blocks: blocks::Owner::new(context.clone()),
             lifecycle: lifecycle::Owner::new(context.clone()),
             policy_config,
@@ -205,6 +208,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
         target
     }
     fn publish(&mut self) -> Result<(), Error> {
+        self.current.metrics = self.metrics.status();
         self.current.blocks = self.blocks.status();
         self.current.active = self
             .lanes
@@ -303,6 +307,7 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
                 _ = self.forwarded.closed() => break,
                 _ = self.changed.changed() => (),
                 _ = refresh.tick() => self.lifecycle.refresh(),
+                result = self.metrics.next(self.context.clone()) => if let Err(error) = result { self.current.last_error = Some(error); break; },
                 _ = self.policy_config.changed() => (),
                 _ = async { match &mut self.policy_changed {
                     Some(changed) => { let _ = changed.changed().await; }
@@ -337,6 +342,8 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
             .collect();
         monitors.extend(self.blocks.cancel());
         self.lifecycle.cancel();
+        self.metrics.cancel();
+        self.current.metrics = self.metrics.status();
         self.current.counts.cancelled = self
             .current
             .counts
@@ -372,6 +379,8 @@ impl<O: MapOrder + Send + Sync + 'static> Service<O> {
 impl<O: MapOrder + Send + Sync + 'static> Drop for Service<O> {
     fn drop(&mut self) {
         self.lifecycle.cancel();
+        self.metrics.cancel();
+        self.current.metrics = self.metrics.status();
         self.blocks.cancel();
         self.current.blocks = self.blocks.status();
         self.context.stopped.store(true, Ordering::Release);

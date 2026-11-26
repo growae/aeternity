@@ -28,6 +28,19 @@ impl MiningMetrics {
         }
         counts
     }
+    // Shared by test targets that observe different subsets of metrics.
+    #[allow(dead_code)]
+    pub fn heights(&self) -> Vec<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Gauge(Gauge::Height, instrumentation::Value::Integer(n)) => Some(*n),
+                _ => None,
+            })
+            .collect()
+    }
     pub fn key_info(&self) -> Vec<instrumentation::Value> {
         self.0
             .lock()

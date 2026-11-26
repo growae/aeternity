@@ -91,6 +91,26 @@ impl Database {
     pub fn instrumentation(&self) -> &ae_chain::instrumentation::Publisher {
         &self.instrumentation
     }
+    // Called once by each logical conductor initialization, after its services
+    // are ready. Read the fresh top, not a constructor's earlier snapshot, and
+    // serialize publication with selected-top commits.
+    pub fn publish_selected_height(&self) -> Result<u64, Error> {
+        use ae_chain::instrumentation::{Event, Gauge, Value};
+        let policy = self.writer.lock().map_err(|_| backend_lock())?;
+        let view = self.view_locked(&policy)?;
+        let info = self.events.reader().info();
+        if info.closed || info.status != view.status() {
+            return Err(Error::Backend("commit event source requires reopen".into()));
+        }
+        let height = view
+            .require_block(view.status().tip.ok_or(Error::Uninitialized)?)?
+            .header()
+            .common()
+            .height;
+        self.instrumentation
+            .event(Event::Gauge(Gauge::Height, Value::Integer(height)));
+        Ok(height)
+    }
     pub fn open(path: impl AsRef<Path>, identity: Identity) -> Result<Self, Error> {
         Self::open_with_config(path, identity, ReadConfig::default())
     }
@@ -602,6 +622,8 @@ impl Database {
         ) && update.change().old_tip != Some(update.change().new_tip)
         {
             self.instrumentation.event(Event::TopChanged);
+            self.instrumentation
+                .event(Event::Gauge(Gauge::Height, Value::Integer(block.height)));
             if update.identity().consensus == ae_protocol::ConsensusType::Pow
                 && let Some(info) = update.key_info()
             {

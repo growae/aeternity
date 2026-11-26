@@ -48,7 +48,7 @@ async fn seeded(node: Node) -> Node {
 struct Running {
     handle: Handle,
     context: Arc<Context<Otp26>>,
-    _events: Events,
+    _events: Option<Events>,
     task: JoinHandle<Status>,
     network: network::Handle,
     network_task: JoinHandle<network::Exit>,
@@ -121,7 +121,7 @@ impl Running {
         let mut running = Self {
             handle,
             context,
-            _events: events,
+            _events: Some(events),
             task,
             network,
             network_task,
@@ -552,4 +552,113 @@ async fn borrowed_sync_shutdown_waits_for_inflight_commit_and_preserves_owner_re
         owned.stop();
         owned.join().await;
     }
+}
+
+#[tokio::test]
+async fn sync_progress_timer_publishes_idle_without_observer_and_closes_on_shutdown() {
+    use ae_chain::instrumentation::{self, Event, Gauge, Value};
+    #[derive(Default)]
+    struct Sink(Mutex<Vec<f64>>);
+    impl instrumentation::Sink for Sink {
+        fn event(&self, e: Event) {
+            if let Event::Gauge(Gauge::SyncProgress, Value::Float(value)) = e {
+                self.0.lock().unwrap().push(value);
+            }
+        }
+        fn start(&self, _: instrumentation::Stage) -> Option<Box<dyn instrumentation::Span>> {
+            None
+        }
+    }
+    let node = source().await;
+    let sink = Arc::new(Sink::default());
+    let _binding = node.db.instrumentation().bind(sink.clone()).unwrap();
+    for generation in 1..=2 {
+        let mut running = Running::new(&node, &node, importer(&node)).await;
+        let mut logs = running.handle.subscribe_logs(None).unwrap();
+        within(async {
+            while running.handle.status().metrics.ticks == 0 {
+                running.handle.changed().await.unwrap();
+            }
+        })
+        .await;
+        let status = running.handle.status().metrics;
+        assert_eq!(status.last, Some(100.0));
+        assert_eq!(status.gauges, 1);
+        assert_eq!(status.logs, 0);
+        assert_eq!(sink.0.lock().unwrap().len(), generation);
+        let stopped = running.stop().await;
+        assert_eq!(stopped.metrics.next, None);
+        assert_eq!(stopped.metrics.ticks, 1);
+        assert!(within(logs.recv()).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn sync_progress_active_logs_reach_a_late_observer_and_close_with_owner() {
+    use crate::observe;
+    let node = Node::new();
+    let source = source().await;
+    let mut owned = importer(&node);
+    let gate = fault(&mut owned, false, false);
+    let mut running = Running::new(&node, &source, owned).await;
+    within(gate.entered).await.unwrap();
+    // If the 1ms initial jitter won the race with connection setup, wait for
+    // the real 30s callback. Never shorten the production cadence for a test.
+    tokio::time::timeout(Duration::from_secs(35), async {
+        while running.handle.status().metrics.logs < 2 {
+            running.handle.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(running.handle.status().metrics.last, Some(0.0));
+    let mut source_logs = running.handle.subscribe_logs(None).unwrap();
+    assert!(
+        matches!(source_logs.recv().await, Some(crate::events::Delivery::Event(r)) if r.event == metrics::Log::Progress(0.0))
+    );
+    assert!(
+        matches!(source_logs.recv().await, Some(crate::events::Delivery::Event(r)) if matches!(&r.event, metrics::Log::Task(t) if t.task.target > 0 && t.adding > 0))
+    );
+    let (mut observer, service) = observe::create(
+        observe::Sources {
+            database: node.db.clone(),
+            network: running.network.clone(),
+            peer: running.application.clone(),
+            gossip: running.gossip.clone(),
+            sync: running.handle.clone(),
+            admission: node.client(),
+        },
+        running._events.take().unwrap(),
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    let mut observed = observer.subscribe(None).unwrap();
+    let observer_task = tokio::spawn(service.run());
+    within(async {
+        while observer.status().sync_logs < 2 {
+            observer.changed().await.unwrap();
+        }
+    })
+    .await;
+    let texts = within(async {
+        let mut texts = vec![];
+        while texts.len() < 2 {
+            if let Some(observe::Delivery::Record(r)) = observed.recv().await {
+                let value: serde_json::Value = serde_json::from_slice(r.json_line()).unwrap();
+                if r.category == "sync" && value["data"]["type"] == "status" {
+                    texts.push(value["data"]["text"].as_str().unwrap().to_owned());
+                }
+            }
+        }
+        texts
+    })
+    .await;
+    assert_eq!(texts[0], "Sync progress: 0.0000%");
+    assert!(texts[1].starts_with("SyncTask ("));
+    gate.release.send(()).unwrap();
+    observer.shutdown();
+    assert!(within(observer_task).await.unwrap().joined);
+    assert!(running.stop().await.joined);
+    assert!(within(source_logs.recv()).await.is_none());
 }

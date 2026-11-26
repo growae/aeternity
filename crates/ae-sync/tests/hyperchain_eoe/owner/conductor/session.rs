@@ -37,7 +37,10 @@ fn logical_replacement_restores_autostart_and_preserves_live_service_generations
     for row in native["cases"].as_array().unwrap() {
         let autostart = row["configured_autostart"].as_bool().unwrap();
         let node = Node::new(0);
+        let (metrics, _binding) =
+            common::mining_metrics::MiningMetrics::bind(node.db.instrumentation());
         let mut c = start(&node, autostart);
+        assert_eq!(metrics.heights(), vec![0]);
         assert_eq!(
             serde_json::json!(c.status().producing),
             row["before_control"]
@@ -70,6 +73,7 @@ fn logical_replacement_restores_autostart_and_preserves_live_service_generations
         let (previous, stopped) = replaced(&mut c, &mut 1000, &mut Instant::now());
         assert_eq!(serde_json::json!(previous.producing), row["after_control"]);
         assert!(stopped.is_empty());
+        assert_eq!(metrics.heights(), vec![0, 0]);
         let status = c.status();
         assert_eq!(serde_json::json!(status.producing), row["after_restart"]);
         assert_eq!(

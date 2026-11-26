@@ -18,6 +18,7 @@ fn unacknowledged_writes_close_success_stream_until_reopen() {
             Error::Failed(Failure::UncertainWrite)
         );
         assert!(db.event_snapshot().is_err());
+        assert!(db.publish_selected_height().is_err());
         assert!(db.gc_event_snapshot().is_err());
         assert_eq!(
             db.gc_events().info().failure,

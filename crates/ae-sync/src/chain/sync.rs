@@ -24,6 +24,7 @@ pub mod agreement;
 pub mod blocks;
 pub mod coordination;
 pub mod lifecycle;
+pub mod metrics;
 mod service;
 mod session;
 mod shared;
@@ -173,6 +174,7 @@ pub enum Error {
     Network(network::Error),
     Runtime(net::Error),
     Storage(repository::Error),
+    Progress(lifecycle::Error),
     Import(super::Failure),
     Policy(super::Error),
     Resilience(crate::resilience::Error),
@@ -313,6 +315,7 @@ pub struct Status {
     pub blocks: blocks::Status,
     pub lifecycle: lifecycle::Status,
     pub statistics: statistics::Status,
+    pub metrics: metrics::Status,
 }
 #[derive(Clone)]
 pub struct Handle {
@@ -324,10 +327,19 @@ pub struct Handle {
     policy_source: Option<crate::resilience::Source>,
     status: watch::Receiver<Status>,
     events: crate::events::Feed<lifecycle::Event>,
+    logs: crate::events::Feed<metrics::Log>,
+    logs_origin: crate::events::Cursor,
 }
 impl Handle {
     pub fn peers_in_sync(&self) -> Result<Vec<PeerPublicKey>, Error> {
         self.membership.peers()
+    }
+    pub fn subscribe_logs(
+        &self,
+        after: Option<crate::events::Cursor>,
+    ) -> Result<crate::events::Subscription<metrics::Log>, crate::events::Error> {
+        self.logs
+            .subscribe(Some(after.unwrap_or_else(|| self.logs_origin.clone())))
     }
     pub fn events(&self) -> crate::events::Feed<lifecycle::Event> {
         self.events.clone()
@@ -476,6 +488,7 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
     let mut book = shared::Book::with_events(config.events)?;
     book.policy_source = policy_source.clone();
     let business_events = book.feed();
+    let (metrics, logs, logs_origin) = metrics::Owner::new(config.events)?;
     let reads = blocking::Pool::named(
         "ae-chain-sync",
         config.read_threads,
@@ -497,6 +510,7 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
         blocks: Default::default(),
         lifecycle: Default::default(),
         statistics: Default::default(),
+        metrics: metrics.status(),
     };
     let (status, observed) = watch::channel(current.clone());
     let database = Arc::downgrade(&importer.context.db);
@@ -527,6 +541,8 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
             policy_source,
             status: observed,
             events: business_events,
+            logs,
+            logs_origin,
         },
         Events {
             receiver: events,
@@ -534,6 +550,7 @@ pub(crate) fn create_bound<O: MapOrder + Send + Sync + 'static>(
         },
         Service::new(
             context,
+            metrics,
             application,
             incoming,
             send,

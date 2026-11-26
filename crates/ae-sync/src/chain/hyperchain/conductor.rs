@@ -64,6 +64,7 @@ pub enum Error {
     Closed,
     Backpressured,
     Source(eoe::Error),
+    Repository(ae_chain::repository::Error),
     Events(events::Error),
     Rollback(u64),
     Importer(chain::Error),
@@ -548,6 +549,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             producing: config.producing,
             block_producer: config.block_producer,
         };
+        importer
+            .database()
+            .publish_selected_height()
+            .map_err(Error::Repository)?;
         Ok(Self {
             services: Services {
                 owner: Some(owner),
@@ -1097,7 +1102,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Conductor<O> {
             return Ok(Progress::Advanced);
         }
         if self.session_retirement.is_some() {
-            self.install_session();
+            self.install_session()?;
             return Ok(Progress::Output);
         }
         let Some((wall_ms, now)) = production else {
