@@ -7,6 +7,7 @@ pub mod blocks;
 pub mod channels;
 pub mod contracts;
 mod ends;
+pub mod gas_prices;
 mod header;
 pub mod names;
 pub mod oracles;

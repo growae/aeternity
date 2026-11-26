@@ -29,10 +29,17 @@ impl GasReporting {
                     .and_then(|n| n.as_str().parse::<BigInt>().ok())
             })
             .filter(|n| *n > BigInt::ZERO);
-        let utilization = find(resolved, "reporting_utilization_override")?
-            .and_then(|v| v.as_u64())
-            .filter(|n| *n <= 100)
-            .unwrap_or(0) as u8;
+        // The native pair helper does not consult this setting at all when
+        // the price override is disabled. An unused malformed application
+        // property must not turn an otherwise valid observation into an error.
+        let utilization = if price.is_some() {
+            find(resolved, "reporting_utilization_override")?
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n <= 100)
+                .unwrap_or(0) as u8
+        } else {
+            0
+        };
         Ok(Self { price, utilization })
     }
     pub fn apply(&self, summary: &mut ae_chain::gas_prices::Summary) {

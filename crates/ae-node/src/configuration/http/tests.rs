@@ -43,7 +43,11 @@ fn original_gas_reporting_overrides_and_scalar_floor_use_nested_precedence() {
         );
         assert_eq!(
             Some(u64::from(reporting.utilization)),
-            expected["utilization"].as_u64(),
+            if reporting.price.is_some() {
+                expected["utilization"].as_u64()
+            } else {
+                Some(0)
+            },
             "{r}"
         );
         for sample in expected["samples"].as_array().unwrap() {
@@ -60,6 +64,60 @@ fn original_gas_reporting_overrides_and_scalar_floor_use_nested_precedence() {
             assert_eq!(row.minimum, integer(&sample["pair_price"]));
             assert_eq!(row.utilization, integer(&sample["pair_utilization"]));
         }
+    }
+}
+
+#[test]
+fn disabled_price_reporting_skips_malformed_unused_application_utilization() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_gas_reporting_gates.json"
+    ))
+    .unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 16);
+    for r in rows {
+        let mut context = Context::new(Directories {
+            home: "/release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        context
+            .set(
+                "aehttp".into(),
+                "gas_price".into(),
+                r["application_pairs"].clone(),
+            )
+            .unwrap();
+        let config = Configuration {
+            value: json!({"http":{"gas_price":r["user"]}}),
+        };
+        let reporting = GasReporting::resolve(&config.resolve(&context).unwrap());
+        if r["first"]["code"] == 500 {
+            assert_eq!(reporting, Err(Error::Lookup), "{r}");
+        } else {
+            let reporting = reporting.unwrap();
+            for expected in r["first"]["body"].as_array().unwrap() {
+                let mut summary = ae_chain::gas_prices::Summary {
+                    minutes: expected["minutes"].as_u64().unwrap() as u32,
+                    minimum: 1000.into(),
+                    utilization: 17.into(),
+                };
+                reporting.apply(&mut summary);
+                assert_eq!(
+                    summary.minimum.to_string(),
+                    expected["min_gas_price"].to_string(),
+                    "{r}"
+                );
+                assert_eq!(
+                    summary.utilization.to_string(),
+                    expected["utilization"].to_string(),
+                    "{r}"
+                );
+            }
+        }
+        assert_eq!(r["first"]["code"], r["second"]["code"]);
+        assert_eq!(r["first"]["body"], r["second"]["body"]);
     }
 }
 
