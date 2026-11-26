@@ -59,6 +59,244 @@ async fn get(
 }
 
 #[tokio::test]
+async fn http_transaction_queries_follow_pool_mining_rollback_and_worker_replacement() {
+    let lab = Lab::new();
+    let prepared = prepare(lab.services("on_demand", json!({"dev_mode":true}), Default::default()));
+    let db = prepared.configured().chain().database().clone();
+    let tx = transfer(prepared.configured());
+    let mut settings = commands(&lab);
+    if let node::Settings::OnDemand(s) = &mut settings {
+        s.config.workers.pool.policy.allow_reentry = true;
+    }
+    let mut running = prepared
+        .launch(settings, || Ok(Default::default()))
+        .unwrap();
+    let mut h = running.handle();
+    ready(&mut h).await;
+    let mut cfg = config();
+    cfg.groups.insert("transaction".into());
+    let http = running.listen_http(cfg).await.unwrap();
+    let address = http.status().address;
+    let encoded_hash = api::encode(ApiType::TxHash, tx.hash().as_ref());
+    let expected = json!({
+        "block_hash":"none", "block_height":-1,
+        "hash":encoded_hash, "encoded_tx":api::encode(ApiType::Transaction,&tx.encode()),
+        "signatures":tx.signatures().iter().map(|s|api::encode(ApiType::Signature,s.as_ref())).collect::<Vec<_>>(),
+        "tx":{"type":"SpendTx","version":1,"sender_id":api::encode(ApiType::AccountPubkey,payer().public_key().as_ref()),"recipient_id":api::encode(ApiType::AccountPubkey,&[43;32]),"nonce":1,"amount":7,"fee":100_000_000_000_000u64,"payload":api::encode(ApiType::Bytearray,&[])}
+    });
+    for version in ["v2", "v3"] {
+        let (code, _, body) =
+            get(address, &format!("/{version}/transactions/{encoded_hash}")).await;
+        assert_eq!(
+            (code, body),
+            (404, json!({"reason":"Transaction not found"}))
+        );
+    }
+    let workers = h.pow().unwrap().workers().unwrap();
+    let pool = workers.bindings().admission.current().unwrap().client;
+    pool.push(tx.clone(), ae_mempool::pool::Event::Created, false)
+        .unwrap()
+        .await
+        .unwrap();
+    for version in ["v2", "v3"] {
+        let (code, _, body) =
+            get(address, &format!("/{version}/transactions/{encoded_hash}")).await;
+        assert_eq!((code, body), (200, expected.clone()));
+    }
+    pool.delete(tx.hash()).unwrap().await.unwrap();
+    assert_eq!(
+        get(address, &format!("/v3/transactions/{encoded_hash}"))
+            .await
+            .0,
+        404
+    );
+    pool.push(tx.clone(), ae_mempool::pool::Event::Created, false)
+        .unwrap()
+        .await
+        .unwrap();
+    let generation = workers.status().admission_generation;
+    let command_generation = h.commands().unwrap().number;
+    workers
+        .restart(ae_sync::runtime::workers::Child::Admission, generation)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    within(async {
+        loop {
+            assert!(h.status().running && h.status().failure.is_none());
+            if h.status().ready && h.commands().is_some_and(|c| c.number > command_generation) {
+                break;
+            }
+            h.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert_eq!(
+        get(address, &format!("/v3/transactions/{encoded_hash}"))
+            .await
+            .2,
+        expected
+    );
+    let importer = h.importer().unwrap();
+    let capacity = importer.available();
+    let mut unread = vec![];
+    while let Ok(ticket) = importer.current() {
+        unread.push(ticket);
+        assert!(unread.len() < 64);
+    }
+    for path in [
+        format!("/v3/transactions/{encoded_hash}"),
+        "/v3/transactions/bad".into(),
+        "/v3/micro-blocks/hash/bad/transactions".into(),
+    ] {
+        let (code, headers, body) = get(address, &path).await;
+        assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
+        assert_eq!(headers["retry-after"], "3");
+    }
+    assert_eq!(
+        get(address, "/v3/micro-blocks/hash/bad/transactions/index/0")
+            .await
+            .0,
+        400
+    );
+    drop(unread);
+    within(async {
+        while importer.available() != capacity {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let completion = h
+        .commands()
+        .unwrap()
+        .client
+        .submit(Command::Blocks {
+            count: 2,
+            kind: Kind::Any,
+        })
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(completion.result.as_ref().unwrap().command.result.is_ok());
+    let (header, micro, key) = {
+        let view = db.view().unwrap();
+        let block = view.location(tx.hash()).unwrap().unwrap();
+        let header = view.require_header(block).unwrap();
+        let key = api::encode(ApiType::MicroBlockHash, &header.common().previous_key_hash);
+        let micro = api::encode(ApiType::MicroBlockHash, block.as_ref());
+        (header, micro, key)
+    };
+    let mut mined = expected.clone();
+    mined["block_height"] = json!(header.common().height);
+    mined["block_hash"] = json!(micro);
+    for version in ["v2", "v3"] {
+        for suffix in [
+            format!("transactions/{encoded_hash}"),
+            format!("micro-blocks/hash/{micro}/transactions/index/+0001"),
+        ] {
+            let (code, headers, body) = get(address, &format!("/{version}/{suffix}")).await;
+            assert_eq!((code, body), (200, mined.clone()));
+            assert_eq!(
+                headers["access-control-allow-origin"],
+                "https://client.example"
+            );
+        }
+        assert_eq!(
+            get(
+                address,
+                &format!("/{version}/micro-blocks/hash/{micro}/transactions")
+            )
+            .await
+            .2,
+            json!({"transactions":[mined]})
+        );
+        for index in [
+            "2",
+            "18446744073709551616",
+            "9999999999999999999999999999999999999999999999999999999999999",
+        ] {
+            let (code, _, body) = get(
+                address,
+                &format!("/{version}/micro-blocks/hash/{micro}/transactions/index/{index}"),
+            )
+            .await;
+            assert_eq!(
+                (code, body),
+                (400, json!({"reason":"Invalid hash or index"}))
+            );
+        }
+        let (code, _, body) = get(
+            address,
+            &format!("/{version}/micro-blocks/hash/{key}/transactions"),
+        )
+        .await;
+        assert_eq!(
+            (code, body),
+            (
+                404,
+                json!({"reason":"Block not found","error_code":"block_not_found"})
+            )
+        );
+        let (code, _, body) = get(
+            address,
+            &format!("/{version}/micro-blocks/hash/{key}/transactions/index/1"),
+        )
+        .await;
+        assert_eq!((code, body), (404, json!({"reason":"Block not found"})));
+        let (code, _, body) = get(
+            address,
+            &format!("/{version}/micro-blocks/hash/{micro}/transactions/index/%ED%A0%41"),
+        )
+        .await;
+        assert_eq!(
+            (code, body),
+            (
+                400,
+                json!({"reason":"validation_error","parameter":"index","info":{"error":"wrong_type","data":"�"}})
+            )
+        );
+    }
+    let (code, _, string_body) = get(
+        address,
+        &format!("/v3/transactions/{encoded_hash}?int-as-string=true"),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(string_body["tx"]["amount"], "7");
+    assert_eq!(string_body["tx"]["version"], "1");
+    assert_eq!(
+        string_body["block_height"],
+        header.common().height.to_string()
+    );
+    db.rollback(
+        ae_chain::repository::rollback::Target::Height(0),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        get(address, &format!("/v3/transactions/{encoded_hash}"))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        get(
+            address,
+            &format!("/v3/micro-blocks/hash/{micro}/transactions")
+        )
+        .await
+        .0,
+        404
+    );
+    let exit = within(running.shutdown()).await.unwrap();
+    assert!(exit.status().joined);
+    assert!(http.status().joined);
+    assert!(TcpStream::connect(address).await.is_err());
+}
+
+#[tokio::test]
 async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
     let lab = Lab::new();
     let prepared = prepare(lab.services("on_demand", json!({"dev_mode":true}), Default::default()));

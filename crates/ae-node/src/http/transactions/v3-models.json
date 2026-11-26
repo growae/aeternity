@@ -1,0 +1,1303 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "definitions": {
+    "SignedTx": {
+      "type": "object",
+      "properties": {
+        "tx": {
+          "$ref": "#/definitions/Tx"
+        },
+        "block_height": {
+          "$ref": "#/definitions/TxBlockHeight"
+        },
+        "block_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "hash": {
+          "$ref": "#/definitions/EncodedTxHash"
+        },
+        "encoded_tx": {
+          "$ref": "#/definitions/EncodedTxByteArray"
+        },
+        "signatures": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/definitions/EncodedSignature"
+          }
+        }
+      },
+      "required": [
+        "tx"
+      ]
+    },
+    "EncodedSignature": {
+      "type": "string",
+      "pattern": "^sg_\\w+$"
+    },
+    "EncodedTxByteArray": {
+      "type": "string",
+      "pattern": "^tx_[0-9A-Za-z+/=]+$"
+    },
+    "EncodedTxHash": {
+      "type": "string",
+      "pattern": "^th_\\w+$"
+    },
+    "EncodedHash": {
+      "type": "string"
+    },
+    "TxBlockHeight": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 18446744073709552000
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "Tx": {
+      "allOf": [
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "$ref": "#/definitions/UInt32"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "SpendTx",
+                "ChannelCreateTx",
+                "ChannelDepositTx",
+                "ChannelWithdrawTx",
+                "ChannelForceProgressTx",
+                "ChannelCloseMutualTx",
+                "ChannelCloseSoloTx",
+                "ChannelSlashTx",
+                "ChannelSettleTx",
+                "ChannelSnapshotSoloTx",
+                "ChannelSetDelegatesTx",
+                "OracleRegisterTx",
+                "OracleExtendTx",
+                "OracleQueryTx",
+                "OracleRespondTx",
+                "NamePreclaimTx",
+                "NameClaimTx",
+                "NameUpdateTx",
+                "NameTransferTx",
+                "NameRevokeTx",
+                "ContractCreateTx",
+                "ContractCallTx",
+                "GAAttachTx",
+                "GAMetaTx",
+                "PayingForTx"
+              ]
+            }
+          },
+          "required": [
+            "version",
+            "type"
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SpendTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelCreateTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelDepositTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelWithdrawTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelForceProgressTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelCloseMutualTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelCloseSoloTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelSlashTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelSettleTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelSnapshotSoloTx"
+            },
+            {
+              "$ref": "#/definitions/ChannelSetDelegatesTx"
+            },
+            {
+              "$ref": "#/definitions/OracleRegisterTx"
+            },
+            {
+              "$ref": "#/definitions/OracleExtendTx"
+            },
+            {
+              "$ref": "#/definitions/OracleQueryTx"
+            },
+            {
+              "$ref": "#/definitions/OracleRespondTx"
+            },
+            {
+              "$ref": "#/definitions/NamePreclaimTx"
+            },
+            {
+              "$ref": "#/definitions/NameClaimTx"
+            },
+            {
+              "$ref": "#/definitions/NameUpdateTx"
+            },
+            {
+              "$ref": "#/definitions/NameTransferTx"
+            },
+            {
+              "$ref": "#/definitions/NameRevokeTx"
+            },
+            {
+              "$ref": "#/definitions/ContractCreateTx"
+            },
+            {
+              "$ref": "#/definitions/ContractCallTx"
+            },
+            {
+              "$ref": "#/definitions/GAAttachTx"
+            },
+            {
+              "$ref": "#/definitions/GAMetaTx"
+            },
+            {
+              "$ref": "#/definitions/PayingForTx"
+            }
+          ]
+        }
+      ]
+    },
+    "PayingForTx": {
+      "type": "object",
+      "properties": {
+        "payer_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "tx": {
+          "$ref": "#/definitions/SignedTx"
+        }
+      },
+      "required": [
+        "payer_id",
+        "fee",
+        "tx"
+      ]
+    },
+    "UInt64": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709552000
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "UInt": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "EncodedPubkey": {
+      "type": "string"
+    },
+    "GAMetaTx": {
+      "type": "object",
+      "properties": {
+        "ga_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "gas": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "gas_price": {
+          "$ref": "#/definitions/UInt"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "auth_data": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        },
+        "tx": {
+          "$ref": "#/definitions/SignedTx"
+        }
+      },
+      "required": [
+        "ga_id",
+        "abi_version",
+        "gas",
+        "gas_price",
+        "fee",
+        "auth_data",
+        "tx"
+      ]
+    },
+    "EncodedContractByteArray": {
+      "type": "string",
+      "pattern": "^cb_[0-9A-Za-z+/=]+$"
+    },
+    "UInt16": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "GAAttachTx": {
+      "type": "object",
+      "properties": {
+        "owner_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "code": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        },
+        "vm_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "gas": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "gas_price": {
+          "$ref": "#/definitions/UInt"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "call_data": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        },
+        "auth_fun": {
+          "type": "string",
+          "pattern": "^(0x|0X)?[a-fA-F0-9]+$"
+        }
+      },
+      "required": [
+        "owner_id",
+        "code",
+        "vm_version",
+        "abi_version",
+        "gas",
+        "gas_price",
+        "fee",
+        "call_data",
+        "auth_fun"
+      ]
+    },
+    "ContractCallTx": {
+      "type": "object",
+      "properties": {
+        "caller_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "contract_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "gas": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "gas_price": {
+          "$ref": "#/definitions/UInt"
+        },
+        "call_data": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        }
+      },
+      "required": [
+        "caller_id",
+        "contract_id",
+        "abi_version",
+        "fee",
+        "amount",
+        "gas",
+        "gas_price",
+        "call_data"
+      ]
+    },
+    "ContractCreateTx": {
+      "type": "object",
+      "properties": {
+        "owner_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "code": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        },
+        "vm_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        },
+        "deposit": {
+          "$ref": "#/definitions/UInt"
+        },
+        "amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "gas": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "gas_price": {
+          "$ref": "#/definitions/UInt"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "call_data": {
+          "$ref": "#/definitions/EncodedContractByteArray"
+        }
+      },
+      "required": [
+        "owner_id",
+        "code",
+        "vm_version",
+        "abi_version",
+        "deposit",
+        "amount",
+        "gas",
+        "gas_price",
+        "fee",
+        "call_data"
+      ]
+    },
+    "NameRevokeTx": {
+      "type": "object",
+      "properties": {
+        "name_id": {
+          "$ref": "#/definitions/EncodedNameId"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "name_id",
+        "fee",
+        "account_id"
+      ]
+    },
+    "EncodedNameId": {
+      "type": "string",
+      "pattern": "^nm_\\w+$"
+    },
+    "NameTransferTx": {
+      "type": "object",
+      "properties": {
+        "name_id": {
+          "$ref": "#/definitions/EncodedNameId"
+        },
+        "recipient_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "name_id",
+        "recipient_id",
+        "fee",
+        "account_id"
+      ]
+    },
+    "NameUpdateTx": {
+      "type": "object",
+      "properties": {
+        "name_id": {
+          "$ref": "#/definitions/EncodedNameId"
+        },
+        "name_ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "pointers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamePointer"
+          }
+        },
+        "client_ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "name_id",
+        "name_ttl",
+        "client_ttl",
+        "pointers",
+        "fee",
+        "account_id"
+      ]
+    },
+    "NamePointer": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "encoded_key": {
+          "$ref": "#/definitions/EncodedByteArray"
+        },
+        "id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        }
+      },
+      "required": [
+        "key",
+        "id"
+      ]
+    },
+    "EncodedByteArray": {
+      "type": "string",
+      "pattern": "^ba_[0-9A-Za-z+/=]+$"
+    },
+    "NameClaimTx": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "name_salt": {
+          "$ref": "#/definitions/UInt"
+        },
+        "name_fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "name",
+        "name_salt",
+        "fee",
+        "account_id"
+      ]
+    },
+    "NamePreclaimTx": {
+      "type": "object",
+      "properties": {
+        "commitment_id": {
+          "$ref": "#/definitions/EncodedCommitmentId"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "commitment_id",
+        "fee",
+        "account_id"
+      ]
+    },
+    "EncodedCommitmentId": {
+      "type": "string",
+      "pattern": "^cm_\\w+$"
+    },
+    "OracleRespondTx": {
+      "type": "object",
+      "properties": {
+        "query_id": {
+          "$ref": "#/definitions/EncodedOracleQueryId"
+        },
+        "response": {
+          "type": "string"
+        },
+        "response_ttl": {
+          "$ref": "#/definitions/RelativeTTL"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "oracle_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "query_id",
+        "response",
+        "response_ttl",
+        "fee",
+        "oracle_id"
+      ]
+    },
+    "RelativeTTL": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "delta"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "EncodedOracleQueryId": {
+      "type": "string",
+      "pattern": "^oq_\\w+$"
+    },
+    "OracleQueryTx": {
+      "type": "object",
+      "properties": {
+        "oracle_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "query": {
+          "type": "string"
+        },
+        "query_fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "query_ttl": {
+          "$ref": "#/definitions/TTL"
+        },
+        "response_ttl": {
+          "$ref": "#/definitions/RelativeTTL"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "sender_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "oracle_id",
+        "query",
+        "query_fee",
+        "query_ttl",
+        "response_ttl",
+        "fee",
+        "sender_id"
+      ]
+    },
+    "TTL": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "delta",
+            "block"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "OracleExtendTx": {
+      "type": "object",
+      "properties": {
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "oracle_ttl": {
+          "$ref": "#/definitions/RelativeTTL"
+        },
+        "oracle_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "fee",
+        "oracle_ttl",
+        "oracle_id"
+      ]
+    },
+    "OracleRegisterTx": {
+      "type": "object",
+      "properties": {
+        "query_format": {
+          "type": "string"
+        },
+        "response_format": {
+          "type": "string"
+        },
+        "query_fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "oracle_ttl": {
+          "$ref": "#/definitions/TTL"
+        },
+        "account_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "abi_version": {
+          "$ref": "#/definitions/UInt16"
+        }
+      },
+      "required": [
+        "query_format",
+        "response_format",
+        "query_fee",
+        "fee",
+        "oracle_ttl",
+        "account_id"
+      ]
+    },
+    "ChannelSetDelegatesTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "initiator_delegate_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EncodedPubkey"
+          }
+        },
+        "responder_delegate_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EncodedPubkey"
+          }
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "round": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "initiator_delegate_ids",
+        "responder_delegate_ids",
+        "state_hash",
+        "round",
+        "payload",
+        "fee"
+      ]
+    },
+    "ChannelSnapshotSoloTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "payload",
+        "fee"
+      ]
+    },
+    "ChannelSettleTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "initiator_amount_final": {
+          "$ref": "#/definitions/UInt"
+        },
+        "responder_amount_final": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "initiator_amount_final",
+        "responder_amount_final",
+        "fee",
+        "nonce"
+      ]
+    },
+    "ChannelSlashTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "poi": {
+          "$ref": "#/definitions/EncodedProofOfInclusion"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "payload",
+        "fee",
+        "poi"
+      ]
+    },
+    "EncodedProofOfInclusion": {
+      "type": "string",
+      "pattern": "^pi_[0-9A-Za-z+/=]+$"
+    },
+    "ChannelCloseSoloTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "poi": {
+          "$ref": "#/definitions/EncodedProofOfInclusion"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "payload",
+        "fee",
+        "poi"
+      ]
+    },
+    "ChannelCloseMutualTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "initiator_amount_final": {
+          "$ref": "#/definitions/UInt"
+        },
+        "responder_amount_final": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "initiator_amount_final",
+        "responder_amount_final",
+        "fee",
+        "nonce"
+      ]
+    },
+    "ChannelForceProgressTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "payload": {
+          "$ref": "#/definitions/EncodedTxByteArray"
+        },
+        "round": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "update": {
+          "$ref": "#/definitions/OffChainUpdate"
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "offchain_trees": {
+          "$ref": "#/definitions/EncodedStateTrees"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "payload",
+        "round",
+        "update",
+        "state_hash",
+        "fee"
+      ]
+    },
+    "EncodedStateTrees": {
+      "type": "string",
+      "pattern": "^ss_[0-9A-Za-z+/=]+$"
+    },
+    "OffChainUpdate": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op"
+      ]
+    },
+    "ChannelWithdrawTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "to_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "round": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "to_id",
+        "amount",
+        "fee",
+        "nonce",
+        "state_hash",
+        "round"
+      ]
+    },
+    "ChannelDepositTx": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "from_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "round": {
+          "$ref": "#/definitions/UInt64"
+        }
+      },
+      "required": [
+        "channel_id",
+        "from_id",
+        "amount",
+        "fee",
+        "nonce",
+        "state_hash",
+        "round"
+      ]
+    },
+    "ChannelCreateTx": {
+      "type": "object",
+      "properties": {
+        "initiator_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "initiator_amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "responder_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "responder_amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "channel_reserve": {
+          "$ref": "#/definitions/UInt"
+        },
+        "lock_period": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "state_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "delegate_ids": {
+          "$ref": "#/definitions/Delegates"
+        }
+      },
+      "required": [
+        "initiator_id",
+        "initiator_amount",
+        "responder_id",
+        "responder_amount",
+        "channel_reserve",
+        "lock_period",
+        "fee",
+        "state_hash"
+      ]
+    },
+    "Delegates": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EncodedPubkey"
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "initiator": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/EncodedPubkey"
+              }
+            },
+            "responder": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/EncodedPubkey"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SpendTx": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SpendTxInput"
+        },
+        {
+          "required": [
+            "nonce"
+          ]
+        }
+      ]
+    },
+    "SpendTxInput": {
+      "type": "object",
+      "properties": {
+        "recipient_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "amount": {
+          "$ref": "#/definitions/UInt"
+        },
+        "fee": {
+          "$ref": "#/definitions/UInt"
+        },
+        "ttl": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "sender_id": {
+          "$ref": "#/definitions/EncodedPubkey"
+        },
+        "nonce": {
+          "$ref": "#/definitions/UInt64"
+        },
+        "payload": {}
+      },
+      "required": [
+        "recipient_id",
+        "amount",
+        "fee",
+        "sender_id",
+        "payload"
+      ]
+    },
+    "UInt32": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SignedTxs": {
+      "type": "object",
+      "properties": {
+        "transactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SignedTx"
+          }
+        }
+      }
+    }
+  },
+  "operations": {
+    "GetMicroBlockTransactionsByHash": {
+      "$ref": "#/definitions/SignedTxs"
+    },
+    "GetMicroBlockTransactionByHashAndIndex": {
+      "$ref": "#/definitions/SignedTx"
+    },
+    "GetTransactionByHash": {
+      "$ref": "#/definitions/SignedTx"
+    }
+  }
+}

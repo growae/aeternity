@@ -83,7 +83,7 @@ fn height(raw: &[u8], v3: bool) -> Result<u128, Response> {
         json!({"reason":"validation_error","parameter":"height","info":{"error":error,"data":data}}),
     ))
 }
-fn hash(raw: &[u8], kind: ApiType, code: bool) -> Result<Hash256, Response> {
+pub(super) fn hash(raw: &[u8], kind: ApiType, code: bool) -> Result<Hash256, Response> {
     // Base58 hash/public-key encodings have fixed widths. Reject impossible
     // lengths before the quadratic decoder; variable-width types use base64.
     let decoded = std::str::from_utf8(raw)

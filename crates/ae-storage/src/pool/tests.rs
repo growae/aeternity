@@ -15,6 +15,7 @@ use ae_state::{
 };
 use serde_json::Value as J;
 use std::path::PathBuf;
+mod client;
 mod lifecycle;
 pub(super) mod metrics;
 mod nonce;

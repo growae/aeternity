@@ -3,6 +3,7 @@ use ae_codec::headers::Header;
 use ae_storage::events::{Cursor, Reader};
 
 pub mod blocks;
+pub mod transactions;
 
 pub(super) struct Height {
     reader: Reader,
@@ -84,7 +85,28 @@ pub struct Ticket<T = Current> {
     pending: blocking::Pending<Result<T, Error>>,
     timeout: Duration,
 }
+// Retain the read job's capacity through serialization and socket ownership.
+// Dropping the guard returns both its job slot and byte reservation.
+pub struct ReadCredits {
+    _credits: blocking::Credits,
+}
+pub struct Retained<T> {
+    pub value: T,
+    pub credits: ReadCredits,
+}
 impl<T> Ticket<T> {
+    pub async fn wait_retained(self) -> Result<Retained<T>, Error> {
+        let held = tokio::time::timeout(self.timeout, self.pending.retained())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(Error::from)?;
+        Ok(Retained {
+            value: held.value?,
+            credits: ReadCredits {
+                _credits: held.credits,
+            },
+        })
+    }
     pub async fn wait(self) -> Result<T, Error> {
         tokio::time::timeout(self.timeout, self.pending)
             .await

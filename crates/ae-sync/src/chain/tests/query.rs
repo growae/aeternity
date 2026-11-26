@@ -1,6 +1,157 @@
 use super::*;
 
 #[tokio::test]
+async fn transaction_queries_follow_mainnet_records_and_keep_reply_capacity_until_drop() {
+    use crate::chain::query::transactions::{Reply, Request};
+    let (_temp, importer) = setup(Config {
+        jobs: 1,
+        ..Default::default()
+    });
+    let blocks = fixtures::blocks(&NetworkProfile::mainnet());
+    let Block::Micro(micro) = &blocks[1] else {
+        panic!()
+    };
+    let transaction = micro.transactions[0].clone();
+    let hash = transaction.hash();
+    let query = |request| {
+        importer
+            .transaction_query(16 << 20)
+            .unwrap()
+            .submit(request, |reply| reply)
+            .unwrap()
+    };
+    assert_eq!(
+        query(Request::Hash(hash)).wait().await.unwrap(),
+        Reply::MissingTransaction
+    );
+    for block in &blocks[..2] {
+        importer
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    }
+    let block_hash = blocks[1].hash().unwrap();
+    let held = query(Request::Hash(hash)).wait_retained().await.unwrap();
+    assert_eq!(
+        held.value,
+        Reply::Transaction {
+            transaction: Box::new(transaction.clone()),
+            header: Some(blocks[1].header())
+        }
+    );
+    assert_eq!(importer.available(), (0, 0));
+    assert!(matches!(importer.current(), Err(Error::Busy)));
+    drop(held.value);
+    assert!(matches!(importer.transaction_query(1), Err(Error::Busy)));
+    drop(held.credits);
+    assert_eq!(importer.available(), (1, 128 << 20));
+    assert_eq!(
+        query(Request::Micro(block_hash)).wait().await.unwrap(),
+        Reply::Transactions {
+            transactions: micro.transactions.clone(),
+            header: blocks[1].header()
+        }
+    );
+    for index in [None, Some(0), Some(micro.transactions.len() + 1)] {
+        assert_eq!(
+            query(Request::MicroIndex {
+                hash: block_hash,
+                index
+            })
+            .wait()
+            .await
+            .unwrap(),
+            Reply::InvalidIndex
+        );
+    }
+    assert_eq!(
+        query(Request::MicroIndex {
+            hash: block_hash,
+            index: Some(1)
+        })
+        .wait()
+        .await
+        .unwrap(),
+        Reply::Transaction {
+            transaction: Box::new(transaction),
+            header: Some(blocks[1].header())
+        }
+    );
+    assert_eq!(
+        query(Request::Micro(blocks[0].hash().unwrap()))
+            .wait()
+            .await
+            .unwrap(),
+        Reply::MissingBlock
+    );
+    importer
+        .database()
+        .rollback(repository::rollback::Target::Height(0), Default::default())
+        .unwrap();
+    assert_eq!(
+        query(Request::Hash(hash)).wait().await.unwrap(),
+        Reply::MissingTransaction
+    );
+    assert_eq!(
+        query(Request::Micro(block_hash)).wait().await.unwrap(),
+        Reply::MissingBlock
+    );
+    importer.stop();
+    assert!(matches!(importer.transaction_query(0), Err(Error::Closed)));
+    importer.join().await;
+}
+
+#[tokio::test]
+async fn transaction_reads_cancel_before_render_and_join_without_waiting_for_reply_credits() {
+    use crate::chain::query::transactions::Request;
+    let (_temp, importer) = setup(Config {
+        jobs: 2,
+        bytes: 256 << 20,
+        ..Default::default()
+    });
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let active = importer
+        .jobs
+        .submit(1, move |_| {
+            entered_tx.send(()).unwrap();
+            wait.recv().unwrap();
+        })
+        .unwrap();
+    entered.await.unwrap();
+    let rendered = Arc::new(AtomicBool::new(false));
+    let flag = rendered.clone();
+    let queued = importer
+        .transaction_query(16 << 20)
+        .unwrap()
+        .submit(Request::Hash(Hash256::ZERO), move |_| {
+            flag.store(true, Ordering::SeqCst)
+        })
+        .unwrap();
+    assert!(matches!(importer.current(), Err(Error::Busy)));
+    drop(queued);
+    release.send(()).unwrap();
+    active.await.unwrap();
+    importer.jobs.drain().await;
+    assert!(!rendered.load(Ordering::SeqCst));
+    let held = importer
+        .transaction_query(16 << 20)
+        .unwrap()
+        .submit(Request::Hash(Hash256::ZERO), |r| r)
+        .unwrap()
+        .wait_retained()
+        .await
+        .unwrap();
+    importer.stop();
+    within(importer.join()).await;
+    // A completed socket response owns only permits, not a live worker job.
+    drop(held);
+    assert_eq!(importer.available(), (2, 256 << 20));
+}
+
+#[tokio::test]
 async fn block_queries_follow_admitted_mainnet_keys_micros_and_rollback() {
     use crate::chain::query::blocks::{Kind, Missing, Reply, Request};
     let (_temp, importer) = setup(Default::default());

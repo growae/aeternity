@@ -161,6 +161,10 @@ pub(super) enum Operation {
         operation: super::blocks::Operation,
         v3: bool,
     },
+    Transactions {
+        operation: super::transactions::Operation,
+        v3: bool,
+    },
 }
 pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
     if config.target != Target::External {
@@ -174,6 +178,12 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         _ => return None,
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    if let Some(operation) = super::transactions::route(&suffix) {
+        return config
+            .groups
+            .contains(operation.group())
+            .then_some((v3, Operation::Transactions { operation, v3 }));
+    }
     let (operation, group) = match suffix.as_slice() {
         [b"key-blocks", b"current", b"height"] => (Operation::Current { height: true }, "chain"),
         [b"key-blocks", b"current", b"hash"] => (Operation::Current { height: false }, "chain"),

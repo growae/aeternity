@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "definitions": {
+    "GenericSignedTx": {
+      "type": "object",
+      "properties": {
+        "tx": {
+          "$ref": "#/definitions/GenericTx"
+        },
+        "block_height": {
+          "$ref": "#/definitions/TxBlockHeight"
+        },
+        "block_hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "hash": {
+          "$ref": "#/definitions/EncodedHash"
+        },
+        "encoded_tx": {
+          "$ref": "#/definitions/EncodedByteArray"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EncodedValue"
+          }
+        }
+      },
+      "required": [
+        "tx",
+        "block_height",
+        "block_hash",
+        "hash"
+      ]
+    },
+    "EncodedValue": {
+      "type": "string"
+    },
+    "EncodedByteArray": {
+      "type": "string"
+    },
+    "EncodedHash": {
+      "type": "string"
+    },
+    "TxBlockHeight": {
+      "type": "integer",
+      "minimum": -1,
+      "maximum": 18446744073709551615
+    },
+    "GenericTx": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/definitions/UInt32"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "type"
+      ]
+    },
+    "UInt32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "GenericTxs": {
+      "type": "object",
+      "properties": {
+        "transactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GenericSignedTx"
+          }
+        }
+      },
+      "required": [
+        "transactions"
+      ]
+    }
+  },
+  "operations": {
+    "GetMicroBlockTransactionsByHash": {
+      "$ref": "#/definitions/GenericTxs"
+    },
+    "GetMicroBlockTransactionByHashAndIndex": {
+      "$ref": "#/definitions/GenericSignedTx"
+    },
+    "GetTransactionByHash": {
+      "$ref": "#/definitions/GenericSignedTx"
+    }
+  }
+}

@@ -651,34 +651,39 @@ impl<S: Read> View<S> {
                 Error::ResourceLimit => ae_tx::storage::Error::ResourceLimit.into(),
                 error => error,
             })?
-            .map(|b| {
-                let config = self.config.transaction_record();
-                if b.len() > config.max_record_bytes {
-                    return Err(ae_tx::storage::Error::ResourceLimit.into());
-                }
-                let tx = if b.first() == Some(&0) {
-                    ae_tx::storage::decode(&b, config)?
-                } else {
-                    // Version-1 databases stored canonical signed transport bytes.
-                    let t = ae_tx::SignedTransaction::decode_with_state_config(
-                        &b,
-                        config.transaction,
-                        config.state,
-                    )
-                    .map_err(|e| {
-                        Error::TransactionStorage(ae_tx::storage::Error::Transaction(e))
-                    })?;
-                    if t.encode() != b {
-                        return Err(Error::Corrupt("legacy transaction encoding"));
-                    }
-                    t
-                };
-                if tx.hash() != hash {
-                    return Err(Error::Corrupt("transaction hash"));
-                }
-                Ok(tx)
-            })
+            .map(|b| self.transaction_from_record(hash, &b))
             .transpose()
+    }
+    // Decode a record already read from this snapshot, after the caller has
+    // resolved its visibility. Avoid a second storage read or a new snapshot.
+    pub fn transaction_from_record(
+        &self,
+        hash: Hash256,
+        bytes: &[u8],
+    ) -> Result<ae_tx::SignedTransaction<ae_tx::Transaction>, Error> {
+        let config = self.config.transaction_record();
+        if bytes.len() > config.max_record_bytes {
+            return Err(ae_tx::storage::Error::ResourceLimit.into());
+        }
+        let tx = if bytes.first() == Some(&0) {
+            ae_tx::storage::decode(bytes, config)?
+        } else {
+            // Version-1 databases stored canonical signed transport bytes.
+            let t = ae_tx::SignedTransaction::decode_with_state_config(
+                bytes,
+                config.transaction,
+                config.state,
+            )
+            .map_err(|e| Error::TransactionStorage(ae_tx::storage::Error::Transaction(e)))?;
+            if t.encode() != bytes {
+                return Err(Error::Corrupt("legacy transaction encoding"));
+            }
+            t
+        };
+        if tx.hash() != hash {
+            return Err(Error::Corrupt("transaction hash"));
+        }
+        Ok(tx)
     }
     pub fn require_block(&self, h: Hash256) -> Result<Block, Error> {
         self.block(h)?.ok_or(Error::Missing(h))

@@ -99,11 +99,29 @@ struct Response<T> {
     _slot: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
 }
+pub(crate) struct Credits {
+    _slot: OwnedSemaphorePermit,
+    _bytes: OwnedSemaphorePermit,
+}
+pub(crate) struct Retained<T> {
+    pub value: T,
+    pub credits: Credits,
+}
 pub(crate) struct Pending<T> {
     receiver: oneshot::Receiver<Response<T>>,
     cancel: Cancellation,
 }
 impl<T> Pending<T> {
+    pub async fn retained(mut self) -> Result<Retained<T>, Error> {
+        let response = (&mut self.receiver).await.map_err(|_| Error::Stopped)?;
+        Ok(Retained {
+            value: response.result?,
+            credits: Credits {
+                _slot: response._slot,
+                _bytes: response._bytes,
+            },
+        })
+    }
     pub fn try_result(&mut self) -> Option<Result<T, Error>> {
         match self.receiver.try_recv() {
             Ok(response) => Some(response.result),

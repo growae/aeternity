@@ -93,9 +93,55 @@ impl<S: Read> Stored<S> {
         }
         self.chain
             .source()
-            .get(&repo::key(RECORDS, hash.0))?
+            .get_bounded(
+                &repo::key(RECORDS, hash.0),
+                self.chain.config().max_transaction_record_bytes,
+            )
+            .map_err(|error| match error {
+                Error::ResourceLimit => ae_tx::storage::Error::ResourceLimit.into(),
+                error => error,
+            })?
             .map(|b| decode_record(hash, &b, self.chain.config().transaction_record()))
             .transpose()
+    }
+    // aec_db:find_tx_with_location reads the shared signed record first.
+    // Unknown/deleted records are absent; orphan location/membership entries
+    // cannot manufacture a client transaction. All reads use this same view.
+    pub fn find_transaction(&self, hash: Hash256) -> Result<Option<(Location, Signed)>, Error> {
+        let read = |prefix| {
+            self.chain
+                .source()
+                .get_bounded(
+                    &repo::key(prefix, hash.0),
+                    self.chain.config().max_transaction_record_bytes,
+                )
+                .map_err(|error| match error {
+                    Error::ResourceLimit => ae_tx::storage::Error::ResourceLimit.into(),
+                    error => error,
+                })
+        };
+        let chain = read(repo::TRANSACTIONS)?;
+        let from_chain = chain.is_some();
+        let Some(bytes) = (if from_chain { chain } else { read(RECORDS)? }) else {
+            return Ok(None);
+        };
+        let location = if let Some(block) = self.chain.location(hash)? {
+            Location::Block(block)
+        } else if member(
+            self.chain
+                .source()
+                .get_bounded(&repo::key(MEMBERS, hash.0), 1)?,
+        )? {
+            Location::Pool
+        } else {
+            return Ok(None);
+        };
+        let tx = if from_chain {
+            self.chain.transaction_from_record(hash, &bytes)?
+        } else {
+            decode_record(hash, &bytes, self.chain.config().transaction_record())?
+        };
+        Ok(Some((location, tx)))
     }
     pub fn location(&self, hash: Hash256) -> Result<Location, Error> {
         if let Some(block) = self.chain.location(hash)? {

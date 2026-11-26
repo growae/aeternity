@@ -279,6 +279,9 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     if let Operation::Blocks { operation, v3 } = &operation {
         operation.validate_path(*v3)?;
     }
+    if let Operation::Transactions { operation, .. } = &operation {
+        operation.validate_path()?;
+    }
     Ok((operation, strings))
 }
 pub(super) fn dispatch(
@@ -287,6 +290,9 @@ pub(super) fn dispatch(
 ) -> Response {
     match (plan, result) {
         (Err(response), _) | (_, Err(response)) => response,
+        (Ok((Operation::Transactions { operation, v3 }, strings)), Ok(body)) => {
+            super::transactions::finish(&operation, body, v3, strings)
+        }
         (Ok((Operation::SyncStatus { v3 }, _)), Ok(body)) => {
             if super::sync::valid_response(&body, v3) {
                 Response::json(200, body)
@@ -339,7 +345,28 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
     if height.is_none() {
         height = selected.as_ref().ok().map(|s| s.height);
     }
+    let mut retained = None;
+    let mut rendered = None;
     let result = match &plan {
+        Ok((Operation::Transactions { operation, v3 }, strings)) => {
+            match super::transactions::query(
+                &parent,
+                &config,
+                captured.as_ref(),
+                operation,
+                *v3,
+                *strings,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    retained = Some(reply.credits);
+                    rendered = Some(reply.value);
+                    Err(Response::unavailable(false))
+                }
+                Err(response) => Err(response),
+            }
+        }
         Ok((Operation::Current { height }, _)) => selected.map(|s| response::current(s, *height)),
         Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
         Ok((Operation::PeerPublicKey, _)) => super::key::query(&parent, &config).await,
@@ -349,12 +376,14 @@ pub(super) async fn exchange(mut stream: TcpStream, parent: runtime::Handle, con
         }
         Err(_) => Err(Response::unavailable(false)),
     };
-    let mut response = dispatch(plan, result);
+    let mut response = rendered.unwrap_or_else(|| dispatch(plan, result));
     response.stamp(&config, &headers, height);
-    if matches!(
+    let written = matches!(
         tokio::time::timeout(config.timeout, write(&mut stream, response)).await,
         Ok(Ok(()))
-    ) {
+    );
+    drop(retained);
+    if written {
         // Half-close the response first. Bounded draining gives the client a
         // chance to receive the error before unread request bytes cause a TCP
         // reset (notably a header rejected at the configured byte limit).
