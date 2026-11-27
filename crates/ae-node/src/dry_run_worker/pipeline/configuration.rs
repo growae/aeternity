@@ -32,6 +32,9 @@ impl Settings {
     pub fn gas_limit(&self) -> Result<serde_json::Value, Error> {
         http::external_dry_run_gas_limit(&self.snapshot.resolved())
     }
+    pub fn internal_debug_endpoints(&self) -> Result<bool, Error> {
+        http::internal_debug_endpoints(&self.snapshot.resolved())
+    }
     pub fn timeout(&self, profile: Profile) -> Result<ae_sync::dry_run::Timeout, Error> {
         dry_run::timeout(&self.snapshot.resolved(), profile, None)?.runtime()
     }

@@ -4,6 +4,26 @@ use super::resolution::{Error, Resolved, Strategy};
 use num_bigint::BigInt;
 use serde_json::{Value, json};
 
+// aehttp_app:enable_internal_debug_endpoints/0. This gate is distinct from
+// registering the debug route group and defaults to disabled.
+pub fn internal_debug_endpoints(resolved: &Resolved<'_>) -> Result<bool, Error> {
+    resolved
+        .find(
+            &["http", "internal", "debug_endpoints"],
+            &[
+                Strategy::User,
+                Strategy::ApplicationPath {
+                    app: "aehttp",
+                    path: &["internal", "debug_endpoints"],
+                },
+                Strategy::SchemaDefault,
+                Strategy::Value(&json!(false)),
+            ],
+        )?
+        .and_then(|value| value.as_bool())
+        .ok_or(Error::Field("debug_endpoints"))
+}
+
 // The scalar dry-run getter must never read reporting_utilization_override.
 pub fn reporting_floor(resolved: &Resolved<'_>) -> Result<Option<ae_types::Unsigned>, Error> {
     let value = resolved.find(

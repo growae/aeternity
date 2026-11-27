@@ -265,7 +265,15 @@ pub(super) fn failure(error: chain::Error) -> Response {
         _ => Response::unavailable(false),
     }
 }
+#[cfg(test)]
 fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Response> {
+    plan_checked(request, config, || Ok(()))
+}
+fn plan_checked(
+    request: &Request,
+    config: &Config,
+    authorize_internal: impl FnOnce() -> Result<(), Response>,
+) -> Result<(Operation, bool), Response> {
     if request.method == "OPTIONS" {
         return Err(Response::empty(200));
     }
@@ -275,12 +283,21 @@ fn plan(request: &Request, config: &Config) -> Result<(Operation, bool), Respons
     let Some((v3, operation)) = response::route(&request.path, config) else {
         return Err(Response::empty(404));
     };
-    plan_routed(request, v3, operation)
+    plan_routed_checked(request, v3, operation, authorize_internal)
 }
+#[cfg(test)]
 fn plan_routed(
     request: &Request,
     v3: bool,
+    operation: Operation,
+) -> Result<(Operation, bool), Response> {
+    plan_routed_checked(request, v3, operation, || Ok(()))
+}
+fn plan_routed_checked(
+    request: &Request,
+    v3: bool,
     mut operation: Operation,
+    authorize_internal: impl FnOnce() -> Result<(), Response>,
 ) -> Result<(Operation, bool), Response> {
     let method = if matches!(
         operation,
@@ -300,6 +317,15 @@ fn plan_routed(
         let mut response = Response::empty(405);
         response.headers.insert("allow".into(), method.into());
         return Err(response);
+    }
+    if matches!(
+        operation,
+        Operation::DryRun {
+            profile: super::dry_run::Profile::Internal,
+            ..
+        }
+    ) {
+        authorize_internal()?;
     }
     if !accepts_json(&request.headers) {
         return Err(Response::empty(406));
@@ -431,7 +457,9 @@ pub(super) async fn exchange(
             prefetched,
             http11,
         }) => (
-            plan(&request, &config),
+            plan_checked(&request, &config, || {
+                parent.information.dry_run.authorize_internal()
+            }),
             request.headers,
             prefetched,
             request.query,

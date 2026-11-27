@@ -46,8 +46,11 @@ async fn post_at(address: SocketAddr, path: &str, body: &Value) -> (u16, Value) 
 #[tokio::test]
 async fn live_dry_runs_share_runtime_state_without_mutating_chain_or_pool() {
     let lab = Lab::new();
-    let prepared =
-        prepare(lab.services("on_demand", json!({"dev_mode": true}), Default::default()));
+    let prepared = configured(
+        &lab,
+        &empty(),
+        json!({"internal": {"debug_endpoints": true}}),
+    );
     let db = prepared.configured().chain().database().clone();
     let tx = transfer(prepared.configured());
     let mut running = prepared
@@ -150,8 +153,11 @@ async fn live_dry_runs_share_runtime_state_without_mutating_chain_or_pool() {
 #[tokio::test]
 async fn listener_group_shares_body_admission_and_unwinds_failed_startup() {
     let lab = Lab::new();
-    let prepared =
-        prepare(lab.services("on_demand", json!({"dev_mode": true}), Default::default()));
+    let prepared = configured(
+        &lab,
+        &empty(),
+        json!({"internal": {"debug_endpoints": true}}),
+    );
     let mut running = prepared
         .launch(commands(&lab), || Ok(Default::default()))
         .unwrap();
@@ -313,7 +319,7 @@ async fn live_fate_sequences_preserve_native_calls_and_public_floor_on_captured_
     let prepared = configured(
         &lab,
         &initial,
-        json!({"dry_run": {"timeout_ms": 0}, "gas_price": {"min_relay_gas_price": 2_000_000}}),
+        json!({"internal": {"debug_endpoints": true}, "dry_run": {"timeout_ms": 0}, "gas_price": {"min_relay_gas_price": 2_000_000}}),
     );
     let db = prepared.configured().chain().database().clone();
     let mut running = prepared
@@ -391,12 +397,16 @@ async fn live_fate_sequences_preserve_native_calls_and_public_floor_on_captured_
 async fn separate_runtime_owners_keep_their_gas_policy_and_internal_bypass() {
     let first = Lab::new();
     let second = Lab::new();
-    let a = configured(&first, &empty(), json!({"external": {"gas_limit": 0}}));
+    let a = configured(
+        &first,
+        &empty(),
+        json!({"external": {"gas_limit": 0}, "internal": {"debug_endpoints": true}}),
+    );
     let tx = transfer(a.configured());
     let b = configured(
         &second,
         &empty(),
-        json!({"external": {"gas_limit": 6_000_000}}),
+        json!({"external": {"gas_limit": 6_000_000}, "internal": {"debug_endpoints": true}}),
     );
     let mut a = a
         .launch(commands(&first), || Ok(Default::default()))
@@ -446,5 +456,111 @@ async fn separate_runtime_owners_keep_their_gas_policy_and_internal_bypass() {
             .0,
         200
     );
+    assert!(within(b.shutdown()).await.unwrap().status().joined);
+}
+
+#[tokio::test]
+async fn internal_debug_permission_precedes_body_admission_and_stays_with_its_runtime() {
+    let disabled = Lab::new();
+    let enabled = Lab::new();
+    let mut a = configured(&disabled, &empty(), json!({}))
+        .launch(commands(&disabled), || Ok(Default::default()))
+        .unwrap();
+    let mut ah = a.handle();
+    ready(&mut ah).await;
+    let mut options = worker();
+    options.admission.requests = 1;
+    options.admission.threads = 1;
+    let aa = a
+        .listen_http_group(listeners(), Some(options))
+        .await
+        .unwrap();
+    let mut slow = TcpStream::connect(aa[0].status().address).await.unwrap();
+    slow.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    let mut continuing = [0; 25];
+    slow.read_exact(&mut continuing).await.unwrap();
+    assert_eq!(&continuing, b"HTTP/1.1 100 Continue\r\n\r\n");
+    let db = ah.pow().unwrap().workers().unwrap();
+    let generation = db.status().admission_generation;
+    for version in ["v2", "v3"] {
+        for (method, suffix, headers, expected) in [
+            (
+                "POST",
+                "",
+                "Content-Type: application/json\r\nExpect: 100-continue\r\n",
+                403,
+            ),
+            ("POST", "?int-as-string=bad", "Accept: text/plain\r\n", 403),
+            ("GET", "", "", 405),
+            ("BREW", "", "", 501),
+            ("OPTIONS", "", "", 200),
+        ] {
+            // Deliberately omit all ten declared body bytes. A forbidden
+            // request must finish without sending 100 Continue or waiting.
+            let raw = format!(
+                "{method} /{version}/debug/transactions/dry-run{suffix} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n{headers}Content-Length: 10\r\n\r\n"
+            );
+            let (code, headers, body) = tokio::time::timeout(
+                Duration::from_secs(2),
+                request(aa[1].status().address, &raw),
+            )
+            .await
+            .unwrap();
+            assert_eq!(code, expected);
+            assert!(body.is_empty());
+            assert_eq!(
+                headers["access-control-allow-origin"],
+                "https://client.example"
+            );
+        }
+    }
+    assert_eq!(db.status().admission_generation, generation);
+    let mut b = configured(
+        &enabled,
+        &empty(),
+        json!({"internal": {"debug_endpoints": true}}),
+    )
+    .launch(commands(&enabled), || Ok(Default::default()))
+    .unwrap();
+    let mut bh = b.handle();
+    ready(&mut bh).await;
+    let bb = b
+        .listen_http_group(listeners(), Some(worker()))
+        .await
+        .unwrap();
+    let body = json!({"txs": []});
+    assert_eq!(
+        post_at(
+            bb[1].status().address,
+            "/v3/debug/transactions/dry-run",
+            &body
+        )
+        .await,
+        (200, json!({"results": []}))
+    );
+    assert_eq!(
+        post_at(
+            aa[1].status().address,
+            "/v3/debug/transactions/dry-run",
+            &body
+        )
+        .await,
+        (403, Value::Null)
+    );
+    drop(slow);
+    within(async {
+        loop {
+            let result = post_at(aa[0].status().address, "/v3/dry-run", &body).await;
+            if result.0 == 200 {
+                assert_eq!(result.1, json!({"results": []}));
+                break;
+            }
+            assert_eq!(result.0, 503);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(within(a.shutdown()).await.unwrap().status().joined);
+    assert!(bh.status().ready);
     assert!(within(b.shutdown()).await.unwrap().status().joined);
 }

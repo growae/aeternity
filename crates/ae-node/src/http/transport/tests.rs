@@ -2,6 +2,141 @@ use super::*;
 use ae_types::Hash256;
 
 #[tokio::test]
+async fn original_debug_gate_wire_responses_preserve_configuration_and_preflight_order() {
+    use crate::configuration::{
+        Configuration,
+        resolution::{Context, Directories},
+    };
+    use crate::dry_run_worker::pipeline::configuration::Settings;
+    use crate::http::{Target, dry_run};
+    use std::{cell::Cell, sync::Arc, time::Duration};
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_http_debug_gate.json"
+    ))
+    .unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 428);
+    for row in rows {
+        let input = &fixture["inputs"][row["id"].as_u64().unwrap() as usize];
+        let configuration = &input["configuration"];
+        let user = Configuration::from_value(configuration["user"].clone()).unwrap();
+        let mut context = Context::new(Directories {
+            home: "release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        })
+        .unwrap();
+        if let Some(value) = configuration.get("application") {
+            context
+                .set("aehttp".into(), "internal".into(), value.clone())
+                .unwrap();
+        }
+        let settings = Settings::capture(&user, Arc::new(context), 8).unwrap();
+        let internal = input["operation"] == "DryRunTxs";
+        let v3 = row["version"] == "oas3";
+        let path = format!(
+            "/{}{}",
+            if v3 { "v3" } else { "v2" },
+            if internal {
+                "/debug/transactions/dry-run"
+            } else {
+                "/dry-run"
+            }
+        );
+        let raw = String::from_utf8(hex::decode(input["raw"].as_str().unwrap()).unwrap())
+            .unwrap()
+            .replacen("/dry-run", &path, 1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, wait) = tokio::sync::oneshot::channel();
+        let client = tokio::spawn(async move {
+            let mut socket = TcpStream::connect(address).await.unwrap();
+            socket.write_all(raw.as_bytes()).await.unwrap();
+            let _ = wait.await;
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let config = Config {
+            target: if internal {
+                Target::Internal
+            } else {
+                Target::External
+            },
+            groups: ["debug".into(), "dry-run".into()].into(),
+            timeout: Duration::from_millis(25),
+            ..Default::default()
+        };
+        let gates = Cell::new(0);
+        let logic = Cell::new(false);
+        let outcome = async {
+            let read = read(&mut socket, &config).await.map_err(Response::empty)?;
+            plan_checked(&read.request, &config, || {
+                gates.set(gates.get() + 1);
+                dry_run::service::authorize_internal(&settings)
+            })?;
+            let data =
+                body::read(&mut socket, &read.request.headers, read.prefetched, &config).await?;
+            let body = match &data {
+                super::super::post::Body::Complete(b) => dry_run::schema::Body::Complete(b),
+                super::super::post::Body::More(b) => dry_run::schema::Body::More(b),
+            };
+            let parsed = dry_run::schema::request(body, v3, &read.request.query, config.body_bytes)
+                .map_err(|e| e.response())?;
+            logic.set(true);
+            let mut params = json!({"DryRunInput": parsed.input});
+            if v3 {
+                params["int-as-string"] = json!(parsed.strings);
+            }
+            assert_eq!(row["logic"], json!([params]), "{input} {row}");
+            let value = dry_run::schema::render(200, json!({"results": []}), v3, parsed.strings)
+                .map_err(|e| e.response())?;
+            Ok::<_, Response>(Response::json(200, value))
+        }
+        .await;
+        let _ = done.send(());
+        client.await.unwrap();
+        let response = outcome.unwrap_or_else(|error| error);
+        assert_eq!(
+            u64::from(response.status),
+            row["status"].as_u64().unwrap(),
+            "{input} {row}"
+        );
+        let expected = hex::decode(row["body"].as_str().unwrap()).unwrap();
+        if expected.is_empty() {
+            assert!(response.body.is_empty(), "{input} {row}");
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+                serde_json::from_slice::<serde_json::Value>(&expected).unwrap(),
+                "{input} {row}"
+            );
+        }
+        assert_eq!(
+            gates.get(),
+            if internal {
+                row["gates"].as_u64().unwrap()
+            } else {
+                0
+            },
+            "{input} {row}"
+        );
+        assert_eq!(
+            logic.get(),
+            !row["logic"].as_array().unwrap().is_empty(),
+            "{input} {row}"
+        );
+        for header in ["allow", "content-type"] {
+            assert_eq!(
+                response.headers.get(header).map(String::as_str),
+                row["headers"]
+                    .get(header)
+                    .and_then(serde_json::Value::as_str),
+                "{header} {input} {row}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn original_post_wire_cases_match_request_parsing_and_validation_order() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/erlang_http_post_wire.json"

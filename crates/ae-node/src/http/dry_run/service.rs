@@ -109,6 +109,9 @@ pub(crate) struct Bound {
     gas_limit: ae_types::Unsigned,
 }
 impl Bound {
+    pub(in crate::http) fn authorize_internal(&self) -> Result<(), Response> {
+        authorize_internal(&self.settings)
+    }
     pub fn capture(prepared: &runtime::Prepared) -> Self {
         let open = prepared.configured();
         Self {
@@ -118,6 +121,16 @@ impl Bound {
             settings: open.dry_run().clone(),
             gas_limit: open.execution().effective_gas_limit().clone(),
         }
+    }
+}
+pub(in crate::http) fn authorize_internal(
+    settings: &pipeline::configuration::Settings,
+) -> Result<(), Response> {
+    match settings.internal_debug_endpoints() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Response::empty(403)),
+        // Native forbidden callback errors become empty stream-level 500s.
+        Err(_) => Err(Response::empty(500)),
     }
 }
 pub(crate) type Source = pipeline::repository::Repository<snapshots::Reader>;

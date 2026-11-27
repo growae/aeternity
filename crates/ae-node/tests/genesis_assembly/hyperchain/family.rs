@@ -57,7 +57,10 @@ async fn live_hyperchain_dry_runs_share_existing_snapshot_authority_and_join_lis
         net::TcpStream,
     };
     let parent = Parent::start();
-    let lab = Hc::new(8, json!({"dev_mode": true}), &parent);
+    let mut lab = Hc::new(8, json!({"dev_mode": true}), &parent);
+    let mut value = lab.config.user_map().clone();
+    value["http"] = json!({"internal": {"debug_endpoints": true}});
+    lab.config = Configuration::from_value(value).unwrap();
     let p = prepare(&lab, Default::default());
     let db = p.configured().chain().database().clone();
     let clock = Clock::new();
