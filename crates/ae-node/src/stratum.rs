@@ -43,6 +43,8 @@ pub enum Error {
     Mining(&'static str),
     Services(services::Error),
     PreparationSetup(ae_sync::chain::pow::producer::mining::Error),
+    ProductionKeys(ae_sync::keys::Error),
+    ProductionController(ae_sync::chain::pow::producer::Error),
     PayoutPool(ae_storage::pool::worker::Error),
     PayoutSigner(ae_sync::preset_keys::Error),
     PayoutPreflight(Arc<mining::payouts::preflight::task::Error>),

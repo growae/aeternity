@@ -232,6 +232,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 } else {
                     mining.invalidate().map_err(Error::Mining)?;
                 }
+            }
+            if self.mining.is_some() || self.config.external_key_work {
                 if enabled && self.config.resume_current && self.promote.is_none() {
                     self.promote = Some(self.selected.miner);
                 }
@@ -252,6 +254,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         self.status.key = self.selected.key;
         self.status.miner = self.selected.miner;
         self.status.pending = self.pending.is_some();
+        self.status.promotion_pending =
+            self.promote.is_some() || matches!(self.pending, Some(Pending::Promote { .. }));
         self.status.generator_pending = self.generator_pending.is_some();
         self.status.mining = self.mining.as_ref().map(mining::Mining::status);
         self.status.sleeping = self
@@ -467,7 +471,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             && self.status.enabled
     }
     fn act(&mut self, wall: u64, now: Instant, keys: keys::PublicKeys) -> Result<(), Error> {
-        if !self.status.enabled && self.mining.is_none() {
+        if !self.status.enabled && self.mining.is_none() && !self.config.external_key_work {
             return Ok(());
         }
         if let Some(expected) = self.promote {
@@ -476,7 +480,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 let s = lock(&shared.state);
                 // Native key promotion precedes preparation even while PoW
                 // production is stopped. It remains owned by this producer.
-                let stopped_promotion = self.mining.is_some()
+                let stopped_promotion = (self.mining.is_some() || self.config.external_key_work)
                     && !s.shutdown
                     && s.status.request_revision == self.status.applied_revision;
                 if !self.authorized(&s) && !stopped_promotion {

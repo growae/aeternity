@@ -461,3 +461,6 @@ mod group;
 mod lifecycle;
 #[path = "pow_producer/mining.rs"]
 mod mining;
+
+#[path = "pow_producer/external.rs"]
+mod external;

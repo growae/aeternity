@@ -9,10 +9,35 @@ use ae_sync::chain::pow::{
 use ae_types::AccountPublicKey;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub enum Miner {
+    Fixed(AccountPublicKey),
+    Managed(ae_sync::keys::Client),
+    Coordinated(ae_sync::chain::pow::producer::Client),
+}
+impl Miner {
+    fn current(
+        &self,
+        parent: Option<ae_types::Hash256>,
+    ) -> Result<Option<AccountPublicKey>, Error> {
+        match self {
+            Self::Fixed(key) => Ok(Some(*key)),
+            Self::Managed(keys) => {
+                let info = keys.info();
+                if !info.running || !info.accepting {
+                    return Err(Error::ProductionKeys(ae_sync::keys::Error::Stopped));
+                }
+                Ok(Some(info.keys.candidate))
+            }
+            Self::Coordinated(producer) => producer
+                .candidate_key(parent.unwrap_or_else(|| producer.status().top))
+                .map_err(Error::ProductionController),
+        }
+    }
+}
 pub struct Inputs {
     pub snapshots: snapshots::Owner,
     pub preparation: ae_chain::repository::pow::key::Limits,
-    pub miner: AccountPublicKey,
+    pub miner: Miner,
     pub beneficiary: AccountPublicKey,
     pub release_info: u32,
     pub retry: Duration,
@@ -23,6 +48,27 @@ impl Inputs {
     pub fn new(
         snapshots: snapshots::Owner,
         miner: AccountPublicKey,
+        beneficiary: AccountPublicKey,
+    ) -> Self {
+        Self::with_miner(snapshots, Miner::Fixed(miner), beneficiary)
+    }
+    pub fn managed(
+        snapshots: snapshots::Owner,
+        keys: ae_sync::keys::Client,
+        beneficiary: AccountPublicKey,
+    ) -> Self {
+        Self::with_miner(snapshots, Miner::Managed(keys), beneficiary)
+    }
+    pub fn coordinated(
+        snapshots: snapshots::Owner,
+        producer: ae_sync::chain::pow::producer::Client,
+        beneficiary: AccountPublicKey,
+    ) -> Self {
+        Self::with_miner(snapshots, Miner::Coordinated(producer), beneficiary)
+    }
+    fn with_miner(
+        snapshots: snapshots::Owner,
+        miner: Miner,
         beneficiary: AccountPublicKey,
     ) -> Self {
         Self {
@@ -42,6 +88,8 @@ pub struct Status {
     pub running: bool,
     pub waiting_for_services: bool,
     pub preparing: Option<preparation::Id>,
+    pub miner: Option<AccountPublicKey>,
+    pub waiting_for_identity: bool,
     pub published: u64,
     pub broadcasts: u64,
     pub queued: u64,
@@ -111,6 +159,14 @@ impl Worker {
         {
             return Err(Error::Configuration);
         }
+        if let Miner::Coordinated(producer) = &config.miner
+            && !producer.uses_snapshots(&config.snapshots)
+        {
+            return Err(Error::ProductionController(
+                ae_sync::chain::pow::producer::Error::Binding,
+            ));
+        }
+        config.miner.current(None)?;
         let builder = admitter
             .preparer(config.snapshots.clone(), config.preparation)
             .map_err(Error::PreparationSetup)?;
@@ -176,8 +232,16 @@ impl Worker {
             self.stop();
         }
         let running = !self.shared.stopped.load(Ordering::Acquire);
+        // Hold this generation's key capability. A replacement owner must
+        // retire and join accepted work before constructing another producer.
+        let miner = if running {
+            self.config.miner.current(frame.top)?
+        } else {
+            None
+        };
         self.update(|s| {
             s.running = running;
+            s.waiting_for_identity = running && miner.is_none();
             s.feed_gaps += u64::from(frame.gap);
         });
         if let Some(task) = &self.task
@@ -301,15 +365,23 @@ impl Worker {
         let Some(parent) = frame.top else {
             return Ok(());
         };
+        let Some(miner) = miner else {
+            return Ok(());
+        };
         let request = preparation::Request {
             parent,
-            miner: self.config.miner,
+            // Capture the current candidate key for each new preparation.
+            // An accepted task retains that key even if promotion follows.
+            miner,
             beneficiary: self.config.beneficiary,
             release_info: self.config.release_info,
         };
         match self.builder.start(request, self.clock.clone()) {
             Ok(task) => {
-                self.update(|s| s.preparing = Some(task.id()));
+                self.update(|s| {
+                    s.preparing = Some(task.id());
+                    s.miner = Some(request.miner);
+                });
                 self.task_reset = frame.reset_revision;
                 self.task = Some(task);
             }

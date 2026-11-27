@@ -503,3 +503,5 @@ fn same_generation_microblocks_keep_work_until_a_conductor_reply_requests_fresh_
     drop(services);
     stop(importer);
 }
+
+mod managed;

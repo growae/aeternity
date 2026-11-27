@@ -44,6 +44,9 @@ impl Clock for SystemClock {
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub enabled: bool,
+    // Stratum supplies key-block work externally. Promotion still runs while
+    // local micro production is stopped; no local miner is constructed.
+    pub external_key_work: bool,
     // Explicit restart recovery: resume an owned selected generation from
     // the initial snapshot. Native conductor init starts with leader=false.
     pub resume_current: bool,
@@ -57,6 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: false,
+            external_key_work: false,
             resume_current: false,
             strictly_follow_top: false,
             micro_cycle_ms: 3000,
@@ -101,6 +105,7 @@ pub struct Status {
     pub miner: AccountPublicKey,
     pub sleeping: bool,
     pub pending: bool,
+    pub promotion_pending: bool,
     pub generator_pending: bool,
     pub signatures: u64,
     pub admissions: u64,
@@ -127,6 +132,8 @@ struct State {
     outputs: VecDeque<Arc<Output>>,
 }
 struct Shared {
+    database: Arc<ae_storage::Database>,
+    keys: keys::Client,
     state: Mutex<State>,
     wake: Condvar,
     credits: Arc<Mutex<usize>>,
@@ -138,8 +145,27 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct Client(Arc<Shared>);
 impl Client {
+    pub fn uses_snapshots(&self, snapshots: &ae_storage::snapshots::Owner) -> bool {
+        snapshots.uses_database(&self.0.database)
+    }
     pub fn status(&self) -> Status {
         lock(&self.0.state).status.clone()
+    }
+    // A Stratum preparer must observe this owner's selected top and complete
+    // key promotion before capturing the next candidate identity.
+    pub fn candidate_key(&self, parent: Hash256) -> Result<Option<AccountPublicKey>, Error> {
+        let state = lock(&self.0.state);
+        if state.shutdown || !state.status.running || !state.status.accepting {
+            return Err(Error::Closed);
+        }
+        if state.status.top != parent || state.status.promotion_pending {
+            return Ok(None);
+        }
+        let keys = self.0.keys.info();
+        if !keys.running || !keys.accepting {
+            return Err(Error::Keys(keys::Error::Stopped));
+        }
+        Ok(Some(keys.keys.candidate))
     }
     // Idempotent desired-state control, not an unbounded queue of commands.
     // Applied revision observes the coordinator's gate. Already accepted key
@@ -235,7 +261,8 @@ impl Worker {
         clock: impl Clock,
         mining: Option<mining::Inputs>,
     ) -> Result<Self, Error> {
-        if config.poll.is_zero()
+        if (config.external_key_work && mining.is_some())
+            || config.poll.is_zero()
             || config.poll > Duration::from_secs(1)
             || !(1..=1024).contains(&config.events_per_step)
             || !(1..=128).contains(&config.outputs)
@@ -245,6 +272,11 @@ impl Worker {
         }
         let db = importer.database().clone();
         let (view, cursor) = db.event_snapshot().map_err(Error::Repository)?;
+        if config.external_key_work
+            && view.identity().algorithm != ae_protocol::ConsensusAlgorithm::Cuckoo
+        {
+            return Err(Error::Binding);
+        }
         if importer.consensus() != ae_protocol::ConsensusType::Pow
             || !generator.uses_source(repo::Read::source_id(view.source()))
             || generator.micro_cycle_ms() != config.micro_cycle_ms
@@ -272,6 +304,7 @@ impl Worker {
             miner: selected.miner,
             sleeping: false,
             pending: false,
+            promotion_pending: config.resume_current,
             generator_pending: false,
             signatures: 0,
             admissions: 0,
@@ -282,6 +315,8 @@ impl Worker {
             mining: mining.as_ref().map(mining::Mining::status),
         };
         let shared = Arc::new(Shared {
+            database: db.clone(),
+            keys: keys.clone(),
             state: Mutex::new(State {
                 status: status.clone(),
                 shutdown: false,
