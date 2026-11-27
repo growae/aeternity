@@ -1,0 +1,158 @@
+{
+  "inputs": [
+    {
+      "name": "zero_origin",
+      "reward_delay": 0,
+      "confirmation_delay": 0,
+      "top": 0,
+      "block": 0,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "zero_immediate",
+      "reward_delay": 0,
+      "confirmation_delay": 0,
+      "top": 1,
+      "block": 1,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "native_delay_boundary",
+      "reward_delay": 180,
+      "confirmation_delay": 180,
+      "top": 180,
+      "block": 1,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "native_delay_after_boundary",
+      "reward_delay": 180,
+      "confirmation_delay": 180,
+      "top": 181,
+      "block": 1,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "before_confirmation",
+      "reward_delay": 0,
+      "confirmation_delay": 2,
+      "top": 4,
+      "block": 3,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "at_confirmation",
+      "reward_delay": 0,
+      "confirmation_delay": 2,
+      "top": 5,
+      "block": 3,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "unmined",
+      "reward_delay": 0,
+      "confirmation_delay": 0,
+      "top": 5,
+      "block": 3,
+      "located": false,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    },
+    {
+      "name": "top_before_location",
+      "reward_delay": 1,
+      "confirmation_delay": 2,
+      "top": 2,
+      "block": 3,
+      "located": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "zero_origin",
+      "reward_height": null,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 0,
+      "confirmed": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 0
+    },
+    {
+      "name": "zero_immediate",
+      "reward_height": 1,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 0,
+      "confirmed": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 0
+    },
+    {
+      "name": "native_delay_boundary",
+      "reward_height": null,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 180,
+      "confirmed": false,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 180
+    },
+    {
+      "name": "native_delay_after_boundary",
+      "reward_height": 1,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 180,
+      "confirmed": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 180
+    },
+    {
+      "name": "before_confirmation",
+      "reward_height": 4,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 2,
+      "confirmed": false,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 0
+    },
+    {
+      "name": "at_confirmation",
+      "reward_height": 5,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 2,
+      "confirmed": true,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 0
+    },
+    {
+      "name": "unmined",
+      "reward_height": 5,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 0,
+      "confirmed": false,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 0
+    },
+    {
+      "name": "top_before_location",
+      "reward_height": 1,
+      "round_stored": true,
+      "caller_preserved": true,
+      "confirmation_delay": 2,
+      "confirmed": false,
+      "contract": "0000000000000000000000000000000000000000000000000000000000000017",
+      "reward_delay": 1
+    }
+  ]
+}

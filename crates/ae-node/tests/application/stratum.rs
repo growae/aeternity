@@ -6,6 +6,8 @@ use ae_codec::{
 use ae_consensus::cuckoo::{self, solver};
 use ae_stratum::nonce::{Kind, Part};
 use ae_types::{Hash256, PeerPublicKey};
+#[path = "stratum/payout.rs"]
+mod payout;
 
 fn bytes(value: &Value) -> Vec<u8> {
     api::decode(value.as_str().unwrap()).unwrap().1

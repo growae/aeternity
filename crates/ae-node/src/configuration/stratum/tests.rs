@@ -71,6 +71,82 @@ impl Drop for Lab {
 }
 
 #[test]
+fn trusted_reward_settings_match_native_values_without_replacing_keys_or_share_weights() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/erlang_stratum_rewards.json"
+    ))
+    .unwrap();
+    let lab = Lab::new();
+    let caller = lab.keys("valid");
+    assert_eq!(fixture["inputs"].as_array().unwrap().len(), 8);
+    for (input, native) in fixture["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(fixture["outputs"].as_array().unwrap())
+    {
+        assert_eq!(input["name"], native["name"]);
+        let original = lab.resolve(lab.user()).unwrap().unwrap().load().unwrap();
+        let rounds = original.rounds().unwrap();
+        let mut before = original.public_configuration();
+        let rewards = Rewards {
+            contract: ContractPublicKey(
+                hex::decode(input["contract"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            reward_delay: input["reward_delay"].as_u64().unwrap(),
+            confirmation_delay: input["confirmation_delay"].as_u64().unwrap(),
+        };
+        let prepared = original.with_rewards(rewards);
+        assert_eq!(prepared.rewards(), rewards);
+        assert_eq!(prepared.caller(), caller);
+        assert_eq!(native["caller_preserved"], true);
+        let mut after = prepared.public_configuration();
+        assert_eq!(after["contract_pubkey"], native["contract"]);
+        assert_eq!(after["reward_keyblock_delay"], native["reward_delay"]);
+        assert_eq!(after["payout_keyblock_delay"], native["confirmation_delay"]);
+        assert_eq!(prepared.payouts().contract, rewards.contract);
+        assert_eq!(prepared.payouts().caller, caller);
+        assert_eq!(
+            prepared.payouts().delay,
+            native["confirmation_delay"].as_u64().unwrap()
+        );
+        let updated = prepared.rounds().unwrap();
+        assert_eq!(updated.delay, native["reward_delay"].as_u64().unwrap());
+        assert_eq!(
+            (updated.pool, updated.percent, updated.last_n),
+            (rounds.pool, rounds.percent, rounds.last_n)
+        );
+        for key in [
+            "contract_pubkey",
+            "contract_address",
+            "reward_keyblock_delay",
+            "payout_keyblock_delay",
+        ] {
+            before.as_object_mut().unwrap().remove(key);
+            after.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(before, after);
+        let signer = prepared.signer(Default::default()).unwrap();
+        let signature = signer
+            .client()
+            .sign_binary(b"unchanged reward signer", caller)
+            .unwrap()
+            .wait_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(ae_crypto::verify_ed25519(
+            &caller,
+            b"unchanged reward signer",
+            &signature
+        ));
+        assert!(signer.retire().joined);
+    }
+}
+
+#[test]
 fn original_stratum_setup_defaults_numbers_nonce_capacity_and_key_pairs_match() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/erlang_stratum_setup.json"

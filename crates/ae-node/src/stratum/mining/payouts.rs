@@ -129,6 +129,8 @@ pub struct Status {
     pub closing: bool,
     pub stopped: bool,
     pub waiting_for_pool: bool,
+    // Completed canonical-location/receipt checks, including pending results.
+    pub confirmation_checks: u64,
     pub last: Option<Notice>,
 }
 pub(super) struct Shared {
@@ -333,6 +335,7 @@ impl Worker {
                     closing: false,
                     stopped: false,
                     waiting_for_pool: false,
+                    confirmation_checks: 0,
                     last: None,
                 }),
             }),
@@ -585,6 +588,10 @@ impl Worker {
             let result = retry(writer, |w| {
                 w.confirm_scheduled_payout(self.epoch, record, self.inputs.limits)
             })?;
+            {
+                let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+                status.confirmation_checks = status.confirmation_checks.saturating_add(1);
+            }
             if self.confirmation(result) {
                 info = self.info()?;
             }

@@ -45,6 +45,7 @@ pub struct Options {
     pub storage: bootstrap::Config,
     pub preparation: runtime::Preparation,
     pub miner_directories: ae_sync::chain::pow::configuration::Directories,
+    pub stratum_rewards: Option<configuration::stratum::Rewards>,
     pub http: http::ConfiguredLimits,
     pub dry_run: http::DryRunConfig,
 }
@@ -59,6 +60,7 @@ impl Options {
             storage: Default::default(),
             preparation: Default::default(),
             miner_directories: Default::default(),
+            stratum_rewards: None,
             http: Default::default(),
         }
     }
@@ -168,6 +170,11 @@ impl Prepared {
             .expect("validated enabled section")
             .load_or_create()
             .map_err(|e| Error::at("Stratum reward keys", e))?;
+            let prepared = if let Some(rewards) = options.stratum_rewards {
+                prepared.with_rewards(rewards)
+            } else {
+                prepared
+            };
             Some(
                 crate::stratum::configured::Config::new(prepared)
                     .map_err(|e| Error::at("Stratum runtime configuration", e))?,

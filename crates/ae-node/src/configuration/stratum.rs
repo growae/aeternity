@@ -44,7 +44,18 @@ pub struct Prepared {
     contract: ContractPublicKey,
     weights: rewards::Map,
     last_n: usize,
+    reward_delay: u64,
+    confirmation_delay: u64,
     keys: ae_hyperchain::signing::Keys,
+}
+// Trusted embedding equivalents of the internal aestratum_env reward values.
+// Captured before launching a service generation; these are not user-file
+// options and never change the reward signer or consensus rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rewards {
+    pub contract: ContractPublicKey,
+    pub reward_delay: u64,
+    pub confirmation_delay: u64,
 }
 fn integer(value: &Value, field: &'static str) -> Result<BigInt, Error> {
     let text = value.as_number().ok_or(Error::Field(field))?.to_string();
@@ -331,11 +342,47 @@ impl Plan {
             contract: self.contract,
             weights,
             last_n: self.last_n,
+            reward_delay: 180,
+            confirmation_delay: 180,
             keys: ae_hyperchain::signing::Keys::new([key]),
         })
     }
 }
 impl Prepared {
+    pub fn rewards(&self) -> Rewards {
+        Rewards {
+            contract: self.contract,
+            reward_delay: self.reward_delay,
+            confirmation_delay: self.confirmation_delay,
+        }
+    }
+    pub fn with_rewards(mut self, rewards: Rewards) -> Self {
+        self.contract = rewards.contract;
+        self.reward_delay = rewards.reward_delay;
+        self.confirmation_delay = rewards.confirmation_delay;
+        self.values.extend([
+            (
+                "contract_address".into(),
+                json!(api::encode(ApiType::ContractPubkey, &self.contract.0)),
+            ),
+            (
+                "contract_pubkey".into(),
+                json!(
+                    self.contract
+                        .0
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<String>()
+                ),
+            ),
+            ("reward_keyblock_delay".into(), json!(self.reward_delay)),
+            (
+                "payout_keyblock_delay".into(),
+                json!(self.confirmation_delay),
+            ),
+        ]);
+        self
+    }
     pub fn public_configuration(&self) -> Value {
         Value::Object(self.values.clone())
     }
@@ -394,7 +441,7 @@ impl Prepared {
         ae_storage::stratum::rounds::Config::from_percentages(
             self.weights.clone(),
             self.last_n,
-            180,
+            self.reward_delay,
             Default::default(),
         )
         .map_err(|_| Error::Rewards)
@@ -403,7 +450,7 @@ impl Prepared {
         ae_storage::stratum::payouts::Config {
             caller: self.caller,
             contract: self.contract,
-            delay: 180,
+            delay: self.confirmation_delay,
         }
     }
     pub fn signer(
