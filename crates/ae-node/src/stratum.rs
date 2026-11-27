@@ -411,6 +411,9 @@ fn run(
                 }
                 let result = caught(|| {
                     before(job.id);
+                    if let Some(w) = mining.as_deref_mut() {
+                        w.refresh_producer(writer)?;
+                    }
                     Ok(retry(writer, |writer| match mining.as_deref_mut() {
                         Some(w) => {
                             w.accept(writer, epoch, job.id.sequence, job.input.clone(), limits)

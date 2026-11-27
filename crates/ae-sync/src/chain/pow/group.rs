@@ -127,6 +127,7 @@ struct State<O> {
     outputs: VecDeque<Arc<Output>>,
 }
 struct Shared<O> {
+    database: Arc<ae_storage::Database>,
     state: Mutex<State<O>>,
     wake: Condvar,
     credits: Arc<Mutex<usize>>,
@@ -142,6 +143,9 @@ impl<O> Clone for Client<O> {
     }
 }
 impl<O> Client<O> {
+    pub fn uses_snapshots(&self, snapshots: &snapshots::Owner) -> bool {
+        snapshots.uses_database(&self.0.database)
+    }
     pub fn status(&self) -> Status {
         lock(&self.0.state).status.clone()
     }
@@ -277,6 +281,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             failure: None,
         };
         let shared = Arc::new(Shared {
+            database: importer.database().clone(),
             state: Mutex::new(State {
                 status,
                 shutdown: false,

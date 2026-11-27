@@ -352,6 +352,12 @@ impl Worker {
             .into_iter()
             .next())
     }
+    pub(super) fn refresh_producer(&mut self, writer: &mut storage::Writer) -> Result<(), Error> {
+        if let Some(production) = self.production.as_mut() {
+            production.refresh_source(writer, &self.epoch, self.inputs.limits)?;
+        }
+        Ok(())
+    }
     pub(super) fn accept(
         &mut self,
         writer: &mut storage::Writer,

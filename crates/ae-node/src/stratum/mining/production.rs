@@ -3,7 +3,7 @@
 use super::*;
 use ae_storage::snapshots;
 use ae_sync::chain::pow::{
-    preparation,
+    group, preparation, producer,
     stratum::{Prepared, Preparer},
 };
 use ae_types::AccountPublicKey;
@@ -13,13 +13,42 @@ pub enum Miner {
     Fixed(AccountPublicKey),
     Managed(ae_sync::keys::Client),
     Coordinated(ae_sync::chain::pow::producer::Client),
+    Supervised(group::Client<ae_vm_fate::maps::order::Otp26>),
+}
+struct Identity {
+    key: Option<AccountPublicKey>,
+    producer: Option<group::GenerationId>,
 }
 impl Miner {
-    fn current(
-        &self,
-        parent: Option<ae_types::Hash256>,
-    ) -> Result<Option<AccountPublicKey>, Error> {
-        match self {
+    fn current(&self, parent: Option<ae_types::Hash256>) -> Result<Identity, Error> {
+        if let Self::Supervised(group) = self {
+            let current = group.current();
+            let current = current.filter(|g| {
+                let s = g.producer.status();
+                s.running && s.accepting
+            });
+            let Some(current) = current else {
+                return Ok(Identity {
+                    key: None,
+                    producer: None,
+                });
+            };
+            let parent = parent.unwrap_or_else(|| current.producer.status().top);
+            return match current.producer.candidate_key(parent) {
+                Ok(key) => Ok(Identity {
+                    key,
+                    producer: Some(current.id),
+                }),
+                Err(
+                    producer::Error::Closed | producer::Error::Keys(ae_sync::keys::Error::Stopped),
+                ) => Ok(Identity {
+                    key: None,
+                    producer: None,
+                }),
+                Err(error) => Err(Error::ProductionController(error)),
+            };
+        }
+        let key = match self {
             Self::Fixed(key) => Ok(Some(*key)),
             Self::Managed(keys) => {
                 let info = keys.info();
@@ -31,7 +60,12 @@ impl Miner {
             Self::Coordinated(producer) => producer
                 .candidate_key(parent.unwrap_or_else(|| producer.status().top))
                 .map_err(Error::ProductionController),
-        }
+            Self::Supervised(_) => unreachable!(),
+        }?;
+        Ok(Identity {
+            key,
+            producer: None,
+        })
     }
 }
 pub struct Inputs {
@@ -66,6 +100,13 @@ impl Inputs {
     ) -> Self {
         Self::with_miner(snapshots, Miner::Coordinated(producer), beneficiary)
     }
+    pub fn supervised(
+        snapshots: snapshots::Owner,
+        group: group::Client<ae_vm_fate::maps::order::Otp26>,
+        beneficiary: AccountPublicKey,
+    ) -> Self {
+        Self::with_miner(snapshots, Miner::Supervised(group), beneficiary)
+    }
     fn with_miner(
         snapshots: snapshots::Owner,
         miner: Miner,
@@ -90,6 +131,8 @@ pub struct Status {
     pub preparing: Option<preparation::Id>,
     pub miner: Option<AccountPublicKey>,
     pub waiting_for_identity: bool,
+    pub producer: Option<group::GenerationId>,
+    pub producer_changes: u64,
     pub published: u64,
     pub broadcasts: u64,
     pub queued: u64,
@@ -142,6 +185,8 @@ pub(super) struct Worker {
     clock: Arc<dyn Clock>,
     task: Option<preparation::Task>,
     task_reset: u64,
+    source_producer: Option<group::GenerationId>,
+    task_producer: Option<group::GenerationId>,
     last: Option<Result<Prepared, ae_sync::chain::pow::stratum::Error>>,
     pending: Option<journal::Publication>,
     retry_at: Instant,
@@ -159,14 +204,17 @@ impl Worker {
         {
             return Err(Error::Configuration);
         }
-        if let Miner::Coordinated(producer) = &config.miner
-            && !producer.uses_snapshots(&config.snapshots)
-        {
+        let bound = match &config.miner {
+            Miner::Coordinated(p) => p.uses_snapshots(&config.snapshots),
+            Miner::Supervised(g) => g.uses_snapshots(&config.snapshots),
+            _ => true,
+        };
+        if !bound {
             return Err(Error::ProductionController(
                 ae_sync::chain::pow::producer::Error::Binding,
             ));
         }
-        config.miner.current(None)?;
+        let identity = config.miner.current(None)?;
         let builder = admitter
             .preparer(config.snapshots.clone(), config.preparation)
             .map_err(Error::PreparationSetup)?;
@@ -178,6 +226,7 @@ impl Worker {
                 status: Mutex::new(Status {
                     running: true,
                     waiting_for_services: true,
+                    producer: identity.producer,
                     ..Default::default()
                 }),
             }),
@@ -186,6 +235,8 @@ impl Worker {
             clock,
             task: None,
             task_reset: 0,
+            source_producer: identity.producer,
+            task_producer: None,
             last: None,
             pending: None,
             retry_at: Instant::now(),
@@ -220,36 +271,82 @@ impl Worker {
             task.request_cancel();
         }
     }
+    // Retire conductor authority without restarting Stratum accounting or TCP.
+    // Accepted admissions/payouts keep their existing tickets; only unclaimed
+    // work and undelivered notifications lose authority on producer replacement.
+    pub(super) fn refresh_source(
+        &mut self,
+        writer: &mut storage::Writer,
+        epoch: &journal::Epoch,
+        limits: journal::Limits,
+    ) -> Result<(), Error> {
+        let identity = self.config.miner.current(None)?;
+        self.bind_source(writer, epoch, limits, &identity)
+    }
+    fn bind_source(
+        &mut self,
+        writer: &mut storage::Writer,
+        epoch: &journal::Epoch,
+        limits: journal::Limits,
+        identity: &Identity,
+    ) -> Result<(), Error> {
+        if self.source_producer != identity.producer {
+            if let Some(task) = &self.task {
+                task.request_cancel();
+            }
+            retry(writer, |w| w.retire_work(epoch, limits))?;
+            self.pending.take();
+            self.source_producer = identity.producer;
+            self.refresh_requested = true;
+            self.retry_at = Instant::now();
+            self.update(|s| {
+                s.producer = identity.producer;
+                s.producer_changes += 1;
+                s.waiting_broadcast = false;
+            });
+        }
+        Ok(())
+    }
     pub fn tick(
         &mut self,
         writer: &mut storage::Writer,
         epoch: &journal::Epoch,
         limits: journal::Limits,
-        frame: journal::Frame,
+        mut frame: journal::Frame,
         enabled: bool,
     ) -> Result<(), Error> {
         if !enabled {
             self.stop();
         }
         let running = !self.shared.stopped.load(Ordering::Acquire);
-        // Hold this generation's key capability. A replacement owner must
-        // retire and join accepted work before constructing another producer.
-        let miner = if running {
+        let identity = if running {
             self.config.miner.current(frame.top)?
         } else {
-            None
+            Identity {
+                key: None,
+                producer: self.source_producer,
+            }
         };
+        if self.source_producer != identity.producer {
+            self.bind_source(writer, epoch, limits, &identity)?;
+            frame = retry(writer, |w| w.refresh_work(epoch, limits))?;
+        }
+        let miner = identity.key;
         self.update(|s| {
             s.running = running;
             s.waiting_for_identity = running && miner.is_none();
             s.feed_gaps += u64::from(frame.gap);
         });
         if let Some(task) = &self.task
-            && (!running || frame.reset_revision != self.task_reset)
+            && (!running
+                || frame.reset_revision != self.task_reset
+                || self.task_producer != self.source_producer)
         {
             task.request_cancel();
         }
-        let usable = running && self.task_reset == frame.reset_revision;
+        let usable = running
+            && self.task_reset == frame.reset_revision
+            && self.task_producer == self.source_producer;
         let completion = self.task.as_mut().and_then(preparation::Task::try_result);
         if let Some(done) = completion {
             self.task.take();
@@ -280,6 +377,7 @@ impl Worker {
                     }
                 }
                 Ok(_) => self.update(|s| s.stale += 1),
+                Err(_) if !usable && running => self.update(|s| s.stale += 1),
                 Err(error) if running => self.backoff(format!("{error:?}")),
                 Err(_) => {}
             }
@@ -383,6 +481,7 @@ impl Worker {
                     s.miner = Some(request.miner);
                 });
                 self.task_reset = frame.reset_revision;
+                self.task_producer = self.source_producer;
                 self.task = Some(task);
             }
             Err(error) => self.backoff(format!("{error:?}")),

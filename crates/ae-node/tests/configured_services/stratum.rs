@@ -2,6 +2,16 @@ use super::*;
 use ae_node::{configuration::stratum::Plan, stratum::configured as stratum};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+fn native_replacement(name: &str) -> Value {
+    let rows: Value =
+        serde_json::from_str(include_str!("../fixtures/erlang_stratum_continuity.json")).unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == name)
+        .unwrap()
+        .clone()
+}
 fn configuration(lab: &Lab) -> stratum::Config {
     let cfg = Configuration::from_value(json!({"stratum":{
         "enabled":true,"connection":{"port":9999,"max_connections":4,"num_acceptors":2},
@@ -226,40 +236,122 @@ async fn stratum_root_retires_before_worker_rebinding_and_preserves_output_backp
     joined(&exit.stratum.unwrap().report);
 }
 
+async fn packet(stream: &mut BufReader<tokio::net::TcpStream>) -> Value {
+    let mut line = String::new();
+    assert!(within(stream.read_line(&mut line)).await.unwrap() > 0);
+    serde_json::from_str(&line).unwrap()
+}
+async fn authorize(stream: &mut BufReader<tokio::net::TcpStream>) {
+    let account = api::encode(ApiType::AccountPubkey, &payer().public_key().0);
+    let raw = json!({"jsonrpc":"2.0","id":2,"method":"mining.authorize","params":[format!("{account}.one"),null]}).to_string()+"\n";
+    stream.get_mut().write_all(raw.as_bytes()).await.unwrap();
+    loop {
+        let reply = packet(stream).await;
+        if reply["id"] == 2 {
+            assert_eq!(reply["result"], true, "{reply}");
+            break;
+        }
+    }
+}
+fn drain(h: &root::Handle) {
+    while let Some(output) = h.try_output() {
+        assert!(
+            !matches!(output, root::Output::StratumRetired(_)),
+            "Stratum restarted on producer replacement"
+        );
+    }
+}
+
 #[tokio::test]
-async fn stratum_root_follows_internal_producer_replacement_and_retains_old_report() {
+async fn stratum_root_preserves_authorized_session_nonce_accounting_and_signer_across_producer_replacement()
+ {
     let lab = Lab::new();
-    let running = start(&lab, settings(&lab, configuration(&lab)));
+    let mut config = configuration(&lab);
+    config.transport.session.skip_blocks = 0;
+    let running = start(&lab, settings(&lab, config));
     let h = running.handle();
     root_ready(&h, 1).await;
     let old = h.stratum().unwrap();
+    let mining = old.accounting.mining().unwrap();
+    let epoch = mining.epoch();
+    let mut stream = subscribe(&old).await;
+    authorize(&mut stream).await;
+    let connection = old.transport.connections().pop().unwrap();
+    let before = within(connection.status().unwrap()).await.unwrap().unwrap();
+    let nonce = before.session.extra_nonce();
+    let account = before.session.account().unwrap().to_owned();
+    drop(before);
+    until(|| mining.production_status().unwrap().published > 0).await;
     let group = h.production().unwrap();
-    let id = group.current().unwrap().id;
-    group.current().unwrap().generator.request_shutdown();
-    let mut reports = 0;
-    until(|| {
-        while let Some(o) = h.try_output() {
-            if let root::Output::StratumRetired(s) = o {
-                assert_eq!(s.producer, id);
-                joined(&s.report);
-                reports += 1;
+    for generator in [true, false] {
+        let previous = mining.production_status().unwrap().last.unwrap();
+        let current = group.current().unwrap();
+        if generator {
+            current.generator.request_shutdown();
+        } else {
+            current.producer.request_shutdown();
+        }
+        until(|| {
+            drain(&h);
+            assert!(
+                h.status().running && h.status().failure.is_none(),
+                "{:?}",
+                h.status()
+            );
+            h.status().ready
+                && group.current().is_some_and(|g| g.id != current.id)
+                && mining
+                    .production_status()
+                    .unwrap()
+                    .last
+                    .as_ref()
+                    .is_some_and(|p| p.sequence > previous.sequence)
+        })
+        .await;
+        let native = native_replacement(if generator { "generator" } else { "conductor" });
+        assert_eq!(
+            group.current().unwrap().id != current.id,
+            native["producer_children_replaced"].as_bool().unwrap()
+        );
+        assert_eq!(
+            h.status().stratum_starts == 1,
+            native["stratum_children_preserved"].as_bool().unwrap()
+        );
+        assert_eq!(
+            h.status().running && h.status().production_starts == 1,
+            native["supervisors_preserved"].as_bool().unwrap()
+        );
+        let next = mining.production_status().unwrap().last.unwrap();
+        assert_eq!(mining.info().unwrap().active, vec![next.candidate.clone()]);
+        assert_eq!(mining.epoch(), epoch);
+        assert_eq!(mining.info().unwrap().epoch, epoch);
+        assert_eq!(h.status().stratum_starts, 1);
+        assert_eq!(h.status().production_starts, 1);
+        assert!(old.signer.same_worker(&h.stratum().unwrap().signer));
+        assert!(old.signer.info().accepting && !old.accounting.is_closed());
+        assert_eq!(old.transport.connections()[0].id(), connection.id());
+        let job = next.candidate.work().unwrap().id().unwrap();
+        loop {
+            let message = packet(&mut stream).await;
+            if message["method"] == "mining.notify" && message["params"][0] == job {
+                break;
             }
         }
-        assert!(
-            h.status().running && h.status().failure.is_none(),
-            "{:?}",
-            h.status()
+        let after = within(connection.status().unwrap()).await.unwrap().unwrap();
+        assert_eq!(after.session.extra_nonce(), nonce);
+        assert_eq!(after.session.account(), Some(account.as_str()));
+        assert!(after.session.accepts_blocks());
+        assert_eq!(
+            after.session.phase(),
+            ae_stratum::session::Phase::Authorized
         );
-        h.status().ready && h.status().stratum_starts == 2
-    })
-    .await;
-    assert_eq!(reports, 1);
-    assert_eq!(h.status().production_starts, 1);
-    assert!(old.signer.info().joined && old.transport.is_closed());
-    assert_ne!(h.status().stratum.unwrap().producer, id);
+    }
     let exit = running.shutdown().await.unwrap();
     assert_root_joined(&exit);
     assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    joined(&exit.stratum.unwrap().report);
+    let mut line = String::new();
+    assert_eq!(within(stream.read_line(&mut line)).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -317,6 +409,15 @@ async fn stratum_root_restarts_a_permanent_listener_once_then_retains_restart_li
     })
     .await;
     assert_eq!(reports, 1);
+    let native = native_replacement("stratum");
+    assert_eq!(
+        h.status().production_starts == 1,
+        native["producer_children_preserved"].as_bool().unwrap()
+    );
+    assert_eq!(
+        h.status().stratum_starts == 2,
+        native["stratum_children_replaced"].as_bool().unwrap()
+    );
     assert!(first.signer.info().joined);
     h.stratum().unwrap().transport.request_shutdown();
     until(|| !h.status().running).await;
@@ -402,4 +503,160 @@ async fn stratum_root_shutdown_keeps_reward_signer_until_blocked_preparation_is_
             .is_some()
     );
     assert_eq!(snapshots.live_snapshots(), 0);
+}
+
+#[tokio::test]
+async fn stratum_producer_gap_under_output_pressure_keeps_tcp_and_retires_unclaimed_work() {
+    let lab = Lab::new();
+    let mut config = settings(&lab, configuration(&lab));
+    config.outputs = 1;
+    config.production.outputs = 1;
+    let running = start(&lab, config);
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    let old = h.stratum().unwrap();
+    let mining = old.accounting.mining().unwrap();
+    until(|| mining.production_status().unwrap().published > 0).await;
+    let mut held = None;
+    until(|| {
+        held = h.try_output();
+        held.is_some()
+    })
+    .await;
+    let current = h.production().unwrap().current().unwrap();
+    current.producer.request_shutdown();
+    until(|| mining.production_status().unwrap().waiting_for_identity).await;
+    assert!(mining.info().unwrap().active.is_empty());
+    assert!(
+        h.production()
+            .unwrap()
+            .current()
+            .is_none_or(|g| g.id == current.id)
+    );
+    assert_eq!(h.status().stratum_starts, 1);
+    let mut stream = subscribe(&old).await;
+    authorize(&mut stream).await;
+    assert!(old.signer.info().accepting && !old.accounting.is_closed());
+    drop(held);
+    until(|| {
+        drain(&h);
+        h.status().ready
+            && h.production()
+                .unwrap()
+                .current()
+                .is_some_and(|g| g.id != current.id)
+            && mining.production_status().unwrap().published >= 2
+    })
+    .await;
+    assert_eq!(h.status().stratum_starts, 1);
+    assert!(!old.transport.connections()[0].is_closed());
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+}
+
+#[tokio::test]
+async fn stratum_replacement_joins_obsolete_preparation_before_dispatching_new_work_on_the_same_service()
+ {
+    let lab = Lab::new();
+    let p = lab.services("pow_cuckoo", json!({"dev_mode":true}), Default::default());
+    let snapshots = p.snapshots().clone();
+    let (entered, wait) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let clocks = Clocks(Arc::new(Gate(std::sync::Mutex::new(Some((
+        entered, blocked,
+    ))))));
+    let running = root::launch(
+        p,
+        settings(&lab, configuration(&lab)),
+        Arc::new(clocks),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    until(|| wait.try_recv().is_ok()).await;
+    let old = h.stratum().unwrap();
+    let mining = old.accounting.mining().unwrap();
+    let task = mining.production_status().unwrap().preparing.unwrap();
+    let current = h.production().unwrap().current().unwrap();
+    current.generator.request_shutdown();
+    until(|| {
+        drain(&h);
+        h.status().ready
+            && h.production()
+                .unwrap()
+                .current()
+                .is_some_and(|g| g.id != current.id)
+            && mining.production_status().unwrap().producer != Some(current.id)
+    })
+    .await;
+    assert_eq!(mining.production_status().unwrap().preparing, Some(task));
+    assert_eq!(mining.production_status().unwrap().published, 0);
+    assert_eq!(h.status().stratum_starts, 1);
+    let mut stream = subscribe(&old).await;
+    authorize(&mut stream).await;
+    assert!(old.signer.info().accepting);
+    release.send(()).unwrap();
+    until(|| mining.production_status().unwrap().published == 1).await;
+    assert!(mining.production_status().unwrap().stale >= 1);
+    assert_eq!(
+        mining.production_status().unwrap().producer,
+        Some(h.production().unwrap().current().unwrap().id)
+    );
+    assert_eq!(mining.info().unwrap().active.len(), 1);
+    assert!(!old.accounting.is_closed());
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert_eq!(snapshots.live_snapshots(), 0);
+}
+
+#[tokio::test]
+async fn stratum_supervised_source_rejects_a_foreign_database_before_starting_services() {
+    let lab = Lab::new();
+    let p = lab.services("pow_cuckoo", json!({"dev_mode":true}), Default::default());
+    let snapshots = p.snapshots().clone();
+    let database = p.configured().chain().database().clone();
+    let running = launch_root(&lab, p);
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    assert!(h.production().unwrap().uses_snapshots(&snapshots));
+    let other = Lab::new();
+    let foreign = start(&other, root_config(&other));
+    let f = foreign.handle();
+    root_ready(&f, 1).await;
+    assert!(!f.production().unwrap().uses_snapshots(&snapshots));
+    let failure = stratum::Live::start(
+        &configuration(&lab),
+        stratum::Inputs {
+            database,
+            snapshots,
+            admitter: h.importer().unwrap().stratum_admitter(),
+            producers: f.production().unwrap(),
+            pool: h
+                .workers()
+                .unwrap()
+                .bindings()
+                .admission
+                .current()
+                .unwrap()
+                .client,
+            clock: Arc::new(generator::SystemClock),
+            strictly_follow_top: false,
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        failure.error,
+        ae_node::stratum::Error::Configuration
+    ));
+    assert!(
+        failure.report.signer.is_none()
+            && failure.report.accounting.is_none()
+            && failure.report.transport.is_none()
+    );
+    assert_root_joined(&running.shutdown().await.unwrap());
+    assert_root_joined(&foreign.shutdown().await.unwrap());
 }

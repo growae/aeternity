@@ -2,7 +2,7 @@
 // Retirement joins accepted work before another generation can acquire Writer.
 use super::*;
 use ae_sync::{
-    chain::pow::{generator, producer},
+    chain::pow::{generator, group},
     preset_keys,
 };
 use std::time::Duration;
@@ -51,7 +51,7 @@ pub struct Inputs {
     pub database: Arc<Database>,
     pub snapshots: ae_storage::snapshots::Owner,
     pub admitter: ae_sync::chain::pow::stratum::Admitter,
-    pub producer: producer::Client,
+    pub producers: group::Client<ae_vm_fate::maps::order::Otp26>,
     pub pool: ae_storage::pool::worker::Client,
     pub clock: Arc<dyn generator::Clock>,
     pub strictly_follow_top: bool,
@@ -151,7 +151,7 @@ impl Live {
         if !inputs.admitter.uses_database(&inputs.database)
             || !inputs.pool.uses_database(&inputs.database)
             || !inputs.snapshots.uses_database(&inputs.database)
-            || !inputs.producer.uses_snapshots(&inputs.snapshots)
+            || !inputs.producers.uses_snapshots(&inputs.snapshots)
         {
             return Err(fail(Error::Configuration, Report::default()));
         }
@@ -167,9 +167,9 @@ impl Live {
             .prepared
             .signer(config.signer)
             .map_err(|e| fail(Error::Setup(e), Report::default()))?;
-        let mut production = mining::production::Inputs::coordinated(
+        let mut production = mining::production::Inputs::supervised(
             inputs.snapshots.clone(),
-            inputs.producer,
+            inputs.producers,
             config.beneficiary(),
         );
         production.preparation = config.preparation;

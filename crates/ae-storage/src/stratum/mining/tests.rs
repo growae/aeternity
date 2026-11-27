@@ -566,6 +566,103 @@ fn codecs_and_startup_reject_dangling_journal_indices_receipts_and_totals() {
 }
 mod recovery;
 #[test]
+fn conductor_retirement_preserves_cache_sequence_and_accepted_admission_but_revokes_old_work() {
+    let t = Temp::new();
+    let db = open(&t);
+    let mut w = writer(&db);
+    let (e, i) = setup(&mut w);
+    let receipt = accept(&mut w, &e, &i, 1);
+    let accepted = w
+        .begin_submission(&record(&db, receipt.id), Default::default())
+        .unwrap();
+    let publication = w
+        .publish_work(&e, 2, candidate(), date(), Default::default())
+        .unwrap();
+    let cached = db
+        .stratum(Default::default())
+        .unwrap()
+        .query(|tx| tx.candidate(candidate().hash()))
+        .unwrap();
+    w.retire_work(&e, Default::default()).unwrap();
+    w.retire_work(&e, Default::default()).unwrap();
+    assert_eq!(record(&db, receipt.id), accepted);
+    assert_eq!(
+        db.stratum(Default::default())
+            .unwrap()
+            .query(|tx| tx.candidate(candidate().hash()))
+            .unwrap(),
+        cached
+    );
+    let frame = w.refresh_work(&e, Default::default()).unwrap();
+    assert!(frame.info.active.is_empty());
+    assert_eq!(frame.info.epoch, e.value());
+    assert_eq!(frame.info.last, Some(publication.clone()));
+    assert_eq!(
+        w.publish_work(&e, 2, candidate(), date(), Default::default())
+            .unwrap(),
+        publication
+    );
+    assert!(
+        w.refresh_work(&e, Default::default())
+            .unwrap()
+            .info
+            .active
+            .is_empty()
+    );
+    let late = accept(&mut w, &e, &i, 2);
+    assert_eq!(record(&db, late.id).state, State::Done(Outcome::Inactive));
+    assert_eq!(record(&db, receipt.id), accepted);
+    w.finish_submission(&accepted, reject(), Default::default())
+        .unwrap();
+    assert!(
+        w.publish_work(&e, 3, candidate(), date(), Default::default())
+            .unwrap()
+            .published
+    );
+    db.stratum(Default::default())
+        .unwrap()
+        .mining(Default::default())
+        .unwrap()
+        .verify()
+        .unwrap();
+}
+
+#[test]
+fn conductor_retirement_recovers_uncertain_storage_without_losing_claimed_records() {
+    for applied in [false, true] {
+        let t = Temp::new();
+        let db = open(&t);
+        let mut w = writer(&db);
+        let (e, i) = setup(&mut w);
+        let receipt = accept(&mut w, &e, &i, 1);
+        let accepted = record(&db, receipt.id);
+        w.publish_work(&e, 2, candidate(), date(), Default::default())
+            .unwrap();
+        assert!(
+            w.retire_work_with(&e, Default::default(), |db, batch| {
+                if applied {
+                    db.db.write_opt(batch, &write_options()).unwrap();
+                }
+                Err(Error::Backend("retirement response lost".into()))
+            })
+            .is_err()
+        );
+        w.recover().unwrap();
+        let frame = w.refresh_work(&e, Default::default()).unwrap();
+        assert_eq!(frame.info.active.is_empty(), applied);
+        assert_eq!(record(&db, receipt.id), accepted);
+        w.retire_work(&e, Default::default()).unwrap();
+        assert!(
+            w.refresh_work(&e, Default::default())
+                .unwrap()
+                .info
+                .active
+                .is_empty()
+        );
+        assert_eq!(record(&db, receipt.id), accepted);
+    }
+}
+#[test]
 fn uncertain_publication_recovers_the_same_work_cursor_as_its_durable_batch() {
     for applied in [false, true] {
         let t = Temp::new();

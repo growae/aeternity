@@ -17,6 +17,33 @@ pub struct Frame {
     pub info: Info,
 }
 impl Writer {
+    // A conductor restart revokes unclaimed work, while Stratum's cache,
+    // accounting, accepted admission records and payout state remain alive.
+    pub fn retire_work(&mut self, epoch: &Epoch, limits: Limits) -> Result<(), Failure> {
+        self.retire_work_with(epoch, limits, |db, b| {
+            db.db.write_opt(b, &write_options()).map_err(backend)
+        })
+    }
+    pub(super) fn retire_work_with(
+        &mut self,
+        epoch: &Epoch,
+        limits: Limits,
+        write: impl FnOnce(&Database, WriteBatch) -> Result<(), Error>,
+    ) -> Result<(), Failure> {
+        let version = self.version()?;
+        let stored = self.db.stratum(self.limits)?;
+        let journal = stored.mining(limits)?;
+        self.check_mining_epoch(epoch, &journal)?;
+        let mut frame = self.work_frame(&stored, &journal)?;
+        frame.info.active.clear();
+        let extra = journal.extra(&frame.info)?;
+        let checks = vec![status_check(&stored)?];
+        drop(journal);
+        drop(stored);
+        let result = self.commit_checked(version, vec![], vec![extra], checks, write);
+        self.finish_work(result, frame.revision, frame.revision)?;
+        Ok(())
+    }
     pub(in crate::stratum) fn finish_work(
         &mut self,
         result: Result<super::super::Commit, Failure>,

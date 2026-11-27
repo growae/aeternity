@@ -89,18 +89,14 @@ impl Owner {
             let s = g.producer.status();
             s.running && s.accepting
         });
-        if self
-            .stratum
-            .as_ref()
-            .is_some_and(|s| current.as_ref().is_none_or(|c| c.id != s.producer))
-        {
-            self.stop_stratum().await?;
-        }
         if !self.release_stratum()? {
             return Ok(false);
         }
-        if let Some(s) = &self.stratum {
+        if let Some(s) = &mut self.stratum {
             if s.worker.handle().failure().is_none() {
+                if let Some(current) = &current {
+                    s.producer = current.id;
+                }
                 return Ok(true);
             }
             // aestratum_appsup is permanent one_for_all, intensity 1 / 5s.
@@ -135,11 +131,14 @@ impl Owner {
             .input
             .stratum_inputs(self.status.production_starts)
             .ok_or(Error::Configuration)?;
+        let Some(Live::Cuckoo(group)) = &self.production else {
+            return Err(Error::Configuration);
+        };
         let inputs = service::Inputs {
             database: services.configured().chain().database().clone(),
             snapshots: services.snapshots().clone(),
             admitter: services.importer().stratum_admitter(),
-            producer: current.producer,
+            producers: group.client(),
             pool,
             clock,
             strictly_follow_top,
