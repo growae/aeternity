@@ -87,8 +87,26 @@ fn compare(row: &J, profile: &J) {
                         &options,
                         Default::default(),
                         Default::default(),
-                    )
-                    .unwrap();
+                    );
+                    let result = match result {
+                        Ok(r) => r,
+                        Err(execution::Error::Selection(e)) => {
+                            return super::failure::body(
+                                super::failure::selection(&e).unwrap(),
+                                1 << 20,
+                            )
+                            .unwrap();
+                        }
+                        Err(execution::Error::Execution(e)) => {
+                            let index = super::failure::bad_call_index(&e).unwrap();
+                            let reason = super::failure::bad_call(
+                                &parsed.input["txs"][index]["call_req"],
+                                Default::default(),
+                            )
+                            .unwrap();
+                            return super::failure::body(&reason, 1 << 20).unwrap();
+                        }
+                    };
                     assert_eq!(result.view.trees.roots(), original);
                     let prices: Vec<_> = result
                         .output
@@ -160,7 +178,7 @@ fn compare(row: &J, profile: &J) {
 fn schema_preparation_execution_and_rendering_match_native_pipeline() {
     let rows = FIXTURE["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 560);
-    assert_eq!(rows.iter().filter(|r| covered(r)).count(), 472);
+    assert_eq!(rows.iter().filter(|r| covered(r)).count(), 508);
     for (index, row) in rows.iter().enumerate().filter(|(_, r)| covered(r)) {
         for profile in [&FIXTURE["profile"], &FIXTURE["repeat_profile"]] {
             let result = std::panic::catch_unwind(|| compare(row, profile));

@@ -29,6 +29,7 @@ fn json_term(t: &Term<'_>) -> J {
     match t {
         Term::Atom(a) => json!(["atom", a]),
         Term::Integer(n) => json!(["integer", n.to_string()]),
+        Term::FloatBits(_) => panic!("FATE code exception terms cannot contain floats"),
         Term::Binary(b) => json!(["binary", hex::encode(b)]),
         Term::Tuple(v) => json!(["tuple", v.iter().map(json_term).collect::<Vec<_>>()]),
         Term::List(v) => json!(["list", v.iter().map(json_term).collect::<Vec<_>>()]),

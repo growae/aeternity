@@ -97,8 +97,17 @@ async fn compare(row: &J, profile: &J, client: &admission::Client) -> usize {
             match dry_run::prepare(&parsed.input, &mut source, &config) {
                 Err(Error::Rejected { code, reason }) => (code, json!({"reason":reason})),
                 Err(e) => panic!("unexpected preparation {e:?}"),
-                Ok(request) => {
-                    let view = source.view(request.top).unwrap();
+                Ok(request) => 'execution: {
+                    let view = match source.view(request.top) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            break 'execution dry_run::failure::body(
+                                dry_run::failure::selection(&e).unwrap(),
+                                1 << 20,
+                            )
+                            .unwrap();
+                        }
+                    };
                     let weak = std::sync::Arc::downgrade(&view);
                     let floor = Unsigned::from(row["input"]["floor"].as_u64().unwrap());
                     let options = ae_execution::dry_run::Options {
@@ -138,14 +147,20 @@ async fn compare(row: &J, profile: &J, client: &admission::Client) -> usize {
                     assert!(weak.upgrade().is_some());
                     let reply =
                         worker::decode_reply(retained.value.result.as_ref().unwrap()).unwrap();
-                    let worker::Reply::Done(result) = reply else {
-                        panic!("worker failure {reply:?}")
+                    let (status, body) = match reply {
+                        worker::Reply::Done(result) => (200, result.body),
+                        worker::Reply::Failed(f) => dry_run::failure::body(
+                            dry_run::failure::worker(&f)
+                                .unwrap_or_else(|| panic!("worker failure {f:?}")),
+                            1 << 20,
+                        )
+                        .unwrap(),
                     };
-                    let body = schema::render(200, result.body, v3, parsed.strings).unwrap();
+                    let body = schema::render(status, body, v3, parsed.strings).unwrap();
                     drop(retained);
                     assert!(weak.upgrade().is_none());
                     assert_eq!(client.available().0, 1);
-                    (200, body)
+                    (status, body)
                 }
             }
         }
@@ -169,7 +184,7 @@ async fn production_worker_preserves_native_pipeline_results_profiles_and_retain
     })
     .unwrap();
     let rows = FIXTURE["rows"].as_array().unwrap();
-    assert_eq!(rows.iter().filter(|r| covered(r)).count(), 472);
+    assert_eq!(rows.iter().filter(|r| covered(r)).count(), 508);
     let mut children = 0;
     for (index, row) in rows.iter().enumerate().filter(|(_, r)| covered(r)) {
         for profile in [&FIXTURE["profile"], &FIXTURE["repeat_profile"]] {
@@ -180,8 +195,8 @@ async fn production_worker_preserves_native_pipeline_results_profiles_and_retain
             children += compare(row, profile, &client).await;
         }
     }
-    assert_eq!(children, 888);
-    println!("native comparisons=944; production children={children}");
+    assert_eq!(children, 904);
+    println!("native comparisons=1016; production children={children}");
     owner.shutdown().await;
 }
 
@@ -189,5 +204,7 @@ async fn production_worker_preserves_native_pipeline_results_profiles_and_retain
 mod aevm;
 #[path = "dry_run_worker/control.rs"]
 mod control;
+#[path = "dry_run_worker/failure.rs"]
+mod failure;
 #[path = "dry_run_worker/repository.rs"]
 mod repository;

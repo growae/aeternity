@@ -15,16 +15,22 @@ fn row() -> &'static J {
         })
         .unwrap()
 }
+type JobTicket = admission::Ticket<
+    process::Completed<worker::Broker<ae_trie::MemoryStore, ae_trie::MemoryStore>>,
+>;
 fn ticket(
     client: &admission::Client,
     p: process::Config,
     control: Option<ae_types::work::Control>,
-) -> (
-    admission::Ticket<
-        process::Completed<worker::Broker<ae_trie::MemoryStore, ae_trie::MemoryStore>>,
-    >,
-    std::sync::Weak<View>,
-) {
+) -> (JobTicket, std::sync::Weak<View>) {
+    timed_ticket(client, p, control, Timeout::After(Duration::from_secs(10)))
+}
+fn timed_ticket(
+    client: &admission::Client,
+    p: process::Config,
+    control: Option<ae_types::work::Control>,
+    timeout: Timeout,
+) -> (JobTicket, std::sync::Weak<View>) {
     let row = row();
     let mut source = Backend::new(row);
     let wire = bytes(&row["raw"]);
@@ -76,7 +82,7 @@ fn ticket(
             request,
             options,
             parameters(base, None),
-            Timeout::After(Duration::from_secs(10)),
+            timeout,
         )
     })
     .unwrap();
@@ -162,6 +168,20 @@ async fn production_worker_heap_exits_and_small_output_limits_remain_operational
         tiny.heap = ae_worker_heap::Limit { bytes: 1, source };
         let (t, weak) = ticket(&client, tiny, None);
         let done = t.wait_retained().await.unwrap();
+        let native = done
+            .value
+            .result
+            .as_ref()
+            .err()
+            .and_then(dry_run::failure::process);
+        assert_eq!(
+            native,
+            if source == ae_worker_heap::Source::Native {
+                Some("dry-run failed: killed")
+            } else {
+                None
+            }
+        );
         let exit = match done.value.result {
             Err(process::Error::Exit(s)) => s.code().and_then(ae_worker_heap::Exit::from_code),
             ref r => panic!("startup cap: {r:?}"),
@@ -182,6 +202,75 @@ async fn production_worker_heap_exits_and_small_output_limits_remain_operational
     let (t, _) = ticket(&client, tiny, None);
     let done = t.wait().await.unwrap();
     assert!(matches!(done.result,Err(process::Error::Exit(s))if s.code()==Some(94)));
+    let (t, _) = ticket(&client, p, None);
+    let done = t.wait().await.unwrap();
+    assert!(matches!(
+        worker::decode_reply(&done.result.unwrap()).unwrap(),
+        worker::Reply::Done(_)
+    ));
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_timeout_response_keeps_blocked_callback_source_and_capacity_owned() {
+    use std::sync::{Condvar, Mutex, mpsc};
+    struct Release(Arc<(Mutex<bool>, Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all()
+        }
+    }
+    let p = process();
+    let (client, owner) = admission::create(admission::Config {
+        threads: 1,
+        requests: 1,
+        bytes: p.reservation(p.input_bytes).unwrap(),
+    })
+    .unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Release(gate.clone());
+    let (tx, rx) = mpsc::sync_channel(1);
+    let control = ae_types::work::Control::new(move || {
+        let _ = tx.try_send(());
+        drop(gate.1.wait_while(gate.0.lock().unwrap(), |v| !*v).unwrap());
+        false
+    });
+    let (t, weak) = timed_ticket(
+        &client,
+        p.clone(),
+        Some(control),
+        Timeout::After(Duration::from_millis(500)),
+    );
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let error = match t.wait_retained().await {
+        Err(e) => e,
+        Ok(_) => panic!("deadline must fire while callback is blocked"),
+    };
+    assert_eq!(error, admission::Error::Timeout);
+    let response =
+        dry_run::failure::body(dry_run::failure::admission(error).unwrap(), 1 << 20).unwrap();
+    let native = FIXTURE["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["input"]["name"] == "deadline" && r["operation"] == "ProtectedDryRunTxs")
+        .unwrap();
+    assert_eq!(
+        response,
+        (400, native["result"]["response"]["body"].clone())
+    );
+    assert!(weak.upgrade().is_some());
+    assert_eq!(client.available().0, 0);
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while client.available().0 == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await
+        }
+    })
+    .await
+    .unwrap();
+    assert!(weak.upgrade().is_none());
     let (t, _) = ticket(&client, p, None);
     let done = t.wait().await.unwrap();
     assert!(matches!(

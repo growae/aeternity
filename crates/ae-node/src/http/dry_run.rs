@@ -1,6 +1,7 @@
 // aehttp_dispatch_ext/int and aehttp_helpers dry-run preparation, fa2a6d7.
 // Copyright (c) Aeternity developers. ISC: repository LICENSE.
 pub mod execution;
+pub mod failure;
 #[cfg(test)]
 mod pipeline_tests;
 pub mod response;

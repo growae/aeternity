@@ -151,8 +151,14 @@ impl ae_chain::dry_run::Source for Backend<'_> {
     fn state(&mut self, h: Hash256) -> Result<State, ae_chain::dry_run::StateError<Self::Error>> {
         self.trace
             .push(json!({"call":"state","hash":hex::encode_upper(h.0)}));
-        assert_eq!(self.row["input"]["state_mode"], "ordinary");
-        Ok(self.trees.clone())
+        match self.row["input"]["state_mode"].as_str().unwrap() {
+            "ordinary" => Ok(self.trees.clone()),
+            "gc" => Err(ae_chain::dry_run::StateError::GarbageCollected),
+            "raised" => Err(ae_chain::dry_run::StateError::Source(
+                "controlled_state_failure",
+            )),
+            mode => panic!("unsupported source mode {mode}"),
+        }
     }
 }
 pub(crate) fn configured<R>(profile: &J, f: impl FnOnce(&transactions::Config<'_>) -> R) -> R {
@@ -220,5 +226,9 @@ pub(crate) fn covered(row: &J) -> bool {
             | "hash_lookup"
             | "missing_hash"
             | "schema_before_top"
-    )
+            | "unknown_top"
+            | "pruned_state"
+            | "bad_call"
+            | "pruned_before_bad_call"
+    ) || (row["input"]["name"] == "negative_before_bad_call" && row["module"] == "endpoints")
 }

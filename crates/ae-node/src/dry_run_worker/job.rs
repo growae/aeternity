@@ -48,7 +48,7 @@ pub(super) struct Job {
 }
 impl Wire for Job {
     fn put(&self, e: &mut Encoder) -> Result<(), Error> {
-        e.raw(b"AED1")?;
+        e.raw(b"AED2")?;
         self.roots.put(e)?;
         self.context.put(e)?;
         self.funding.put(e)?;
@@ -65,7 +65,7 @@ impl Wire for Job {
         self.output_bytes.put(e)
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, Error> {
-        if d.raw(4)? != b"AED1" {
+        if d.raw(4)? != b"AED2" {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -111,8 +111,9 @@ pub enum Kind {
     NegativeBalance,
     Preparation,
     Operational,
+    BadCallRequest,
 }
-super::codec::enumeration!(Kind{Interrupted=0,Capacity=1,NegativeBalance=2,Preparation=3,Operational=4});
+super::codec::enumeration!(Kind{Interrupted=0,Capacity=1,NegativeBalance=2,Preparation=3,Operational=4,BadCallRequest=5});
 // Diagnostic is bounded Rust diagnostic text for operators, not an HTTP reason
 // or a replacement for a captured native exception rendering policy.
 #[derive(Debug)]
@@ -123,6 +124,7 @@ pub struct Failure {
     pub account: Option<ae_types::AccountPublicKey>,
     pub balance: Option<num_bigint::BigInt>,
     pub diagnostic: String,
+    pub native_reason: Option<String>,
 }
 structure!(Failure {
     stage,
@@ -130,7 +132,8 @@ structure!(Failure {
     index,
     account,
     balance,
-    diagnostic
+    diagnostic,
+    native_reason
 });
 #[derive(Debug)]
 pub enum Reply {
@@ -139,7 +142,7 @@ pub enum Reply {
 }
 impl Wire for Reply {
     fn put(&self, e: &mut Encoder) -> Result<(), Error> {
-        e.raw(b"AER1")?;
+        e.raw(b"AER2")?;
         match self {
             Self::Done(v) => {
                 0_u8.put(e)?;
@@ -152,7 +155,7 @@ impl Wire for Reply {
         }
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, Error> {
-        if d.raw(4)? != b"AER1" {
+        if d.raw(4)? != b"AER2" {
             return Err(Error::Invalid);
         }
         match u8::get(d)? {
@@ -186,6 +189,7 @@ impl Failure {
             account: None,
             balance: None,
             diagnostic: diagnostic(v),
+            native_reason: None,
         }
     }
     fn execution<A: std::fmt::Debug, C: std::fmt::Debug>(e: core::Error<A, C>) -> Self {
@@ -296,7 +300,32 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
         .with_config(|c| setup.requests(c, inputs, job.preparation, state));
     let output = match output {
         Ok(v) => v,
-        Err(e) => return Reply::Failed(Failure::execution(e)),
+        Err(e) => {
+            let bad_call = crate::http::dry_run::failure::bad_call_index(&e)
+                .and_then(|index| calls.get(index))
+                .and_then(Option::as_ref);
+            let mut failure = Failure::execution(e);
+            if let Some(call) = bad_call {
+                match crate::http::dry_run::failure::bad_call(call, job.rendering.diagnostic) {
+                    Ok(reason) => {
+                        failure.kind = Kind::BadCallRequest;
+                        failure.native_reason = Some(reason)
+                    }
+                    Err(e) => {
+                        return Reply::Failed(Failure::new(
+                            Stage::Rendering,
+                            if e.is_capacity() {
+                                Kind::Capacity
+                            } else {
+                                Kind::Operational
+                            },
+                            &e,
+                        ));
+                    }
+                }
+            }
+            return Reply::Failed(failure);
+        }
     };
     let profile = if job.options.profile == core::Profile::Public {
         crate::http::dry_run::Profile::Public

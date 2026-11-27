@@ -8,6 +8,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::borrow::Cow;
 mod abort;
+mod floating;
 mod idna;
 mod pretty;
 mod reason;
@@ -15,11 +16,24 @@ pub use abort::native_abort;
 pub use idna::idna_error;
 pub use reason::{native_term, reason};
 
+// IEEE finite values have at most 17 significant decimal digits. The native
+// fixed/scientific decision and all temporary spellings are bounded constants.
+pub fn float(bits: u64) -> Result<String, Error> {
+    let value = f64::from_bits(bits);
+    if !value.is_finite() {
+        return Err(Error::InvalidValue);
+    }
+    Ok(floating::finite(value))
+}
+
 // Map entries are already in the selected runtime's maps:iterator order.
 // They must not be sorted by Rust's ordering or by FATE value comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Term<'a> {
     Integer(Cow<'a, BigInt>),
+    // Native diagnostics may contain finite floats even though FATE values do
+    // not. Preserve IEEE bits, including negative zero, without an Eq on f64.
+    FloatBits(u64),
     Atom(Cow<'a, str>),
     Binary(Cow<'a, [u8]>),
     Tuple(Vec<Term<'a>>),
@@ -108,6 +122,7 @@ impl Work {
         match t {
             Term::Integer(n) => self
                 .bytes(usize::try_from(n.bits().div_ceil(8)).map_err(|_| Error::ResourceLimit)?)?,
+            Term::FloatBits(_) => self.bytes(8)?,
             Term::Atom(a) => self.bytes(a.len())?,
             Term::Binary(b) => self.bytes(b.len())?,
             Term::Tuple(v) | Term::List(v) => {
@@ -133,6 +148,10 @@ impl Work {
                 .ok_or(Error::ResourceLimit)?,
         )?;
         Ok(n.to_string().into_bytes())
+    }
+    fn float(&mut self, bits: u64) -> Result<Vec<u8>, Error> {
+        self.bytes(1024)?;
+        Ok(float(bits)?.into_bytes())
     }
 }
 
@@ -240,6 +259,10 @@ fn write(t: &Term<'_>, d: i32, w: &mut Work, out: &mut Vec<u8>, level: usize) ->
     match t {
         Term::Integer(n) => {
             let s = w.integer(n)?;
+            w.push(out, &s)
+        }
+        Term::FloatBits(bits) => {
+            let s = w.float(*bits)?;
             w.push(out, &s)
         }
         Term::Atom(a) => {
@@ -370,6 +393,7 @@ fn node(t: &Term<'_>, d: i32, w: &mut Work, level: usize) -> Result<Node, Error>
     }
     Ok(match t {
         Term::Integer(n) => Node::owned(w.integer(n)?),
+        Term::FloatBits(bits) => Node::owned(w.float(*bits)?),
         Term::Atom(a) => Node::owned(atom(a, w)?),
         Term::Binary(b) if b.is_empty() => Node::atom(b"<<>>", w)?,
         Term::Binary(_) if d == 1 => Node::atom(b"<<...>>", w)?,
