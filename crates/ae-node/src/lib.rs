@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod application;
 pub mod bootstrap;
 pub mod configuration;
 pub mod dry_run_worker;

@@ -11,6 +11,85 @@ mod http_checks;
 #[path = "../../common/network_settings.rs"]
 mod network_settings;
 
+#[tokio::test]
+async fn application_assembly_starts_hyperchain_from_files_and_joins_all_owners() {
+    use ae_node::application::{Options, Prepared};
+    let parent = Parent::start();
+    let lab = Hc::new(8, json!({"dev_mode":true}), &parent);
+    let data = unpack(include_str!(
+        "../../../../ae-hyperchain/tests/fixtures/erlang_hc_genesis.json"
+    ));
+    let row = data["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["protocol"] == 8)
+        .unwrap();
+    let mut accounts = serde_json::Map::new();
+    for account in row["initial"]["accounts"].as_array().unwrap() {
+        let key = AccountPublicKey(native_bytes(&account["key"]).try_into().unwrap());
+        let account = Account::deserialize(key, &native_bytes(&account["encoded"])).unwrap();
+        accounts.insert(
+            api::encode(ApiType::AccountPubkey, &key.0),
+            serde_json::from_str(
+                &num_bigint::BigInt::from_bytes_be(
+                    num_bigint::Sign::Plus,
+                    account.balance().as_bytes(),
+                )
+                .to_string(),
+            )
+            .unwrap(),
+        );
+    }
+    let allocation = lab.temp.write(
+        "application-accounts.json",
+        serde_json::to_vec(&accounts).unwrap(),
+    );
+    let mut value = lab.config.user_map().clone();
+    value["chain"]["hard_forks"]["8"]["accounts_file"] = json!(allocation);
+    value["keys"] = json!({"dir":"application-keys","peer_password":"local-test"});
+    value["include_default_peers"] = json!(false);
+    value["sync"] =
+        json!({"listen_address":"127.0.0.1","port":0,"upnp_enabled":false,"peer_analytics":false});
+    value["metrics"] = json!({"host":"127.0.0.1","rules":[{"name":"ae.**","actions":"none"}]});
+    value["http"] = json!({"external":{"listen_address":"127.0.0.1","port":0},"internal":{"port":0},"rosetta":{"port":0},"rosetta_offline":{"port":0}});
+    let config = Configuration::from_value(value).unwrap();
+    let options = Options::new(
+        lab.temp.0.clone(),
+        "application-chain".into(),
+        ae_node::http::DryRunConfig::new(
+            env!("CARGO_BIN_EXE_ae-dry-run-worker").into(),
+            std::env::temp_dir(),
+        ),
+    );
+    let prepared =
+        Prepared::load(&config, Arc::new(lab.temp.context()), &lab.profile, options).unwrap();
+    let db = prepared.configured().chain().database().clone();
+    let mut running = prepared.launch().unwrap();
+    let h = running.handle();
+    let servers = tokio::time::timeout(Duration::from_secs(20), running.start_http())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(h.status().family, node::Family::Hyperchain);
+    assert_eq!(servers.len(), 4);
+    assert!(h.status().ready);
+    assert!(h.metrics().is_some());
+    assert!(ae_storage::snapshots::Owner::current(&db).is_ok());
+    let workers = h.hyperchain().unwrap().workers().unwrap();
+    let keys = workers.bindings().keys.as_ref().unwrap().current().unwrap();
+    assert!(keys.peer_identity().unwrap().await.is_ok());
+    let before = db.view().unwrap().status();
+    let exit = tokio::time::timeout(Duration::from_secs(20), running.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(exit.status().joined && exit.status().failure.is_none());
+    assert_eq!(db.view().unwrap().status(), before);
+    assert!(servers.iter().all(|s| s.status().joined));
+    assert!(!keys.info().running && !keys.info().accepting);
+}
+
 fn prepare(lab: &Hc, resources: Resources) -> node::Prepared {
     let mut options = node::Preparation::default();
     options.hyperchain.micro_cycle_ms = Some(1);

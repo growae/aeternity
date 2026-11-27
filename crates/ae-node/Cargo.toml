@@ -25,7 +25,7 @@ ae-sync.workspace = true
 ae-storage.workspace = true
 ae-p2p.workspace = true
 ae-vm-fate.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "signal"] }
 httparse.workspace = true
 ae-codec.workspace = true
 ae-crypto.workspace = true
