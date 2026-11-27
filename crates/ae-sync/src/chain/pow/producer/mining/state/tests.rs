@@ -43,6 +43,27 @@ fn configuration(header: &KeyHeader) -> Config {
     config.release_info = header.info.map(u32::from_be_bytes).unwrap_or(0);
     config
 }
+
+#[test]
+fn mining_graph_must_match_the_importer_before_workers_or_preparation_start() {
+    let node = Node::new();
+    let importer = importer(&node);
+    let snapshots = snapshots::Owner::start(node.db.clone(), Default::default()).unwrap();
+    let mut config = Config::new(AccountPublicKey([1; 32]));
+    config.edge_bits = cuckoo::EdgeBits::new(15).unwrap();
+    assert!(matches!(
+        Mining::new(
+            &importer,
+            Inputs {
+                snapshots: snapshots.clone(),
+                config,
+                clock: Arc::new(Clock(WALL)),
+            }
+        ),
+        Err(Error::Binding)
+    ));
+    assert_eq!(snapshots.live_snapshots(), 0);
+}
 fn ready(
     importer: &chain::Importer<Otp26>,
     snapshots: snapshots::Owner,

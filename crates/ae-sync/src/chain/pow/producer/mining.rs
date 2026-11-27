@@ -24,6 +24,7 @@ impl Default for Instance {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub edge_bits: cuckoo::EdgeBits,
     pub beneficiary: AccountPublicKey,
     pub release_info: u32,
     pub instances: Vec<Instance>,
@@ -37,6 +38,7 @@ pub struct Config {
 impl Config {
     pub fn new(beneficiary: AccountPublicKey) -> Self {
         Self {
+            edge_bits: Default::default(),
             beneficiary,
             release_info: 0,
             instances: vec![Instance::default()],
@@ -72,6 +74,7 @@ pub enum Error {
 }
 #[derive(Debug)]
 pub struct Candidate {
+    pub edge_bits: cuckoo::EdgeBits,
     pub id: preparation::Id,
     pub request: preparation::Request,
     pub header: KeyHeader,
@@ -123,6 +126,7 @@ pub struct Status {
     pub workers: Vec<miner::Status>,
 }
 struct Preparing {
+    edge_bits: cuckoo::EdgeBits,
     task: preparation::Task,
     epoch: u64,
 }
@@ -152,7 +156,7 @@ struct Admission {
     ticket: chain::Ticket,
 }
 
-fn prepared(done: preparation::Completion) -> Completion {
+fn prepared(done: preparation::Completion, edge_bits: cuckoo::EdgeBits) -> Completion {
     let preparation::Completion {
         id,
         request,
@@ -174,6 +178,7 @@ fn prepared(done: preparation::Completion) -> Completion {
         // CPU work needs only frozen header bytes. Release the trie snapshot
         // here; ordinary admission will capture and validate state again.
         Ok(Arc::new(Candidate {
+            edge_bits,
             id,
             request,
             header: p.header,
@@ -192,7 +197,12 @@ fn prepared(done: preparation::Completion) -> Completion {
 fn seal(job: &Job, result: &miner::Completion) -> Result<Option<Box<KeyHeader>>, Error> {
     if result.id != job.ticket.id()
         || result.work != job.ticket.work()
-        || miner::Work::key(&job.candidate.header, result.work.nonces).map_err(Error::Worker)?
+        || miner::Work::key_with_edge_bits(
+            &job.candidate.header,
+            result.work.nonces,
+            job.candidate.edge_bits,
+        )
+        .map_err(Error::Worker)?
             != result.work
     {
         return Err(Error::Binding);
@@ -211,7 +221,9 @@ fn seal(job: &Job, result: &miner::Completion) -> Result<Option<Box<KeyHeader>>,
     for (word, edge) in header.seal.iter_mut().zip(proof.iter()) {
         *word = u32::try_from(*edge).map_err(|_| Error::Binding)?;
     }
-    if !cuckoo::verify_key_seal(&header).map_err(|_| Error::Binding)? {
+    if !cuckoo::verify_key_seal_with_edge_bits(&header, job.candidate.edge_bits)
+        .map_err(|_| Error::Binding)?
+    {
         return Err(Error::Binding);
     }
     Ok(Some(header))
@@ -232,7 +244,7 @@ impl Retirement {
         if let Some(p) = &mut self.preparing
             && let Some(done) = p.task.try_result()
         {
-            outputs.push(prepared(done));
+            outputs.push(prepared(done, p.edge_bits));
             self.preparing = None;
         }
         if let Some(s) = self.solution.take() {

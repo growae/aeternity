@@ -145,11 +145,35 @@ impl Resolved<'_> {
         &self,
         system: &pow::configuration::System,
     ) -> Result<pow::configuration::Configuration, Error> {
+        let mut system = system.clone();
+        system.edge_bits = self.mining_edge_bits(&system.edge_bits)?;
         pow::configuration::Configuration::from_value(
             self.get(&["mining", "cuckoo"])?.unwrap_or(&json!({})),
-            system,
+            &system,
         )
         .map_err(Error::Mining)
+    }
+    // aec_mining:get_edge_bits reads the application tuple before applying
+    // the user override. The tuple's miner list is unused by verification.
+    pub fn mining_edge_bits(
+        &self,
+        fallback: &num_bigint::BigInt,
+    ) -> Result<num_bigint::BigInt, Error> {
+        let application = self.context.application("aecore", "aec_mining")?;
+        let system = application
+            .as_ref()
+            .map(|v| {
+                v.as_array()
+                    .filter(|v| v.len() == 2)
+                    .map(|v| &v[0])
+                    .ok_or(Error::Field("aec_mining"))
+            })
+            .transpose()?;
+        let value = self.get(&["mining", "cuckoo", "edge_bits"])?.or(system);
+        value.map_or_else(
+            || Ok(fallback.clone()),
+            |v| super::super::protocols::integer(v).ok_or(Error::Field("edge_bits")),
+        )
     }
     pub fn hyperchain(
         &self,

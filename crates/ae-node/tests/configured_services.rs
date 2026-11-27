@@ -1085,3 +1085,6 @@ mod family;
 mod on_demand_root;
 #[path = "configured_services/stratum.rs"]
 mod stratum_root;
+
+#[path = "configured_services/graph.rs"]
+mod graph;

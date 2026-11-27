@@ -116,6 +116,7 @@ impl PowError {
 }
 #[derive(Debug, Clone)]
 pub struct PowRules {
+    pub edge_bits: ae_consensus::cuckoo::EdgeBits,
     pub now_ms: u64,
     pub micro_cycle_ms: u64,
     pub configured_gas_limit: BigInt,
@@ -163,7 +164,14 @@ fn validate_pow_parts(
         network,
         known_previous,
         rules,
-        ae_consensus::headers::validate_standalone,
+        |header, network, now| {
+            ae_consensus::headers::validate_standalone_with_edge_bits(
+                header,
+                network,
+                now,
+                rules.edge_bits,
+            )
+        },
     )
 }
 pub fn validate_on_demand(
@@ -207,7 +215,7 @@ fn validate_parts(
     network: &NetworkProfile,
     known_previous: Option<&Header>,
     rules: &PowRules,
-    validate: fn(&Header, &NetworkProfile, u64) -> Result<(), ae_consensus::headers::Error>,
+    validate: impl FnOnce(&Header, &NetworkProfile, u64) -> Result<(), ae_consensus::headers::Error>,
 ) -> Result<(), PowError> {
     network
         .validate_version(header.common().height, header.common().version)

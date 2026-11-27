@@ -21,6 +21,20 @@ fn captured_mainnet_headers_have_valid_cuckoo29_proofs() {
             "height {}",
             header.common.height
         );
+        assert!(
+            ae_consensus::cuckoo::verify_key_seal_with_edge_bits(
+                &header,
+                ae_consensus::cuckoo::EdgeBits::new(29).unwrap(),
+            )
+            .unwrap()
+        );
+        assert!(
+            !ae_consensus::cuckoo::verify_key_seal_with_edge_bits(
+                &header,
+                ae_consensus::cuckoo::EdgeBits::new(15).unwrap(),
+            )
+            .unwrap()
+        );
         let sealed = sealing_bytes(&header).unwrap();
         assert_ne!(
             sealed,

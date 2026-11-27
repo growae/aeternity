@@ -38,6 +38,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             return Err(Error::Configuration);
         }
         let builder = importer.pow_preparation(snapshots, config.preparation)?;
+        if builder.edge_bits() != config.edge_bits {
+            return Err(Error::Binding);
+        }
         let mut cpus = Vec::new();
         for instance in &config.instances {
             let worker = match &instance.external {
@@ -173,7 +176,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             && let Some(done) = p.task.try_result()
         {
             let epoch = p.epoch;
-            let mut out = prepared(done);
+            let mut out = prepared(done, p.edge_bits);
             self.preparing = None;
             self.wanted = true;
             if let Completion::Prepared { result, used, .. } = &mut out {
@@ -344,6 +347,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
                     )
                     .map_err(|_| Error::Binding)?;
                 self.preparing = Some(Preparing {
+                    edge_bits: self.config.edge_bits,
                     task,
                     epoch: self.epoch,
                 });
@@ -369,7 +373,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             }
             let nonces = Nonces::reserve(candidate.nonce, cpu.config.repeats)
                 .map_err(|_| Error::Configuration)?;
-            let work = miner::Work::key(&candidate.value.header, nonces).map_err(Error::Worker)?;
+            let work = miner::Work::key_with_edge_bits(
+                &candidate.value.header,
+                nonces,
+                candidate.value.edge_bits,
+            )
+            .map_err(Error::Worker)?;
             match cpu
                 .worker
                 .as_ref()

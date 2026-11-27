@@ -105,6 +105,7 @@ impl Open {
     pub fn pow_rules(&self, micro_cycle_ms: u64, body_limits: admission::Limits) -> Rules {
         let mut rules = Rules::new(
             admission::PowRules {
+                edge_bits: self.chain().settings().cuckoo_edge_bits(),
                 now_ms: 0,
                 micro_cycle_ms,
                 configured_gas_limit: num_bigint::BigInt::from_bytes_be(

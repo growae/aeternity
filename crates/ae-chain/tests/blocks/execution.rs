@@ -84,6 +84,7 @@ fn block(row: &J) -> ae_chain::block::MicroBlock {
 }
 fn rules() -> ex::Rules {
     ex::Rules {
+        edge_bits: Default::default(),
         now_ms: 20000,
         micro_cycle_ms: 3000,
         configured_gas_limit: 6_000_000.into(),

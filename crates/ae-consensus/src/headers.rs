@@ -104,6 +104,14 @@ pub fn validate_standalone(
     network: &NetworkProfile,
     now_ms: u64,
 ) -> Result<(), Error> {
+    validate_standalone_with_edge_bits(header, network, now_ms, cuckoo::EdgeBits::default())
+}
+pub fn validate_standalone_with_edge_bits(
+    header: &Header,
+    network: &NetworkProfile,
+    now_ms: u64,
+    edge_bits: cuckoo::EdgeBits,
+) -> Result<(), Error> {
     // Encoding also validates typed headers constructed locally.
     header.encode()?;
     if matches!(header,Header::Key(k) if k.hole || k.end_of_epoch) {
@@ -114,7 +122,7 @@ pub fn validate_standalone(
     }
     network.validate_version(header.common().height, header.common().version)?;
     if let Header::Key(k) = header
-        && !cuckoo::verify_key_seal(k)?
+        && !cuckoo::verify_key_seal_with_edge_bits(k, edge_bits)?
     {
         return Err(Error::IncorrectProofOfWork);
     }

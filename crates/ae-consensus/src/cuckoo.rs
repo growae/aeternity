@@ -11,6 +11,28 @@ pub mod solver;
 
 pub const MAINNET_EDGE_BITS: u8 = 29;
 
+// Explicit node configuration, never inferred from an untrusted proof. The
+// canonical header carries no graph-size field; all owners must share this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeBits(u8);
+impl EdgeBits {
+    pub const fn new(bits: u8) -> Option<Self> {
+        if bits > 0 && bits < 64 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+impl Default for EdgeBits {
+    fn default() -> Self {
+        Self(MAINNET_EDGE_BITS)
+    }
+}
+
 pub fn sealing_bytes(header: &KeyHeader) -> Result<Vec<u8>, HeaderError> {
     let mut blank = header.clone();
     blank.nonce = 0;
@@ -18,13 +40,19 @@ pub fn sealing_bytes(header: &KeyHeader) -> Result<Vec<u8>, HeaderError> {
     Header::Key(blank).encode()
 }
 pub fn verify_key_seal(header: &KeyHeader) -> Result<bool, HeaderError> {
+    verify_key_seal_with_edge_bits(header, EdgeBits::default())
+}
+pub fn verify_key_seal_with_edge_bits(
+    header: &KeyHeader,
+    edge_bits: EdgeBits,
+) -> Result<bool, HeaderError> {
     let solution: Vec<u64> = header.seal.iter().map(|x| u64::from(*x)).collect();
     Ok(verify(
         &sealing_bytes(header)?,
         header.nonce,
         &solution,
         Target(header.target),
-        MAINNET_EDGE_BITS,
+        edge_bits.get(),
     ))
 }
 pub fn solution_hash(solution: &[u64], edge_bits: u8) -> Option<Hash256> {

@@ -63,6 +63,7 @@ fn one_snapshot_keeps_genesis_while_validated_public_key_and_micro_change_select
     let config = ae_execution::transactions::Config::primitives(&network);
     let rules = ae_chain::key::Rules::new(
         ae_chain::admission::PowRules {
+            edge_bits: Default::default(),
             now_ms: u64::MAX - 600_000,
             micro_cycle_ms: 3000,
             configured_gas_limit: 6_000_000.into(),
@@ -141,6 +142,7 @@ fn public_bootstrap_generations_include_stored_transactions_and_preserve_snapsho
     let config = ae_execution::transactions::Config::primitives(&network);
     let rules = ae_chain::key::Rules::new(
         ae_chain::admission::PowRules {
+            edge_bits: Default::default(),
             now_ms: u64::MAX - 600_000,
             micro_cycle_ms: 3000,
             configured_gas_limit: 6_000_000.into(),

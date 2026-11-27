@@ -100,6 +100,7 @@ pub fn execution_with_consensus(
 pub fn rules(genesis: Hash256) -> Rules {
     Rules::new(
         ae_chain::admission::PowRules {
+            edge_bits: Default::default(),
             now_ms: 0,
             micro_cycle_ms: 3000,
             configured_gas_limit: 6_000_000.into(),

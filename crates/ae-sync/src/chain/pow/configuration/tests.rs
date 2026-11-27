@@ -178,7 +178,7 @@ fn precedence_and_deprecated_override_use_only_selected_native_fields() {
     sys.edge_bits = 17.into();
     let cfg = Configuration::from_value(&json!({"miners":[{"executable":"user"}]}), &sys).unwrap();
     assert_eq!(cfg.edge_bits, 17.into());
-    assert_eq!(prepare(&cfg).err(), Some(Error::Consensus));
+    assert_eq!(prepare(&cfg).unwrap().config.edge_bits.get(), 17);
 }
 
 #[test]
@@ -246,6 +246,8 @@ fn resource_and_consensus_bounds_fail_before_any_runtime_is_created() {
     assert_eq!(cfg.miners[0].repeats.to_string(), "18446744073709551616");
     assert_eq!(prepare(&cfg).err(), Some(Error::Attempts));
     let cfg = parse(json!({"edge_bits":15})).unwrap();
+    assert_eq!(prepare(&cfg).unwrap().config.edge_bits.get(), 15);
+    let cfg = parse(json!({"edge_bits":64})).unwrap();
     assert_eq!(prepare(&cfg).err(), Some(Error::Consensus));
     let cfg = parse(json!({})).unwrap();
     assert_eq!(

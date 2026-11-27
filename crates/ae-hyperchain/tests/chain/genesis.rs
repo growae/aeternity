@@ -585,6 +585,7 @@ fn production_contract_genesis_commits_reopens_and_queries_persistent_roots() {
             ));
             let rules = ae_chain::key::Rules::new(
                 ae_chain::admission::PowRules {
+                    edge_bits: Default::default(),
                     now_ms: 0,
                     micro_cycle_ms: 3_000,
                     configured_gas_limit: 6_000_000.into(),

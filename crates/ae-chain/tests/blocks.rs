@@ -129,6 +129,7 @@ fn check_row(row: &J) -> Block {
             &profile(row),
             None,
             &admission::PowRules {
+                edge_bits: Default::default(),
                 now_ms: 10000,
                 micro_cycle_ms: 3000,
                 configured_gas_limit: 6_000_000.into(),
@@ -214,6 +215,7 @@ fn admission_order_historical_gas_and_timestamp_boundaries_match_original() {
             &profile(row),
             previous.as_ref(),
             &admission::PowRules {
+                edge_bits: Default::default(),
                 now_ms: 10000,
                 micro_cycle_ms: row["cycle"].as_u64().unwrap_or(3000),
                 configured_gas_limit: gas,

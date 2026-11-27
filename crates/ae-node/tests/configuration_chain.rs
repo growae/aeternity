@@ -30,6 +30,81 @@ fn kind(value: &Value) -> Kind {
         _ => panic!("fixture consensus"),
     }
 }
+
+#[test]
+fn configured_cuckoo_graph_matches_native_precedence_and_actual_proof_verification() {
+    let rows: Value =
+        serde_json::from_str(include_str!("fixtures/erlang_cuckoo_graph.json")).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 11);
+    for row in rows.as_array().unwrap() {
+        let cfg = Configuration::from_value(json!({"mining":{"cuckoo":row["cuckoo"]}})).unwrap();
+        let mut ctx = context();
+        if !row["application"].is_null() {
+            ctx.set(
+                "aecore".into(),
+                "aec_mining".into(),
+                row["application"].clone(),
+            )
+            .unwrap();
+        }
+        let resolved = cfg.resolve(&ctx).unwrap();
+        let result = Settings::resolve(&resolved, Some(b"ae_graph_test"));
+        if row["result"]["class"] == "error" {
+            assert!(result.is_err(), "{row}");
+            continue;
+        }
+        let bits = result.unwrap().cuckoo_edge_bits();
+        assert_eq!(u64::from(bits.get()), row["effective"].as_u64().unwrap());
+        assert_eq!(
+            resolved.mining(&Default::default()).unwrap().edge_bits,
+            bits.get().into()
+        );
+        let proof: Vec<_> = row["proof"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            ae_consensus::cuckoo::verify(
+                &hex::decode(row["data"].as_str().unwrap()).unwrap(),
+                row["nonce"].as_u64().unwrap(),
+                &proof,
+                ae_consensus::target::Target(row["target"].as_u64().unwrap() as u32),
+                bits.get(),
+            ),
+            row["result"]["accepted"].as_bool().unwrap(),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn graph_configuration_is_captured_per_owner_and_unused_by_other_consensus_families() {
+    let cfg = Configuration::empty();
+    let mut ctx = context();
+    let original = Settings::resolve(&cfg.resolve(&ctx).unwrap(), None).unwrap();
+    ctx.set("aecore".into(), "aec_mining".into(), json!([15, []]))
+        .unwrap();
+    let next = Settings::resolve(&cfg.resolve(&ctx).unwrap(), None).unwrap();
+    assert_eq!(original.cuckoo_edge_bits().get(), 29);
+    assert_eq!(next.cuckoo_edge_bits().get(), 15);
+    for bits in [0, 64, 256] {
+        let cfg =
+            Configuration::from_value(json!({"mining":{"cuckoo":{"edge_bits":bits}}})).unwrap();
+        assert!(Settings::resolve(&cfg.resolve(&ctx).unwrap(), Some(b"ae_graph_test")).is_err());
+        for family in ["on_demand", "hyperchain"] {
+            let cfg = Configuration::from_value(json!({"mining":{"cuckoo":{"edge_bits":bits}},"chain":{"consensus":{"0":{"type":family}}}})).unwrap();
+            assert_eq!(
+                Settings::resolve(&cfg.resolve(&ctx).unwrap(), Some(b"ae_graph_test"))
+                    .unwrap()
+                    .cuckoo_edge_bits()
+                    .get(),
+                29
+            );
+        }
+    }
+}
 #[test]
 fn expected_mine_rate_preserves_precedence_large_integers_and_chain_identity() {
     let empty = Configuration::empty();

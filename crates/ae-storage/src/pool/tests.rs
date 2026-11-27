@@ -142,6 +142,7 @@ pub(super) fn prepare(db: &Database, block: &Block) -> Update {
     let net = NetworkProfile::mainnet();
     let rules = ae_chain::key::Rules::new(
         ae_chain::admission::PowRules {
+            edge_bits: Default::default(),
             now_ms: u64::MAX - 600_000,
             micro_cycle_ms: 3000,
             configured_gas_limit: 6_000_000.into(),

@@ -86,6 +86,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Builder<O> {
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
     }
+    pub fn edge_bits(&self) -> ae_consensus::cuckoo::EdgeBits {
+        self.config.rules.admission.edge_bits
+    }
     pub fn start(&self, request: Request, clock: Arc<dyn Clock>) -> Result<Task, Error> {
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

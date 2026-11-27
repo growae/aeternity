@@ -72,6 +72,7 @@ fn genesis_key(n: Network) -> KeyHeader {
 fn rules(n: Network) -> ae_chain::key::Rules {
     ae_chain::key::Rules::new(
         ae_chain::admission::PowRules {
+            edge_bits: Default::default(),
             now_ms: u64::MAX - 600_000,
             micro_cycle_ms: 3000,
             configured_gas_limit: 6_000_000.into(),

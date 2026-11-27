@@ -17,6 +17,7 @@ pub enum Error {
     Protocols(protocols::Error),
     GenesisTime,
     MicroCycle,
+    CuckooGraph,
     Genesis,
 }
 impl fmt::Display for Error {
@@ -32,6 +33,7 @@ pub struct Settings {
     genesis_time: u64,
     expected_mine_rate: serde_json::Value,
     micro_cycle_ms: u64,
+    cuckoo_edge_bits: ae_consensus::cuckoo::EdgeBits,
 }
 impl Settings {
     pub fn resolve(
@@ -68,7 +70,19 @@ impl Settings {
         } else {
             0
         };
+        let cuckoo_edge_bits = if consensus.genesis().kind() == Kind::PowCuckoo {
+            let bits = resolved
+                .mining_edge_bits(&29.into())
+                .map_err(Error::Resolution)?;
+            u8::try_from(bits)
+                .ok()
+                .and_then(ae_consensus::cuckoo::EdgeBits::new)
+                .ok_or(Error::CuckooGraph)?
+        } else {
+            Default::default()
+        };
         Ok(Self {
+            cuckoo_edge_bits,
             profile,
             consensus,
             genesis_time,
@@ -101,6 +115,9 @@ impl Settings {
     }
     pub fn micro_cycle_ms(&self) -> u64 {
         self.micro_cycle_ms
+    }
+    pub fn cuckoo_edge_bits(&self) -> ae_consensus::cuckoo::EdgeBits {
+        self.cuckoo_edge_bits
     }
     pub fn retarget_rate(&self) -> ae_consensus::target::MineRate {
         protocols::integer(&self.expected_mine_rate).map_or(

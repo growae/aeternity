@@ -181,10 +181,10 @@ impl Configuration {
         mut config: mining::Config,
     ) -> Result<Prepared, Error> {
         let instances = self.instances()?;
-        // Configuration never rewrites canonical mainnet/UAT PoW rules.
-        if self.edge_bits != BigInt::from(ae_consensus::cuckoo::MAINNET_EDGE_BITS) {
-            return Err(Error::Consensus);
-        }
+        config.edge_bits = u8::try_from(&self.edge_bits)
+            .ok()
+            .and_then(ae_consensus::cuckoo::EdgeBits::new)
+            .ok_or(Error::Consensus)?;
         let mut workers = Vec::with_capacity(instances.len());
         for instance in &instances {
             worker.validate().map_err(Error::Worker)?;

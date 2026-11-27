@@ -102,7 +102,8 @@ impl Candidate {
 
 // Sealing reconstructs bytes, including invalid proofs. The native pool marks
 // accounting before conductor admission; a pool solution is not a validity
-// certificate. In particular no configurable small graph replaces PoW29.
+// certificate. Admission uses the node's captured graph size independently
+// of the session's share-validation setting; the public default remains 29.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sealed {
     header: KeyHeader,

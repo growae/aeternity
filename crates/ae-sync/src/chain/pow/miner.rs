@@ -27,13 +27,19 @@ pub struct Work {
     pub nonces: Nonces,
 }
 impl Work {
-    // Canonical key mining always uses 29 bits, independently of any generic
-    // small-graph jobs submitted for an isolated development/test workload.
+    // The default entry point preserves the public-network graph size.
     pub fn key(header: &KeyHeader, nonces: Nonces) -> Result<Self, Error> {
+        Self::key_with_edge_bits(header, nonces, cuckoo::EdgeBits::default())
+    }
+    pub fn key_with_edge_bits(
+        header: &KeyHeader,
+        nonces: Nonces,
+        edge_bits: cuckoo::EdgeBits,
+    ) -> Result<Self, Error> {
         Ok(Self {
             hash: blake2b_256(&cuckoo::sealing_bytes(header).map_err(|_| Error::Header)?),
             target: Target(header.target),
-            edge_bits: cuckoo::MAINNET_EDGE_BITS,
+            edge_bits: edge_bits.get(),
             nonces,
         })
     }
