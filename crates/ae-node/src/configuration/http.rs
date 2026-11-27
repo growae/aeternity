@@ -4,6 +4,8 @@ use super::resolution::{Error, Resolved, Strategy};
 use num_bigint::BigInt;
 use serde_json::{Value, json};
 
+pub mod startup;
+
 // aehttp_app:enable_internal_debug_endpoints/0. This gate is distinct from
 // registering the debug route group and defaults to disabled.
 pub fn internal_debug_endpoints(resolved: &Resolved<'_>) -> Result<bool, Error> {

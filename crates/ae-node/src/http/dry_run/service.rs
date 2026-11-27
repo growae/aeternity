@@ -109,6 +109,12 @@ pub(crate) struct Bound {
     gas_limit: ae_types::Unsigned,
 }
 impl Bound {
+    pub fn http_startup(
+        &self,
+    ) -> Result<crate::configuration::http::startup::Startup, crate::configuration::resolution::Error>
+    {
+        self.settings.http_startup()
+    }
     pub(in crate::http) fn authorize_internal(&self) -> Result<(), Response> {
         authorize_internal(&self.settings)
     }

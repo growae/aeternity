@@ -505,6 +505,24 @@ pub struct Running {
     information: Arc<Information>,
 }
 impl Running {
+    // Resolve from this generation's immutable startup snapshot. A caller may
+    // supply service budgets, but cannot substitute another node's settings.
+    pub async fn listen_configured_http(
+        &mut self,
+        limits: http::ConfiguredLimits,
+        dry_run: Option<http::DryRunConfig>,
+    ) -> Result<Vec<http::Handle>, http::Error> {
+        if self.http.is_some() {
+            return Err(http::Error::AlreadyListening);
+        }
+        let startup = self
+            .information
+            .dry_run
+            .http_startup()
+            .map_err(|_| http::Error::Configuration)?;
+        self.listen_http_group(startup.configs(&limits)?, dry_run)
+            .await
+    }
     pub async fn listen_http_group(
         &mut self,
         configs: Vec<http::Config>,

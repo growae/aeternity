@@ -12,7 +12,7 @@ pub struct Cors {
     pub domains: Vec<String>,
     pub methods: String,
     pub headers: Option<String>,
-    pub max_age: u64,
+    pub max_age: num_bigint::BigInt,
 }
 impl Default for Cors {
     fn default() -> Self {
@@ -20,12 +20,16 @@ impl Default for Cors {
             domains: vec!["*".into()],
             methods: "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT".into(),
             headers: None,
-            max_age: 1800,
+            max_age: 1800.into(),
         }
     }
 }
 impl Cors {
-    pub(super) fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
+        // Bound conversion before allocating decimal response text.
+        if self.max_age.bits() > 4096 {
+            return false;
+        }
         let values = self
             .domains
             .iter()
@@ -38,9 +42,9 @@ impl Cors {
             }
             size = size.saturating_add(value.len());
         }
-        self.domains.len() <= 256 && size <= 16 << 10
+        self.domains.len() <= 256 && size + self.max_age.to_string().len() <= 16 << 10
     }
-    pub(super) fn apply(&self, request: &Headers, response: &mut Headers) {
+    pub(crate) fn apply(&self, request: &Headers, response: &mut Headers) {
         let Some(origin) = request.get("origin") else {
             return;
         };

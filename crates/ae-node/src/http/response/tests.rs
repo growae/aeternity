@@ -30,7 +30,7 @@ fn original_cors_and_height_headers_match_preflight_and_normal_requests() {
         }
         config.cors.headers = native["allow_headers"].as_str().map(str::to_owned);
         if let Some(age) = native["max_age"].as_u64() {
-            config.cors.max_age = age;
+            config.cors.max_age = age.into();
         }
         assert!(config.cors.valid());
         let headers = row["request_headers"]

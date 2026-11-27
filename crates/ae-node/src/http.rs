@@ -9,6 +9,7 @@ use tokio::{
 mod accounts;
 mod blocks;
 mod channels;
+mod configured;
 mod contracts;
 mod currency;
 pub mod dry_run;
@@ -31,6 +32,7 @@ mod text;
 pub mod transaction;
 mod transactions;
 mod transport;
+pub use configured::Limits as ConfiguredLimits;
 pub use dry_run::service::Config as DryRunConfig;
 pub(crate) use listeners::Running;
 pub use post::Limits as SubmissionLimits;
@@ -50,6 +52,7 @@ pub struct Config {
     pub target: Target,
     pub groups: BTreeSet<String>,
     pub cors: Cors,
+    pub acceptors: usize,
     pub connections: usize,
     pub header_bytes: usize,
     pub body_bytes: usize,
@@ -63,6 +66,7 @@ impl Default for Config {
             target: Target::External,
             groups: BTreeSet::from(["chain".into(), "node_info".into()]),
             cors: Cors::default(),
+            acceptors: 10,
             connections: 128,
             header_bytes: 16 << 10,
             body_bytes: 5_000_000,
@@ -73,7 +77,9 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
-        if self.connections == 0
+        if self.acceptors == 0
+            || self.acceptors > 4096
+            || self.connections == 0
             || self.connections > 4096
             || !(1024..=1 << 20).contains(&self.header_bytes)
             || self.body_bytes > 64 << 20
@@ -240,7 +246,17 @@ async fn run(
 ) -> Status {
     let mut state = publish.borrow().clone();
     let mut clients = JoinSet::new();
+    let listener = Arc::new(listener);
+    let mut accepting = JoinSet::new();
     while !*stopping.borrow() && parent.status().running {
+        // Reserve a connection slot for every outstanding accept operation.
+        // Completed accepts retained in the set also hold a slot until joined.
+        while accepting.len() < config.acceptors
+            && accepting.len() + clients.len() < config.connections
+        {
+            let listener = listener.clone();
+            accepting.spawn(async move { listener.accept().await });
+        }
         tokio::select! {
             biased;
             _ = stopping.changed() => break,
@@ -253,9 +269,9 @@ async fn run(
                 }
                 publish.send_replace(state.clone());
             },
-            accepted = listener.accept(), if clients.len() < config.connections => {
+            accepted = accepting.join_next(), if !accepting.is_empty() => {
                 match accepted {
-                    Ok((stream, _)) => {
+                    Some(Ok(Ok((stream, _)))) => {
                         state.accepted = state.accepted.saturating_add(1);
                         state.active += 1;
                         let config = config.clone(); let parent = parent.clone();
@@ -264,11 +280,14 @@ async fn run(
                         clients.spawn(async move { transport::exchange(stream, parent, config, posts, dry_run).await });
                         publish.send_replace(state.clone());
                     },
-                    Err(error) => { state.failure = Some(Error::Io(error.to_string())); break; }
+                    Some(Ok(Err(error))) => { state.failure = Some(Error::Io(error.to_string())); break; }
+                    _ => { state.failure = Some(Error::Task); break; }
                 }
             }
         }
     }
+    accepting.abort_all();
+    while accepting.join_next().await.is_some() {}
     drop(listener);
     state.running = false;
     publish.send_replace(state.clone());
