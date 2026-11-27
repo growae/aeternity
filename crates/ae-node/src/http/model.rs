@@ -4,6 +4,12 @@ use jsonschema::{Keyword, PatternOptions, ValidationError, Validator};
 use num_bigint::BigInt;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
+mod pattern;
+mod word_ranges;
+
+pub(super) fn matches_pattern(pattern: &str, value: &str) -> bool {
+    pattern::Pattern::new(pattern).matches(value)
+}
 
 struct Integer {
     minimum: Option<BigInt>,
@@ -30,6 +36,9 @@ impl Keyword for Integer {
 fn adapt(value: &mut Value) {
     match value {
         Value::Object(fields) => {
+            if let Some(pattern) = fields.remove("pattern") {
+                fields.insert("nativePattern".into(), pattern);
+            }
             if fields.get("type").and_then(Value::as_str) == Some("integer") {
                 fields.remove("type");
                 let mut bounds = serde_json::Map::new();
@@ -72,6 +81,11 @@ fn validators(v3: bool) -> &'static BTreeMap<String, Validator> {
                 root["definitions"] = document["definitions"].clone();
                 let validator = jsonschema::draft4::options()
                     .with_pattern_options(PatternOptions::regex().size_limit(1 << 20))
+                    .with_keyword("nativePattern", |_, value, _| {
+                        Ok(Box::new(pattern::Pattern::new(
+                            value.as_str().expect("HTTP pattern string"),
+                        )))
+                    })
                     .with_keyword("nativeInteger", |_, bounds, _| {
                         let get = |key| {
                             bounds.get(key).map(|n| {

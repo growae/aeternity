@@ -2370,6 +2370,50 @@
           "utilization"
         ]
       }
+    },
+    "DryRunResults": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DryRunResult"
+          }
+        },
+        "tx_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TxEvent"
+          }
+        }
+      },
+      "required": [
+        "results"
+      ]
+    },
+    "DryRunResult": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "call_obj": {
+          "$ref": "#/definitions/ContractCallObject"
+        }
+      },
+      "required": [
+        "type",
+        "result"
+      ]
+    },
+    "TxEvent": {
+      "type": "object"
     }
   },
   "operations": {
@@ -2453,6 +2497,12 @@
     },
     "GetRecentGasPrices": {
       "$ref": "#/definitions/GasPrices"
+    },
+    "DryRunResults": {
+      "$ref": "#/definitions/DryRunResults"
+    },
+    "DryRunError": {
+      "$ref": "#/definitions/Error"
     }
   }
 }

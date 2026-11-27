@@ -14,6 +14,7 @@ mod currency;
 pub mod dry_run;
 mod ends;
 pub(crate) mod gas;
+mod json;
 mod key;
 mod model;
 mod names;

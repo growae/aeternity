@@ -2,10 +2,7 @@
 // Copyright (c) Aeternity developers. ISC: repository LICENSE.
 use super::{Config, response::Response};
 use crate::runtime;
-use ae_codec::{
-    api::{self, ApiType},
-    jsx,
-};
+use ae_codec::api::{self, ApiType};
 use ae_mempool::pool as policy;
 use ae_storage::pool::{self, worker};
 use ae_sync::blocking;
@@ -87,33 +84,11 @@ fn validation(parameter: &str, info: Value) -> Response {
     )
 }
 pub(super) fn body_value(body: Body, v3: bool, maximum: usize) -> Result<Value, Response> {
-    let raw = match body {
-        Body::Complete(raw) => raw,
-        Body::More(raw) => {
-            return Err(validation(
-                "",
-                json!({"error":"body_too_big","data":super::text::binary(&raw)}),
-            ));
-        }
+    let body = match &body {
+        Body::Complete(raw) => super::json::Body::Complete(raw),
+        Body::More(raw) => super::json::Body::More(raw),
     };
-    let limits = jsx::Limits {
-        bytes: maximum,
-        string_bytes: maximum.saturating_mul(3).min(64 << 20),
-        values: 65536,
-        ..Default::default()
-    };
-    let value = if raw.is_empty() {
-        json!("")
-    } else {
-        jsx::decode(&raw, limits).map_err(|error| match error {
-            jsx::Error::Parse => validation(
-                "",
-                json!({"error":"invalid_body","data":super::text::binary(&raw)}),
-            ),
-            // A local CPU/memory bound is not a statement of JSON invalidity.
-            jsx::Error::Limit(_) | jsx::Error::Limits => Response::unavailable(true),
-        })?
-    };
+    let value = super::json::parse(body, maximum).map_err(super::json::Error::response)?;
     let object = value
         .as_object()
         .ok_or_else(|| validation("body", json!({"error":"wrong_type","data":value,"path":[]})))?;
