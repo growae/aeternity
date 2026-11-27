@@ -52,10 +52,21 @@ pub fn format(
     column: usize,
     limits: Limits,
 ) -> Result<(Vec<u8>, Limits), Error> {
+    format_with_width(term, style, depth, column, 80, limits)
+}
+
+pub fn format_with_width(
+    term: &Term<'_>,
+    style: Style,
+    depth: i32,
+    column: usize,
+    line_length: usize,
+    limits: Limits,
+) -> Result<(Vec<u8>, Limits), Error> {
     let mut work = Work::new(limits);
     work.input(term, 0)?;
     let mut out = Vec::new();
-    render(term, style, depth, column, &mut work, &mut out)?;
+    render(term, style, depth, column, line_length, &mut work, &mut out)?;
     Ok((out, work.remaining()))
 }
 
@@ -130,6 +141,7 @@ fn render(
     style: Style,
     d: i32,
     column: usize,
+    line_length: usize,
     w: &mut Work,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
@@ -137,7 +149,7 @@ fn render(
         Style::Write => write(t, d, w, out, 0),
         Style::Pretty => {
             let node = node(t, d, w, 0)?;
-            pretty::render(&node, column.max(1), w, out)
+            pretty::render(&node, column.max(1), line_length, w, out)
         }
     }
 }

@@ -1,5 +1,9 @@
 // aehttp_dispatch_ext/int and aehttp_helpers dry-run preparation, fa2a6d7.
 // Copyright (c) Aeternity developers. ISC: repository LICENSE.
+pub mod execution;
+#[cfg(test)]
+mod pipeline_tests;
+pub mod response;
 pub mod schema;
 use ae_codec::api::{self, ApiType};
 use ae_execution::dry_run::prepare::Input;

@@ -22,13 +22,23 @@ fn return_type(value: ReturnType) -> &'static str {
 pub fn call(value: &Call, limits: Limits) -> Result<Value, Error> {
     call_with(value, &budget(limits))
 }
+pub fn call_with_gas_price(
+    value: &Call,
+    gas_price: &Unsigned,
+    limits: Limits,
+) -> Result<Value, Error> {
+    call_price(value, gas_price, &budget(limits))
+}
 fn call_with(value: &Call, budget: &Budget) -> Result<Value, Error> {
+    call_price(value, &value.gas_price, budget)
+}
+fn call_price(value: &Call, gas_price: &Unsigned, budget: &Budget) -> Result<Value, Error> {
     let mut out = Object::new(budget)?;
     out.id("caller_id", value.caller)?;
     out.number("caller_nonce", &value.nonce)?;
     out.number("height", &value.height)?;
     out.encoded("contract_id", ApiType::ContractPubkey, &value.contract)?;
-    out.number("gas_price", &value.gas_price)?;
+    out.number("gas_price", gas_price)?;
     out.number("gas_used", &value.gas_used)?;
     out.encoded(
         "return_value",

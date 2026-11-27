@@ -31,6 +31,31 @@ fn term(v: &J) -> Term<'static> {
     }
 }
 #[test]
+fn explicit_dry_run_widths_depths_and_prefix_columns_match_otp() {
+    let packed: J =
+        serde_json::from_str(include_str!("fixtures/erlang_dry_run_diagnostics.json")).unwrap();
+    let pool = packed["values"].as_array().unwrap();
+    let data = expand(&packed["root"], pool, pool.len());
+    let rows = data["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3240);
+    for (i, row) in rows.iter().enumerate() {
+        let (actual, _) = diagnostic::format_with_width(
+            &term(&row["term"]),
+            Style::Pretty,
+            row["depth"].as_i64().unwrap() as i32,
+            row["column"].as_u64().unwrap() as usize,
+            row["width"].as_u64().unwrap() as usize,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            actual,
+            hex::decode(row["output"].as_str().unwrap()).unwrap(),
+            "row {i}: {row}"
+        );
+    }
+}
+#[test]
 fn native_term_printing_and_fate_abort_messages_match_original_profiles() {
     let data: J =
         serde_json::from_str(include_str!("fixtures/erlang_fate_diagnostics.json")).unwrap();

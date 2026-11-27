@@ -4,7 +4,6 @@
 // License text: licenses/Apache-2.0.txt at the repository root.
 use super::{Error, Kind, Node, Work};
 
-const LINE: i128 = 80;
 #[derive(Clone, Copy)]
 struct Pos {
     col: i128,
@@ -25,18 +24,29 @@ type Result<T> = std::result::Result<T, Failure>;
 pub(super) fn render(
     node: &Node,
     column: usize,
+    line_length: usize,
     work: &mut Work,
     out: &mut Vec<u8>,
 ) -> std::result::Result<(), Error> {
     let col = i128::try_from(column).map_err(|_| Error::ResourceLimit)?;
     let max = i128::try_from(node.len).map_err(|_| Error::ResourceLimit)?;
     let mut layout = Layout {
+        line: i128::try_from(line_length).map_err(|_| Error::ResourceLimit)?,
         work,
         out,
         max,
         tag_indent: -1,
         check: true,
     };
+    // OTP uses zero width to disable line wrapping, after constructing the
+    // same depth-limited printable representation as other pretty formats.
+    if line_length == 0 {
+        layout.check = false;
+        return layout.flat(node, 0).map_err(|e| match e {
+            Failure::Work(e) => e,
+            Failure::Indent => Error::InvalidValue,
+        });
+    }
     let pos = Pos {
         col,
         ld: 0,
@@ -62,6 +72,7 @@ pub(super) fn render(
     })
 }
 struct Layout<'a> {
+    line: i128,
     work: &'a mut Work,
     out: &'a mut Vec<u8>,
     max: i128,
@@ -89,7 +100,7 @@ impl Layout<'_> {
     }
     fn fits(&self, len: usize, p: Pos) -> bool {
         let n = len as i128;
-        n < LINE - p.col - p.ld && n + p.used + p.ld <= self.max
+        n < self.line - p.col - p.ld && n + p.used + p.ld <= self.max
     }
     fn flat(&mut self, n: &Node, depth: usize) -> Result<()> {
         self.work.visit(depth)?;
@@ -167,7 +178,7 @@ impl Layout<'_> {
                 if self.check {
                     return Ok(());
                 }
-                let capacity = 8.max((LINE - p.col - 2).min(self.max - 4 - p.used) - p.ld);
+                let capacity = 8.max((self.line - p.col - 2).min(self.max - 4 - p.used) - p.ld);
                 let mut remaining = capacity;
                 self.emit(b"<<")?;
                 for (i, s) in chunks.iter().enumerate() {
@@ -202,7 +213,7 @@ impl Layout<'_> {
                     self.flat(tag, depth + 1)?;
                     if self.tag_indent > 0 && tag_ind > self.tag_indent {
                         let col = p.col + self.tag_indent;
-                        if self.check && !(self.max + col <= LINE || col <= LINE / 2) {
+                        if self.check && !(self.max + col <= self.line || col <= self.line / 2) {
                             return Err(Failure::Indent);
                         }
                         self.tail(
@@ -219,7 +230,7 @@ impl Layout<'_> {
                             false,
                         )?;
                     } else {
-                        if self.check && !(self.max + tcol < LINE || tcol < LINE / 2) {
+                        if self.check && !(self.max + tcol < self.line || tcol < self.line / 2) {
                             return Err(Failure::Indent);
                         }
                         self.emit(b",")?;
@@ -276,13 +287,17 @@ impl Layout<'_> {
             Ok(n.len as i128)
         } else {
             self.pp(n, p, depth)?;
-            Ok(LINE)
+            Ok(self.line)
         }
     }
     fn pair(&mut self, n: &Node, p: Pos, depth: usize) -> Result<i128> {
         if self.fits(n.len, p) {
             self.flat(n, depth)?;
-            return Ok(if n.atomic_pair() { n.len as i128 } else { LINE });
+            return Ok(if n.atomic_pair() {
+                n.len as i128
+            } else {
+                self.line
+            });
         }
         let Kind::Pair(k, v) = &n.kind else {
             return Err(Error::InvalidValue.into());
@@ -304,7 +319,7 @@ impl Layout<'_> {
             },
             depth + 1,
         )?;
-        Ok(LINE)
+        Ok(self.line)
     }
     fn sequence(
         &mut self,
@@ -361,9 +376,9 @@ impl Layout<'_> {
             let ld = if i + 1 == v.len() { p.ld + 1 } else { 0 };
             let len = 1 + n.len as i128;
             let fits = if ld == 0 {
-                len + 1 < LINE - col && used + len < self.max
+                len + 1 < self.line - col && used + len < self.max
             } else {
-                len < LINE - col - ld && used + len + ld <= self.max
+                len < self.line - col - ld && used + len + ld <= self.max
             };
             let atomic = if map { n.atomic_pair() } else { n.atomic() };
             self.emit(b",")?;
