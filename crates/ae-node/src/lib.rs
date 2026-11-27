@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 pub mod bootstrap;
 pub mod configuration;
+pub mod dry_run_worker;
 pub mod http;
 pub mod hyperchain;
 pub mod pow;

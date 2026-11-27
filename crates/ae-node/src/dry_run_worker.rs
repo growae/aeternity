@@ -1,0 +1,261 @@
+// Local disposable-worker transport. These encodings never enter consensus,
+// durable storage, or the public HTTP schema. The child has no database handle.
+mod codec;
+mod job;
+mod metadata;
+use ae_execution::{dry_run as core, transactions};
+use ae_hyperchain::chain::View;
+use ae_sync::dry_run::{self, Ticket, Timeout, process};
+use ae_trie::{NodeReader, Overlay};
+pub use codec::Error as EncodingError;
+pub use job::{Failure, Kind, Reply, ResultBody, Stage};
+use std::{
+    io::{Read, Write},
+    sync::{Arc, Mutex},
+};
+
+pub struct Request<'a> {
+    pub inputs: Vec<core::prepare::Input<'a>>,
+    pub funding: Vec<core::Funding>,
+    pub options: core::Options,
+}
+pub struct Parameters<'a> {
+    pub execution: &'a transactions::Config<'a>,
+    pub preparation: core::prepare::Limits,
+    pub state: ae_state::transport::Config<'a>,
+    pub overlays: ae_trie::OverlayLimits,
+    pub node_decode: ae_codec::rlp::DecodeLimits,
+    pub rendering: crate::http::dry_run::response::Limits,
+    pub reporting_floor: Option<&'a ae_types::Unsigned>,
+}
+#[derive(Debug)]
+pub enum Error {
+    Admission(dry_run::Error),
+    Encoding(EncodingError),
+    Capacity,
+}
+impl From<EncodingError> for Error {
+    fn from(e: EncodingError) -> Self {
+        Self::Encoding(e)
+    }
+}
+// Retain this broker with process output and the Ticket::wait_retained credits
+// through response rendering/sending. A captured view owns all eight stores.
+pub struct Broker<A, C> {
+    pub view: Arc<View<Overlay<A>, Overlay<C>>>,
+    controls: Vec<ae_types::work::Control>,
+    node_bytes: usize,
+}
+#[derive(Debug)]
+pub enum ReadError {
+    Query,
+    Capacity,
+    Node(ae_trie::Error),
+}
+impl<A: NodeReader, C: NodeReader> process::Broker for Broker<A, C> {
+    type Error = ReadError;
+    fn read(&mut self, q: &[u8]) -> Result<Vec<u8>, ReadError> {
+        if let [128, id] = q {
+            let control = self.controls.get(*id as usize).ok_or(ReadError::Query)?;
+            return Ok(vec![u8::from(control.check().is_err())]);
+        }
+        if q.len() != 33 {
+            return Err(ReadError::Query);
+        }
+        let hash = ae_types::Hash256(q[1..].try_into().map_err(|_| ReadError::Query)?);
+        let trees = &self.view.trees;
+        let value = match q[0] {
+            0 => trees.accounts.tree().store().node(&hash),
+            1 => trees.calls.tree().store().node(&hash),
+            2 => trees.channels.tree().store().node(&hash),
+            3 => trees.contracts.tree().store().node(&hash),
+            4 => trees.names.tree().store().node(&hash),
+            5 => trees.oracles.tree().store().node(&hash),
+            6 => trees.names.cache().store().node(&hash),
+            7 => trees.oracles.cache().store().node(&hash),
+            _ => return Err(ReadError::Query),
+        }
+        .map_err(ReadError::Node)?;
+        let Some(mut value) = value else {
+            return Ok(vec![0]);
+        };
+        if value.len() > self.node_bytes {
+            return Err(ReadError::Capacity);
+        }
+        if ae_crypto::blake2b_256(&value) != hash {
+            return Err(ReadError::Node(ae_trie::Error::HashMismatch(hash)));
+        }
+        value
+            .try_reserve_exact(1)
+            .map_err(|_| ReadError::Capacity)?;
+        value.insert(0, 1);
+        Ok(value)
+    }
+}
+pub fn submit<
+    A: NodeReader + Clone + Send + Sync + 'static,
+    C: NodeReader + Clone + Send + Sync + 'static,
+>(
+    client: &dry_run::Client,
+    process: process::Config,
+    view: Arc<View<Overlay<A>, Overlay<C>>>,
+    request: Request<'_>,
+    parameters: Parameters<'_>,
+    timeout: Timeout,
+) -> Result<Ticket<process::Completed<Broker<A, C>>>, Error> {
+    // Reserve the maximum input weight before encoding or capturing configuration.
+    let weight = process
+        .reservation(process.input_bytes)
+        .map_err(Error::Admission)?;
+    let reservation = client.reserve(weight, timeout).map_err(Error::Admission)?;
+    if request.inputs.len() > parameters.preparation.requests
+        || request.inputs.len() > request.options.max_transactions
+        || request.funding.len() > request.options.max_accounts
+    {
+        return Err(Error::Capacity);
+    }
+    let mut remaining = process.input_bytes;
+    let mut work = parameters.preparation.work_bytes;
+    let mut inputs = vec![];
+    for input in request.inputs {
+        let data = match input {
+            core::prepare::Input::Transaction(tx) => {
+                let tx = tx.view();
+                if tx.layers().len() > parameters.preparation.transaction.max_layers
+                    || tx.wire_size() > parameters.preparation.encoded_bytes
+                    || tx.wire_size() > remaining
+                {
+                    return Err(Error::Capacity);
+                }
+                for n in std::iter::once(tx.leaf().wire_size())
+                    .chain(tx.layers().iter().map(|l| l.wire_size()))
+                {
+                    work = work.checked_sub(n).ok_or(Error::Capacity)?;
+                }
+                job::Input::Transaction(tx.encode())
+            }
+            core::prepare::Input::CallRequest(v) => job::Input::Call(codec::encode(v, remaining)?),
+        };
+        let length = match &data {
+            job::Input::Transaction(v) | job::Input::Call(v) => v.len(),
+        };
+        remaining = remaining.checked_sub(length).ok_or(Error::Capacity)?;
+        inputs.push(data);
+    }
+    let mut execution = metadata::Execution::capture(parameters.execution);
+    if let Some(fate) = &mut execution.fate {
+        fate.control = ae_types::work::Control::combine(
+            fate.control.as_ref(),
+            request.options.control.as_ref(),
+        );
+        fate.environment = view.environment.clone();
+        fate.history = view.history.clone();
+        fate.auth_tx = None;
+    }
+    execution.aevm = view.aevm.clone();
+    let job = job::Job {
+        roots: ae_chain::repository::Roots::of(&view.trees),
+        context: view.context.clone(),
+        funding: request.funding,
+        inputs,
+        execution,
+        options: request.options,
+        preparation: parameters.preparation,
+        state: parameters.state.limits,
+        atoms: parameters.state.existing_name_status_atoms.cloned(),
+        overlays: parameters.overlays,
+        node_decode: parameters.node_decode,
+        rendering: parameters.rendering,
+        reporting_floor: parameters.reporting_floor.cloned(),
+        output_bytes: process.output_bytes,
+    };
+    let (bytes, controls) = codec::capture(&job, process.input_bytes)?;
+    let broker = Broker {
+        view,
+        controls,
+        node_bytes: process.frame_bytes.saturating_sub(1),
+    };
+    reservation
+        .submit(move |control| process::run(process, bytes, broker, control))
+        .map_err(Error::Admission)
+}
+pub fn submit_http<
+    A: NodeReader + Clone + Send + Sync + 'static,
+    C: NodeReader + Clone + Send + Sync + 'static,
+>(
+    client: &dry_run::Client,
+    process: process::Config,
+    view: Arc<View<Overlay<A>, Overlay<C>>>,
+    request: crate::http::dry_run::Request<'_>,
+    mut options: core::Options,
+    parameters: Parameters<'_>,
+    timeout: Timeout,
+) -> Result<Ticket<process::Completed<Broker<A, C>>>, Error> {
+    options.profile = match request.profile {
+        crate::http::dry_run::Profile::Public => core::Profile::Public,
+        crate::http::dry_run::Profile::Internal => core::Profile::Internal,
+    };
+    options.tx_events = request.tx_events;
+    submit(
+        client,
+        process,
+        view,
+        Request {
+            inputs: request.inputs,
+            funding: request
+                .accounts
+                .into_iter()
+                .map(|a| core::Funding {
+                    account: a.public_key,
+                    amount: a.amount,
+                })
+                .collect(),
+            options,
+        },
+        parameters,
+        timeout,
+    )
+}
+pub fn decode_reply(bytes: &[u8]) -> Result<Reply, EncodingError> {
+    codec::decode(bytes)
+}
+#[derive(Debug)]
+pub enum ServeError {
+    Transport(process::wire::Error),
+    Encoding(EncodingError),
+    Poisoned,
+}
+// This is used by the trusted worker executable, with its installed Guard.
+// Bootstrap arms the guard before parsing any job or allocating decoded values.
+pub fn serve<R: Read + Send + 'static, W: Write + Send + 'static>(
+    input: R,
+    output: W,
+    guard: &ae_worker_heap::Guard,
+) -> Result<(), ServeError> {
+    let mut session =
+        process::wire::Session::start(input, output, guard).map_err(ServeError::Transport)?;
+    let bytes = session
+        .initial(process::wire::MAX_FRAME)
+        .map_err(ServeError::Transport)?;
+    let session = Arc::new(Mutex::new(session));
+    let resolve = |id| {
+        let s = session.clone();
+        ae_types::work::Control::new(move || {
+            let Ok(mut s) = s.lock() else { return true };
+            !matches!(s.read(&[128, id]), Ok(v) if v == [0])
+        })
+    };
+    let job: job::Job = codec::decode_with(&bytes, Some(&resolve)).map_err(ServeError::Encoding)?;
+    let maximum = job.output_bytes;
+    if maximum > process::wire::MAX_FRAME {
+        return Err(ServeError::Encoding(EncodingError::Capacity));
+    }
+    drop(bytes);
+    let reply = job::execute(job, session.clone());
+    let bytes = codec::encode(&reply, maximum).map_err(ServeError::Encoding)?;
+    session
+        .lock()
+        .map_err(|_| ServeError::Poisoned)?
+        .finish(&bytes)
+        .map_err(ServeError::Transport)
+}

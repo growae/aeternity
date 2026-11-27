@@ -122,6 +122,9 @@ pub struct Otp26 {
     atoms: BTreeMap<Atom, u32>,
 }
 impl Otp26 {
+    pub fn components(&self) -> (WordSize, Mixing, &BTreeMap<Atom, u32>) {
+        (self.word_size, self.mixing, &self.atoms)
+    }
     pub fn new(
         word_size: WordSize,
         mixing: Mixing,

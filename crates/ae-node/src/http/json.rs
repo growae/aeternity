@@ -17,6 +17,10 @@ pub enum Error {
     Capacity,
 }
 impl Error {
+    pub fn response_parts(self) -> (u16, Vec<u8>) {
+        let response = self.response();
+        (response.status, response.body)
+    }
     pub(super) fn response(self) -> Response {
         match self {
             Self::Validation { parameter, info } => Response::json(

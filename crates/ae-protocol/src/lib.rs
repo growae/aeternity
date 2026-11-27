@@ -163,6 +163,9 @@ impl NetworkProfile {
     pub fn community_fork(&self) -> Option<signaling::Fork> {
         self.fork
     }
+    pub fn resolution(&self) -> Option<(u64, u32)> {
+        self.resolved
+    }
     // A resolution belongs to one height in one captured selected-chain view.
     // Repository insertion recomputes it from its own immutable snapshot.
     pub fn resolve(&self, height: u64, prior: signaling::Prior) -> Result<Self, ProfileError> {

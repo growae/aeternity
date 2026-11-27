@@ -53,12 +53,14 @@ impl<S: NodeReader> Broker for Store<S> {
 pub struct Reader<R, W> {
     session: Arc<Mutex<wire::Session<R, W>>>,
     limits: ae_codec::rlp::DecodeLimits,
+    namespace: u8,
 }
 impl<R, W> Clone for Reader<R, W> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
             limits: self.limits,
+            namespace: self.namespace,
         }
     }
 }
@@ -67,12 +69,21 @@ impl<R: Read, W: Write> Reader<R, W> {
         session: Arc<Mutex<wire::Session<R, W>>>,
         limits: ae_codec::rlp::DecodeLimits,
     ) -> Self {
-        Self { session, limits }
+        Self {
+            session,
+            limits,
+            namespace: 0,
+        }
+    }
+    pub fn with_namespace(mut self, namespace: u8) -> Self {
+        self.namespace = namespace;
+        self
     }
 }
 impl<R: Read, W: Write> NodeReader for Reader<R, W> {
     fn node(&self, hash: &Hash256) -> Result<Option<Vec<u8>>, TrieError> {
         let mut query = [0; 33];
+        query[0] = self.namespace;
         query[1..].copy_from_slice(&hash.0);
         let mut response = self
             .session
@@ -97,5 +108,12 @@ impl<R: Read, W: Write> NodeReader for Reader<R, W> {
     }
     fn decode_limits(&self) -> ae_codec::rlp::DecodeLimits {
         self.limits
+    }
+}
+impl<R, W> std::fmt::Debug for Reader<R, W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("namespace", &self.namespace)
+            .finish_non_exhaustive()
     }
 }
