@@ -488,6 +488,7 @@ fn configured_hyperchain_genesis_matches_original_contract_roots_and_reopens() {
         let execution = base.with_config(|c| {
             let f = c.fate.unwrap();
             let fate = ae_execution::contracts::fate::Config {
+                control: f.control.clone(),
                 order: &order,
                 history: f.history.clone(),
                 auth_tx: f.auth_tx.clone(),

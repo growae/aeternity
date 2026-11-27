@@ -170,6 +170,7 @@ fn with_context<T>(
     let order = otp_order::profile(&KEY["profile"]);
     let overrides = Overrides::default();
     let fate = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,

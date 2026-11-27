@@ -14,6 +14,7 @@ pub(super) fn verify_init(
     use super::super::Error;
     let value = match heap::decode_with_budget(&Type::Tuple(vec![Type::Word]), data, budget) {
         Ok(v) => v,
+        Err(heap::Error::Interrupted) => return Err(Error::Interrupted),
         Err(heap::Error::ResourceLimit) => return Err(Error::ResourceLimit),
         Err(_) => return Err(Error::Rejected("bad_init_function")),
     };
@@ -25,7 +26,13 @@ pub(super) fn verify_init(
     };
     let hash = Word::wrapping(hash);
     for f in &code.type_info {
-        budget.work(1).map_err(|_| Error::ResourceLimit)?;
+        budget.work(1).map_err(|e| {
+            if e == Stop::Interrupted {
+                Error::Interrupted
+            } else {
+                Error::ResourceLimit
+            }
+        })?;
         if f.hash == hash.0 {
             return if f.name == b"init" {
                 Ok(())
@@ -45,6 +52,7 @@ pub(super) fn check(
     let decode =
         |ty: &Type, data: &[u8], b: &mut Budget| match heap::decode_with_budget(ty, data, b) {
             Ok(v) => Ok(Some(v)),
+            Err(heap::Error::Interrupted) => Err(RuntimeFault::Stop(Stop::Interrupted)),
             Err(heap::Error::ResourceLimit) => Err(RuntimeFault::Stop(Stop::ResourceLimit)),
             Err(_) => Ok(None),
         };
@@ -93,7 +101,13 @@ pub(super) fn verify_auth(
 ) -> Result<(), super::super::Error> {
     use super::super::Error;
     for f in &code.type_info {
-        budget.work(1).map_err(|_| Error::ResourceLimit)?;
+        budget.work(1).map_err(|e| {
+            if e == Stop::Interrupted {
+                Error::Interrupted
+            } else {
+                Error::ResourceLimit
+            }
+        })?;
         if f.hash == hash {
             let decode = |b: &[u8], budget: &mut Budget| match heap::decode_with_budget(
                 &Type::TypeRep,
@@ -101,6 +115,7 @@ pub(super) fn verify_auth(
                 budget,
             ) {
                 Ok(Value::Type(t)) => Ok(t),
+                Err(heap::Error::Interrupted) => Err(Error::Interrupted),
                 Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
                 _ => Err(Error::Rejected("bad_function_hash")),
             };
@@ -132,6 +147,7 @@ pub(super) fn verify_auth_data(
                 Err(Error::Rejected("wrong_auth_function"))
             }
         }
+        Err(heap::Error::Interrupted) => Err(Error::Interrupted),
         Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
         _ => Err(Error::Rejected("bad_auth_data")),
     }
@@ -142,6 +158,7 @@ pub(super) fn auth_result(data: &[u8], b: &mut Budget) -> Result<bool, super::su
         Ok(Value::Integer(n)) if n == 0.into() => Ok(false),
         Ok(Value::Integer(n)) if n == 1.into() => Ok(true),
         Ok(Value::Integer(n)) => Err(Error::AuthenticationResultCase(n)),
+        Err(heap::Error::Interrupted) => Err(Error::Interrupted),
         Err(heap::Error::ResourceLimit) => Err(Error::ResourceLimit),
         _ => Ok(false),
     }

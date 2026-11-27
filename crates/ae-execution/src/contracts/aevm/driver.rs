@@ -159,6 +159,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     onchain: Option<&Trees<A, C>>,
 ) -> Result<Output<A, C>, Error<A, C>> {
     b.check_call_depth(1)?;
+    b.check()?;
     let (mut frame, mut step) = begin(
         tx,
         trees,
@@ -172,6 +173,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     let mut waiting: Vec<Waiting<A, C>> = Vec::new();
     let host = Host::new(config);
     loop {
+        b.check()?;
         match step {
             Step::Complete(completed) => {
                 if waiting.is_empty() && (supplied_store.is_some() || onchain.is_some()) {
@@ -196,6 +198,7 @@ fn drive<A: NodeWriter + Clone, C: NodeWriter + Clone>(
                 }
                 .map_err(transaction_fault)?;
                 let Some(parent) = waiting.pop() else {
+                    b.check()?;
                     *trees = committed;
                     return Ok(Output::Settled(receipt));
                 };

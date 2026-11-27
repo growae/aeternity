@@ -284,6 +284,7 @@ pub(crate) fn with_block_environment_difficulty<O: MapOrder, R>(
         e
     });
     let fate = config.fate.map(|f| contracts::fate::Config {
+        control: f.control.clone(),
         context: fate_context.as_ref().expect("FATE template"),
         order: f.order,
         overrides: f.overrides,
@@ -306,6 +307,7 @@ pub(crate) fn with_block_environment_difficulty<O: MapOrder, R>(
         a
     });
     let config = transactions::Config {
+        control: config.control,
         network: config.network,
         consensus: config.consensus,
         fate: fate.as_ref(),

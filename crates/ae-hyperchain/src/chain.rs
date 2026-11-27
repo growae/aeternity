@@ -389,6 +389,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
             return owned.with_config(|base| {
                 let original = base.fate.expect("Owned retains both VMs");
                 let vm = contracts::fate::Config {
+                    control: original.control.clone(),
                     context: original.context,
                     order: original.order,
                     overrides: original.overrides,
@@ -399,6 +400,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
                     diagnostic_profile: original.diagnostic_profile,
                 };
                 f(&transactions::Config {
+                    control: base.control,
                     network: &p.network,
                     consensus: base.consensus,
                     fate: Some(&vm),
@@ -415,6 +417,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
             });
         }
         let vm = contracts::fate::Config {
+            control: None,
             context: &p.context,
             order: &p.order,
             overrides: &p.overrides,
@@ -425,6 +428,7 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder, S: Source<A, C>>
             diagnostic_profile: p.diagnostic,
         };
         let execution = transactions::Config {
+            control: None,
             network: &p.network,
             consensus: match view.environment.consensus {
                 machine::program::remote::context::Consensus::Pow => ConsensusType::Pow,

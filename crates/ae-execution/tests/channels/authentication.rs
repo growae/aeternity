@@ -34,6 +34,7 @@ fn execute_limits<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone
     let order = otp_order::profile(&AUTH["profile"]);
     let overrides = Overrides::default();
     let f = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -45,6 +46,7 @@ fn execute_limits<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone
     };
     let a = aevm_config();
     let config = Config {
+        control: None,
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),

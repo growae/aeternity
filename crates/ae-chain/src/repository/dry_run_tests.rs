@@ -99,6 +99,7 @@ fn insert(
 }
 fn snapshot(db: &Memory, id: &Identity, config: ReadConfig) -> repo::execution::Snapshot<Memory> {
     let aevm = aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 99,
             key_hash: [99; 32],

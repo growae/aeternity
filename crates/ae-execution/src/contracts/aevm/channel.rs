@@ -18,7 +18,7 @@ pub(crate) fn run<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     limits: Limits,
 ) -> Result<Completion<A, C>, Error<A, C>> {
-    let mut b = Budget::new(limits);
+    let mut b = config.budget(limits);
     let init = matches!(tx.operation(), ContractOperation::Create { .. });
     let mut stored = contract.clone();
     if init {

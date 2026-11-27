@@ -12,6 +12,8 @@ use num_bigint::{BigInt, Sign};
 use serde_json::{Value as J, json};
 use std::sync::{Arc, LazyLock};
 
+#[path = "dry_run/interruption.rs"]
+mod interruption;
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
 
@@ -128,6 +130,7 @@ fn configured<R>(profile: &J, f: impl FnOnce(&transactions::Config<'_>) -> R) ->
     let order = otp_order::profile(profile);
     let overrides = Overrides::default();
     let fate = contracts::fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -322,6 +325,7 @@ fn compare_sequences(fixture: &J, count: usize, requests: bool) {
             };
             let base = Protocol::try_from(row["protocol"].as_u64().unwrap() as u32).unwrap();
             let options = dry::Options {
+                control: Some(ae_types::work::Control::new(|| false)),
                 profile: profile(row),
                 store_read_gas_metering: row["metering_enabled"].as_bool().unwrap(),
                 tx_events: row["events_enabled"].as_bool().unwrap(),

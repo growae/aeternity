@@ -27,6 +27,7 @@ use ae_vm_fate::{
 use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 pub struct Config<'a, O> {
+    pub control: Option<ae_types::work::Control>,
     pub context: &'a machine::Context,
     pub order: &'a O,
     pub overrides: &'a Overrides,
@@ -35,6 +36,27 @@ pub struct Config<'a, O> {
     pub auth_tx: Option<Arc<ae_tx::WireTransaction>>,
     pub metering_floor: Option<u32>,
     pub diagnostic_profile: ae_vm_fate::diagnostic::Profile,
+}
+impl<O> Config<'_, O> {
+    pub fn with_control(&self, control: Option<&ae_types::work::Control>) -> Config<'_, O> {
+        Config {
+            control: ae_types::work::Control::combine(self.control.as_ref(), control),
+            context: self.context,
+            order: self.order,
+            overrides: self.overrides,
+            environment: self.environment,
+            history: self.history.clone(),
+            auth_tx: self.auth_tx.clone(),
+            metering_floor: self.metering_floor,
+            diagnostic_profile: self.diagnostic_profile,
+        }
+    }
+    pub(super) fn check(&self) -> Result<(), Error> {
+        if let Some(control) = &self.control {
+            control.check().map_err(|_| Error::Interrupted)?;
+        }
+        Ok(())
+    }
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
@@ -369,6 +391,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<remote::Outcome<VmStore<C>, Host<A, C>>, Error> {
+    config.check()?;
     let mut machine_context = config.context.clone();
     if host.onchain.is_some() {
         machine_context.on_chain = false;
@@ -381,6 +404,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         contracts: &sources,
     })
     .setup_invocation(spec, env, host, limits)?;
+    config.check()?;
     let remote::Outcome::Continue {
         mut state,
         remaining_limits: mut limits,
@@ -389,6 +413,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         return Ok(out);
     };
     for _ in 0..maximum_steps {
+        config.check()?;
         match (Executor {
             context: &machine_context,
             order: config.order,
@@ -402,6 +427,7 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                     return Err(Error::Vm(machine::Error::NeedContract(key)));
                 }
                 let (store, remaining) = state.session.host.contract_store_source(key, limits)?;
+                config.check()?;
                 sources.insert(key, store);
                 limits = remaining;
             }
@@ -420,15 +446,21 @@ fn run<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                 state,
                 remaining_limits,
             }) => {
-                return Ok((Executor {
+                config.check()?;
+                let result = (Executor {
                     context: &machine_context,
                     order: config.order,
                     overrides: config.overrides,
                     contracts: &sources,
                 })
-                .finalize_remote_program(&state, remaining_limits)?);
+                .finalize_remote_program(&state, remaining_limits)?;
+                config.check()?;
+                return Ok(result);
             }
-            Ok(other) => return Ok(other),
+            Ok(other) => {
+                config.check()?;
+                return Ok(other);
+            }
         }
     }
     Err(Error::ResourceLimit)

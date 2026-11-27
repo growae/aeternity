@@ -88,6 +88,7 @@ fn state(row: &J) -> State {
 }
 fn config() -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],

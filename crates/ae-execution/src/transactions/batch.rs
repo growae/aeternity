@@ -110,6 +110,9 @@ pub fn apply<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     for (index, signed) in transactions.iter().enumerate() {
         let mut candidate = next.clone();
         let attempt = (|| {
+            config
+                .check()
+                .map_err(|e| Failure::Transaction(Box::new(e)))?;
             if options.signatures == Signatures::Verify {
                 // The block entry point always uses the outer network domain,
                 // regardless of any payer in the caller's environment.
@@ -150,6 +153,9 @@ pub fn apply<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
                 None
             };
             receipt.transaction_hash = Some(signed.hash());
+            config
+                .check()
+                .map_err(|e| Failure::Transaction(Box::new(e)))?;
             Ok((receipt, used))
         })();
         match attempt {
@@ -191,6 +197,10 @@ pub fn apply<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
             )),
         }
     }
+    config.check().map_err(|e| Error {
+        index: transactions.len().saturating_sub(1),
+        failure: Failure::Transaction(Box::new(e)),
+    })?;
     *trees = next;
     Ok(result)
 }

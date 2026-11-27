@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod work;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeError {
     InvalidSize { expected: usize, actual: usize },

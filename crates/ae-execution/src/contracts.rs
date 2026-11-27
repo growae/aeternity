@@ -32,6 +32,7 @@ pub mod fate;
 
 #[derive(Debug)]
 pub enum Error {
+    Interrupted,
     Primitive(crate::Error),
     State(ae_state::contracts::Error),
     ChannelState(ae_state::channels::Error),
@@ -236,6 +237,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<Receipt, Error> {
+    vm.check()?;
     let prepared = prepare_call(tx, trees, context)?;
     let ContractOperation::Call { call_data, .. } = tx.operation() else {
         unreachable!()
@@ -259,6 +261,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>(
         context,
         completed,
         prepared.events,
+        vm.control.as_ref(),
     )
 }
 fn prepare_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
@@ -394,8 +397,12 @@ fn settle<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     context: &Context,
     completed: Completion<A, C>,
     events: Vec<Event>,
+    control: Option<&ae_types::work::Control>,
 ) -> Result<Receipt, Error> {
     let (receipt, next) = settle_detached(tx, rollback, context, completed, events)?;
+    if let Some(control) = control {
+        control.check().map_err(|_| Error::Interrupted)?;
+    }
     *trees = next;
     Ok(receipt)
 }

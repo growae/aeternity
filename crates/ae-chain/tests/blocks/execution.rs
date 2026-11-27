@@ -33,6 +33,7 @@ fn configured<T>(row: &J, f: impl FnOnce(&mut transactions::Config<'_>) -> T) ->
     let order = otp_order::profile(&DATA["profile"]);
     let overrides = Overrides::default();
     let fate = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -619,6 +620,7 @@ fn environment() -> machine::program::remote::context::Environment {
 }
 fn aevm() -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],

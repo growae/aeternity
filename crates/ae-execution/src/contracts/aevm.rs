@@ -53,11 +53,17 @@ pub struct Environment {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub control: Option<ae_types::work::Control>,
     pub environment: Environment,
     pub network_id: Arc<[u8]>,
     pub event_context: aevm_chain::EventContext,
     pub float_profile: FloatProfile,
     pub store_order: OrderProfile,
+}
+impl Config {
+    fn budget(&self, limits: Limits) -> Budget {
+        Budget::controlled(limits, self.control.clone())
+    }
 }
 pub struct Host<'a, A = MemoryStore, C = MemoryStore> {
     pub config: &'a Config,
@@ -82,6 +88,7 @@ fn chain_fault<T>(
 }
 fn transaction_fault(e: super::Error) -> RuntimeFault<HostError> {
     match e {
+        super::Error::Interrupted => RuntimeFault::Stop(Stop::Interrupted),
         super::Error::ResourceLimit => RuntimeFault::Stop(Stop::ResourceLimit),
         e => RuntimeFault::Host(HostError::Transaction(e)),
     }
@@ -135,7 +142,7 @@ pub fn process_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     if !matches!(tx.operation(), ContractOperation::Call { .. }) {
         return Err(transaction_fault(super::Error::UnsupportedOperation).into());
     }
-    process_budgeted(tx, trees, context, config, &mut Budget::new(limits))
+    process_budgeted(tx, trees, context, config, &mut config.budget(limits))
 }
 #[allow(clippy::too_many_arguments)]
 pub fn execute_signed_call<A: NodeWriter + Clone, C: NodeWriter + Clone>(
@@ -396,7 +403,7 @@ pub(crate) fn authenticate<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     limits: Limits,
     relevant: impl FnOnce() -> Result<(), super::Error>,
 ) -> Result<Receipt, Error<A, C>> {
-    let mut b = Budget::new(limits);
+    let mut b = config.budget(limits);
     let p = super::authentication::prepare(tx, trees, context, relevant, |hash| {
         abi::verify_auth_data(&tx.auth_data, hash, &mut b)
     })
@@ -412,11 +419,16 @@ pub(crate) fn authenticate<A: NodeWriter + Clone, C: NodeWriter + Clone>(
 }
 
 pub(crate) fn verify_payload_auth_data(
+    control: Option<&ae_types::work::Control>,
     data: &[u8],
     hash: &[u8],
     limits: Limits,
 ) -> Result<(), super::Error> {
-    abi::verify_auth_data(data, hash, &mut Budget::new(limits))
+    abi::verify_auth_data(
+        data,
+        hash,
+        &mut Budget::controlled(limits, control.cloned()),
+    )
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn detached_auth<A: NodeWriter + Clone, C: NodeWriter + Clone>(
@@ -428,7 +440,7 @@ pub(crate) fn detached_auth<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     config: &Config,
     limits: Limits,
 ) -> Result<Call, Error<A, C>> {
-    let mut b = Budget::new(limits);
+    let mut b = config.budget(limits);
     let store = trees
         .contracts
         .read_store(store_key)
@@ -459,6 +471,10 @@ pub(crate) fn detached_auth<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         &mut b,
     )
 }
-pub(crate) fn payload_auth_result(data: &[u8], limits: Limits) -> Result<bool, super::Error> {
-    abi::auth_result(data, &mut Budget::new(limits))
+pub(crate) fn payload_auth_result(
+    control: Option<&ae_types::work::Control>,
+    data: &[u8],
+    limits: Limits,
+) -> Result<bool, super::Error> {
+    abi::auth_result(data, &mut Budget::controlled(limits, control.cloned()))
 }

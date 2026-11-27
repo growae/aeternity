@@ -159,15 +159,18 @@ impl<A: NodeWriter + Clone, C: NodeWriter + Clone> outer_call::Host for Host<'_,
         use crate::chain_history::{self, Error as E};
         let height = u64::try_from(height.unsigned()).map_err(|_| Stop::InvalidInitialState)?;
         let environment = &self.config.environment;
-        chain_history::select(&environment.history, height, environment.key_hash, || {
-            budget.work(1).map_err(|_| E::ResourceLimit)
-        })
-        .map(|selection| Word(selection.branch))
-        .map_err(|e| match e {
-            E::ResourceLimit => RuntimeFault::Stop(Stop::ResourceLimit),
-            E::NoCommonAncestor => RuntimeFault::Native(Native::BlockHashNoCommonAncestor),
-            e => RuntimeFault::Host(HostError::History(e)),
-        })
+        let selection =
+            chain_history::select(&environment.history, height, environment.key_hash, || {
+                budget.work(1).map_err(|_| E::ResourceLimit)
+            });
+        budget.check()?;
+        selection
+            .map(|selection| Word(selection.branch))
+            .map_err(|e| match e {
+                E::ResourceLimit => RuntimeFault::Stop(Stop::ResourceLimit),
+                E::NoCommonAncestor => RuntimeFault::Native(Native::BlockHashNoCommonAncestor),
+                e => RuntimeFault::Host(HostError::History(e)),
+            })
     }
     fn call(
         &self,

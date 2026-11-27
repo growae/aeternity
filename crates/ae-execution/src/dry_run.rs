@@ -73,6 +73,7 @@ pub struct Funding {
 }
 #[derive(Debug, Clone)]
 pub struct Options {
+    pub control: Option<ae_types::work::Control>,
     pub profile: Profile,
     pub store_read_gas_metering: bool,
     pub tx_events: bool,
@@ -86,6 +87,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             profile: Profile::Unspecified,
+            control: None,
             store_read_gas_metering: true,
             tx_events: false,
             gas_limit: None,
@@ -116,6 +118,7 @@ pub struct Output<A, C> {
 }
 #[derive(Debug)]
 pub enum Error<A, C> {
+    Interrupted,
     ResourceLimit,
     Funding(AccountError),
     NegativeBalance {
@@ -150,6 +153,7 @@ pub fn setup<A: NodeReader + Clone, C: NodeReader + Clone>(
     funding: &[Funding],
     options: &Options,
 ) -> Result<Setup<A, C>, Error<A, C>> {
+    check(options.control.as_ref())?;
     if funding.len() > options.max_accounts {
         return Err(Error::ResourceLimit);
     }
@@ -159,6 +163,7 @@ pub fn setup<A: NodeReader + Clone, C: NodeReader + Clone>(
     };
     let mut bytes = options.max_funding_bytes;
     for (index, funds) in std::iter::once(&magic).chain(funding).enumerate() {
+        check(options.control.as_ref())?;
         let mut account = trees
             .accounts
             .lookup(funds.account)
@@ -198,12 +203,19 @@ pub fn setup<A: NodeReader + Clone, C: NodeReader + Clone>(
     let mut context = context.clone();
     context.protocol = protocol;
     context.dry_run = true;
+    check(options.control.as_ref())?;
     Ok(Setup {
         trees,
         context,
         floor,
         options: options.clone(),
     })
+}
+fn check<A, C>(control: Option<&ae_types::work::Control>) -> Result<(), Error<A, C>> {
+    if let Some(control) = control {
+        control.check().map_err(|_| Error::Interrupted)?;
+    }
+    Ok(())
 }
 pub fn run<A: NodeReader + Clone, C: NodeReader + Clone, O: MapOrder>(
     trees: Trees<Overlay<A>, Overlay<C>>,
@@ -238,7 +250,10 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Setup<A, C> {
         if inputs.len() > self.options.max_transactions {
             return Err(Error::ResourceLimit);
         }
-        let owned = prepare::all(inputs, limits, state).map_err(Error::Preparation)?;
+        let control =
+            ae_types::work::Control::combine(self.options.control.as_ref(), config.control);
+        let owned = prepare::all_controlled(inputs, limits, state, control.as_ref())
+            .map_err(Error::Preparation)?;
         let prepared: Vec<_> = owned.iter().map(prepare::Owned::as_prepared).collect();
         self.prepared(config, &prepared)
     }
@@ -253,10 +268,13 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Setup<A, C> {
             floor,
             options,
         } = self;
+        let control = ae_types::work::Control::combine(options.control.as_ref(), config.control);
+        check(control.as_ref())?;
         if prepared.len() > options.max_transactions {
             return Err(Error::ResourceLimit);
         }
         let fate = config.fate.map(|base| contracts::fate::Config {
+            control: base.control.clone(),
             context: base.context,
             order: base.order,
             overrides: base.overrides,
@@ -267,6 +285,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Setup<A, C> {
             diagnostic_profile: base.diagnostic_profile,
         });
         let config = transactions::Config {
+            control: control.as_ref(),
             fate: fate.as_ref(),
             ..*config
         };
@@ -280,6 +299,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Setup<A, C> {
         let mut results = Vec::with_capacity(prepared.len());
         let mut events = vec![];
         for (index, request) in prepared.iter().enumerate() {
+            check(control.as_ref())?;
             request.prepare_environment(&mut context, &mut events);
             let mut candidate = trees.clone();
             let result = match batch::apply(
@@ -322,6 +342,7 @@ impl<A: NodeReader + Clone, C: NodeReader + Clone> Setup<A, C> {
                 result,
             });
         }
+        check(control.as_ref())?;
         Ok(Output {
             results,
             events,

@@ -50,6 +50,7 @@ fn contract_creations_match_original_transaction_processing() {
         let context = tx_context(row);
         let vm = vm_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -130,6 +131,7 @@ fn creation_backend_and_work_failures_publish_no_partial_nonce_deposit_or_contra
         let vm = vm_context(row);
         let context = tx_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -245,6 +247,7 @@ fn signed_creation_enforces_network_and_sponsor_domains_and_uses_owner_address()
         base.accounts.enter(&a).unwrap();
         let vm = vm_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -345,6 +348,7 @@ fn signed_creation_enforces_network_and_sponsor_domains_and_uses_owner_address()
         let vm = vm_context(row);
         let context = tx_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,

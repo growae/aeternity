@@ -53,7 +53,9 @@ pub fn format<H: ChainHost>(
     }
 }
 pub(crate) fn heap_fault<E>(e: heap::Error) -> Fault<E> {
-    if e == heap::Error::ResourceLimit {
+    if e == heap::Error::Interrupted {
+        Stop::Interrupted.into()
+    } else if e == heap::Error::ResourceLimit {
         Stop::ResourceLimit.into()
     } else {
         Fault::Native(Native::ChainException {

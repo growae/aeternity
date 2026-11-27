@@ -26,6 +26,7 @@ pub use signatures::{
 };
 
 pub struct Config<'a, O = Otp26> {
+    pub control: Option<&'a ae_types::work::Control>,
     pub name_claim_bid_timeout: Option<&'a Unsigned>,
     pub network: &'a NetworkProfile,
     pub consensus: ConsensusType,
@@ -42,6 +43,7 @@ pub struct Config<'a, O = Otp26> {
 impl<'a> Config<'a> {
     pub fn primitives(network: &'a NetworkProfile) -> Self {
         Self {
+            control: None,
             name_claim_bid_timeout: None,
             network,
             consensus: ConsensusType::Pow,
@@ -57,8 +59,17 @@ impl<'a> Config<'a> {
         }
     }
 }
+impl<O> Config<'_, O> {
+    pub fn check<A, C>(&self) -> Result<(), Error<A, C>> {
+        if let Some(control) = self.control {
+            control.check().map_err(|_| Error::Interrupted)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Debug)]
 pub enum Error<A = MemoryStore, C = MemoryStore> {
+    Interrupted,
     Primitive(crate::Error),
     Contract(Box<contracts::Error>),
     Channel(Box<crate::channels::Error>),
@@ -127,6 +138,7 @@ pub fn execute_signed<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
+    config.check()?;
     verify_with_channel_state(
         signed.transaction().view(),
         signed.signatures(),
@@ -149,6 +161,7 @@ pub fn execute_signed_with_context<A: NodeWriter + Clone, C: NodeWriter + Clone,
     context: &Context,
     config: &Config<'_, O>,
 ) -> Result<Receipt, Error<A, C>> {
+    config.check()?;
     verify_with_trees(
         signed.transaction().view(),
         signed.signatures(),
@@ -183,6 +196,18 @@ pub fn process_with_signed_source<A: NodeWriter + Clone, C: NodeWriter + Clone, 
 ) -> Result<Receipt, Error<A, C>> {
     // Bind trusted execution configuration before wrappers and VM invocation;
     // an incoming transaction context cannot replace this chain setting.
+    config.check()?;
+    let fate = config.fate.map(|f| f.with_control(config.control));
+    let aevm = config.aevm.map(|base| {
+        let mut vm = base.clone();
+        vm.control = ae_types::work::Control::combine(base.control.as_ref(), config.control);
+        vm
+    });
+    let config = &Config {
+        fate: fate.as_ref(),
+        aevm: aevm.as_ref(),
+        ..*config
+    };
     let mut context = context.clone();
     context.name_claim_bid_timeout = config.name_claim_bid_timeout.cloned();
     wrappers::process(tx, trees, &context, config, source)

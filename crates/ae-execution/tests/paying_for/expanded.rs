@@ -90,6 +90,7 @@ fn environment() -> machine::program::remote::context::Environment {
 }
 fn aevm() -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],
@@ -153,6 +154,7 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     let order = otp_order::profile(&DATA["profile"]);
     let overrides = Overrides::default();
     let f = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -164,6 +166,7 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     };
     let a = aevm();
     let config = Config {
+        control: None,
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),

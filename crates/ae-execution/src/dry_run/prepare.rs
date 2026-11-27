@@ -69,6 +69,7 @@ impl Default for Limits {
 }
 #[derive(Debug)]
 pub enum Error {
+    Interrupted,
     BadCallRequest,
     ResourceLimit,
     Operational(ae_tx::Error),
@@ -79,12 +80,20 @@ pub struct Failure {
     pub error: Error,
 }
 struct Budget {
+    control: Option<ae_types::work::Control>,
     remaining: usize,
     limits: Limits,
 }
 impl Budget {
     fn charge(&mut self, n: usize) -> Result<(), Error> {
+        self.check()?;
         self.remaining = self.remaining.checked_sub(n).ok_or(Error::ResourceLimit)?;
+        Ok(())
+    }
+    fn check(&self) -> Result<(), Error> {
+        if let Some(control) = &self.control {
+            control.check().map_err(|_| Error::Interrupted)?;
+        }
         Ok(())
     }
     fn payload(&mut self, n: usize) -> Result<(), Error> {
@@ -232,6 +241,20 @@ pub fn all(
     limits: Limits,
     state: ae_state::transport::Config<'_>,
 ) -> Result<Vec<Owned>, Failure> {
+    all_controlled(inputs, limits, state, None)
+}
+pub fn all_controlled(
+    inputs: Vec<Input<'_>>,
+    limits: Limits,
+    state: ae_state::transport::Config<'_>,
+    control: Option<&ae_types::work::Control>,
+) -> Result<Vec<Owned>, Failure> {
+    if let Some(control) = control {
+        control.check().map_err(|_| Failure {
+            index: None,
+            error: Error::Interrupted,
+        })?;
+    }
     if inputs.len() > limits.requests {
         return Err(Failure {
             index: None,
@@ -239,6 +262,7 @@ pub fn all(
         });
     }
     let mut budget = Budget {
+        control: control.cloned(),
         remaining: limits.work_bytes,
         limits,
     };
@@ -255,6 +279,10 @@ pub fn all(
         .map_err(|error| Failure { index: None, error })?;
     let mut prepared = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.into_iter().enumerate() {
+        budget.check().map_err(|error| Failure {
+            index: Some(index),
+            error,
+        })?;
         let result = match input {
             Input::Transaction(tx) => budget.payload(tx.view().wire_size()).map(|()| dummy(*tx)),
             Input::CallRequest(value) => call(value, &mut budget, state),
@@ -265,5 +293,8 @@ pub fn all(
         })?;
         prepared.push(result);
     }
+    budget
+        .check()
+        .map_err(|error| Failure { index: None, error })?;
     Ok(prepared)
 }

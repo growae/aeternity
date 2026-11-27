@@ -53,6 +53,7 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     limits: Limits,
     maximum_steps: usize,
 ) -> Result<Receipt, Error> {
+    vm.check()?;
     let (prepared, code) = prepare(
         tx,
         trees,
@@ -151,7 +152,15 @@ pub(super) fn run_prepared<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapO
         remaining,
         maximum_steps,
     )?;
-    settle(tx, trees, rollback, context, completed, events)
+    settle(
+        tx,
+        trees,
+        rollback,
+        context,
+        completed,
+        events,
+        vm.control.as_ref(),
+    )
 }
 
 // Creation admission/accounting is shared; each VM supplies its init selector.

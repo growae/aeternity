@@ -330,6 +330,7 @@ impl Bound {
             key_hash: [0; 32],
         };
         let fate = fate::Config {
+            control: None,
             context: &context,
             order: &order,
             overrides: &auxiliary.overrides,
@@ -340,6 +341,7 @@ impl Bound {
             diagnostic_profile: specification.diagnostic,
         };
         let aevm = aevm::Config {
+            control: None,
             environment: aevm::Environment {
                 genesis_height: 0,
                 key_hash: [0; 32],
@@ -356,6 +358,7 @@ impl Bound {
             store_order: specification.store,
         };
         let execution = Owned::capture(&transactions::Config {
+            control: None,
             network,
             consensus,
             fate: Some(&fate),

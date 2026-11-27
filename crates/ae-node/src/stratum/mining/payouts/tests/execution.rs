@@ -93,6 +93,7 @@ pub(super) fn corpus_limits() -> Limits {
 }
 fn vm_config(network: &[u8]) -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],

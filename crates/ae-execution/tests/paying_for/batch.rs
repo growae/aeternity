@@ -11,6 +11,7 @@ fn configured<T>(row: &J, f: impl FnOnce(&Context, &mut Config<'_>) -> T) -> T {
     let order = otp_order::profile(&BATCH["profile"]);
     let overrides = Overrides::default();
     let fate = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,

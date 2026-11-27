@@ -292,6 +292,7 @@ fn with_execution<T>(
     f: impl FnOnce(&transactions::Config<'_, Otp26>) -> T,
 ) -> T {
     let vm = contracts::fate::Config {
+        control: None,
         context: &p.context,
         order: &p.order,
         overrides: &p.overrides,

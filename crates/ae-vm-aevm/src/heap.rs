@@ -35,6 +35,7 @@ pub enum Value {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Interrupted,
     BinaryTooShort,
     Bounds,
     CircularReferences,
@@ -92,7 +93,13 @@ impl<'a> Budget<'a> {
     }
     fn node(&mut self, depth: usize) -> Result<(), Error> {
         if let Some(b) = &mut self.execution {
-            b.work(1).map_err(|_| Error::ResourceLimit)?;
+            b.work(1).map_err(|e| {
+                if e == crate::execution::Stop::Interrupted {
+                    Error::Interrupted
+                } else {
+                    Error::ResourceLimit
+                }
+            })?;
         }
         self.nodes = self.nodes.checked_add(1).ok_or(Error::ResourceLimit)?;
         if depth > self.limits.max_depth || self.nodes > self.limits.max_nodes {
@@ -102,7 +109,13 @@ impl<'a> Budget<'a> {
     }
     fn bytes(&mut self, n: usize) -> Result<(), Error> {
         if let Some(b) = &mut self.execution {
-            b.bytes(n).map_err(|_| Error::ResourceLimit)?;
+            b.bytes(n).map_err(|e| {
+                if e == crate::execution::Stop::Interrupted {
+                    Error::Interrupted
+                } else {
+                    Error::ResourceLimit
+                }
+            })?;
         }
         self.bytes = self.bytes.checked_add(n).ok_or(Error::ResourceLimit)?;
         if self.bytes > self.limits.max_bytes {

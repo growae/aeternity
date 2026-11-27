@@ -25,7 +25,8 @@ pub(crate) fn verify_data<A, C, O>(
     config: &Config<'_, O>,
 ) -> Result<(), TxError<A, C>> {
     if meta.abi_version == 1.into() {
-        aevm::verify_payload_auth_data(&meta.auth_data, hash, config.aevm_limits).map_err(error)
+        aevm::verify_payload_auth_data(config.control, &meta.auth_data, hash, config.aevm_limits)
+            .map_err(error)
     } else if meta.abi_version == 3.into() {
         let hash = hash
             .try_into()
@@ -66,6 +67,7 @@ pub(crate) fn verify_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOr
             let mut environment = vm.environment.clone();
             environment.auth_tx_hash = context.ga_transaction_hash.map(|h| h.0.to_vec());
             let vm = fate::Config {
+                control: vm.control.clone(),
                 context: vm.context,
                 order: vm.order,
                 overrides: vm.overrides,
@@ -118,7 +120,8 @@ pub(crate) fn verify_call<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOr
         return Err(reject("signature_verification_failed_contract_error"));
     }
     let authenticated = match contract.version.abi {
-        1 => aevm::payload_auth_result(&call.return_value, config.aevm_limits).map_err(error)?,
+        1 => aevm::payload_auth_result(config.control, &call.return_value, config.aevm_limits)
+            .map_err(error)?,
         3 => match ae_vm_fate::encoding::decode(&call.return_value, config.fate_limits) {
             Ok(ae_vm_fate::value::Value::Boolean(b)) => b,
             Err(ae_vm_fate::Error::ResourceLimit) => return Err(error(Error::ResourceLimit)),

@@ -395,6 +395,7 @@ pub fn initialize<O: MapOrder>(
     environment.consensus = Consensus::Pos;
     environment.key_hash = hash.0;
     let fate = ae_execution::contracts::fate::Config {
+        control: original.control.clone(),
         context: &context,
         order: original.order,
         overrides: original.overrides,

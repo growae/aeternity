@@ -196,6 +196,7 @@ pub enum Outcome {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
+    Interrupted,
     ResourceLimit,
     InvalidInitialState,
     UnimplementedInstruction(u8),
@@ -221,6 +222,7 @@ impl Default for Limits {
     }
 }
 pub struct Budget {
+    control: Option<ae_types::work::Control>,
     work: usize,
     bytes: usize,
     words: usize,
@@ -228,6 +230,12 @@ pub struct Budget {
     active_calls: usize,
 }
 impl Budget {
+    pub fn check(&self) -> Result<(), Stop> {
+        if let Some(control) = &self.control {
+            control.check().map_err(|_| Stop::Interrupted)?;
+        }
+        Ok(())
+    }
     pub fn remaining(&self) -> Limits {
         Limits {
             max_work: self.work,
@@ -237,7 +245,11 @@ impl Budget {
         }
     }
     pub fn new(limits: Limits) -> Self {
+        Self::controlled(limits, None)
+    }
+    pub fn controlled(limits: Limits, control: Option<ae_types::work::Control>) -> Self {
         Self {
+            control,
             work: limits.max_work,
             bytes: limits.max_bytes,
             words: limits.max_memory_words,
@@ -246,10 +258,12 @@ impl Budget {
         }
     }
     pub fn work(&mut self, n: usize) -> Result<(), Stop> {
+        self.check()?;
         self.work = self.work.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
     }
     pub fn check_call_depth(&self, additional: usize) -> Result<(), Stop> {
+        self.check()?;
         if self
             .active_calls
             .checked_add(additional)
@@ -261,6 +275,7 @@ impl Budget {
         Ok(())
     }
     pub(crate) fn enter_call(&mut self) -> Result<(), Stop> {
+        self.check()?;
         if self.active_calls >= self.depth {
             return Err(Stop::ResourceLimit);
         }
@@ -276,6 +291,7 @@ impl Budget {
         address: &BigUint,
         size: usize,
     ) -> Result<(), Stop> {
+        self.check()?;
         if size == 0 {
             return Ok(());
         }
@@ -302,6 +318,7 @@ impl Budget {
         self.bytes(count.checked_mul(bytes).ok_or(Stop::ResourceLimit)?)
     }
     pub fn bytes(&mut self, n: usize) -> Result<(), Stop> {
+        self.check()?;
         self.bytes = self.bytes.checked_sub(n).ok_or(Stop::ResourceLimit)?;
         Ok(())
     }

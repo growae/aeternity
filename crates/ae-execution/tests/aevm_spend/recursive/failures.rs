@@ -19,6 +19,53 @@ fn row(section: &str, case: &str) -> &'static J {
         .unwrap()
 }
 #[test]
+fn interrupted_aevm_nested_calls_and_rollbacks_never_publish_partial_roots() {
+    use std::sync::atomic::AtomicUsize;
+    for case in [
+        "nested_store",
+        "nested_spend",
+        "parent_revert",
+        "parent_error",
+    ] {
+        let row = row("transactions", case);
+        let initial = state(row);
+        let tx = ContractTransaction::decode(&bytes(&row["transaction"])).unwrap();
+        let context = transaction_context(row);
+        let before = initial.trees.roots();
+        let run = |limit| {
+            let count = Arc::new(AtomicUsize::new(0));
+            let c = count.clone();
+            let mut cfg = expanded_config();
+            cfg.control = Some(ae_types::work::Control::new(move || {
+                c.fetch_add(1, Relaxed) >= limit
+            }));
+            let mut t = initial.trees.clone();
+            let result = aevm::process_call(&tx, &mut t, &context, &cfg, Limits::default());
+            (result, t, count.load(Relaxed))
+        };
+        let (result, expected, total) = run(usize::MAX);
+        let expected_receipt = result.unwrap();
+        assert!(total > 32);
+        for limit in [0, 1, 2, 3, 8, 32, total / 2, total - 1] {
+            let (result, t, _) = run(limit);
+            assert!(
+                matches!(
+                    result,
+                    Err(outer_call::Fault::Runtime(Fault::Stop(Stop::Interrupted)))
+                ),
+                "{case} checkpoint {limit}: {result:?}"
+            );
+            assert_eq!(t.roots(), before);
+        }
+        let (result, retry, _) = run(usize::MAX);
+        assert_eq!(retry.roots(), expected.roots());
+        assert_eq!(
+            result.unwrap().call.serialize().unwrap(),
+            expected_receipt.call.serialize().unwrap()
+        );
+    }
+}
+#[test]
 fn real_aevm_recursive_resource_stops_preserve_inputs_and_allow_retry() {
     let cfg = expanded_config();
     for case in ["two_calls", "nested_spend", "parent_revert"] {

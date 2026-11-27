@@ -78,6 +78,7 @@ pub(crate) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     maximum_steps: usize,
     relevant: impl FnOnce() -> Result<(), Error>,
 ) -> Result<Receipt, Error> {
+    vm.check()?;
     let p = prepare(tx, trees, context, relevant, |hash| {
         let hash = hash
             .try_into()
@@ -116,6 +117,7 @@ pub(crate) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
                 _ => Ok(false),
             },
         )?;
+    vm.check()?;
     *trees = next;
     Ok(r)
 }

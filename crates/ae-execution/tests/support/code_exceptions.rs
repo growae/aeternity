@@ -63,6 +63,7 @@ fn check_case(
     let vm = vm_context(row);
     let overrides = Overrides::default();
     let config = Config {
+        control: None,
         context: &vm,
         order,
         overrides: &overrides,

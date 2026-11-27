@@ -14,6 +14,61 @@ fn config() -> Config {
         bytes: 8,
     }
 }
+#[tokio::test]
+async fn execution_budget_observes_timeout_drop_and_shutdown_while_retaining_capacity() {
+    for mode in 0..3 {
+        let (client, owner) = create(config()).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let reader = Guard(drops.clone());
+        let (started, entered) = oneshot::channel();
+        let (release, wait) = mpsc::channel();
+        let (observed, result) = oneshot::channel();
+        let timeout = if mode == 0 {
+            Timeout::After(Duration::from_millis(100))
+        } else {
+            Timeout::Unbounded
+        };
+        let ticket = client
+            .submit(8, timeout, move |control| {
+                let _reader = reader;
+                let execution = control.execution();
+                let mut budget = ae_vm_aevm::execution::Budget::controlled(
+                    Default::default(),
+                    Some(execution.clone()),
+                );
+                budget.work(1).unwrap();
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                let stopped = budget.work(1);
+                assert_eq!(execution.check(), Err(ae_types::work::Interrupted));
+                observed.send(stopped).unwrap();
+            })
+            .unwrap();
+        within(entered).await.unwrap();
+        let mut ticket = Some(ticket);
+        match mode {
+            0 => assert_eq!(
+                within(ticket.take().unwrap().wait()).await,
+                Err(Error::Timeout)
+            ),
+            1 => drop(ticket.take()),
+            _ => owner.stop(),
+        }
+        assert_eq!(client.available(), (0, 0));
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        release.send(()).unwrap();
+        assert_eq!(
+            within(result).await.unwrap(),
+            Err(ae_vm_aevm::execution::Stop::Interrupted)
+        );
+        if let Some(ticket) = ticket {
+            assert_eq!(within(ticket.wait()).await, Err(Error::Stopped));
+        }
+        owner.shutdown().await;
+        assert_eq!(client.available(), (1, 8));
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
+}
 struct Guard(Arc<AtomicUsize>);
 impl Drop for Guard {
     fn drop(&mut self) {

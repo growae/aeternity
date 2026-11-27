@@ -517,6 +517,7 @@ fn context_binding_history_and_write_limits_preserve_inputs_and_allow_retry() {
     let (memory, id) = prepare(row, true);
     let profile = genesis::reader(state(row)).profile;
     let template = aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 99,
             key_hash: [99; 32],

@@ -132,6 +132,7 @@ pub(super) fn with_history<O: MapOrder, R>(
     f: impl FnOnce(&transactions::Config<'_, O>) -> R,
 ) -> R {
     let fate = config.fate.map(|old| contracts::fate::Config {
+        control: old.control.clone(),
         context: old.context,
         order: old.order,
         overrides: old.overrides,
@@ -147,6 +148,7 @@ pub(super) fn with_history<O: MapOrder, R>(
         a
     });
     let bound = transactions::Config {
+        control: config.control,
         network,
         consensus: config.consensus,
         fate: fate.as_ref(),

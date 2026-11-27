@@ -190,6 +190,7 @@ fn contract_calls_match_original_transaction_processing() {
         let context = tx_context(row);
         let vm = vm_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -254,6 +255,7 @@ fn contract_call_operational_failures_preserve_input_and_allow_retry() {
         let context = tx_context(row);
         let vm = vm_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -368,6 +370,7 @@ fn signed_contract_calls_enforce_domains_before_state_changes() {
         base.accounts.enter(&account).unwrap();
         let vm = vm_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,
@@ -487,6 +490,7 @@ fn signed_contract_calls_enforce_domains_before_state_changes() {
         let vm = vm_context(row);
         let context = tx_context(row);
         let config = Config {
+            control: None,
             diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
             context: &vm,
             order: &order,

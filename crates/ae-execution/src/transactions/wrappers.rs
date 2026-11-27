@@ -254,6 +254,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
     let mut current = tx.view();
     let mut stack = Vec::new();
     let mut result = loop {
+        config.check()?;
         let Some(layer) = current.layer() else {
             break process_leaf(current.leaf(), &mut next, &env.context, config, source);
         };
@@ -308,6 +309,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         current = current.inner().expect("wrapper inner");
     };
     while let Some(frame) = stack.pop() {
+        config.check()?;
         result = match frame {
             Frame::Payer { gas, events } => result.and_then(|mut r| {
                 r.gas = unsigned(big(&r.gas) + gas)?;
@@ -318,6 +320,7 @@ pub(super) fn process<A: NodeWriter + Clone, C: NodeWriter + Clone, O: MapOrder>
         };
     }
     let result = result?;
+    config.check()?;
     *trees = next;
     Ok(result)
 }

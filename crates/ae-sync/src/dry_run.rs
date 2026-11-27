@@ -82,6 +82,10 @@ pub struct Control {
     deadline: Option<Instant>,
 }
 impl Control {
+    pub fn execution(&self) -> ae_types::work::Control {
+        let source = self.clone();
+        ae_types::work::Control::new(move || source.check().is_err())
+    }
     pub fn check(&self) -> Result<(), Error> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::Stopped);

@@ -9,12 +9,32 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     aevm_limits: ae_vm_aevm::execution::Limits,
     fate_limits: ae_vm_fate::Limits,
 ) -> Result<Receipt, Error<A, C>> {
+    execute_controlled(
+        row,
+        t,
+        signature_limits,
+        maximum_fate_steps,
+        aevm_limits,
+        fate_limits,
+        None,
+    )
+}
+fn execute_controlled<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
+    row: &J,
+    t: &mut Trees<A, C>,
+    signature_limits: SignatureLimits,
+    maximum_fate_steps: usize,
+    aevm_limits: ae_vm_aevm::execution::Limits,
+    fate_limits: ae_vm_fate::Limits,
+    control: Option<&ae_types::work::Control>,
+) -> Result<Receipt, Error<A, C>> {
     let network = NetworkProfile::mainnet();
     let vm = vm();
     let env = environment();
     let order = otp_order::profile(&META["profile"]);
     let overrides = Overrides::default();
     let f = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -26,6 +46,7 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     };
     let a = aevm();
     let config = Config {
+        control,
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),
@@ -57,7 +78,13 @@ fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
             );
         }
     }
-    transactions::execute_signed(&s, t, &c, &config)
+    if control.is_some() {
+        transactions::owned::Owned::capture(&config)
+            .unwrap()
+            .with_config(|config| transactions::execute_signed(&s, t, &c, config))
+    } else {
+        transactions::execute_signed(&s, t, &c, &config)
+    }
 }
 fn run<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + Clone>(
     row: &J,
@@ -235,6 +262,66 @@ fn fixture(abi: u64, op: &str, mode: &str, protocol: u64) -> &'static J {
                 && r["dry_run"] == false
         })
         .unwrap()
+}
+#[test]
+fn interruption_escapes_meta_authentication_and_sponsored_inner_failures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for abi in [1, 3] {
+        for (op, mode) in [
+            ("spend", "nested_same"),
+            ("spend", "sponsored"),
+            ("fate_call", "normal"),
+        ] {
+            let row = fixture(abi, op, mode, 6);
+            let initial = trees(&row["before"]);
+            let before = initial.roots();
+            let run = |limit| {
+                let count = Arc::new(AtomicUsize::new(0));
+                let c = count.clone();
+                let control = ae_types::work::Control::new(move || {
+                    c.fetch_add(1, Ordering::Relaxed) >= limit
+                });
+                let mut t = initial.clone();
+                let result = execute_controlled(
+                    row,
+                    &mut t,
+                    Default::default(),
+                    1_000_000,
+                    Default::default(),
+                    Default::default(),
+                    Some(&control),
+                );
+                (result, t, count.load(Ordering::Relaxed))
+            };
+            let (result, expected, total) = run(usize::MAX);
+            assert!(result.is_ok(), "{abi} {op} {mode}: {result:?}");
+            assert!(total > 8);
+            for limit in [0, 1, 2, 3, total / 4, total / 2, total - 1] {
+                let (result, t, _) = run(limit);
+                let error = result.unwrap_err();
+                assert!(
+                    match &error {
+                        Error::Interrupted => true,
+                        Error::Contract(e) => matches!(**e, contracts::Error::Interrupted),
+                        Error::Aevm(e) => matches!(
+                            **e,
+                            ae_vm_aevm::outer_call::Fault::Runtime(
+                                ae_vm_aevm::runtime::Fault::Stop(
+                                    ae_vm_aevm::execution::Stop::Interrupted
+                                )
+                            )
+                        ),
+                        _ => false,
+                    },
+                    "{abi} {op} {mode} at {limit}: {error:?}"
+                );
+                assert_eq!(t.roots(), before);
+            }
+            let (result, retry, _) = run(usize::MAX);
+            assert!(result.is_ok());
+            assert_eq!(retry.roots(), expected.roots());
+        }
+    }
 }
 #[test]
 fn meta_auth_and_inner_backend_failures_never_publish_partial_charges_or_roots() {

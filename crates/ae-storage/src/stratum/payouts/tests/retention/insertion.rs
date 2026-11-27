@@ -95,6 +95,7 @@ fn profile(protocol: u32) -> NetworkProfile {
 }
 fn vm() -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],

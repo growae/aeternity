@@ -13,7 +13,7 @@ pub fn process_create<A: NodeWriter + Clone, C: NodeWriter + Clone>(
     if !matches!(tx.operation(), ContractOperation::Create { .. }) {
         return Err(transaction_fault(super::super::Error::UnsupportedOperation).into());
     }
-    process_budgeted(tx, trees, context, config, &mut Budget::new(limits))
+    process_budgeted(tx, trees, context, config, &mut config.budget(limits))
 }
 #[allow(clippy::too_many_arguments)]
 pub fn execute_signed_create<A: NodeWriter + Clone, C: NodeWriter + Clone>(
@@ -153,6 +153,6 @@ pub fn process_attach<A: NodeWriter + Clone, C: NodeWriter + Clone>(
         trees,
         context,
         config,
-        &mut Budget::new(limits),
+        &mut config.budget(limits),
     )
 }

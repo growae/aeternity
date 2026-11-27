@@ -70,6 +70,7 @@ fn configured<T>(
     let order = otp_order::profile(profile);
     let overrides = Overrides::default();
     let fate = fate::Config {
+        control: None,
         context: &context,
         order: &order,
         overrides: &overrides,

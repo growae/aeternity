@@ -46,6 +46,7 @@ pub(super) fn environment() -> machine::program::remote::context::Environment {
 }
 pub(super) fn aevm() -> aevm::Config {
     aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],
@@ -82,6 +83,7 @@ pub(super) fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + C
     let order = otp_order::profile(&WRAPPED["profile"]);
     let overrides = Overrides::default();
     let f = fate::Config {
+        control: None,
         context: &vm,
         order: &order,
         overrides: &overrides,
@@ -93,6 +95,7 @@ pub(super) fn execute<A: ae_trie::NodeWriter + Clone, C: ae_trie::NodeWriter + C
     };
     let a = aevm();
     let config = Config {
+        control: None,
         network: &network,
         fate: Some(&f),
         aevm: Some(&a),

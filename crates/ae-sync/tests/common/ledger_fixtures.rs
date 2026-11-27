@@ -62,6 +62,7 @@ pub fn execution_with_consensus(
         key_hash: [0; 32],
     };
     let fate = fate::Config {
+        control: None,
         context: &context,
         order: &order,
         overrides: &overrides,
@@ -72,6 +73,7 @@ pub fn execution_with_consensus(
         diagnostic_profile: ae_vm_fate::diagnostic::Profile::Test,
     };
     let aevm = aevm::Config {
+        control: None,
         environment: aevm::Environment {
             genesis_height: 0,
             key_hash: [0; 32],

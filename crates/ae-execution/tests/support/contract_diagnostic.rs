@@ -35,6 +35,7 @@ pub(super) fn check_profiles(packed: J, expected_cases: usize) {
             let context = tx_context(row);
             let vm = vm_context(row);
             let config = Config {
+                control: None,
                 context: &vm,
                 order: &order,
                 overrides: &overrides,
