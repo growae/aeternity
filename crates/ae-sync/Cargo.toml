@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ae-worker-heap.workspace = true
+ae-trie.workspace = true
 gethostname.workspace = true
 ae-consensus.workspace = true
 ae-stratum.workspace = true
@@ -47,7 +49,6 @@ process-wrap.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 rocksdb.workspace = true
-ae-trie.workspace = true
 ae-state.workspace = true
 hex.workspace = true
 

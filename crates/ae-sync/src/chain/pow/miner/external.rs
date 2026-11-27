@@ -90,16 +90,7 @@ impl Config {
         args
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    Runtime,
-    Pipe,
-    Spawn,
-    Read,
-    Inspect,
-    Kill,
-    Wait,
-}
+pub use crate::child_process::{Operation, Termination};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Io {
@@ -149,14 +140,6 @@ pub enum Phase {
     Verifying,
     Draining,
     Reaped,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Termination {
-    Signalled,
-    AlreadyGone,
-    // Darwin also reports EPERM for a group containing only zombies. The
-    // leader's exit is verified, but this is not a successful group signal.
-    PermissionAfterLeaderExit,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Report {
@@ -216,7 +199,7 @@ async fn run(
     // Child owns cleanup during unwinding as well as ordinary completion.
     let result = scan(shared, receipt, config, report, &mut reader, &mut child).await;
     drop(reader);
-    let exit = child.finish();
+    let exit = child.finish().map_err(child_error);
     report.termination = child.termination();
     match exit {
         Ok(exit) => {
@@ -246,10 +229,10 @@ async fn scan(
         if receipt.cancelled.load(Ordering::Acquire) {
             return Err(super::Error::Cancelled);
         }
-        if deadline.is_none() && child.exited()? {
+        if deadline.is_none() && child.exited().map_err(child_error)? {
             // Kill inherited writers before reaping the leader. On Unix the
             // unreaped child prevents reuse of its PID/process-group identity.
-            child.stop()?;
+            child.stop().map_err(child_error)?;
             deadline = Some(tokio::time::Instant::now() + config.drain);
             report.phase = Phase::Draining;
             progress(shared, *report);
@@ -287,3 +270,10 @@ async fn scan(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+fn child_error(e: crate::child_process::Error) -> super::Error {
+    super::Error::External(match e {
+        crate::child_process::Error::Io { operation, kind } => Error::Io { operation, kind },
+        crate::child_process::Error::OwnershipLost => Error::OwnershipLost,
+    })
+}

@@ -269,6 +269,7 @@ dependencies = [
  "ae-types",
  "ae-vm-aevm",
  "ae-vm-fate",
+ "ae-worker-heap",
  "aes",
  "base64 0.22.1",
  "ed25519-dalek",

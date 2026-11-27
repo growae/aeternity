@@ -38,3 +38,5 @@ pub mod upnp;
 pub mod resilience;
 
 pub mod votes;
+
+pub mod child_process;
