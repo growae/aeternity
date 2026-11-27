@@ -38,6 +38,7 @@ num-traits.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+rocksdb.workspace = true
 
 [lints]
 workspace = true

@@ -282,3 +282,129 @@ async fn recent_gas_http_captures_reporting_override_and_defers_configuration_er
         assert!(within(running.shutdown()).await.unwrap().status().joined);
     }
 }
+
+#[tokio::test]
+async fn recent_gas_http_distinguishes_missing_state_records_and_missing_ancestor_headers() {
+    use ae_chain::repository as repo;
+    for missing_state in [true, false] {
+        let lab = Lab::new();
+        let p = prepared(&lab, None, false);
+        let tx = transfer(p.configured());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let clock = Arc::new(RecentClock(AtomicU64::new(now - 20_000)));
+        let mut running = p
+            .launch(settings(&lab, clock.clone()), || Ok(Default::default()))
+            .unwrap();
+        let mut h = running.handle();
+        ready(&mut h).await;
+        info::mine(&h, 1, Kind::Key).await;
+        h.pow()
+            .unwrap()
+            .workers()
+            .unwrap()
+            .bindings()
+            .admission
+            .current()
+            .unwrap()
+            .client
+            .push(tx.clone(), ae_mempool::pool::Event::Created, false)
+            .unwrap()
+            .await
+            .unwrap();
+        info::mine(&h, 1, Kind::Micro).await;
+        let micro = h
+            .importer()
+            .unwrap()
+            .current_header(0, |header| header.selected.top)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        // The missing row is an ancestor, not the selected tip. Startup's tip
+        // validation remains intact; the HTTP traversal must encounter it.
+        info::mine(&h, 2, Kind::Key).await;
+        let http = running.listen_http(http_config()).await.unwrap();
+        let healthy = get(http.status().address, "/v3/recent-gas-prices").await;
+        assert_eq!(healthy.0, 200);
+        assert!(healthy.2[0]["min_gas_price"].as_u64().unwrap() > 0);
+        let exit = within(running.shutdown()).await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        drop(exit);
+        drop(h);
+        let key = repo::key(
+            if missing_state {
+                repo::RECORDS
+            } else {
+                repo::BLOCKS
+            },
+            micro.0,
+        );
+        let saved = {
+            // Only this stopped, isolated test database is modified. No
+            // production mutation hook or second live writer is introduced.
+            let raw = rocksdb::DB::open(&rocksdb::Options::default(), lab.0.join("chain")).unwrap();
+            let bytes = raw.get(&key).unwrap().expect("admitted ancestor row");
+            raw.delete(&key).unwrap();
+            raw.flush().unwrap();
+            bytes
+        };
+        let p = prepared(&lab, None, false);
+        let mut running = p
+            .launch(settings(&lab, clock.clone()), || Ok(Default::default()))
+            .unwrap();
+        let mut h = running.handle();
+        ready(&mut h).await;
+        let http = running.listen_http(http_config()).await.unwrap();
+        for attempt in 0..2 {
+            for path in [
+                "/v2/recent-gas-prices",
+                "/v3/recent-gas-prices",
+                "/v3/recent-gas-prices?int-as-string=true",
+            ] {
+                let (status, headers, body) = request(http.status().address, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n\r\n")).await;
+                assert_eq!(
+                    status, 500,
+                    "{path}, missing_state={missing_state}, attempt={attempt}"
+                );
+                if missing_state {
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&body).unwrap(),
+                        json!({"reason":"Internal server error"})
+                    );
+                    assert_eq!(headers["x-ae-height"], "3");
+                    assert_eq!(
+                        headers["access-control-allow-origin"],
+                        "https://client.example"
+                    );
+                } else {
+                    assert!(body.is_empty());
+                    assert!(!headers.contains_key("x-ae-height"));
+                    assert!(!headers.contains_key("access-control-allow-origin"));
+                }
+            }
+            assert!(h.status().ready);
+        }
+        let exit = within(running.shutdown()).await.unwrap();
+        assert!(exit.status().joined && exit.status().failure.is_none());
+        drop(exit);
+        drop(h);
+        {
+            let raw = rocksdb::DB::open(&rocksdb::Options::default(), lab.0.join("chain")).unwrap();
+            assert!(raw.get(&key).unwrap().is_none());
+            raw.put(&key, &saved).unwrap();
+            raw.flush().unwrap();
+        }
+        let p = prepared(&lab, None, false);
+        let mut running = p
+            .launch(settings(&lab, clock), || Ok(Default::default()))
+            .unwrap();
+        let mut h = running.handle();
+        ready(&mut h).await;
+        let http = running.listen_http(http_config()).await.unwrap();
+        check(http.status().address, &healthy.2).await;
+        assert!(within(running.shutdown()).await.unwrap().status().joined);
+    }
+}

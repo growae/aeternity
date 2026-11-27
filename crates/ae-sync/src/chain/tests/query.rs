@@ -1,6 +1,118 @@
 use super::*;
 
 #[tokio::test]
+async fn recent_gas_cache_outlives_a_joined_importer_and_preserves_negative_results() {
+    use crate::chain::query::gas_prices::{Cache, Data, QueryError};
+    use ae_chain::gas_prices as gas;
+    let (_temp, first) = setup(Default::default());
+    let network = NetworkProfile::mainnet();
+    let blocks = fixtures::blocks(&network);
+    for block in &blocks[..2] {
+        first
+            .import_block(block.encode().unwrap(), NOW)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    }
+    let Block::Micro(micro) = &blocks[1] else {
+        panic!("fixture micro")
+    };
+    let hash = blocks[1].hash().unwrap();
+    let time = i128::from(micro.header.time);
+    let positive = Arc::new(Cache::new(Default::default()).unwrap());
+    let negative = Arc::new(Cache::new(Default::default()).unwrap());
+    let expected = first
+        .recent_gas_prices(positive.clone(), time, 6_000_000.into(), 0, |r| r)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .unwrap();
+    let value = positive
+        .get_or_fill(hash, || Ok(()), |_| panic!("expected warm cache"))
+        .unwrap();
+    assert!(matches!(value.data(), Data::Observed(_)));
+    // Model the native negative_recovered case: a previous missing-record
+    // result remains cached even though the block and its state now exist.
+    let missing = negative
+        .get_or_fill(hash, || Ok(()), |_| Err(gas::Error::MissingState(hash)))
+        .unwrap();
+    assert!(matches!(missing.data(), Data::MissingState));
+    assert!(
+        matches!(first.recent_gas_prices(negative.clone(),time,6_000_000.into(),0,|r|r).unwrap().wait().await.unwrap(),Err(QueryError::Observation(gas::Error::MissingState(h)))if h==hash)
+    );
+    let db = first.context.db.clone();
+    let genesis = db.view().unwrap().identity().genesis;
+    first.stop();
+    within(first.join()).await;
+    let second = Importer::new(
+        db,
+        fixtures::execution(&network),
+        fixtures::rules(genesis),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(&first.context, &second.context));
+    assert!(matches!(
+        first.recent_gas_prices(positive.clone(), time, 6_000_000.into(), 0, |r| r),
+        Err(Error::Closed)
+    ));
+    let actual = second
+        .recent_gas_prices(positive.clone(), time, 6_000_000.into(), 0, |r| r)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual, expected);
+    let retained = positive
+        .get_or_fill(
+            hash,
+            || Ok(()),
+            |_| panic!("replacement lost positive cache"),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&value, &retained));
+    assert!(
+        matches!(second.recent_gas_prices(negative.clone(),time,6_000_000.into(),0,|r|r).unwrap().wait().await.unwrap(),Err(QueryError::Observation(gas::Error::MissingState(h)))if h==hash)
+    );
+    let retained = negative
+        .get_or_fill(
+            hash,
+            || Ok(()),
+            |_| panic!("replacement lost negative cache"),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&missing, &retained));
+    let fresh = Arc::new(Cache::new(Default::default()).unwrap());
+    assert_eq!(
+        second
+            .recent_gas_prices(fresh, time, 6_000_000.into(), 0, |r| r)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+    positive.close();
+    assert!(matches!(
+        second
+            .recent_gas_prices(positive, time, 6_000_000.into(), 0, |r| r)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        Err(QueryError::Cache(
+            crate::chain::query::gas_prices::Error::Closed
+        ))
+    ));
+    second.stop();
+    within(second.join()).await;
+}
+
+#[tokio::test]
 async fn recent_gas_reads_fit_default_pool_retain_capacity_and_preserve_partial_cache_fills() {
     use crate::chain::query::gas_prices::{Cache, Config as CacheConfig, Data, QueryError};
     use ae_chain::gas_prices as gas;
