@@ -155,6 +155,7 @@ dependencies = [
  "jsonschema",
  "num-bigint",
  "num-traits",
+ "rand",
  "rocksdb",
  "rustix",
  "serde_json",

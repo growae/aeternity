@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+rand.workspace = true
 ae-worker-heap.workspace = true
 base64.workspace = true
 ae-hyperchain.workspace = true

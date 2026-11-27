@@ -8,11 +8,8 @@ use ae_types::{AccountPublicKey, ContractPublicKey};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use serde_json::{Map, Value, json};
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
-use zeroize::Zeroizing;
+use std::path::{Path, PathBuf};
+mod keys;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -21,6 +18,7 @@ pub enum Error {
     Limit,
     Keys(std::io::ErrorKind),
     KeyPair,
+    Entropy,
     Rewards,
     Runtime(runtime::Error),
     Signer(ae_sync::preset_keys::Error),
@@ -260,38 +258,18 @@ impl Plan {
         }
     }
     pub fn load(self) -> Result<Prepared, Error> {
-        // Bounded regular-file reads; no generation, overwrite or secret logging.
-        fn bytes(path: &Path, expected: usize) -> Result<Zeroizing<Vec<u8>>, Error> {
-            if !std::fs::metadata(path)
-                .map_err(|e| Error::Keys(e.kind()))?
-                .is_file()
-            {
-                return Err(Error::KeyPair);
-            }
-            let f = std::fs::File::open(path).map_err(|e| Error::Keys(e.kind()))?;
-            let meta = f.metadata().map_err(|e| Error::Keys(e.kind()))?;
-            if !meta.is_file() || meta.len() != expected as u64 {
-                return Err(Error::KeyPair);
-            }
-            let mut data = Zeroizing::new(Vec::with_capacity(expected + 1));
-            f.take((expected + 1) as u64)
-                .read_to_end(&mut data)
-                .map_err(|e| Error::Keys(e.kind()))?;
-            if data.len() != expected {
-                return Err(Error::KeyPair);
-            }
-            Ok(data)
-        }
-        let public = bytes(&self.directory.join("sign_key.pub"), 32)?;
-        let secret = bytes(&self.directory.join("sign_key"), 64)?;
-        let key = Ed25519SecretKey::from_seed(secret[..32].try_into().map_err(|_| Error::KeyPair)?);
+        let key = keys::load(&self.directory)?;
+        self.with_key(key)
+    }
+    // Native conductor startup uses create before the Stratum application waits.
+    // A readable malformed pair is rejected without replacement; an I/O failure
+    // causes both files to be written, including a partially present old pair.
+    pub fn load_or_create(self) -> Result<Prepared, Error> {
+        let key = keys::load_or_create(&self.directory)?;
+        self.with_key(key)
+    }
+    fn with_key(self, key: Ed25519SecretKey) -> Result<Prepared, Error> {
         let caller = key.public_key();
-        if public.as_slice() != caller.0
-            || secret[32..] != caller.0
-            || !ae_crypto::verify_ed25519(&caller, b"roundtrip", &key.sign(b"roundtrip"))
-        {
-            return Err(Error::KeyPair);
-        }
         let mut weights = rewards::Map::new();
         for b in self
             .beneficiaries

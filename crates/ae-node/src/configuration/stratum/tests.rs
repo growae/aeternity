@@ -4,7 +4,7 @@ use crate::configuration::{
     resolution::{Context, Directories},
 };
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -306,3 +306,5 @@ fn configured_stratum_acceptors_serve_bounded_tcp_sessions_and_join() {
     drop(overflow);
     drop(std::net::TcpListener::bind(address).unwrap());
 }
+
+mod creation;
