@@ -87,6 +87,21 @@ pub fn max_heap_words(resolved: &Resolved<'_>) -> Result<Value, Error> {
 pub fn heap_guard_words(value: &Value) -> Option<BigInt> {
     integer(value).filter(|n| n > &BigInt::ZERO)
 }
+// Native policy alone, for the child core phase. The service cap remains an
+// independent bootstrap policy throughout decoding, execution and rendering.
+pub fn native_heap_bytes(value: &Value, word_bytes: usize) -> Result<Option<usize>, Error> {
+    if !matches!(word_bytes, 4 | 8) {
+        return Err(Error::Field("dry_run_heap_budget"));
+    }
+    heap_guard_words(value)
+        .map(|words| {
+            usize::try_from(words * word_bytes)
+                .ok()
+                .filter(|n| *n < usize::MAX)
+                .ok_or(Error::Field("max_heap_words"))
+        })
+        .transpose()
+}
 // Select an absolute Rust-worker allocation cap. Native words are interpreted
 // with the captured Erlang word size; disabled native guarding never disables
 // the independent service cap. Rust and Erlang heap layouts are not identical.
@@ -99,14 +114,7 @@ pub fn heap_limit(
     if !matches!(word_bytes, 4 | 8) || service_bytes == 0 || service_bytes == usize::MAX {
         return Err(Error::Field("dry_run_heap_budget"));
     }
-    let native = heap_guard_words(value)
-        .map(|words| {
-            usize::try_from(words * word_bytes)
-                .ok()
-                .filter(|n| *n < usize::MAX)
-                .ok_or(Error::Field("max_heap_words"))
-        })
-        .transpose()?;
+    let native = native_heap_bytes(value, word_bytes)?;
     Ok(match native {
         Some(bytes) if bytes <= service_bytes => Limit {
             bytes,

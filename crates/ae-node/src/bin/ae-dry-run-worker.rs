@@ -7,5 +7,6 @@ fn main() -> std::process::ExitCode {
         Err(ae_node::dry_run_worker::ServeError::Encoding(_)) => std::process::ExitCode::from(94),
         Err(ae_node::dry_run_worker::ServeError::Transport(_)) => std::process::ExitCode::from(95),
         Err(ae_node::dry_run_worker::ServeError::Poisoned) => std::process::ExitCode::from(96),
+        Err(ae_node::dry_run_worker::ServeError::Heap(_)) => std::process::ExitCode::from(97),
     }
 }

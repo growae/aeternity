@@ -26,6 +26,30 @@ static DATA: LazyLock<Value> = LazyLock::new(|| {
     .unwrap();
     unpack(&v["root"], v["values"].as_array().unwrap())
 });
+#[test]
+fn native_phase_heap_policy_keeps_disabled_values_separate_from_service_capacity() {
+    for value in [
+        json!(0),
+        json!(-1),
+        json!(false),
+        Value::Null,
+        json!(1.0),
+        json!("4096"),
+    ] {
+        assert_eq!(native_heap_bytes(&value, 8), Ok(None));
+    }
+    assert_eq!(native_heap_bytes(&json!(4096), 8), Ok(Some(32768)));
+    assert_eq!(native_heap_bytes(&json!(4096), 4), Ok(Some(16384)));
+    assert_eq!(
+        native_heap_bytes(&json!(0), 16),
+        Err(Error::Field("dry_run_heap_budget"))
+    );
+    let huge = serde_json::from_str(&(BigInt::from(1) << 100_usize).to_string()).unwrap();
+    assert_eq!(
+        native_heap_bytes(&huge, 8),
+        Err(Error::Field("max_heap_words"))
+    );
+}
 fn json_term(v: &Value) -> Value {
     if let Some(b) = v.get("binary") {
         return json!(String::from_utf8(hex::decode(b.as_str().unwrap()).unwrap()).unwrap());

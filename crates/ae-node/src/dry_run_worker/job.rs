@@ -46,10 +46,11 @@ pub(super) struct Job {
     pub reporting_floor: Option<ae_types::Unsigned>,
     pub output_bytes: usize,
     pub core_notification: bool,
+    pub native_heap: Option<usize>,
 }
 impl Wire for Job {
     fn put(&self, e: &mut Encoder) -> Result<(), Error> {
-        e.raw(b"AED3")?;
+        e.raw(b"AED4")?;
         self.roots.put(e)?;
         self.context.put(e)?;
         self.funding.put(e)?;
@@ -64,10 +65,11 @@ impl Wire for Job {
         self.rendering.put(e)?;
         self.reporting_floor.put(e)?;
         self.output_bytes.put(e)?;
-        self.core_notification.put(e)
+        self.core_notification.put(e)?;
+        self.native_heap.put(e)
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, Error> {
-        if d.raw(4)? != b"AED3" {
+        if d.raw(4)? != b"AED4" {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -86,6 +88,7 @@ impl Wire for Job {
             reporting_floor: Wire::get(d)?,
             output_bytes: Wire::get(d)?,
             core_notification: Wire::get(d)?,
+            native_heap: Wire::get(d)?,
         })
     }
 }
@@ -345,8 +348,13 @@ fn execute_core<R: std::io::Read, W: std::io::Write>(
 pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
     job: Job,
     session: Arc<std::sync::Mutex<ae_sync::dry_run::process::wire::Session<R, W>>>,
+    guard: &ae_worker_heap::Guard,
 ) -> Result<Reply, super::ServeError> {
+    let heap = guard
+        .begin_native(job.native_heap)
+        .map_err(super::ServeError::Heap)?;
     let output = execute_core(&job, session.clone());
+    drop(heap);
     if job.core_notification {
         let reply = session
             .lock()

@@ -2,6 +2,71 @@ use super::*;
 use crate::Source;
 
 #[test]
+fn native_phase_is_single_use_and_never_resets_live_allocations_or_service_limit() {
+    let guard = Guard::new();
+    assert!(matches!(
+        guard.begin_native(None),
+        Err(PhaseError::NotArmed)
+    ));
+    guard
+        .arm(Limit {
+            bytes: 4096,
+            source: Source::Service,
+        })
+        .unwrap();
+    for limit in [0, usize::MAX] {
+        assert!(matches!(
+            guard.begin_native(Some(limit)),
+            Err(PhaseError::InvalidLimit)
+        ));
+    }
+    // SAFETY: This temporary decode buffer is freed before the core phase.
+    // Its historical peak must not be mistaken for current live allocation.
+    unsafe {
+        let layout = Layout::from_size_align(2048, 64).unwrap();
+        let value = guard.alloc_zeroed(layout);
+        guard.dealloc(value, layout);
+    }
+    assert_eq!(guard.snapshot().peak, 2048);
+    let scope = guard.begin_native(Some(1024)).unwrap();
+    assert_eq!(guard.native_limit(), Some(1024));
+    assert!(matches!(
+        guard.begin_native(None),
+        Err(PhaseError::AlreadyStarted)
+    ));
+    let layout = Layout::from_size_align(512, 64).unwrap();
+    // SAFETY: The live allocation crosses the phase boundary, then is freed
+    // once using its original allocator and matching layout.
+    unsafe {
+        let value = guard.alloc_zeroed(layout);
+        value.write(19);
+        drop(scope);
+        assert_eq!(guard.native_limit(), None);
+        assert_eq!(guard.snapshot().limit, Some(4096));
+        assert_eq!(guard.snapshot().live, 512);
+        assert_eq!(value.read(), 19);
+        guard.dealloc(value, layout);
+    }
+    assert_eq!(guard.snapshot().live, 0);
+    assert!(matches!(
+        guard.begin_native(Some(2048)),
+        Err(PhaseError::AlreadyStarted)
+    ));
+    let guard = Guard::new();
+    guard
+        .arm(Limit {
+            bytes: 4096,
+            source: Source::Service,
+        })
+        .unwrap();
+    drop(guard.begin_native(None).unwrap());
+    assert!(matches!(
+        guard.begin_native(Some(2048)),
+        Err(PhaseError::AlreadyStarted)
+    ));
+}
+
+#[test]
 fn aligned_zeroed_growth_shrink_and_release_preserve_data_and_peak() {
     let guard = Guard::new();
     guard

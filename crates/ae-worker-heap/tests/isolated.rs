@@ -21,6 +21,84 @@ fn arm(extra: usize, source: Source) {
 fn child_entry() {
     let case = std::env::var("AE_WORKER_HEAP_TEST_CASE").unwrap();
     match case.as_str() {
+        "phase_recover" => {
+            arm(8 << 20, Source::Service);
+            let scope = HEAP
+                .begin_native(Some(HEAP.snapshot().live + (128 << 10)))
+                .unwrap();
+            let core = black_box(vec![7_u8; 64 << 10]);
+            drop(scope);
+            let render = black_box(vec![9_u8; 2 << 20]);
+            assert_eq!(core[0], 7);
+            assert_eq!(render[0], 9);
+            assert_eq!(HEAP.native_limit(), None);
+            assert!(HEAP.snapshot().live > 2 << 20);
+        }
+        "phase_native" | "phase_equal" | "phase_service" => {
+            arm(
+                if case == "phase_native" {
+                    8 << 20
+                } else {
+                    256 << 10
+                },
+                Source::Service,
+            );
+            let bytes = if case == "phase_equal" {
+                HEAP.snapshot().limit.unwrap()
+            } else {
+                HEAP.snapshot().live
+                    + if case == "phase_service" {
+                        1 << 20
+                    } else {
+                        128 << 10
+                    }
+            };
+            let _scope = HEAP.begin_native(Some(bytes)).unwrap();
+            black_box(vec![3_u8; black_box(2 << 20)]);
+            panic!("active core phase did not enforce the tighter cap");
+        }
+        "phase_render_service" | "phase_disabled_service" => {
+            arm(256 << 10, Source::Service);
+            let scope = HEAP
+                .begin_native(if case == "phase_disabled_service" {
+                    None
+                } else {
+                    Some(HEAP.snapshot().live + (128 << 10))
+                })
+                .unwrap();
+            let core = black_box(vec![2_u8; 64 << 10]);
+            drop(scope);
+            black_box(vec![3_u8; black_box(1 << 20)]);
+            black_box(core);
+            panic!("native phase completion disabled the service cap");
+        }
+        "phase_already_live" => {
+            arm(8 << 20, Source::Service);
+            let value = black_box(vec![2_u8; 1 << 20]);
+            let _scope = HEAP.begin_native(Some(128 << 10)).unwrap();
+            black_box(value);
+            panic!("native phase ignored decoded live allocations");
+        }
+        "phase_arming_race" => {
+            arm(16 << 20, Source::Service);
+            let barrier = std::sync::Barrier::new(9);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let bytes = black_box(vec![6_u8; 256 << 10]);
+                        barrier.wait();
+                        black_box(bytes);
+                    });
+                }
+                let cap = HEAP.snapshot().live + (1 << 20);
+                barrier.wait();
+                let _native = HEAP.begin_native(Some(cap)).unwrap();
+                barrier.wait();
+            });
+            panic!("allocations raced past the native phase cap");
+        }
         "recover" => {
             arm(8 << 20, Source::Service);
             let mut bytes = Vec::with_capacity(16 << 10);
@@ -118,6 +196,26 @@ fn child_entry() {
             panic!("guard did not reach AEVM memory allocations");
         }
         _ => panic!("unknown child case"),
+    }
+}
+#[test]
+fn native_core_scope_preserves_service_enforcement_and_allocation_ownership() {
+    assert!(child("phase_recover").success());
+    for (case, expected) in [
+        ("phase_native", Exit::NativeHeap),
+        ("phase_equal", Exit::NativeHeap),
+        ("phase_service", Exit::ServiceHeap),
+        ("phase_render_service", Exit::ServiceHeap),
+        ("phase_disabled_service", Exit::ServiceHeap),
+        ("phase_already_live", Exit::NativeHeap),
+        ("phase_arming_race", Exit::NativeHeap),
+    ] {
+        assert_eq!(
+            child(case).code().and_then(Exit::from_code),
+            Some(expected),
+            "{case}"
+        );
+        assert!(child("phase_recover").success(), "fresh core after {case}");
     }
 }
 fn child(case: &str) -> std::process::ExitStatus {

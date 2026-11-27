@@ -72,7 +72,7 @@ fn capture_with_rendering<S>(
     )
     .unwrap();
     let configuration = ae_node::configuration::Configuration::from_value(
-        serde_json::json!({"http":{"dry_run":{"timeout_ms":row["input"]["timeout"]}}}),
+        serde_json::json!({"http":{"dry_run":{"timeout_ms":row["input"]["timeout"],"max_heap_words":row["input"]["heap"]}}}),
     )
     .unwrap();
     let resolved = configuration.resolve(&context).unwrap();
@@ -143,6 +143,11 @@ fn capture_with_rendering<S>(
         },
     )
     .with_native_timeout(native)
+    .with_native_heap(move || {
+        let resolved = configuration.resolve(&context)?;
+        let heap = ae_node::configuration::dry_run::max_heap_words(&resolved)?;
+        ae_node::configuration::dry_run::native_heap_bytes(&heap, 8)
+    })
 }
 fn capture<S>(source: S, row: &J, profile: &J) -> pipeline::Captured<S> {
     configured(profile, |base| capture_with(source, row, profile, base))
@@ -426,6 +431,8 @@ async fn disconnect_and_owner_shutdown_join_blocked_selection_and_keep_credits()
     assert!(weak.upgrade().is_none());
 }
 
+#[path = "dry_run_pipeline_service/heap.rs"]
+mod heap;
 #[path = "dry_run_pipeline_service/native.rs"]
 mod native;
 #[path = "dry_run_pipeline_service/repository.rs"]

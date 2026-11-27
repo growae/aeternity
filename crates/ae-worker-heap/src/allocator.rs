@@ -1,4 +1,4 @@
-use crate::{ArmError, Exit, Limit, Snapshot};
+use crate::{ArmError, Exit, Limit, PhaseError, Snapshot};
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,
@@ -12,6 +12,16 @@ pub struct Guard {
     exit: AtomicI32,
     live: AtomicUsize,
     peak: AtomicUsize,
+    // Zero means not started; MAX means disabled or finished. Every other
+    // value is the additional absolute native cap for this one core phase.
+    native: AtomicUsize,
+}
+#[must_use = "dropping the scope ends the native cap; the permanent cap remains"]
+pub struct NativeScope<'a>(&'a Guard);
+impl Drop for NativeScope<'_> {
+    fn drop(&mut self) {
+        self.0.native.store(usize::MAX, SeqCst);
+    }
 }
 fn terminate(code: i32) -> ! {
     // SAFETY: _exit has no pointer preconditions. It never returns and skips
@@ -31,6 +41,7 @@ impl Guard {
             exit: AtomicI32::new(Exit::Accounting as i32),
             live: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            native: AtomicUsize::new(0),
         }
     }
     // One job per process. The absolute cap includes allocations made before
@@ -57,23 +68,54 @@ impl Guard {
             limit: (limit != usize::MAX).then_some(limit),
         }
     }
+    // Start after job decoding, before core execution. All currently live
+    // layouts count, including decoded input; there is no baseline subtraction.
+    // Dropping the receipt ends only this cap and never resets live accounting.
+    // A phase cannot be started again, even when its limit was disabled.
+    pub fn begin_native(&self, bytes: Option<usize>) -> Result<NativeScope<'_>, PhaseError> {
+        if matches!(bytes, Some(0 | usize::MAX)) {
+            return Err(PhaseError::InvalidLimit);
+        }
+        if self.limit.load(SeqCst) == usize::MAX {
+            return Err(PhaseError::NotArmed);
+        }
+        self.native
+            .compare_exchange(0, bytes.unwrap_or(usize::MAX), SeqCst, SeqCst)
+            .map_err(|_| PhaseError::AlreadyStarted)?;
+        self.check(self.live.load(SeqCst));
+        Ok(NativeScope(self))
+    }
+    pub fn native_limit(&self) -> Option<usize> {
+        match self.native.load(SeqCst) {
+            0 | usize::MAX => None,
+            n => Some(n),
+        }
+    }
+    fn check(&self, live: usize) {
+        let permanent = self.limit.load(SeqCst);
+        let native = self.native.load(SeqCst);
+        // The tighter active cap owns the failure; ties preserve the native
+        // classification. Ending a phase changes no permanent-limit state.
+        if native != 0 && native != usize::MAX && native <= permanent && live > native {
+            terminate(Exit::NativeHeap as i32);
+        }
+        if live > permanent {
+            terminate(self.exit.load(SeqCst));
+        }
+    }
     fn reserve(&self, bytes: usize) {
         let mut old = self.live.load(SeqCst);
         loop {
             let Some(next) = old.checked_add(bytes) else {
                 terminate(Exit::Accounting as i32);
             };
-            if next > self.limit.load(SeqCst) {
-                terminate(self.exit.load(SeqCst));
-            }
+            self.check(next);
             match self.live.compare_exchange_weak(old, next, SeqCst, SeqCst) {
                 Ok(_) => {
                     // Arming may race with a reservation that saw no limit.
                     // With sequential consistency, this check or arm's live
                     // check observes every reservation crossing the new cap.
-                    if next > self.limit.load(SeqCst) {
-                        terminate(self.exit.load(SeqCst));
-                    }
+                    self.check(next);
                     self.peak.fetch_max(next, SeqCst);
                     return;
                 }

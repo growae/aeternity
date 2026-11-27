@@ -103,8 +103,11 @@ pub struct Captured<S> {
     helper: Helper,
     options: core::Options,
     native_timeout: Option<Timeout>,
+    heap: Option<HeapPolicy>,
     reporting: Option<super::ReportingFloor>,
 }
+type HeapPolicy =
+    Box<dyn FnOnce() -> Result<Option<usize>, crate::configuration::resolution::Error> + Send>;
 impl<S> Captured<S> {
     // Call inside the admitted capture closure, from one owner/configuration
     // generation. Native helper preparation and selected execution share source.
@@ -136,6 +139,7 @@ impl<S> Captured<S> {
             },
             options,
             native_timeout: None,
+            heap: None,
             reporting: None,
         }
     }
@@ -143,6 +147,18 @@ impl<S> Captured<S> {
     // armed only after successful schema/helper preparation, before selection.
     pub fn with_native_timeout(mut self, timeout: Timeout) -> Self {
         self.native_timeout = Some(timeout);
+        self
+    }
+    // Resolve after helper preparation and native timer creation, before
+    // state selection. The closure belongs to the captured configuration.
+    // None disables only the native core cap, never the service bootstrap cap.
+    pub fn with_native_heap(
+        mut self,
+        read: impl FnOnce() -> Result<Option<usize>, crate::configuration::resolution::Error>
+        + Send
+        + 'static,
+    ) -> Self {
+        self.heap = Some(Box::new(read));
         self
     }
     // Resolve after successful public core execution and result/event
@@ -171,6 +187,7 @@ pub enum Error<E, S> {
     Preparation(http::Error<ReadError<E>>),
     Selection(ae_chain::dry_run::Error<S>),
     Control(admission::Error),
+    Configuration(crate::configuration::resolution::Error),
     Encoding(super::Error),
     Reply(super::EncodingError),
     Process(process::Error<super::ReadError>),
@@ -384,6 +401,21 @@ fn run<S: Source>(
         control.start_native(timeout).map_err(Error::Control)?;
     }
     control.check().map_err(Error::Control)?;
+    let native_heap = if let Some(read) = captured.heap.take() {
+        if config.process.heap.source != ae_worker_heap::Source::Service {
+            return Err(Error::Control(admission::Error::Configuration));
+        }
+        let bytes = read().map_err(Error::Configuration)?;
+        if matches!(bytes, Some(0 | usize::MAX)) {
+            return Err(Error::Configuration(
+                crate::configuration::resolution::Error::Field("max_heap_words"),
+            ));
+        }
+        bytes
+    } else {
+        None
+    };
+    control.check().map_err(Error::Control)?;
     let view = match captured.source.select(prepared.top) {
         Ok(v) => v,
         Err(e) => {
@@ -423,12 +455,25 @@ fn run<S: Source>(
                 },
                 captured.native_timeout.map(|_| control.clone()),
                 captured.reporting.take(),
+                native_heap,
             )
         })
         .map_err(Error::Encoding)?;
     control.check().map_err(Error::Control)?;
     let done = process::run(config.process.clone(), bytes, broker, control.clone());
     control.check().map_err(Error::Control)?;
+    // A reaped child cannot acknowledge heap exhaustion or another early
+    // exit. End its native timer before formatting the terminal response.
+    if done.result.is_err()
+        && captured.native_timeout.is_some()
+        && done
+            .broker
+            .completion
+            .as_ref()
+            .is_some_and(|c| !c.completed)
+    {
+        control.finish_native().map_err(Error::Control)?;
+    }
     if done.result.is_ok()
         && done
             .broker

@@ -154,7 +154,7 @@ pub fn submit<
         .reservation(process.input_bytes)
         .map_err(Error::Admission)?;
     let reservation = client.reserve(weight, timeout).map_err(Error::Admission)?;
-    let (bytes, broker) = prepare(&process, view, request, parameters, None, None)?;
+    let (bytes, broker) = prepare(&process, view, request, parameters, None, None, None)?;
     reservation
         .submit(move |control| process::run(process, bytes, broker, control))
         .map_err(Error::Admission)
@@ -166,6 +166,7 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
     parameters: Parameters<'_>,
     native: Option<dry_run::Control>,
     reporting: Option<ReportingFloor>,
+    native_heap: Option<usize>,
 ) -> Result<(Vec<u8>, Broker<A, C>), Error> {
     let deferred_reporting = reporting.is_some();
     let completion = (native.is_some() || deferred_reporting).then_some(Completion {
@@ -241,6 +242,7 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
         },
         output_bytes: process.output_bytes,
         core_notification: completion.is_some(),
+        native_heap,
     };
     let (bytes, controls) = codec::capture(&job, process.input_bytes)?;
     let broker = Broker {
@@ -302,6 +304,7 @@ pub enum ServeError {
     Transport(process::wire::Error),
     Encoding(EncodingError),
     Poisoned,
+    Heap(ae_worker_heap::PhaseError),
 }
 // This is used by the trusted worker executable, with its installed Guard.
 // Bootstrap arms the guard before parsing any job or allocating decoded values.
@@ -329,7 +332,7 @@ pub fn serve<R: Read + Send + 'static, W: Write + Send + 'static>(
         return Err(ServeError::Encoding(EncodingError::Capacity));
     }
     drop(bytes);
-    let reply = job::execute(job, session.clone())?;
+    let reply = job::execute(job, session.clone(), guard)?;
     let bytes = codec::encode(&reply, maximum).map_err(ServeError::Encoding)?;
     session
         .lock()

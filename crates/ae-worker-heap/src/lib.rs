@@ -5,7 +5,7 @@
 // It does not count allocator metadata, stacks, mappings or foreign allocations.
 #[allow(unsafe_code)]
 mod allocator;
-pub use allocator::Guard;
+pub use allocator::{Guard, NativeScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -50,10 +50,17 @@ pub enum ArmError {
     AlreadyArmed,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseError {
+    InvalidLimit,
+    NotArmed,
+    AlreadyStarted,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snapshot {
     // Counters are individually atomic; a concurrent snapshot is observational,
     // not one transactional reading of all fields.
     pub live: usize,
     pub peak: usize,
+    // The permanent bootstrap cap. native_limit() reports the phase cap.
     pub limit: Option<usize>,
 }
