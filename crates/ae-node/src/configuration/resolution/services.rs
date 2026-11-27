@@ -147,11 +147,18 @@ impl Resolved<'_> {
     ) -> Result<pow::configuration::Configuration, Error> {
         let mut system = system.clone();
         system.edge_bits = self.mining_edge_bits(&system.edge_bits)?;
-        pow::configuration::Configuration::from_value(
-            self.get(&["mining", "cuckoo"])?.unwrap_or(&json!({})),
-            &system,
-        )
-        .map_err(Error::Mining)
+        let empty = json!({});
+        let user = self.get(&["mining", "cuckoo"])?.unwrap_or(&empty);
+        // aec_mining selects even an empty modern list before deprecated or
+        // application miners. Do not validate an unused application list.
+        if user.get("miners").is_none()
+            && user.get("miner").is_none()
+            && let Some(application) = self.context.application("aecore", "aec_mining")?
+        {
+            // mining_edge_bits already checked the application tuple shape.
+            system = system.with_miners(&application[1]).map_err(Error::Mining)?;
+        }
+        pow::configuration::Configuration::from_value(user, &system).map_err(Error::Mining)
     }
     // aec_mining:get_edge_bits reads the application tuple before applying
     // the user override. The tuple's miner list is unused by verification.

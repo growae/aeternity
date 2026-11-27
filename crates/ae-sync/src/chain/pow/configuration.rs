@@ -81,6 +81,15 @@ impl Default for System {
         }
     }
 }
+impl System {
+    // Original sys.config list of six-element tuples, represented as arrays.
+    // Call only when user miners (including an empty list) were not selected.
+    // Preserve source order; Configuration performs the native reversal once.
+    pub fn with_miners(mut self, value: &Value) -> Result<Self, Error> {
+        self.miners = parse::system_miners(value)?;
+        Ok(self)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
     pub edge_bits: BigInt,

@@ -14,23 +14,10 @@ fn system(value: &Value) -> System {
     }
     System {
         edge_bits: integer(&value[0]),
-        miners: value[1]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| {
-                let mut miner = Miner::new(row[0].as_str().unwrap().into());
-                miner.extra_args = row[1].as_str().unwrap().into();
-                miner.hex_encoded_header = row[2].as_bool().unwrap();
-                miner.repeats = integer(&row[3]);
-                miner.addressed_instances = row[4]
-                    .as_array()
-                    .map(|ids| ids.iter().map(integer).collect());
-                miner.executable_group = row[5].as_str().unwrap().into();
-                miner
-            })
-            .collect(),
+        miners: Vec::new(),
     }
+    .with_miners(&value[1])
+    .unwrap()
 }
 fn definition(miner: &Miner, edge_bits: &BigInt) -> Value {
     json!({"executable":miner.executable,"executable_group":miner.executable_group,"extra_args":miner.extra_args,"hex_encoded_header":miner.hex_encoded_header,"repeats":number(&miner.repeats),"edge_bits":number(edge_bits),"addressed_instances":miner.addressed_instances.as_ref().map(|ids| ids.iter().map(number).collect::<Vec<_>>())})
@@ -50,6 +37,28 @@ fn prepare(config: &Configuration) -> Result<Prepared, Error> {
         Default::default(),
         mining::Config::new(AccountPublicKey([7; 32])),
     )
+}
+
+#[test]
+fn system_tuple_translation_retains_existing_resource_limits_before_workers() {
+    let row = json!(["miner", "", false, 1, null, "aecuckoo"]);
+    let parse = |value: Value| System::default().with_miners(&value);
+    assert_eq!(
+        parse(json!(vec![row.clone(); MAX_DEFINITIONS + 1])),
+        Err(Error::Limit("miners"))
+    );
+    let mut device_limit = row.clone();
+    device_limit[4] = json!(vec![0; MAX_INSTANCES + 1]);
+    assert_eq!(parse(json!([device_limit])), Err(Error::Limit("instances")));
+    let mut text_limit = row.clone();
+    text_limit[1] = json!("x".repeat(MAX_TEXT + 1));
+    assert_eq!(parse(json!([text_limit])), Err(Error::Limit("miner text")));
+    let mut huge = row;
+    huge[3] = serde_json::from_str("18446744073709551616").unwrap();
+    let system = parse(json!([huge])).unwrap();
+    let config = Configuration::from_value(&json!({}), &system).unwrap();
+    assert_eq!(config.miners[0].repeats, BigInt::from(u64::MAX) + 1);
+    assert!(matches!(prepare(&config), Err(Error::Attempts)));
 }
 
 #[test]

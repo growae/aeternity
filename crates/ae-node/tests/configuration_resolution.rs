@@ -6,6 +6,9 @@ use ae_sync::keys;
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
+#[path = "configuration_resolution/miners.rs"]
+mod miners;
+
 fn context() -> Context {
     Context::new(Directories {
         home: "/release".into(),

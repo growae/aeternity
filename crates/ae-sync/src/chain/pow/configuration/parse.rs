@@ -53,6 +53,35 @@ fn definition(value: &Value) -> Result<Miner, Error> {
     result.validate()?;
     Ok(result)
 }
+pub(super) fn system_miners(value: &Value) -> Result<Vec<Miner>, Error> {
+    let rows = value.as_array().ok_or(Error::Field("system miners"))?;
+    if rows.len() > MAX_DEFINITIONS {
+        return Err(Error::Limit("miners"));
+    }
+    rows.iter()
+        .map(|row| {
+            let fields = row
+                .as_array()
+                .filter(|row| row.len() == 6)
+                .ok_or(Error::Field("system miner"))?;
+            let mut map: Map<String, Value> = [
+                ("executable", &fields[0]),
+                ("extra_args", &fields[1]),
+                ("hex_encoded_header", &fields[2]),
+                ("repeats", &fields[3]),
+                ("executable_group", &fields[5]),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.clone()))
+            .collect();
+            // null represents the native undefined instance list.
+            if !fields[4].is_null() {
+                map.insert("addressed_instances".into(), fields[4].clone());
+            }
+            definition(&Value::Object(map))
+        })
+        .collect()
+}
 pub(super) fn normalize(value: &Value, system: &System) -> Result<Configuration, Error> {
     let map = object(value, "cuckoo")?;
     if map.contains_key("miner") && (map.contains_key("miners") || map.contains_key("edge_bits")) {

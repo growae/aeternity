@@ -55,10 +55,13 @@ fn configured_cuckoo_graph_matches_native_precedence_and_actual_proof_verificati
         }
         let bits = result.unwrap().cuckoo_edge_bits();
         assert_eq!(u64::from(bits.get()), row["effective"].as_u64().unwrap());
-        assert_eq!(
-            resolved.mining(&Default::default()).unwrap().edge_bits,
-            bits.get().into()
-        );
+        let miners = resolved.mining(&Default::default());
+        if row["name"] == "unused_application_miner_value" {
+            // Verification ignores the list; actual miner selection consumes it.
+            assert!(miners.is_err());
+        } else {
+            assert_eq!(miners.unwrap().edge_bits, bits.get().into());
+        }
         let proof: Vec<_> = row["proof"]
             .as_array()
             .unwrap()

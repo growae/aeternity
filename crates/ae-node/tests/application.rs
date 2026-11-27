@@ -501,3 +501,6 @@ fn foreground_stratum_creates_and_reuses_reward_keys_serves_tcp_and_joins_on_sig
 
 #[path = "application/stratum.rs"]
 mod stratum;
+
+#[path = "application/miners.rs"]
+mod miners;
