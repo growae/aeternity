@@ -102,6 +102,8 @@ pub struct Captured<S> {
     parameters: Owned,
     helper: Helper,
     options: core::Options,
+    native_timeout: Option<Timeout>,
+    reporting: Option<super::ReportingFloor>,
 }
 impl<S> Captured<S> {
     // Call inside the admitted capture closure, from one owner/configuration
@@ -133,7 +135,28 @@ impl<S> Captured<S> {
                 limits: helper.limits,
             },
             options,
+            native_timeout: None,
+            reporting: None,
         }
+    }
+    // Supply the captured native profile/explicit timer policy. Its clock is
+    // armed only after successful schema/helper preparation, before selection.
+    pub fn with_native_timeout(mut self, timeout: Timeout) -> Self {
+        self.native_timeout = Some(timeout);
+        self
+    }
+    // Resolve after successful public core execution and result/event
+    // serialization. The closure must
+    // remain bound to this captured owner/configuration, not a replacement.
+    pub fn with_reporting_floor(
+        mut self,
+        read: impl FnOnce()
+            -> Result<Option<ae_types::Unsigned>, crate::configuration::resolution::Error>
+        + Send
+        + 'static,
+    ) -> Self {
+        self.reporting = Some(Box::new(read));
+        self
     }
 }
 
@@ -176,7 +199,7 @@ impl Reservation {
         {
             return Err(admission::Error::Configuration);
         }
-        self.reservation.submit(move |control| {
+        self.reservation.submit_phased(move |control| {
             let mut captured = None;
             let mut selected = None;
             let response = run(
@@ -357,9 +380,16 @@ fn run<S: Source>(
         Err(e) => return Err(Error::Preparation(e)),
     };
     control.check().map_err(Error::Control)?;
+    if let Some(timeout) = captured.native_timeout {
+        control.start_native(timeout).map_err(Error::Control)?;
+    }
+    control.check().map_err(Error::Control)?;
     let view = match captured.source.select(prepared.top) {
         Ok(v) => v,
         Err(e) => {
+            if captured.native_timeout.is_some() {
+                control.finish_native().map_err(Error::Control)?;
+            }
             if let Some(reason) = failure::selection(&e) {
                 let (status, value) =
                     failure::body(reason, maximum).map_err(|_| Error::Capacity)?;
@@ -391,15 +421,36 @@ fn run<S: Source>(
                     rendering: p.rendering,
                     reporting_floor: p.reporting_floor.as_ref(),
                 },
+                captured.native_timeout.map(|_| control.clone()),
+                captured.reporting.take(),
             )
         })
         .map_err(Error::Encoding)?;
     control.check().map_err(Error::Control)?;
     let done = process::run(config.process.clone(), bytes, broker, control.clone());
     control.check().map_err(Error::Control)?;
+    if done.result.is_ok()
+        && done
+            .broker
+            .completion
+            .as_ref()
+            .is_some_and(|c| !c.completed)
+    {
+        return Err(Error::Process(process::Error::Protocol));
+    }
     let (status, value) = match done.result {
         Ok(bytes) => match super::decode_reply(&bytes).map_err(Error::Reply)? {
-            super::Reply::Done(v) => (200, v.body),
+            super::Reply::Done(v) => {
+                if done
+                    .broker
+                    .completion
+                    .as_ref()
+                    .is_some_and(|c| c.public && !c.reporting_read)
+                {
+                    return Err(Error::Process(process::Error::Protocol));
+                }
+                (200, v.body)
+            }
             super::Reply::Failed(e) => match failure::worker(&e) {
                 Some(reason) => failure::body(reason, maximum).map_err(|_| Error::Capacity)?,
                 None => return Err(Error::Worker(Box::new(e))),

@@ -54,6 +54,40 @@ fn capture_with<S>(
     profile: &J,
     base: &ae_execution::transactions::Config<'_>,
 ) -> pipeline::Captured<S> {
+    capture_with_rendering(source, row, profile, base, Default::default())
+}
+fn capture_with_rendering<S>(
+    source: S,
+    row: &J,
+    profile: &J,
+    base: &ae_execution::transactions::Config<'_>,
+    rendering: dry_run::response::Limits,
+) -> pipeline::Captured<S> {
+    let context = ae_node::configuration::resolution::Context::new(
+        ae_node::configuration::resolution::Directories {
+            home: "/release".into(),
+            data: "data".into(),
+            log: "log".into(),
+        },
+    )
+    .unwrap();
+    let configuration = ae_node::configuration::Configuration::from_value(
+        serde_json::json!({"http":{"dry_run":{"timeout_ms":row["input"]["timeout"]}}}),
+    )
+    .unwrap();
+    let resolved = configuration.resolve(&context).unwrap();
+    let native = ae_node::configuration::dry_run::timeout(
+        &resolved,
+        if request(row).profile == Profile::Public {
+            ae_execution::dry_run::Profile::Public
+        } else {
+            ae_execution::dry_run::Profile::Internal
+        },
+        None,
+    )
+    .unwrap()
+    .runtime()
+    .unwrap();
     let keys: BTreeSet<_> = [
         "txs",
         "top",
@@ -92,7 +126,7 @@ fn capture_with<S>(
             state: Default::default(),
             overlays: Default::default(),
             node_decode: Default::default(),
-            rendering: Default::default(),
+            rendering,
             reporting_floor: Some(&floor),
         },
         dry_run::Config {
@@ -108,6 +142,7 @@ fn capture_with<S>(
             ..Default::default()
         },
     )
+    .with_native_timeout(native)
 }
 fn capture<S>(source: S, row: &J, profile: &J) -> pipeline::Captured<S> {
     configured(profile, |base| capture_with(source, row, profile, base))
@@ -220,6 +255,7 @@ struct Blocking {
     phase: Phase,
     gate: Gate,
     _life: Arc<()>,
+    selections: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl dry_run::Source for Blocking {
     type Error = &'static str;
@@ -253,6 +289,8 @@ impl pipeline::Source for Blocking {
         &mut self,
         h: Hash256,
     ) -> Result<Arc<View>, ae_chain::dry_run::Error<Self::SelectionError>> {
+        self.selections
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if self.phase == Phase::Selection {
             self.gate.block()
         }
@@ -300,6 +338,7 @@ fn blocked(
                     phase,
                     gate,
                     _life: life,
+                    selections: Arc::default(),
                 },
                 row,
                 &FIXTURE["profile"],
@@ -387,5 +426,7 @@ async fn disconnect_and_owner_shutdown_join_blocked_selection_and_keep_credits()
     assert!(weak.upgrade().is_none());
 }
 
+#[path = "dry_run_pipeline_service/native.rs"]
+mod native;
 #[path = "dry_run_pipeline_service/repository.rs"]
 mod repository;

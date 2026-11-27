@@ -46,16 +46,61 @@ pub struct Broker<A, C> {
     pub view: Arc<View<Overlay<A>, Overlay<C>>>,
     controls: Vec<ae_types::work::Control>,
     node_bytes: usize,
+    completion: Option<Completion>,
+}
+pub type ReportingFloor = Box<
+    dyn FnOnce() -> Result<Option<ae_types::Unsigned>, crate::configuration::resolution::Error>
+        + Send,
+>;
+struct Completion {
+    native: Option<dry_run::Control>,
+    reporting: Option<ReportingFloor>,
+    public: bool,
+    completed: bool,
+    succeeded: bool,
+    reporting_read: bool,
 }
 #[derive(Debug)]
 pub enum ReadError {
     Query,
     Capacity,
     Node(ae_trie::Error),
+    Phase(dry_run::Error),
+    Reporting(crate::configuration::resolution::Error),
+    Encoding(EncodingError),
 }
 impl<A: NodeReader, C: NodeReader> process::Broker for Broker<A, C> {
     type Error = ReadError;
     fn read(&mut self, q: &[u8]) -> Result<Vec<u8>, ReadError> {
+        if q == [130] {
+            let completion = self.completion.as_mut().ok_or(ReadError::Query)?;
+            if !completion.completed
+                || !completion.succeeded
+                || !completion.public
+                || completion.reporting_read
+            {
+                return Err(ReadError::Query);
+            }
+            completion.reporting_read = true;
+            let floor = completion
+                .reporting
+                .take()
+                .map(|read| read().map_err(ReadError::Reporting))
+                .transpose()?;
+            return codec::encode(&floor, self.node_bytes).map_err(ReadError::Encoding);
+        }
+        if self.completion.as_ref().is_some_and(|c| c.completed) {
+            return Err(ReadError::Query);
+        }
+        if let [129, success @ 0..=1] = q {
+            let completion = self.completion.as_mut().ok_or(ReadError::Query)?;
+            if let Some(native) = &completion.native {
+                native.finish_native().map_err(ReadError::Phase)?;
+            }
+            completion.completed = true;
+            completion.succeeded = *success == 1;
+            return Ok(vec![]);
+        }
         if let [128, id] = q {
             let control = self.controls.get(*id as usize).ok_or(ReadError::Query)?;
             return Ok(vec![u8::from(control.check().is_err())]);
@@ -109,7 +154,7 @@ pub fn submit<
         .reservation(process.input_bytes)
         .map_err(Error::Admission)?;
     let reservation = client.reserve(weight, timeout).map_err(Error::Admission)?;
-    let (bytes, broker) = prepare(&process, view, request, parameters)?;
+    let (bytes, broker) = prepare(&process, view, request, parameters, None, None)?;
     reservation
         .submit(move |control| process::run(process, bytes, broker, control))
         .map_err(Error::Admission)
@@ -119,7 +164,18 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
     view: Arc<View<Overlay<A>, Overlay<C>>>,
     request: Request<'_>,
     parameters: Parameters<'_>,
+    native: Option<dry_run::Control>,
+    reporting: Option<ReportingFloor>,
 ) -> Result<(Vec<u8>, Broker<A, C>), Error> {
+    let deferred_reporting = reporting.is_some();
+    let completion = (native.is_some() || deferred_reporting).then_some(Completion {
+        native,
+        reporting,
+        public: request.options.profile == core::Profile::Public,
+        completed: false,
+        succeeded: false,
+        reporting_read: false,
+    });
     if request.inputs.len() > parameters.preparation.requests
         || request.inputs.len() > request.options.max_transactions
         || request.funding.len() > request.options.max_accounts
@@ -178,14 +234,20 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
         overlays: parameters.overlays,
         node_decode: parameters.node_decode,
         rendering: parameters.rendering,
-        reporting_floor: parameters.reporting_floor.cloned(),
+        reporting_floor: if deferred_reporting {
+            None
+        } else {
+            parameters.reporting_floor.cloned()
+        },
         output_bytes: process.output_bytes,
+        core_notification: completion.is_some(),
     };
     let (bytes, controls) = codec::capture(&job, process.input_bytes)?;
     let broker = Broker {
         view,
         controls,
         node_bytes: process.frame_bytes.saturating_sub(1),
+        completion,
     };
     Ok((bytes, broker))
 }
@@ -267,7 +329,7 @@ pub fn serve<R: Read + Send + 'static, W: Write + Send + 'static>(
         return Err(ServeError::Encoding(EncodingError::Capacity));
     }
     drop(bytes);
-    let reply = job::execute(job, session.clone());
+    let reply = job::execute(job, session.clone())?;
     let bytes = codec::encode(&reply, maximum).map_err(ServeError::Encoding)?;
     session
         .lock()

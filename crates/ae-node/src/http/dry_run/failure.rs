@@ -151,10 +151,15 @@ pub fn selection<E>(error: &ae_chain::dry_run::Error<E>) -> Option<&'static str>
 pub fn admission(error: ae_sync::dry_run::Error) -> Option<&'static str> {
     (error == ae_sync::dry_run::Error::Timeout).then_some("dry-run exceeded time limit")
 }
+// Phased pipelines distinguish their whole-job service deadline from the
+// original core timer. Only this typed native expiry is a native HTTP reason.
+pub fn native_admission(error: ae_sync::dry_run::Error) -> Option<&'static str> {
+    (error == ae_sync::dry_run::Error::NativeTimeout).then_some("dry-run exceeded time limit")
+}
 pub fn process<E>(error: &ae_sync::dry_run::process::Error<E>) -> Option<&'static str> {
     use ae_sync::dry_run::process::Error;
     match error {
-        Error::Control(e) => admission(*e),
+        Error::Control(e) => native_admission(*e).or_else(|| admission(*e)),
         Error::Exit(status)
             if status.code().and_then(ae_worker_heap::Exit::from_code)
                 == Some(ae_worker_heap::Exit::NativeHeap) =>

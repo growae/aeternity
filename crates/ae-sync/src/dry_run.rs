@@ -1,6 +1,7 @@
 // Owned off-chain work, following aec_dry_run:run_bounded, fa2a6d7.
 // Copyright (c) Aeternity developers. ISC: repository LICENSE.
 use crate::blocking;
+mod phase;
 use std::{
     sync::{
         Arc,
@@ -21,6 +22,7 @@ pub enum Error {
     Stopped,
     Cancelled,
     Timeout,
+    NativeTimeout,
     Panicked,
     Spawn,
 }
@@ -80,8 +82,22 @@ pub struct Control {
     cancel: blocking::Cancellation,
     closed: Arc<AtomicBool>,
     deadline: Option<Instant>,
+    native: Option<phase::Clock>,
 }
 impl Control {
+    // Only a phased reservation can arm this once. Preparation is outside
+    // the native timer; completion must precede HTTP rendering.
+    pub fn start_native(&self, timeout: Timeout) -> Result<(), Error> {
+        self.check()?;
+        self.native
+            .as_ref()
+            .ok_or(Error::Configuration)?
+            .start(timeout)
+    }
+    pub fn finish_native(&self) -> Result<(), Error> {
+        self.check()?;
+        self.native.as_ref().ok_or(Error::Configuration)?.finish()
+    }
     pub fn execution(&self) -> ae_types::work::Control {
         let source = self.clone();
         ae_types::work::Control::new(move || source.check().is_err())
@@ -95,6 +111,9 @@ impl Control {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             return Err(Error::Timeout);
+        }
+        if let Some(native) = &self.native {
+            native.check()?;
         }
         if self.cancel.cancelled() {
             return Err(Error::Cancelled);
@@ -110,6 +129,7 @@ pub struct Reservation {
 pub struct Ticket<T> {
     pending: blocking::Pending<Result<T, Error>>,
     deadline: Option<Instant>,
+    native: Option<phase::Clock>,
 }
 // Hold this receipt (or its credits) through rendering and socket completion.
 // Its byte weight is a service reservation, not an allocator/RSS measurement.
@@ -153,6 +173,19 @@ impl Reservation {
         self,
         operation: impl FnOnce(Control) -> T + Send + 'static,
     ) -> Result<Ticket<T>, Error> {
+        self.submit_inner(None, operation)
+    }
+    pub fn submit_phased<T: Send + 'static>(
+        self,
+        operation: impl FnOnce(Control) -> T + Send + 'static,
+    ) -> Result<Ticket<T>, Error> {
+        self.submit_inner(Some(phase::Clock::new()), operation)
+    }
+    fn submit_inner<T: Send + 'static>(
+        self,
+        native: Option<phase::Clock>,
+        operation: impl FnOnce(Control) -> T + Send + 'static,
+    ) -> Result<Ticket<T>, Error> {
         let Self {
             reservation,
             closed,
@@ -161,18 +194,30 @@ impl Reservation {
         if closed.load(Ordering::Acquire) {
             return Err(Error::Stopped);
         }
+        let phase = native.clone();
         let pending = reservation.submit(move |cancel| {
             let control = Control {
                 cancel,
                 closed,
                 deadline,
+                native: phase,
             };
             control.check()?;
             let result = operation(control.clone());
+            // A terminal operational failure may precede a child completion
+            // acknowledgement. It ends active native work, never reviving an
+            // expired phase or extending a successfully completed one.
+            if let Some(native) = &control.native {
+                native.end();
+            }
             control.check()?;
             Ok(result)
         })?;
-        Ok(Ticket { pending, deadline })
+        Ok(Ticket {
+            pending,
+            deadline,
+            native,
+        })
     }
 }
 impl<T> Ticket<T> {
@@ -182,17 +227,13 @@ impl<T> Ticket<T> {
     pub async fn wait_retained(self) -> Result<Retained<T>, Error> {
         let held = self.pending.retained();
         tokio::pin!(held);
-        let response = match self.deadline {
-            None => held.await?,
-            Some(deadline) => {
-                // A result completed before the deadline remains valid even
-                // if the caller only polls after the timer would have expired.
-                tokio::select! {
-                    biased;
-                    response=&mut held=>response?,
-                    _=tokio::time::sleep_until(deadline.into())=>return Err(Error::Timeout),
-                }
-            }
+        // A completed result wins delayed polling. The independent native
+        // timer wakes this waiter even while capture/selection callbacks block.
+        let response = tokio::select! {
+            biased;
+            response=&mut held=>response?,
+            _=async { match self.deadline { Some(d)=>tokio::time::sleep_until(d.into()).await, None=>std::future::pending().await } }=>return Err(Error::Timeout),
+            error=async { match self.native { Some(n)=>n.expired().await, None=>std::future::pending().await } }=>return Err(error),
         };
         Ok(Retained {
             value: response.value?,
@@ -220,6 +261,8 @@ impl Drop for Worker {
     }
 }
 
+#[cfg(test)]
+mod phase_tests;
 #[cfg(test)]
 mod tests;
 

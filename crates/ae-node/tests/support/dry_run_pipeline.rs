@@ -153,6 +153,12 @@ impl ae_chain::dry_run::Source for Backend<'_> {
             .push(json!({"call":"state","hash":hex::encode_upper(h.0)}));
         match self.row["input"]["state_mode"].as_str().unwrap() {
             "ordinary" => Ok(self.trees.clone()),
+            // Original controlled aec_chain stub delays state lookup by one
+            // second. Public core timers expire; internal profiles continue.
+            "timeout" => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                Ok(self.trees.clone())
+            }
             "gc" => Err(ae_chain::dry_run::StateError::GarbageCollected),
             "raised" => Err(ae_chain::dry_run::StateError::Source(
                 "controlled_state_failure",

@@ -45,10 +45,11 @@ pub(super) struct Job {
     pub rendering: crate::http::dry_run::response::Limits,
     pub reporting_floor: Option<ae_types::Unsigned>,
     pub output_bytes: usize,
+    pub core_notification: bool,
 }
 impl Wire for Job {
     fn put(&self, e: &mut Encoder) -> Result<(), Error> {
-        e.raw(b"AED2")?;
+        e.raw(b"AED3")?;
         self.roots.put(e)?;
         self.context.put(e)?;
         self.funding.put(e)?;
@@ -62,10 +63,11 @@ impl Wire for Job {
         self.node_decode.put(e)?;
         self.rendering.put(e)?;
         self.reporting_floor.put(e)?;
-        self.output_bytes.put(e)
+        self.output_bytes.put(e)?;
+        self.core_notification.put(e)
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, Error> {
-        if d.raw(4)? != b"AED2" {
+        if d.raw(4)? != b"AED3" {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -83,6 +85,7 @@ impl Wire for Job {
             rendering: Wire::get(d)?,
             reporting_floor: Wire::get(d)?,
             output_bytes: Wire::get(d)?,
+            core_notification: Wire::get(d)?,
         })
     }
 }
@@ -218,10 +221,14 @@ impl Failure {
         f
     }
 }
-pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
-    job: Job,
+type CoreOutput<R, W> = core::Output<
+    ae_sync::dry_run::process::trie::Reader<R, W>,
+    ae_sync::dry_run::process::trie::Reader<R, W>,
+>;
+fn execute_core<R: std::io::Read, W: std::io::Write>(
+    job: &Job,
     session: Arc<std::sync::Mutex<ae_sync::dry_run::process::wire::Session<R, W>>>,
-) -> Reply {
+) -> Result<CoreOutput<R, W>, Box<Failure>> {
     use ae_state::{
         Trees, accounts::Accounts, calls::Calls, channels::Channels, contracts::Contracts,
         names::Names, oracles::Oracles,
@@ -252,12 +259,12 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
     })();
     let trees = match trees {
         Ok(t) => t,
-        Err(e) => return Reply::Failed(Failure::new(Stage::State, Kind::Operational, &e)),
+        Err(e) => return Err(Box::new(Failure::new(Stage::State, Kind::Operational, &e))),
     };
     // Funding precedes request preparation, preserving native failure order.
     let setup = match core::setup(trees, &job.context, &job.funding, &job.options) {
         Ok(v) => v,
-        Err(e) => return Reply::Failed(Failure::execution(e)),
+        Err(e) => return Err(Box::new(Failure::execution(e))),
     };
     let state = ae_state::transport::Config {
         limits: job.state,
@@ -273,7 +280,13 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
         .collect::<Result<Vec<_>, _>>();
     let calls = match calls {
         Ok(v) => v,
-        Err(e) => return Reply::Failed(Failure::new(Stage::Execution, Kind::Preparation, &e)),
+        Err(e) => {
+            return Err(Box::new(Failure::new(
+                Stage::Execution,
+                Kind::Preparation,
+                &e,
+            )));
+        }
     };
     let mut inputs = vec![];
     for (index, input) in job.inputs.iter().enumerate() {
@@ -290,7 +303,7 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
                 Err(e) => {
                     let mut f = Failure::new(Stage::Execution, Kind::Preparation, &e);
                     f.index = Some(index);
-                    return Reply::Failed(f);
+                    return Err(Box::new(f));
                 }
             },
         })
@@ -312,7 +325,7 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
                         failure.native_reason = Some(reason)
                     }
                     Err(e) => {
-                        return Reply::Failed(Failure::new(
+                        return Err(Box::new(Failure::new(
                             Stage::Rendering,
                             if e.is_capacity() {
                                 Kind::Capacity
@@ -320,25 +333,72 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
                                 Kind::Operational
                             },
                             &e,
-                        ));
+                        )));
                     }
                 }
             }
-            return Reply::Failed(failure);
+            return Err(Box::new(failure));
         }
+    };
+    Ok(output)
+}
+pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
+    job: Job,
+    session: Arc<std::sync::Mutex<ae_sync::dry_run::process::wire::Session<R, W>>>,
+) -> Result<Reply, super::ServeError> {
+    let output = execute_core(&job, session.clone());
+    if job.core_notification {
+        let reply = session
+            .lock()
+            .map_err(|_| super::ServeError::Poisoned)?
+            .read(&[129, u8::from(output.is_ok())])
+            .map_err(super::ServeError::Transport)?;
+        if !reply.is_empty() {
+            return Err(super::ServeError::Encoding(Error::Invalid));
+        }
+    }
+    let output = match output {
+        Ok(v) => v,
+        Err(e) => return Ok(Reply::Failed(*e)),
     };
     let profile = if job.options.profile == core::Profile::Public {
         crate::http::dry_run::Profile::Public
     } else {
         crate::http::dry_run::Profile::Internal
     };
-    match crate::http::dry_run::response::body(
-        &output,
-        profile,
-        job.options.tx_events,
-        job.reporting_floor.as_ref(),
-        job.rendering,
-    ) {
+    let render = |floor: Option<&ae_types::Unsigned>| {
+        crate::http::dry_run::response::body(
+            &output,
+            profile,
+            job.options.tx_events,
+            floor,
+            job.rendering,
+        )
+    };
+    let body = render(job.reporting_floor.as_ref());
+    // Native dry_run_results must succeed before the public floor getter runs.
+    // An override reuses the bounded serializer; discard the first body before
+    // reconstructing it so both response trees are never retained together.
+    let body = match body {
+        Ok(body) if job.core_notification && profile == crate::http::dry_run::Profile::Public => {
+            let reply = session
+                .lock()
+                .map_err(|_| super::ServeError::Poisoned)?
+                .read(&[130])
+                .map_err(super::ServeError::Transport)?;
+            let floor: Option<Option<ae_types::Unsigned>> =
+                super::codec::decode(&reply).map_err(super::ServeError::Encoding)?;
+            match floor {
+                Some(Some(floor)) => {
+                    drop(body);
+                    render(Some(&floor))
+                }
+                _ => Ok(body),
+            }
+        }
+        other => other,
+    };
+    Ok(match body {
         Ok(body) => Reply::Done(Box::new(ResultBody {
             body,
             roots: ae_chain::repository::Roots::of(&output.trees),
@@ -353,5 +413,5 @@ pub(super) fn execute<R: std::io::Read, W: std::io::Write>(
             },
             &e,
         )),
-    }
+    })
 }
