@@ -1,10 +1,7 @@
 // One Stratum generation owns its reward signer, accounting and TCP service.
 // Retirement joins accepted work before another generation can acquire Writer.
 use super::*;
-use ae_sync::{
-    chain::pow::{generator, group},
-    preset_keys,
-};
+use ae_sync::{chain::pow::generator, preset_keys};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -51,8 +48,8 @@ pub struct Inputs {
     pub database: Arc<Database>,
     pub snapshots: ae_storage::snapshots::Owner,
     pub admitter: ae_sync::chain::pow::stratum::Admitter,
-    pub producers: group::Client<ae_vm_fate::maps::order::Otp26>,
-    pub pool: ae_storage::pool::worker::Client,
+    pub producers: mining::production::Source,
+    pub pool: ae_sync::bindings::Admission,
     pub clock: Arc<dyn generator::Clock>,
     pub strictly_follow_top: bool,
 }

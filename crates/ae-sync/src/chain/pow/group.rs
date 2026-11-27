@@ -143,6 +143,9 @@ impl<O> Clone for Client<O> {
     }
 }
 impl<O> Client<O> {
+    pub fn uses_database(&self, database: &Arc<ae_storage::Database>) -> bool {
+        Arc::ptr_eq(&self.0.database, database)
+    }
     pub fn uses_snapshots(&self, snapshots: &snapshots::Owner) -> bool {
         snapshots.uses_database(&self.0.database)
     }

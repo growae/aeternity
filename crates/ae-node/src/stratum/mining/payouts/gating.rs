@@ -92,7 +92,12 @@ impl Worker {
             self.withdraw(writer, record, reason, dispatch)?;
             return Ok(());
         }
-        let accepted = self.inputs.pool.push(Arc::new(tx), Event::Created, false);
+        let Some(pool) = self.pool(dispatch) else {
+            drop(gate);
+            self.withdraw(writer, record, Withdrawal::PoolUnavailable, dispatch)?;
+            return Ok(());
+        };
+        let accepted = pool.push(Arc::new(tx), Event::Created, false);
         drop(gate);
         match accepted {
             Ok(ticket) => {

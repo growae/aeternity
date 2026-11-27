@@ -123,22 +123,16 @@ impl Owner {
             .as_ref()
             .ok_or(Error::NotReady)?
             .bindings()
-            .admission
-            .current()
-            .ok_or(Error::NotReady)?
-            .client;
+            .admission;
         let (strictly_follow_top, clock) = self
             .input
             .stratum_inputs(self.status.production_starts)
             .ok_or(Error::Configuration)?;
-        let Some(Live::Cuckoo(group)) = &self.production else {
-            return Err(Error::Configuration);
-        };
         let inputs = service::Inputs {
             database: services.configured().chain().database().clone(),
             snapshots: services.snapshots().clone(),
             admitter: services.importer().stratum_admitter(),
-            producers: group.client(),
+            producers: self.stratum_source.clone().ok_or(Error::NotReady)?,
             pool,
             clock,
             strictly_follow_top,

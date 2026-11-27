@@ -11,12 +11,45 @@ pub mod preflight;
 use gating::Authority;
 use preflight::task;
 
+#[derive(Clone)]
+pub enum Pool {
+    Fixed(txpool::Client),
+    Managed(ae_sync::bindings::Admission),
+}
+impl From<txpool::Client> for Pool {
+    fn from(client: txpool::Client) -> Self {
+        Self::Fixed(client)
+    }
+}
+impl From<ae_sync::bindings::Admission> for Pool {
+    fn from(binding: ae_sync::bindings::Admission) -> Self {
+        Self::Managed(binding)
+    }
+}
+impl Pool {
+    fn uses_database(&self, db: &Arc<Database>) -> bool {
+        match self {
+            Self::Fixed(c) => c.uses_database(db),
+            Self::Managed(b) => b.uses_database(db),
+        }
+    }
+    fn current(&self) -> Option<txpool::Client> {
+        match self {
+            Self::Fixed(c) => Some(c.clone()),
+            Self::Managed(b) => b.current().map(|p| p.client),
+        }
+    }
+    fn replacing(&self, error: &txpool::Error) -> bool {
+        matches!(self, Self::Managed(_)) && matches!(error, txpool::Error::Stopped)
+    }
+}
+
 pub struct Inputs {
     pub config: durable::Config,
     pub limits: durable::Limits,
     pub generation: ae_stratum::payout::Generation,
     pub signer: keys::Client,
-    pub pool: txpool::Client,
+    pub pool: Pool,
     pub snapshots: ae_storage::snapshots::Owner,
     pub preflight: ae_chain::repository::pow::key::Limits,
     pub payout_interval: Duration,
@@ -26,7 +59,7 @@ impl Inputs {
     pub fn new(
         config: durable::Config,
         signer: keys::Client,
-        pool: txpool::Client,
+        pool: impl Into<Pool>,
         snapshots: ae_storage::snapshots::Owner,
     ) -> Self {
         Self {
@@ -34,7 +67,7 @@ impl Inputs {
             limits: Default::default(),
             generation: ae_stratum::payout::Generation::Bounded(Default::default()),
             signer,
-            pool,
+            pool: pool.into(),
             snapshots,
             preflight: Default::default(),
             payout_interval: Duration::from_secs(120),
@@ -65,6 +98,7 @@ pub enum Phase {
 }
 #[derive(Debug, Clone)]
 pub enum Notice {
+    PoolUnavailable,
     Deferred(durable::Deferred),
     Preparation(ae_stratum::payout::Error),
     Signer(keys::Error),
@@ -82,6 +116,7 @@ pub enum Notice {
 }
 #[derive(Debug, Clone)]
 pub enum Withdrawal {
+    PoolUnavailable,
     Stopped,
     Stale,
     Pool(txpool::Error),
@@ -93,6 +128,7 @@ pub struct Status {
     pub phase: Phase,
     pub closing: bool,
     pub stopped: bool,
+    pub waiting_for_pool: bool,
     pub last: Option<Notice>,
 }
 pub(super) struct Shared {
@@ -296,6 +332,7 @@ impl Worker {
                     },
                     closing: false,
                     stopped: false,
+                    waiting_for_pool: false,
                     last: None,
                 }),
             }),
@@ -326,6 +363,28 @@ impl Worker {
             .payouts(self.inputs.limits)?
             .filter(|i| i.epoch == self.epoch)
             .ok_or(Error::Mining("payout owner changed"))
+    }
+    fn wait_for_pool(&mut self, dispatch: bool) {
+        self.check = dispatch;
+        self.shared
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .waiting_for_pool = true;
+        self.shared.notice(Notice::PoolUnavailable);
+    }
+    fn pool(&mut self, dispatch: bool) -> Option<txpool::Client> {
+        let pool = self.inputs.pool.current();
+        if pool.is_none() {
+            self.wait_for_pool(dispatch);
+        } else {
+            self.shared
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .waiting_for_pool = false;
+        }
+        pool
     }
     // Keep terminal replies in pending until every fallible publication is
     // complete. In particular pool tickets consume their replies only once.
@@ -383,11 +442,14 @@ impl Worker {
                     w.unaccepted_payout_submission(epoch, record, limits)
                 })?;
                 match reason {
+                    Withdrawal::PoolUnavailable => self.wait_for_pool(dispatch),
                     Withdrawal::Stopped => {}
                     Withdrawal::Stale => self.check = dispatch,
                     Withdrawal::Pool(error) => {
                         self.shared.notice(Notice::Pool(error.clone()));
-                        if *error != txpool::Error::Saturated {
+                        if self.inputs.pool.replacing(error) {
+                            self.wait_for_pool(dispatch);
+                        } else if *error != txpool::Error::Saturated {
                             return Err(Error::PayoutPool(error.clone()));
                         }
                     }
@@ -422,6 +484,7 @@ impl Worker {
                     }
                 }
                 Ok(_) => {}
+                Err(error) if self.inputs.pool.replacing(error) => self.wait_for_pool(dispatch),
                 Err(error) => return Err(Error::PayoutPool(error.clone())),
             },
             Pending::Signature {
@@ -531,6 +594,9 @@ impl Worker {
         }
         match info.pending {
             None => {
+                let Some(pool) = self.pool(dispatch) else {
+                    return Ok(());
+                };
                 let gate = self
                     .shared
                     .dispatch
@@ -539,7 +605,7 @@ impl Worker {
                 if !*gate {
                     return Ok(());
                 }
-                match self.inputs.pool.minimum_miner_gas_price() {
+                match pool.minimum_miner_gas_price() {
                     Ok(ticket) => {
                         self.pending = Some(Pending::Price {
                             ticket,
@@ -549,6 +615,10 @@ impl Worker {
                     }
                     Err(txpool::Error::Saturated) => {
                         self.shared.notice(Notice::Pool(txpool::Error::Saturated))
+                    }
+                    Err(error) if self.inputs.pool.replacing(&error) => {
+                        drop(gate);
+                        self.wait_for_pool(dispatch);
                     }
                     Err(error) => return Err(Error::PayoutPool(error)),
                 }
@@ -583,6 +653,11 @@ impl Worker {
             }
             Some(record) => match record.signed.as_ref().map(|s| &s.dispatch) {
                 Some(Dispatch::Ready(_)) => {
+                    // Do not publish/retract Sending intents on every poll
+                    // while a managed pool binding is unavailable.
+                    if self.pool(dispatch).is_none() {
+                        return Ok(());
+                    }
                     {
                         let shared = self.shared.clone();
                         let gate = shared.dispatch.lock().unwrap_or_else(|e| e.into_inner());

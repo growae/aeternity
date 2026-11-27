@@ -9,19 +9,35 @@ use ae_sync::chain::pow::{
 use ae_types::AccountPublicKey;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod source;
+pub use source::Source;
+
 pub enum Miner {
     Fixed(AccountPublicKey),
     Managed(ae_sync::keys::Client),
     Coordinated(ae_sync::chain::pow::producer::Client),
-    Supervised(group::Client<ae_vm_fate::maps::order::Otp26>),
+    Supervised(Source),
 }
 struct Identity {
     key: Option<AccountPublicKey>,
     producer: Option<group::GenerationId>,
+    owner: u64,
+}
+impl Identity {
+    fn token(&self) -> Option<(u64, group::GenerationId)> {
+        self.producer.map(|p| (self.owner, p))
+    }
 }
 impl Miner {
     fn current(&self, parent: Option<ae_types::Hash256>) -> Result<Identity, Error> {
-        if let Self::Supervised(group) = self {
+        if let Self::Supervised(source) = self {
+            let Some((owner, group)) = source.current() else {
+                return Ok(Identity {
+                    key: None,
+                    producer: None,
+                    owner: 0,
+                });
+            };
             let current = group.current();
             let current = current.filter(|g| {
                 let s = g.producer.status();
@@ -31,6 +47,7 @@ impl Miner {
                 return Ok(Identity {
                     key: None,
                     producer: None,
+                    owner,
                 });
             };
             let parent = parent.unwrap_or_else(|| current.producer.status().top);
@@ -38,12 +55,14 @@ impl Miner {
                 Ok(key) => Ok(Identity {
                     key,
                     producer: Some(current.id),
+                    owner,
                 }),
                 Err(
                     producer::Error::Closed | producer::Error::Keys(ae_sync::keys::Error::Stopped),
                 ) => Ok(Identity {
                     key: None,
                     producer: None,
+                    owner,
                 }),
                 Err(error) => Err(Error::ProductionController(error)),
             };
@@ -65,6 +84,7 @@ impl Miner {
         Ok(Identity {
             key,
             producer: None,
+            owner: 0,
         })
     }
 }
@@ -102,10 +122,10 @@ impl Inputs {
     }
     pub fn supervised(
         snapshots: snapshots::Owner,
-        group: group::Client<ae_vm_fate::maps::order::Otp26>,
+        group: impl Into<Source>,
         beneficiary: AccountPublicKey,
     ) -> Self {
-        Self::with_miner(snapshots, Miner::Supervised(group), beneficiary)
+        Self::with_miner(snapshots, Miner::Supervised(group.into()), beneficiary)
     }
     fn with_miner(
         snapshots: snapshots::Owner,
@@ -133,6 +153,7 @@ pub struct Status {
     pub waiting_for_identity: bool,
     pub producer: Option<group::GenerationId>,
     pub producer_changes: u64,
+    pub producer_root: Option<u64>,
     pub published: u64,
     pub broadcasts: u64,
     pub queued: u64,
@@ -185,8 +206,8 @@ pub(super) struct Worker {
     clock: Arc<dyn Clock>,
     task: Option<preparation::Task>,
     task_reset: u64,
-    source_producer: Option<group::GenerationId>,
-    task_producer: Option<group::GenerationId>,
+    source_producer: Option<(u64, group::GenerationId)>,
+    task_producer: Option<(u64, group::GenerationId)>,
     last: Option<Result<Prepared, ae_sync::chain::pow::stratum::Error>>,
     pending: Option<journal::Publication>,
     retry_at: Instant,
@@ -227,6 +248,7 @@ impl Worker {
                     running: true,
                     waiting_for_services: true,
                     producer: identity.producer,
+                    producer_root: identity.token().map(|(root, _)| root),
                     ..Default::default()
                 }),
             }),
@@ -235,7 +257,7 @@ impl Worker {
             clock,
             task: None,
             task_reset: 0,
-            source_producer: identity.producer,
+            source_producer: identity.token(),
             task_producer: None,
             last: None,
             pending: None,
@@ -290,17 +312,18 @@ impl Worker {
         limits: journal::Limits,
         identity: &Identity,
     ) -> Result<(), Error> {
-        if self.source_producer != identity.producer {
+        if self.source_producer != identity.token() {
             if let Some(task) = &self.task {
                 task.request_cancel();
             }
             retry(writer, |w| w.retire_work(epoch, limits))?;
             self.pending.take();
-            self.source_producer = identity.producer;
+            self.source_producer = identity.token();
             self.refresh_requested = true;
             self.retry_at = Instant::now();
             self.update(|s| {
                 s.producer = identity.producer;
+                s.producer_root = identity.token().map(|(root, _)| root);
                 s.producer_changes += 1;
                 s.waiting_broadcast = false;
             });
@@ -324,10 +347,11 @@ impl Worker {
         } else {
             Identity {
                 key: None,
-                producer: self.source_producer,
+                producer: self.source_producer.map(|(_, p)| p),
+                owner: self.source_producer.map_or(0, |(root, _)| root),
             }
         };
-        if self.source_producer != identity.producer {
+        if self.source_producer != identity.token() {
             self.bind_source(writer, epoch, limits, &identity)?;
             frame = retry(writer, |w| w.refresh_work(epoch, limits))?;
         }

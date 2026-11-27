@@ -895,6 +895,7 @@ fn close_during_signature_completion_joins_and_prevents_a_late_pool_dispatch() {
 
 mod execution;
 mod gating;
+mod managed;
 
 #[test]
 fn failed_or_unavailable_confirmation_holds_real_dispatch_until_canonical_recheck() {

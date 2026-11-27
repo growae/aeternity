@@ -229,6 +229,9 @@ impl Handle {
     pub fn try_output(&self) -> Option<Output> {
         lock(&self.shared.outputs).pop_front()
     }
+    pub fn pending_outputs(&self) -> usize {
+        lock(&self.shared.outputs).len()
+    }
     pub fn take_exit(&self) -> Option<Exit> {
         lock(&self.shared.exit).take()
     }
@@ -287,6 +290,7 @@ struct Owner {
     connection_task: Option<JoinHandle<connection::Status>>,
     production: Option<Live>,
     stratum: Option<stratum::Generation>,
+    stratum_source: Option<crate::stratum::mining::production::Source>,
     pending_stratum: Option<StratumExit>,
     collect_stratum_first: bool,
     stratum_epoch: Instant,
@@ -419,6 +423,7 @@ where
         connection_task: None,
         production: None,
         stratum: None,
+        stratum_source: None,
         pending_stratum: None,
         collect_stratum_first: true,
         stratum_epoch: Instant::now(),
@@ -702,6 +707,24 @@ impl Owner {
                 }
             }
         }
+        if self.config.stratum.is_some()
+            && let Some(Live::Cuckoo(group)) = &self.production
+        {
+            let database = self
+                .services
+                .as_ref()
+                .unwrap()
+                .configured()
+                .chain()
+                .database()
+                .clone();
+            let source = self.stratum_source.get_or_insert_with(|| {
+                crate::stratum::mining::production::Source::managed(database)
+            });
+            source
+                .install(number, group.client())
+                .map_err(|_| Error::Stratum(crate::stratum::configured::Failure::Configuration))?;
+        }
         loop {
             self.startup_check(end)?;
             self.worker_health()?;
@@ -740,7 +763,9 @@ impl Owner {
             || b.keys.as_ref().is_none_or(|k| k.current().is_none())
     }
     async fn stop_production(&mut self) -> Result<(), Error> {
-        self.stop_stratum().await?;
+        if let Some(source) = &self.stratum_source {
+            source.withdraw();
+        }
         {
             let mut controls = lock(&self.shared.controls);
             controls.production = None;

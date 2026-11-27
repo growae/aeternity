@@ -12,6 +12,16 @@ fn native_replacement(name: &str) -> Value {
         .unwrap()
         .clone()
 }
+fn native_worker_replacement(name: &str) -> Value {
+    let rows: Value =
+        serde_json::from_str(include_str!("../fixtures/erlang_stratum_rebind.json")).unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == name)
+        .unwrap()
+        .clone()
+}
 fn configuration(lab: &Lab) -> stratum::Config {
     let cfg = Configuration::from_value(json!({"stratum":{
         "enabled":true,"connection":{"port":9999,"max_connections":4,"num_acceptors":2},
@@ -175,18 +185,36 @@ async fn stratum_root_bind_failure_retains_accounting_and_signer_retirement() {
 }
 
 #[tokio::test]
-async fn stratum_root_retires_before_worker_rebinding_and_preserves_output_backpressure() {
+async fn stratum_root_keeps_authorized_miners_and_signer_across_key_and_pool_rebinding_under_output_pressure()
+ {
     let lab = Lab::new();
-    let mut config = settings(&lab, configuration(&lab));
+    let mut service = configuration(&lab);
+    service.transport.session.skip_blocks = 0;
+    let mut config = settings(&lab, service);
     config.outputs = 1;
     let reward = config.stratum.as_ref().unwrap().beneficiary();
     let running = start(&lab, config);
     let h = running.handle();
     root_ready(&h, 1).await;
     let importer = h.importer().unwrap();
+    let old = h.stratum().unwrap();
+    let mining = old.accounting.mining().unwrap();
+    let epoch = mining.epoch();
+    let payout_epoch = mining.payout_status().unwrap().epoch;
+    let mut stream = subscribe(&old).await;
+    authorize(&mut stream).await;
+    let connection = old.transport.connections().pop().unwrap();
+    let before = within(connection.status().unwrap()).await.unwrap().unwrap();
+    let nonce = before.session.extra_nonce();
+    let account = before.session.account().unwrap().to_owned();
+    drop(before);
+    until(|| mining.production_status().unwrap().published > 0).await;
     for (child, starts) in [(workers::Child::Keys, 2), (workers::Child::Admission, 3)] {
-        // Keep the single root output slot occupied until retirement is joined.
-        let old = h.stratum().unwrap();
+        // A closed probe contributes a real transport output if no production
+        // output is left. Keep the root's sole slot full until after retirement.
+        drop(subscribe(&old).await);
+        until(|| h.pending_outputs() == 1 && old.transport.connections().len() == 1).await;
+        let previous = mining.production_status().unwrap().last.unwrap();
         h.workers()
             .unwrap()
             .restart(child, 1)
@@ -194,13 +222,15 @@ async fn stratum_root_retires_before_worker_rebinding_and_preserves_output_backp
             .wait()
             .await
             .unwrap();
-        until(|| old.signer.info().joined).await;
+        until(|| h.status().phase == root::Phase::Rebinding).await;
         assert_eq!(h.status().production_starts, starts - 1);
+        assert!(old.signer.info().accepting && !old.accounting.is_closed());
+        assert!(!connection.is_closed());
         let mut reports = 0;
         until(|| {
             while let Some(o) = h.try_output() {
-                if let root::Output::StratumRetired(s) = o {
-                    joined(&s.report);
+                assert!(!matches!(o, root::Output::StratumRetired(_)));
+                if matches!(o, root::Output::Retired(_)) {
                     reports += 1;
                 }
             }
@@ -209,14 +239,51 @@ async fn stratum_root_retires_before_worker_rebinding_and_preserves_output_backp
                 "{:?}",
                 h.status()
             );
-            h.status().ready && h.status().production_starts == starts
+            h.status().ready
+                && h.status().production_starts == starts
+                && mining
+                    .production_status()
+                    .unwrap()
+                    .last
+                    .as_ref()
+                    .is_some_and(|p| p.sequence > previous.sequence)
         })
         .await;
         assert_eq!(reports, 1);
-        assert!(old.transport.is_closed() && old.accounting.is_closed());
-        assert!(!old.signer.same_worker(&h.stratum().unwrap().signer));
-        let s = h.stratum().unwrap();
-        let signature = s
+        let native = native_worker_replacement(if child == workers::Child::Keys {
+            "keys"
+        } else {
+            "pool"
+        });
+        assert_eq!(
+            h.status().stratum_starts == 1,
+            native["stratum_children_preserved"].as_bool().unwrap()
+        );
+        assert_eq!(
+            h.status().running,
+            native["supervisors_preserved"].as_bool().unwrap()
+        );
+        assert_eq!(h.status().stratum_starts, 1);
+        assert_eq!(
+            mining.production_status().unwrap().producer_root,
+            Some(starts)
+        );
+        assert_eq!(mining.epoch(), epoch);
+        assert_eq!(mining.payout_status().unwrap().epoch, payout_epoch);
+        assert!(old.signer.same_worker(&h.stratum().unwrap().signer));
+        let next = mining.production_status().unwrap().last.unwrap();
+        let job = next.candidate.work().unwrap().id().unwrap();
+        loop {
+            let message = packet(&mut stream).await;
+            if message["method"] == "mining.notify" && message["params"][0] == job {
+                break;
+            }
+        }
+        let after = within(connection.status().unwrap()).await.unwrap().unwrap();
+        assert_eq!(after.session.extra_nonce(), nonce);
+        assert_eq!(after.session.account(), Some(account.as_str()));
+        assert_eq!(old.transport.connections()[0].id(), connection.id());
+        let signature = old
             .signer
             .sign_binary(b"same reward key", reward)
             .unwrap()
@@ -409,6 +476,13 @@ async fn stratum_root_restarts_a_permanent_listener_once_then_retains_restart_li
     })
     .await;
     assert_eq!(reports, 1);
+    let worker_native = native_worker_replacement("stratum");
+    assert_eq!(
+        h.status().stratum_starts == 2,
+        worker_native["stratum_children_replaced"]
+            .as_bool()
+            .unwrap()
+    );
     let native = native_replacement("stratum");
     assert_eq!(
         h.status().production_starts == 1,
@@ -633,15 +707,8 @@ async fn stratum_supervised_source_rejects_a_foreign_database_before_starting_se
             database,
             snapshots,
             admitter: h.importer().unwrap().stratum_admitter(),
-            producers: f.production().unwrap(),
-            pool: h
-                .workers()
-                .unwrap()
-                .bindings()
-                .admission
-                .current()
-                .unwrap()
-                .client,
+            producers: f.production().unwrap().into(),
+            pool: h.workers().unwrap().bindings().admission,
             clock: Arc::new(generator::SystemClock),
             strictly_follow_top: false,
         },
@@ -659,4 +726,58 @@ async fn stratum_supervised_source_rejects_a_foreign_database_before_starting_se
     );
     assert_root_joined(&running.shutdown().await.unwrap());
     assert_root_joined(&foreign.shutdown().await.unwrap());
+}
+
+#[tokio::test]
+async fn stratum_outer_rebind_cancels_old_preparation_even_when_inner_producer_ids_repeat() {
+    let lab = Lab::new();
+    let p = lab.services("pow_cuckoo", json!({"dev_mode":true}), Default::default());
+    let snapshots = p.snapshots().clone();
+    let (entered, wait) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let clocks = Clocks(Arc::new(Gate(std::sync::Mutex::new(Some((
+        entered, blocked,
+    ))))));
+    let running = root::launch(
+        p,
+        settings(&lab, configuration(&lab)),
+        Arc::new(clocks),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    until(|| wait.try_recv().is_ok()).await;
+    let old = h.stratum().unwrap();
+    let mining = old.accounting.mining().unwrap();
+    let task = mining.production_status().unwrap().preparing.unwrap();
+    let previous = h.production().unwrap().current().unwrap().id;
+    h.workers()
+        .unwrap()
+        .restart(workers::Child::Admission, 1)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    until(|| {
+        drain(&h);
+        assert!(h.status().failure.is_none(), "{:?}", h.status());
+        h.status().ready
+            && h.status().production_starts == 2
+            && mining.production_status().unwrap().producer_root == Some(2)
+    })
+    .await;
+    assert_eq!(h.production().unwrap().current().unwrap().id, previous);
+    assert_eq!(mining.production_status().unwrap().preparing, Some(task));
+    assert_eq!(mining.production_status().unwrap().published, 0);
+    assert_eq!(h.status().stratum_starts, 1);
+    let mut stream = subscribe(&old).await;
+    authorize(&mut stream).await;
+    release.send(()).unwrap();
+    until(|| mining.production_status().unwrap().published == 1).await;
+    assert!(mining.production_status().unwrap().stale >= 1);
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert_eq!(snapshots.live_snapshots(), 0);
 }
