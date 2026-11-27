@@ -19,6 +19,7 @@ pub mod protocols;
 pub mod resolution;
 pub mod runtime;
 mod schema;
+pub mod stratum;
 mod yaml;
 pub use files::{Discovery, Source};
 

@@ -56,6 +56,7 @@ impl From<services::Error> for Error {
 #[derive(Debug, Clone)]
 pub struct Limits {
     pub connections: usize,
+    pub acceptors: usize,
     pub frame_bytes: usize,
     pub read_bytes: usize,
     pub commands_per_connection: usize,
@@ -69,6 +70,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             connections: 64,
+            acceptors: 10,
             frame_bytes: 65536,
             read_bytes: 8192,
             commands_per_connection: 16,
@@ -88,10 +90,11 @@ pub struct Config {
     pub limits: Limits,
 }
 impl Config {
-    fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         self.session.validate().map_err(Error::Session)?;
         let l = &self.limits;
-        if !(1..=4096).contains(&l.connections)
+        if !(1..=4096).contains(&l.acceptors)
+            || !(1..=4096).contains(&l.connections)
             || l.connections > self.services.connections
             || !(1..=65536).contains(&l.frame_bytes)
             || !(1..=65536).contains(&l.read_bytes)
@@ -477,6 +480,8 @@ async fn serve(
     shared: Arc<Shared>,
     limits: Limits,
 ) -> (Option<Error>, Vec<Exit>) {
+    let listener = Arc::new(listener);
+    let mut accepts = JoinSet::new();
     let mut tasks = JoinSet::new();
     let mut stop = shared.stop.subscribe();
     let mut changes = shared.services.changes();
@@ -501,6 +506,13 @@ async fn serve(
                 pending = Some(exit);
             }
         }
+        if pending.is_none() {
+            let available = limits.connections.saturating_sub(tasks.len());
+            while accepts.len() < limits.acceptors.min(available) {
+                let listener = listener.clone();
+                accepts.spawn(async move { listener.accept().await });
+            }
+        }
         tokio::select! {
             _ = stop.changed() => {},
             _ = changes.changed() => {},
@@ -512,8 +524,8 @@ async fn serve(
                     Err(_) => { failure = Some(Error::Panicked); break; }
                 }
             },
-            accepted = listener.accept(), if tasks.len() < limits.connections && pending.is_none() => {
-                let (stream, peer) = match accepted { Ok(v) => v, Err(e) => { failure = Some(e.into()); break; } };
+            accepted = accepts.join_next(), if !accepts.is_empty() && pending.is_none() => {
+                let (stream, peer) = match accepted.expect("pending accept") { Ok(Ok(v)) => v, Ok(Err(e)) => { failure = Some(e.into()); break; }, Err(_) => { failure=Some(Error::Panicked); break; } };
                 // These options precede session initialization, as in the original handler.
                 if let Err(e) = socket2::SockRef::from(&stream).set_keepalive(true) {
                     failure = Some(e.into()); break;
@@ -532,6 +544,8 @@ async fn serve(
             }
         }
     }
+    accepts.abort_all();
+    while accepts.join_next().await.is_some() {}
     drop(listener);
     shared.stop.send_replace(true);
     let mut exits: Vec<Exit> = pending.into_iter().collect();
