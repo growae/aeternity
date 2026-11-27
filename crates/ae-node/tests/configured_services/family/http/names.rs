@@ -431,7 +431,7 @@ async fn name_http_tracks_claim_update_revoke_auction_bids_replacement_pressure_
     }
     let invalid = request(
         address,
-        "GET /v3/names/bad?ignored=%GG HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /v3/names/bad?ignored=%GG HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
     assert_eq!(invalid.0, 400);
@@ -459,7 +459,9 @@ async fn name_http_tracks_claim_update_revoke_auction_bids_replacement_pressure_
     );
     let v2hash = request(
         address,
-        &format!("GET /v2/names/hash/{name_id} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        &format!(
+            "GET /v2/names/hash/{name_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        ),
     )
     .await;
     assert_eq!(v2hash.0, 404);

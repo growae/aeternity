@@ -399,7 +399,7 @@ async fn account_http_queries_follow_pending_nonces_historical_key_micro_state_g
     assert_eq!(get(address, &format!("{path}/height/0")).await.0, 410);
     let (code, headers, body) = request(
         address,
-        &format!("GET /v2/accounts/{owner}/height/0 HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        &format!("GET /v2/accounts/{owner}/height/0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
     )
     .await;
     assert_eq!(code, 500);

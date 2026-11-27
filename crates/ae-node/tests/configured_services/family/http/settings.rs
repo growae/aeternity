@@ -101,7 +101,7 @@ async fn node_settings_reads_live_policy_after_reconfiguration_recovery_and_repl
     for (query, code) in [("ignored=%GG", 400), ("int-as-string=invalid", 500)] {
         let r = request(
             address,
-            &format!("GET /v3/node-settings?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &format!("GET /v3/node-settings?{query} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
         )
         .await;
         assert_eq!(r.0, code);
@@ -176,7 +176,7 @@ async fn node_settings_preserves_nested_application_and_native_response_validati
         ] {
             let r = request(
                 address,
-                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
             )
             .await;
             assert_eq!(r.0, code, "{path}: {:?}", r.2);

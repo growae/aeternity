@@ -180,7 +180,7 @@ async fn live_hyperchain_dry_runs_share_existing_snapshot_authority_and_join_lis
         (&listeners[1], "/v3/debug/transactions/dry-run"),
     ] {
         let mut socket = TcpStream::connect(listener.status().address).await.unwrap();
-        socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{{\"txs\":[]}}").as_bytes()).await.unwrap();
+        socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{{\"txs\":[]}}").as_bytes()).await.unwrap();
         let mut bytes = vec![];
         socket.read_to_end(&mut bytes).await.unwrap();
         let mut headers = [httparse::EMPTY_HEADER; 32];
@@ -272,7 +272,7 @@ async fn pending_hyperchain_requests_preserve_native_errors_and_root_availabilit
         for version in ["v2", "v3"] {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut stream = TcpStream::connect(http.status().address).await.unwrap();
-                stream.write_all(format!("GET /{version}/key-blocks/pending HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+                stream.write_all(format!("GET /{version}/key-blocks/pending HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 let mut bytes = vec![];
                 stream.read_to_end(&mut bytes).await.unwrap();
                 let mut fields = [httparse::EMPTY_HEADER;64];

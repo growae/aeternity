@@ -235,7 +235,7 @@ async fn protocol_parameters_follow_accepted_versions_bound_rules_replacement_an
     assert_eq!(
         request(
             address,
-            "GET /v2/protocol-parameters HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            "GET /v2/protocol-parameters HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .await
         .0,

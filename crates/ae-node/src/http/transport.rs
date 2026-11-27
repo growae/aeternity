@@ -11,6 +11,8 @@ use tokio::{
     net::TcpStream,
 };
 mod body;
+mod io;
+use io::Socket;
 
 struct Request {
     method: String,
@@ -23,13 +25,20 @@ struct Read {
     prefetched: Vec<u8>,
     http11: bool,
 }
-async fn read(stream: &mut TcpStream, config: &Config) -> Result<Read, u16> {
-    let mut bytes = Vec::new();
+async fn read(
+    stream: &mut Socket,
+    config: &Config,
+    mut bytes: Vec<u8>,
+) -> Result<Option<Read>, u16> {
+    let deadline = tokio::time::Instant::now() + config.protocol.request_timeout;
     loop {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut request = httparse::Request::new(&mut headers);
         match request.parse(&bytes) {
             Ok(httparse::Status::Complete(end)) => {
+                if end > config.header_bytes {
+                    return Err(431);
+                }
                 let method = request.method.ok_or(400u16)?.to_owned();
                 let uri = request.path.ok_or(400u16)?;
                 if !uri.starts_with('/') || uri.contains('#') {
@@ -76,7 +85,8 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Read, u16> {
                         return Err(413);
                     }
                 }
-                return Ok(Read {
+                persistent(&fields, request.version == Some(1))?;
+                return Ok(Some(Read {
                     request: Request {
                         method,
                         path,
@@ -85,23 +95,58 @@ async fn read(stream: &mut TcpStream, config: &Config) -> Result<Read, u16> {
                     },
                     prefetched: bytes[end..].to_vec(),
                     http11: request.version == Some(1),
-                });
+                }));
             }
             Ok(httparse::Status::Partial) => (),
             Err(httparse::Error::TooManyHeaders) => return Err(431),
             Err(_) => return Err(400),
         }
-        if bytes.len() == config.header_bytes {
+        if bytes.len() >= config.header_bytes {
             return Err(431);
         }
         let mut chunk = [0; 2048];
         let count = (config.header_bytes - bytes.len()).min(chunk.len());
-        let n = stream.read(&mut chunk[..count]).await.map_err(|_| 400u16)?;
-        if n == 0 {
-            return Err(400);
-        }
+        let n = match tokio::time::timeout_at(deadline, stream.read(&mut chunk[..count])).await {
+            Ok(Ok(0)) => return if bytes.is_empty() { Ok(None) } else { Err(400) },
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => return Ok(None),
+            Err(_) => {
+                return if bytes.windows(2).any(|w| w == b"\r\n") {
+                    Err(408)
+                } else {
+                    Ok(None)
+                };
+            }
+        };
         bytes.extend_from_slice(&chunk[..n]);
     }
+}
+fn persistent(headers: &Headers, http11: bool) -> Result<bool, u16> {
+    let Some(value) = headers.get("connection") else {
+        return Ok(http11);
+    };
+    let mut tokens = vec![];
+    for part in value.split(',') {
+        let part = part.trim_matches([' ', '\t']);
+        if part.is_empty() {
+            continue;
+        }
+        if !part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            return Err(400);
+        }
+        tokens.push(part);
+    }
+    if tokens.is_empty() {
+        return Err(400);
+    }
+    Ok(if http11 {
+        !tokens.iter().any(|t| t.eq_ignore_ascii_case("close"))
+    } else {
+        tokens.iter().any(|t| t.eq_ignore_ascii_case("keep-alive"))
+    })
 }
 pub(super) fn path_segments(path: &str) -> Option<Vec<Vec<u8>>> {
     // Cowboy splits before percent-decoding: an encoded slash remains inside
@@ -437,44 +482,127 @@ pub(super) fn dispatch(
     }
 }
 pub(super) async fn exchange(
-    mut stream: TcpStream,
+    stream: TcpStream,
     parent: runtime::Handle,
     config: Arc<Config>,
     posts: super::post::Service,
     dry_service: Option<super::dry_run::service::Service>,
 ) {
-    let request = match tokio::time::timeout(config.timeout, read(&mut stream, &config)).await {
-        Ok(result) => result,
-        Err(_) => Err(408),
+    let services = Services {
+        parent: &parent,
+        config: &config,
+        posts: &posts,
+        dry_service: dry_service.as_ref(),
     };
+    connection(stream, &config, &services).await;
+}
+trait Handler: Sync {
+    fn response<'a>(
+        &'a self,
+        stream: &'a mut Socket,
+        request: Result<Read, u16>,
+        input: &'a mut body::Input,
+        close: bool,
+    ) -> impl Future<Output = bool> + Send + 'a;
+}
+impl Handler for Services<'_> {
+    fn response<'a>(
+        &'a self,
+        stream: &'a mut Socket,
+        request: Result<Read, u16>,
+        input: &'a mut body::Input,
+        close: bool,
+    ) -> impl Future<Output = bool> + Send + 'a {
+        respond(stream, self, request, input, close)
+    }
+}
+async fn connection(stream: TcpStream, config: &Config, handler: &impl Handler) {
+    let mut stream = Socket::new(stream);
+    let mut pending = vec![];
+    for number in 1..=config.protocol.max_keepalive {
+        let mut request = match read(&mut stream, config, pending).await {
+            Ok(Some(request)) => Ok(request),
+            Ok(None) => break,
+            Err(status) => Err(status),
+        };
+        let close = number == config.protocol.max_keepalive
+            || request.as_ref().map_or(true, |r| {
+                !persistent(&r.request.headers, r.http11).unwrap_or(false)
+            });
+        let mut input = match &mut request {
+            Ok(r) => body::Input::new(&r.request.headers, std::mem::take(&mut r.prefetched)),
+            Err(_) => body::Input::new(&Headers::new(), vec![]),
+        };
+        let inactivity = stream.inactivity(config.protocol.idle_timeout);
+        let again = tokio::select! {
+            biased;
+            _ = inactivity => false,
+            again = handler.response(&mut stream, request, &mut input, close) => again,
+        };
+        if !again {
+            break;
+        }
+        pending = input.leftover();
+    }
+    // Half-close before bounded draining so an unread request does not reset
+    // a response already written. This never extends the reusable-body limit.
+    let _ = tokio::time::timeout(config.timeout, stream.shutdown()).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        let mut remaining = config.header_bytes + config.body_bytes;
+        let mut buffer = [0; 2048];
+        while remaining > 0 {
+            let count = remaining.min(buffer.len());
+            match stream.read(&mut buffer[..count]).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => remaining -= n,
+            }
+        }
+    })
+    .await;
+}
+struct Services<'a> {
+    parent: &'a runtime::Handle,
+    config: &'a Config,
+    posts: &'a super::post::Service,
+    dry_service: Option<&'a super::dry_run::service::Service>,
+}
+async fn respond(
+    stream: &mut Socket,
+    services: &Services<'_>,
+    request: Result<Read, u16>,
+    input: &mut body::Input,
+    mut close: bool,
+) -> bool {
+    let Services {
+        parent,
+        config,
+        posts,
+        dry_service,
+    } = *services;
     // Capture one owner before the header marker. Cached height does not need
     // a read-work slot, so preflight and overload responses keep their marker.
     let captured = parent.importer().filter(|_| parent.status().ready);
     let mut height = captured.as_ref().and_then(|i| i.cached_height());
-    let (plan, headers, prefetched, query, http11) = match request {
+    let (plan, headers, query, http11) = match request {
         Ok(Read {
-            request,
-            prefetched,
-            http11,
+            request, http11, ..
         }) => (
-            plan_checked(&request, &config, || {
+            plan_checked(&request, config, || {
                 parent.information.dry_run.authorize_internal()
             }),
             request.headers,
-            prefetched,
             request.query,
             http11,
         ),
         Err(status) => (
             Err(Response::empty(status)),
             Headers::new(),
-            vec![],
             String::new(),
             false,
         ),
     };
     let selected = if matches!(plan, Ok((Operation::Current { .. }, _))) || height.is_none() {
-        selected(&parent, &config, captured.as_ref()).await
+        selected(parent, config, captured.as_ref()).await
     } else {
         Err(Response::unavailable(false))
     };
@@ -492,11 +620,11 @@ pub(super) async fn exchange(
             match dry_service.as_ref().filter(|_| captured.is_some()) {
                 None => Err(Response::unavailable(false)),
                 Some(service) => match dry_run(
-                    &mut stream,
+                    stream,
                     &headers,
-                    prefetched,
+                    input,
                     service,
-                    &config,
+                    config,
                     (*v3, *profile, query, http11),
                 )
                 .await
@@ -511,7 +639,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::GasPrices { v3 }, strings)) => {
-            match super::gas::query(&parent, &config, captured.as_ref(), *v3, *strings).await {
+            match super::gas::query(parent, config, captured.as_ref(), *v3, *strings).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     rendered = Some(reply.value);
@@ -521,7 +649,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::ChainEnds { v3 }, strings)) => {
-            match super::ends::query(&parent, &config, captured.as_ref(), *v3, *strings).await {
+            match super::ends::query(parent, config, captured.as_ref(), *v3, *strings).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     rendered = Some(reply.value);
@@ -531,7 +659,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Parameters, strings)) => {
-            match super::parameters::query(&parent, &config, captured.as_ref(), *strings).await {
+            match super::parameters::query(parent, config, captured.as_ref(), *strings).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     rendered = Some(reply.value);
@@ -541,7 +669,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Settings, strings)) => {
-            match super::settings::query(&parent, &config, captured.as_ref(), *strings).await {
+            match super::settings::query(parent, config, captured.as_ref(), *strings).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     account_pool_credits = Some(reply.value.pool_credits);
@@ -552,7 +680,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Currency, strings)) => {
-            match super::currency::query(&parent, &config, captured.as_ref(), *strings).await {
+            match super::currency::query(parent, config, captured.as_ref(), *strings).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     rendered = Some(reply.value);
@@ -563,8 +691,8 @@ pub(super) async fn exchange(
         }
         Ok((Operation::Channels { operation, v3 }, strings)) => {
             match super::channels::query(
-                &parent,
-                &config,
+                parent,
+                config,
                 captured.as_ref(),
                 operation,
                 *v3,
@@ -581,15 +709,8 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Names { operation, v3 }, strings)) => {
-            match super::names::query(
-                &parent,
-                &config,
-                captured.as_ref(),
-                operation,
-                *v3,
-                *strings,
-            )
-            .await
+            match super::names::query(parent, config, captured.as_ref(), operation, *v3, *strings)
+                .await
             {
                 Ok(reply) => {
                     retained = Some(reply.credits);
@@ -600,15 +721,8 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Oracles { operation, v3 }, strings)) => {
-            match super::oracles::query(
-                &parent,
-                &config,
-                captured.as_ref(),
-                operation,
-                *v3,
-                *strings,
-            )
-            .await
+            match super::oracles::query(parent, config, captured.as_ref(), operation, *v3, *strings)
+                .await
             {
                 Ok(reply) => {
                     retained = Some(reply.credits);
@@ -620,8 +734,8 @@ pub(super) async fn exchange(
         }
         Ok((Operation::Contracts { operation, v3 }, strings)) => {
             match super::contracts::query(
-                &parent,
-                &config,
+                parent,
+                config,
                 captured.as_ref(),
                 operation,
                 *v3,
@@ -639,8 +753,8 @@ pub(super) async fn exchange(
         }
         Ok((Operation::Accounts { operation, v3 }, strings)) => {
             match super::accounts::query(
-                &parent,
-                &config,
+                parent,
+                config,
                 captured.as_ref(),
                 operation,
                 *v3,
@@ -658,7 +772,7 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::PendingKey, _)) => {
-            match super::pending::query(&parent, &config, captured.as_ref()).await {
+            match super::pending::query(parent, config, captured.as_ref()).await {
                 Ok(reply) => {
                     retained = Some(reply.credits);
                     pending_candidate = Some(reply.candidate);
@@ -669,12 +783,12 @@ pub(super) async fn exchange(
         }
         Ok((Operation::PostTransaction { v3 }, _)) => {
             match post(
-                &mut stream,
+                stream,
                 &headers,
-                prefetched,
-                &posts,
+                input,
+                posts,
                 parent.clone(),
-                &config,
+                config,
                 (*v3, query, http11),
             )
             .await
@@ -689,8 +803,8 @@ pub(super) async fn exchange(
         }
         Ok((Operation::Transactions { operation, v3 }, strings)) => {
             match super::transactions::query(
-                &parent,
-                &config,
+                parent,
+                config,
                 captured.as_ref(),
                 operation,
                 *v3,
@@ -707,18 +821,19 @@ pub(super) async fn exchange(
             }
         }
         Ok((Operation::Current { height }, _)) => selected.map(|s| response::current(s, *height)),
-        Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(&parent, &config).await,
-        Ok((Operation::PeerPublicKey, _)) => super::key::query(&parent, &config).await,
-        Ok((Operation::Status { .. }, _)) => super::status::query(&parent, &config).await,
+        Ok((Operation::SyncStatus { .. }, _)) => super::sync::query(parent, config).await,
+        Ok((Operation::PeerPublicKey, _)) => super::key::query(parent, config).await,
+        Ok((Operation::Status { .. }, _)) => super::status::query(parent, config).await,
         Ok((Operation::Blocks { operation, v3 }, _)) => {
-            super::blocks::query(&parent, &config, captured.as_ref(), operation, *v3).await
+            super::blocks::query(parent, config, captured.as_ref(), operation, *v3).await
         }
         Err(_) => Err(Response::unavailable(false)),
     };
     let mut response = rendered.unwrap_or_else(|| dispatch(plan, result));
-    response.stamp(&config, &headers, height);
+    response.stamp(config, &headers, height);
+    close |= response.status == 408;
     let written = matches!(
-        tokio::time::timeout(config.timeout, write(&mut stream, response)).await,
+        tokio::time::timeout(config.timeout, write(stream, response, close, http11)).await,
         Ok(Ok(()))
     );
     drop(retained);
@@ -726,31 +841,13 @@ pub(super) async fn exchange(
     drop(dry_receipt);
     drop(pending_candidate);
     drop(account_pool_credits);
-    if written {
-        // Half-close the response first. Bounded draining gives the client a
-        // chance to receive the error before unread request bytes cause a TCP
-        // reset (notably a header rejected at the configured byte limit).
-        let _ = tokio::time::timeout(
-            config.timeout.min(std::time::Duration::from_millis(100)),
-            async {
-                let mut remaining = config.header_bytes + config.body_bytes;
-                let mut buffer = [0; 2048];
-                while remaining > 0 {
-                    let size = remaining.min(buffer.len());
-                    match stream.read(&mut buffer[..size]).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => remaining -= n,
-                    }
-                }
-            },
-        )
-        .await;
-    }
+    written && !close && input.finish(stream, config).await
 }
+
 async fn post(
-    stream: &mut TcpStream,
+    stream: &mut Socket,
     headers: &Headers,
-    prefetched: Vec<u8>,
+    input: &mut body::Input,
     posts: &super::post::Service,
     parent: runtime::Handle,
     config: &Config,
@@ -771,13 +868,13 @@ async fn post(
         .map_err(|_| Response::empty(408))?
         .map_err(|_| Response::empty(400))?;
     }
-    let body = body::read(stream, headers, prefetched, config).await?;
+    let body = body::read(stream, input, config).await?;
     super::post::submit(posts, reservation, parent, config, body, (v3, query)).await
 }
 async fn dry_run(
-    stream: &mut TcpStream,
+    stream: &mut Socket,
     headers: &Headers,
-    prefetched: Vec<u8>,
+    input: &mut body::Input,
     service: &super::dry_run::service::Service,
     config: &Config,
     options: (bool, super::dry_run::Profile, String, bool),
@@ -797,7 +894,7 @@ async fn dry_run(
         .map_err(|_| Response::empty(408))?
         .map_err(|_| Response::empty(400))?;
     }
-    let body = body::read(stream, headers, prefetched, config).await?;
+    let body = body::read(stream, input, config).await?;
     let (body, more) = match body {
         super::post::Body::Complete(b) => (b, false),
         super::post::Body::More(b) => (b, true),
@@ -814,22 +911,15 @@ async fn dry_run(
     )?;
     tokio::select! {
         result = ticket.wait_retained() => result.map_err(super::dry_run::service::admission_error),
-        _ = disconnected(stream) => Err(Response::empty(400)),
+        _ = input.monitor(stream, config.header_bytes) => Err(Response::empty(400)),
     }
 }
-async fn disconnected(stream: &mut TcpStream) {
-    let mut buffer = [0; 1024];
-    loop {
-        match stream.read(&mut buffer).await {
-            Err(_) => return,
-            // A write half-close is legal while waiting for a response. Only
-            // a connection error cancels work; owner/HTTP deadlines still apply.
-            Ok(0) => std::future::pending::<()>().await,
-            Ok(_) => (),
-        }
-    }
-}
-async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Result<()> {
+async fn write(
+    stream: &mut Socket,
+    mut response: Response,
+    close: bool,
+    http11: bool,
+) -> std::io::Result<()> {
     let phrase = match response.status {
         200 => "OK",
         400 => "Bad Request",
@@ -846,7 +936,13 @@ async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Resul
         503 => "Service Unavailable",
         _ => "Error",
     };
-    response.headers.insert("connection".into(), "close".into());
+    if close {
+        response.headers.insert("connection".into(), "close".into());
+    } else if !http11 {
+        response
+            .headers
+            .insert("connection".into(), "keep-alive".into());
+    }
     response
         .headers
         .insert("content-length".into(), response.body.len().to_string());
@@ -857,8 +953,11 @@ async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Resul
     header.push_str("\r\n");
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&response.body).await?;
-    stream.shutdown().await
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod persistence;

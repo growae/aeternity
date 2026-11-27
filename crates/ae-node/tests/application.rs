@@ -197,24 +197,24 @@ fn foreground_node_serves_captured_configuration_and_reopens_after_both_signals(
         assert_eq!(addresses.len(), 4);
         let (code, status) = request(
             addresses[0],
-            "GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /v3/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         );
         assert_eq!(code, 200);
         assert_eq!(status["network_id"], "ae_application_tests");
         let code = request(
             addresses[0],
-            "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )
         .0;
         assert_eq!(code, if round == 0 { 404 } else { 200 });
         let (code, result) = request(
             addresses[0],
-            "POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"txs\":[]}",
+            "POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"txs\":[]}",
         );
         assert_eq!((code, result), (200, json!({"results":[]})));
         let peer = request(
             addresses[0],
-            "GET /v3/peers/pubkey HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /v3/peers/pubkey HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         );
         assert_eq!(peer.0, 200);
         let current = (ready["genesis"].clone(), peer.1);
@@ -227,7 +227,7 @@ fn foreground_node_serves_captured_configuration_and_reopens_after_both_signals(
         stalled
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        stalled.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n").unwrap();
+        stalled.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n").unwrap();
         let mut ready_body = [0; 25];
         stalled.read_exact(&mut ready_body).unwrap();
         assert_eq!(&ready_body, b"HTTP/1.1 100 Continue\r\n\r\n");
@@ -292,7 +292,7 @@ fn foreground_cuckoo_node_starts_network_and_joins_failed_http_startup() {
     assert_eq!(
         request(
             ports[0],
-            "GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            "GET /v3/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .0,
         200
@@ -360,4 +360,76 @@ fn foreground_arguments_and_native_database_guard_fail_without_mutation() {
         std::fs::read(lab.0.join("chain/schema.DAT")).unwrap(),
         b"native-reference"
     );
+}
+
+#[test]
+fn foreground_http_reuses_connections_and_preserves_pipelined_dry_run_requests() {
+    let lab = Lab::new("on_demand", false);
+    let mut process = Process::spawn(&lab, lab.command(), "persistent");
+    let ready = process.event("ready");
+    let address = addresses(&ready)[0];
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    socket.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"txs\":[]}GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut socket = BufReader::new(socket);
+    fn response(socket: &mut BufReader<TcpStream>) -> (u16, bool, Value) {
+        let mut text = String::new();
+        loop {
+            let mut line = String::new();
+            assert!(socket.read_line(&mut line).unwrap() > 0);
+            text.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut fields = [httparse::EMPTY_HEADER; 64];
+        let mut response = httparse::Response::new(&mut fields);
+        response.parse(text.as_bytes()).unwrap().unwrap();
+        let length: usize = std::str::from_utf8(
+            response
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+                .unwrap()
+                .value,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let closed = response.headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("connection") && h.value.eq_ignore_ascii_case(b"close")
+        });
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).unwrap();
+        (
+            response.code.unwrap(),
+            closed,
+            serde_json::from_slice(&body).unwrap(),
+        )
+    }
+    assert_eq!(response(&mut socket), (200, false, json!({"results":[]})));
+    let status = response(&mut socket);
+    assert_eq!((status.0, status.1), (200, false));
+    assert_eq!(status.2["network_id"], "ae_application_tests");
+    // Reusing the same connection must release the first job's credits.
+    socket.get_mut().write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\nConnection: close\r\n\r\n{\"txs\":[]}").unwrap();
+    assert_eq!(response(&mut socket), (200, true, json!({"results":[]})));
+    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+    // A fully idle persistent connection remains owned and closes on shutdown.
+    let mut idle = TcpStream::connect(address).unwrap();
+    idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    idle.write_all(b"GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut idle = BufReader::new(idle);
+    assert_eq!(response(&mut idle).0, 200);
+    process.signal(rustix::process::Signal::TERM);
+    assert_eq!(
+        process.event("stopped"),
+        json!({"event":"stopped","joined":true,"failed":false})
+    );
+    process.wait(true);
+    assert_eq!(idle.read(&mut [0]).unwrap(), 0);
+    drop(TcpListener::bind(address).unwrap());
 }

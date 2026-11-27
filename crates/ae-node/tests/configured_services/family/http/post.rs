@@ -4,7 +4,7 @@ async fn post(address: SocketAddr, version: &str, body: &str, chunked: bool) -> 
     let raw = if chunked {
         let split = body.len() / 2;
         format!(
-            "POST /{version}/transactions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n{:x};test=yes\r\n{}\r\n{:x}\r\n{}\r\n0\r\nX-End: yes\r\n\r\n",
+            "POST /{version}/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n{:x};test=yes\r\n{}\r\n{:x}\r\n{}\r\n0\r\nX-End: yes\r\n\r\n",
             split,
             &body[..split],
             body.len() - split,
@@ -12,7 +12,7 @@ async fn post(address: SocketAddr, version: &str, body: &str, chunked: bool) -> 
         )
     } else {
         format!(
-            "POST /{version}/transactions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /{version}/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
     };
@@ -202,7 +202,7 @@ async fn http_post_rejects_invalid_schema_and_framing_before_pool_submission() {
             request(
                 address,
                 &format!(
-                    "POST /v3/transactions HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n\r\n{body}"
+                    "POST /v3/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}\r\n\r\n{body}"
                 )
             )
             .await
@@ -214,7 +214,7 @@ async fn http_post_rejects_invalid_schema_and_framing_before_pool_submission() {
     assert_eq!(
         request(
             address,
-            "GET /v3/transactions HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            "GET /v3/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .await
         .0,
@@ -268,7 +268,7 @@ async fn http_post_continue_pressure_cancellation_and_created_nonce_policy() {
         .client;
     let count = pool.info().submitted;
     let mut socket = TcpStream::connect(address).await.unwrap();
-    socket.write_all(b"POST /v3/transactions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 200\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    socket.write_all(b"POST /v3/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 200\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
     let mut interim = [0; 25];
     within(socket.read_exact(&mut interim)).await.unwrap();
     assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
@@ -306,7 +306,7 @@ async fn http_post_continue_pressure_cancellation_and_created_nonce_policy() {
     pool.delete(high.hash()).unwrap().await.unwrap();
     let body = json!({"tx":api::encode(ApiType::Transaction,&tx.encode())}).to_string();
     let mut socket = TcpStream::connect(address).await.unwrap();
-    socket.write_all(format!("POST /v2/transactions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+    socket.write_all(format!("POST /v2/transactions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",body.len()).as_bytes()).await.unwrap();
     within(socket.read_exact(&mut interim)).await.unwrap();
     assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
     for byte in body.bytes() {

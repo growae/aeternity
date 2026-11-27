@@ -47,6 +47,23 @@ pub enum Target {
 }
 
 #[derive(Debug, Clone)]
+pub struct Protocol {
+    pub request_timeout: Duration,
+    pub idle_timeout: Duration,
+    pub max_keepalive: usize,
+    pub max_skip_body_length: num_bigint::BigInt,
+}
+impl Default for Protocol {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(480),
+            max_keepalive: 1000,
+            max_skip_body_length: 1_000_000.into(),
+        }
+    }
+}
+#[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
     pub target: Target,
@@ -57,6 +74,7 @@ pub struct Config {
     pub header_bytes: usize,
     pub body_bytes: usize,
     pub submissions: SubmissionLimits,
+    pub protocol: Protocol,
     pub timeout: Duration,
 }
 impl Default for Config {
@@ -71,6 +89,7 @@ impl Default for Config {
             header_bytes: 16 << 10,
             body_bytes: 5_000_000,
             submissions: SubmissionLimits::default(),
+            protocol: Protocol::default(),
             timeout: Duration::from_secs(30),
         }
     }
@@ -84,6 +103,12 @@ impl Config {
             || !(1024..=1 << 20).contains(&self.header_bytes)
             || self.body_bytes > 64 << 20
             || !self.submissions.valid(self.body_bytes)
+            || self.protocol.max_keepalive == 0
+            || self.protocol.max_keepalive > 1_000_000
+            || self.protocol.max_skip_body_length.bits() > 4096
+            || [self.protocol.request_timeout, self.protocol.idle_timeout]
+                .iter()
+                .any(|t| t.is_zero() || tokio::time::Instant::now().checked_add(*t).is_none())
             || self.timeout.is_zero()
             || tokio::time::Instant::now()
                 .checked_add(self.timeout)

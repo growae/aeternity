@@ -97,22 +97,22 @@ async fn configured_http_startup_keeps_captured_groups_cors_and_debug_permission
     assert_eq!(
         request(
             addresses[0],
-            "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .await
         .0,
         404
     );
-    assert_eq!(request(addresses[1], "POST /v3/debug/transactions/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n").await.0, 403);
+    assert_eq!(request(addresses[1], "POST /v3/debug/transactions/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n").await.0, 403);
     let body = r#"{"txs":[]}"#;
-    let (code, _, bytes) = request(addresses[0], &format!("POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await;
+    let (code, _, bytes) = request(addresses[0], &format!("POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await;
     assert_eq!(code, 200);
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap()["results"],
         json!([])
     );
     for address in &addresses {
-        let (code, headers, _) = request(*address, "OPTIONS /v3/status HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\nAccess-Control-Request-Headers: x-requested\r\n\r\n").await;
+        let (code, headers, _) = request(*address, "OPTIONS /v3/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\nAccess-Control-Request-Headers: x-requested\r\n\r\n").await;
         assert_eq!(code, 200);
         assert_eq!(headers["access-control-allow-methods"], "GET, POST");
         assert_eq!(headers["access-control-allow-headers"], "x-onex-two");
@@ -122,7 +122,7 @@ async fn configured_http_startup_keeps_captured_groups_cors_and_debug_permission
         assert_eq!(
             request(
                 *address,
-                "GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                "GET /v3/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             )
             .await
             .0,
@@ -201,7 +201,7 @@ async fn configured_http_startup_unwinds_all_sockets_and_bounds_acceptors() {
     .await;
     let mut third = TcpStream::connect(addresses[0]).await.unwrap();
     third
-        .write_all(b"GET /v3/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /v3/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut byte = [0];

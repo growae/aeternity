@@ -301,7 +301,7 @@ async fn oracle_http_registers_queries_answers_paginates_and_tracks_replacement_
     );
     let bare = request(
         address,
-        "GET /v3/oracles/bad/queries?limit HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /v3/oracles/bad/queries?limit HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
     assert_eq!(bare.0, 500);

@@ -3,8 +3,8 @@ use crate::configuration::http::startup::Startup;
 use std::{net::SocketAddr, time::Duration};
 
 // Rust service budgets, independent of native endpoint registration and
-// transport getters. The current transport closes after one request; its
-// deadline is not Cowboy's idle_timeout, nor its body budget max_skip_body_length.
+// transport getters. Work deadlines and body budgets stay separate from
+// connection inactivity and unread-body retirement.
 #[derive(Debug, Clone)]
 pub struct Limits {
     pub connections: usize,
@@ -50,6 +50,15 @@ impl Startup {
                     header_bytes: limits.header_bytes,
                     body_bytes: limits.body_bytes,
                     submissions: limits.submissions.clone(),
+                    protocol: super::Protocol {
+                        idle_timeout: Duration::from_millis(self.idle_timeout_ms),
+                        max_skip_body_length: self
+                            .max_skip_body_length
+                            .as_number()
+                            .and_then(|n| n.to_string().parse().ok())
+                            .ok_or(Error::Configuration)?,
+                        ..Default::default()
+                    },
                     timeout: limits.timeout,
                 };
                 config.validate()?;

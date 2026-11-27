@@ -364,7 +364,7 @@ async fn recent_gas_http_distinguishes_missing_state_records_and_missing_ancesto
                 "/v3/recent-gas-prices",
                 "/v3/recent-gas-prices?int-as-string=true",
             ] {
-                let (status, headers, body) = request(http.status().address, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n\r\n")).await;
+                let (status, headers, body) = request(http.status().address, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\n\r\n")).await;
                 assert_eq!(
                     status, 500,
                     "{path}, missing_state={missing_state}, attempt={attempt}"

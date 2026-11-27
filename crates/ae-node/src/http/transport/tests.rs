@@ -54,7 +54,8 @@ async fn original_debug_gate_wire_responses_preserve_configuration_and_preflight
             socket.write_all(raw.as_bytes()).await.unwrap();
             let _ = wait.await;
         });
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = Socket::new(socket);
         let config = Config {
             target: if internal {
                 Target::Internal
@@ -68,13 +69,20 @@ async fn original_debug_gate_wire_responses_preserve_configuration_and_preflight
         let gates = Cell::new(0);
         let logic = Cell::new(false);
         let outcome = async {
-            let read = read(&mut socket, &config).await.map_err(Response::empty)?;
+            let read = read(&mut socket, &config, vec![])
+                .await
+                .map_err(Response::empty)?
+                .unwrap();
             plan_checked(&read.request, &config, || {
                 gates.set(gates.get() + 1);
                 dry_run::service::authorize_internal(&settings)
             })?;
-            let data =
-                body::read(&mut socket, &read.request.headers, read.prefetched, &config).await?;
+            let data = body::read(
+                &mut socket,
+                &mut body::Input::new(&read.request.headers, read.prefetched),
+                &config,
+            )
+            .await?;
             let body = match &data {
                 super::super::post::Body::Complete(b) => dry_run::schema::Body::Complete(b),
                 super::super::post::Body::More(b) => dry_run::schema::Body::More(b),
@@ -172,17 +180,25 @@ async fn original_post_wire_cases_match_request_parsing_and_validation_order() {
             let _ = wait.await;
             drop(socket);
         });
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = Socket::new(socket);
         let config = Config {
             groups: ["transaction".into()].into(),
             timeout: std::time::Duration::from_millis(25),
             ..Default::default()
         };
         let outcome = async {
-            let read = read(&mut socket, &config).await.map_err(Response::empty)?;
+            let read = read(&mut socket, &config, vec![])
+                .await
+                .map_err(Response::empty)?
+                .unwrap();
             plan(&read.request, &config)?;
-            let data =
-                body::read(&mut socket, &read.request.headers, read.prefetched, &config).await?;
+            let data = body::read(
+                &mut socket,
+                &mut body::Input::new(&read.request.headers, read.prefetched),
+                &config,
+            )
+            .await?;
             let value = crate::http::post::body_value(data, v3, config.body_bytes)?;
             if v3 {
                 strings(&read.request.query)?;

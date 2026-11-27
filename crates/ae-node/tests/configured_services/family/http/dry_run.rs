@@ -27,7 +27,7 @@ fn listeners() -> Vec<Config> {
 async fn post_at(address: SocketAddr, path: &str, body: &Value) -> (u16, Value) {
     let body = body.to_string();
     let (code, headers, bytes) = request(address, &format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
     )).await;
     assert_eq!(
         headers["access-control-allow-origin"],
@@ -68,13 +68,13 @@ async fn live_dry_runs_share_runtime_state_without_mutating_chain_or_pool() {
     assert_eq!(
         request(
             external,
-            "GET /v3/dry-run HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            "GET /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .await
         .0,
         405
     );
-    assert_eq!(request(internal, "POST /v3/debug/transactions/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n").await.0, 415);
+    assert_eq!(request(internal, "POST /v3/debug/transactions/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await.0, 415);
     let body =
         json!({"txs": [{"tx": api::encode(ApiType::Transaction, &tx.transaction().encode())}]});
     let before = db.view().unwrap().source().prefix(&[], 100_000).unwrap();
@@ -196,7 +196,7 @@ async fn listener_group_shares_body_admission_and_unwinds_failed_startup() {
     let external = servers[0].status().address;
     let internal = servers[1].status().address;
     let mut slow = TcpStream::connect(external).await.unwrap();
-    slow.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    slow.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
     let mut ready = [0; 25];
     slow.read_exact(&mut ready).await.unwrap();
     assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
@@ -221,7 +221,7 @@ async fn listener_group_shares_body_admission_and_unwinds_failed_startup() {
     })
     .await;
     let mut half = TcpStream::connect(external).await.unwrap();
-    half.write_all(b"POST /v2/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"txs\":[]}").await.unwrap();
+    half.write_all(b"POST /v2/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"txs\":[]}").await.unwrap();
     half.shutdown().await.unwrap();
     let mut response = vec![];
     half.read_to_end(&mut response).await.unwrap();
@@ -369,7 +369,7 @@ async fn live_fate_sequences_preserve_native_calls_and_public_floor_on_captured_
         let body = string_row["input"]["body"].to_string();
         let split = body.len() / 2;
         let raw = format!(
-            "POST {path}?{} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            "POST {path}?{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             string_row["query"]["query"].as_str().unwrap(),
             split,
             &body[..split],
@@ -476,7 +476,7 @@ async fn internal_debug_permission_precedes_body_admission_and_stays_with_its_ru
         .await
         .unwrap();
     let mut slow = TcpStream::connect(aa[0].status().address).await.unwrap();
-    slow.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    slow.write_all(b"POST /v3/dry-run HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
     let mut continuing = [0; 25];
     slow.read_exact(&mut continuing).await.unwrap();
     assert_eq!(&continuing, b"HTTP/1.1 100 Continue\r\n\r\n");
@@ -498,7 +498,7 @@ async fn internal_debug_permission_precedes_body_admission_and_stays_with_its_ru
             // Deliberately omit all ten declared body bytes. A forbidden
             // request must finish without sending 100 Continue or waiting.
             let raw = format!(
-                "{method} /{version}/debug/transactions/dry-run{suffix} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n{headers}Content-Length: 10\r\n\r\n"
+                "{method} /{version}/debug/transactions/dry-run{suffix} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\n{headers}Content-Length: 10\r\n\r\n"
             );
             let (code, headers, body) = tokio::time::timeout(
                 Duration::from_secs(2),

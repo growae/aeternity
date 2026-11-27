@@ -227,7 +227,7 @@ async fn channel_http_tracks_cosigned_create_deposit_withdraw_close_replacement_
     assert_eq!(busy.1["retry-after"], "3");
     let invalid = request(
         address,
-        "GET /v3/channels/bad?ignored=%GG HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /v3/channels/bad?ignored=%GG HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
     assert_eq!(invalid.0, 400);

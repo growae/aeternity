@@ -91,7 +91,10 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut socket = TcpStream::connect(http.status().address).await.unwrap();
             socket
-                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .write_all(
+                    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
                 .await
                 .unwrap();
             let mut bytes = vec![];
@@ -226,7 +229,10 @@ pub async fn verify(http: &http::Handle, database: &ae_storage::Database, root: 
     ] {
         let mut socket = TcpStream::connect(http.status().address).await.unwrap();
         socket
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
             .await
             .unwrap();
         let mut bytes = vec![];
@@ -447,7 +453,10 @@ pub(super) async fn block_get(http: &http::Handle, path: &str) -> (u16, Value) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut socket = TcpStream::connect(http.status().address).await.unwrap();
         socket
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
             .await
             .unwrap();
         let mut bytes = vec![];

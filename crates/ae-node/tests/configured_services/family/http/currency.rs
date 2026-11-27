@@ -116,7 +116,9 @@ async fn currency_http_uses_startup_settings_live_files_and_owned_capacity_acros
     for (query, code) in [("ignored=%GG", 400), ("int-as-string=invalid", 500)] {
         let r = request(
             address,
-            &format!("GET /v3/currency?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &format!(
+                "GET /v3/currency?{query} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            ),
         )
         .await;
         assert_eq!(r.0, code);
@@ -213,7 +215,7 @@ async fn currency_http_applies_native_integer_schema_and_keeps_metadata_errors_a
         ] {
             let r = request(
                 address,
-                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
             )
             .await;
             assert_eq!(r.0, code, "{path}: {:?}", r.2);

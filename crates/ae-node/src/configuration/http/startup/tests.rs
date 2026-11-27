@@ -59,12 +59,16 @@ fn native_http_startup_getters_groups_addresses_and_cors_match() {
                 json!({"target":target,"address":address,"port":e.port,"acceptors":e.acceptors,"idle_timeout":actual.idle_timeout_ms,"max_skip_body_length":actual.max_skip_body_length})
             }).collect();
             assert_eq!(json!(values), expected["startup"]["value"], "{label}");
-            let admissible = actual.endpoints.iter().all(|e| {
-                e.port.as_u64().is_some_and(|p| p <= 65535)
-                    && e.acceptors
-                        .as_u64()
-                        .is_some_and(|a| (1..=4096).contains(&a))
-            });
+            let admissible = actual
+                .max_skip_body_length
+                .as_number()
+                .is_some_and(|n| n.to_string().parse::<num_bigint::BigInt>().is_ok())
+                && actual.endpoints.iter().all(|e| {
+                    e.port.as_u64().is_some_and(|p| p <= 65535)
+                        && e.acceptors
+                            .as_u64()
+                            .is_some_and(|a| (1..=4096).contains(&a))
+                });
             assert_eq!(
                 actual.configs(&Limits::default()).is_ok(),
                 admissible,
@@ -112,6 +116,13 @@ fn configured_http_service_budgets_do_not_reinterpret_native_protocol_settings()
     for config in configs {
         assert_eq!(config.timeout, limits.timeout);
         assert_eq!(config.body_bytes, limits.body_bytes);
+        assert_eq!(config.protocol.request_timeout, Duration::from_secs(5));
+        assert_eq!(
+            config.protocol.idle_timeout,
+            Duration::from_millis(startup.idle_timeout_ms)
+        );
+        assert_eq!(config.protocol.max_skip_body_length, 23.into());
+        assert_eq!(config.protocol.max_keepalive, 1000);
     }
     assert!(
         startup

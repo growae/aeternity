@@ -79,7 +79,7 @@ pub(super) async fn get(
     let (code, headers, body) = request(
         address,
         &format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\n\r\n"
         ),
     )
     .await;
@@ -386,7 +386,7 @@ async fn http_query_errors_and_public_key_survive_key_worker_replacement() {
         let (code, headers, body) = request(
             address,
             &format!(
-                "GET {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\n\r\n"
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\n\r\n"
             ),
         )
         .await;
@@ -768,7 +768,7 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     for path in ["/v3%2Fstatus", "/v2/headers/top", "/v3/blocks/top"] {
         let (code, _, body) = request(
             address,
-            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
         )
         .await;
         assert_eq!(code, 404);
@@ -790,7 +790,7 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
             );
             let (code, headers, body) = request(
                 address,
-                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
             )
             .await;
             if v3 {
@@ -843,8 +843,11 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     let (code, headers, body) = get(address, "/v3/key-blocks/hash/invalid").await;
     assert_eq!((code, body), (503, json!({"reason":"Temporary overload"})));
     assert_eq!(headers["retry-after"], "3");
-    let (code, headers, _) =
-        request(address, "OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    let (code, headers, _) = request(
+        address,
+        "OPTIONS / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert_eq!(code, 200);
     assert_eq!(headers["x-ae-height"], "0");
     drop(unread);
@@ -954,13 +957,16 @@ async fn http_current_chain_queries_follow_real_key_and_micro_commits() {
     let (code, headers, body) = get(address, "/v3/key-blocks/current/height").await;
     assert_eq!((code, body), (200, json!({"height":height})));
     assert_eq!(headers["x-ae-height"], height.to_string());
-    let (code,headers,body)=request(address,"OPTIONS /unknown HTTP/1.1\r\nHost: localhost\r\nOrigin: https://client.example\r\nAccess-Control-Request-Headers: x-token\r\n\r\n").await;
+    let (code,headers,body)=request(address,"OPTIONS /unknown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: https://client.example\r\nAccess-Control-Request-Headers: x-token\r\n\r\n").await;
     assert_eq!(code, 200);
     assert!(body.is_empty());
     assert_eq!(headers["x-ae-height"], height.to_string());
     assert_eq!(headers["access-control-allow-headers"], "x-token");
-    let (code, headers, _) =
-        request(address, "GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    let (code, headers, _) = request(
+        address,
+        "GET /unknown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert_eq!(code, 404);
     assert_eq!(headers["x-ae-height"], height.to_string());
     assert!(!headers.contains_key("access-control-allow-origin"));
@@ -1000,11 +1006,11 @@ async fn http_limits_bind_failure_and_idle_clients_are_owned_until_shutdown() {
     ));
     for (raw,code) in [
         ("GET /v3/key-blocks/current/height HTTP/1.1\r\n\r\n".to_owned(),400),
-        ("GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\n\r\n".to_owned(),413),
-        ("GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),400),
-        (format!("GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}", "a".repeat(1500)),431),
-        ("POST /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\n\r\n".to_owned(),405),
-        ("GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n".to_owned(),406),
+        ("GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 17\r\n\r\n".to_owned(),413),
+        ("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),400),
+        (format!("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nX-Large: {}", "a".repeat(1500)),431),
+        ("POST /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_owned(),405),
+        ("GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: text/html\r\n\r\n".to_owned(),406),
     ] { let (actual,headers,_)=request(address,&raw).await;assert_eq!(actual,code);assert_eq!(headers["x-ae-height"],"0"); }
     let mut slow = TcpStream::connect(address).await.unwrap();
     slow.write_all(b"GET /").await.unwrap();
