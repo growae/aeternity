@@ -3,6 +3,7 @@
 mod codec;
 mod job;
 mod metadata;
+pub mod pipeline;
 use ae_execution::{dry_run as core, transactions};
 use ae_hyperchain::chain::View;
 use ae_sync::dry_run::{self, Ticket, Timeout, process};
@@ -108,6 +109,17 @@ pub fn submit<
         .reservation(process.input_bytes)
         .map_err(Error::Admission)?;
     let reservation = client.reserve(weight, timeout).map_err(Error::Admission)?;
+    let (bytes, broker) = prepare(&process, view, request, parameters)?;
+    reservation
+        .submit(move |control| process::run(process, bytes, broker, control))
+        .map_err(Error::Admission)
+}
+fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
+    process: &process::Config,
+    view: Arc<View<Overlay<A>, Overlay<C>>>,
+    request: Request<'_>,
+    parameters: Parameters<'_>,
+) -> Result<(Vec<u8>, Broker<A, C>), Error> {
     if request.inputs.len() > parameters.preparation.requests
         || request.inputs.len() > request.options.max_transactions
         || request.funding.len() > request.options.max_accounts
@@ -175,9 +187,7 @@ pub fn submit<
         controls,
         node_bytes: process.frame_bytes.saturating_sub(1),
     };
-    reservation
-        .submit(move |control| process::run(process, bytes, broker, control))
-        .map_err(Error::Admission)
+    Ok((bytes, broker))
 }
 pub fn submit_http<
     A: NodeReader + Clone + Send + Sync + 'static,
@@ -187,34 +197,40 @@ pub fn submit_http<
     process: process::Config,
     view: Arc<View<Overlay<A>, Overlay<C>>>,
     request: crate::http::dry_run::Request<'_>,
-    mut options: core::Options,
+    options: core::Options,
     parameters: Parameters<'_>,
     timeout: Timeout,
 ) -> Result<Ticket<process::Completed<Broker<A, C>>>, Error> {
+    submit(
+        client,
+        process,
+        view,
+        http_request(request, options),
+        parameters,
+        timeout,
+    )
+}
+fn http_request<'a>(
+    request: crate::http::dry_run::Request<'a>,
+    mut options: core::Options,
+) -> Request<'a> {
     options.profile = match request.profile {
         crate::http::dry_run::Profile::Public => core::Profile::Public,
         crate::http::dry_run::Profile::Internal => core::Profile::Internal,
     };
     options.tx_events = request.tx_events;
-    submit(
-        client,
-        process,
-        view,
-        Request {
-            inputs: request.inputs,
-            funding: request
-                .accounts
-                .into_iter()
-                .map(|a| core::Funding {
-                    account: a.public_key,
-                    amount: a.amount,
-                })
-                .collect(),
-            options,
-        },
-        parameters,
-        timeout,
-    )
+    Request {
+        inputs: request.inputs,
+        funding: request
+            .accounts
+            .into_iter()
+            .map(|a| core::Funding {
+                account: a.public_key,
+                amount: a.amount,
+            })
+            .collect(),
+        options,
+    }
 }
 pub fn decode_reply(bytes: &[u8]) -> Result<Reply, EncodingError> {
     codec::decode(bytes)
