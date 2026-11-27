@@ -1,6 +1,6 @@
 use ae_execution::{Context, Origin, oracles};
 use ae_protocol::oracles::abi_available;
-use ae_tx::{CanonicalTransaction, OracleTransaction};
+use ae_tx::{CanonicalTransaction, OracleTransaction, Transaction, TransactionLeaf};
 use ae_types::Unsigned;
 use serde_json::Value as Json;
 
@@ -45,6 +45,16 @@ fn typed_oracle_envelopes_historical_admission_state_rent_and_fee_sizes_match_er
                 "{row}"
             );
             assert_eq!(oracles::gas(&tx, &context), number(&r["gas"]), "{row}");
+            assert_eq!(
+                Transaction::new(TransactionLeaf::Oracle(tx.clone()))
+                    .view()
+                    .gas_limit(&Unsigned::from(context.height), context.protocol)
+                    .to_string(),
+                r["gas"].as_str().unwrap(),
+                "gas preflight {} at {}",
+                row["label"],
+                context.height
+            );
             assert_eq!(
                 oracles::minimum_fee(&tx, &context),
                 number(&r["minimum_fee"]),

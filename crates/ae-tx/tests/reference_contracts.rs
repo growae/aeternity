@@ -4,7 +4,9 @@ use ae_protocol::{
     Protocol,
     contracts::{Version, serialization_available},
 };
-use ae_tx::{CanonicalTransaction, ContractOperation, ContractTransaction};
+use ae_tx::{
+    CanonicalTransaction, ContractOperation, ContractTransaction, Transaction, TransactionLeaf,
+};
 use ae_types::{Id, Unsigned};
 use serde_json::{Value as J, json};
 fn bytes(j: &J) -> Vec<u8> {
@@ -227,6 +229,14 @@ fn contract_wire_normalization_and_gas_pricing_match_erlang() {
                 "admission {i} {protocol:?}"
             );
             assert_eq!(tx.gas_limit(), int(&p["gas"]), "gas {i}");
+            assert_eq!(
+                Transaction::new(TransactionLeaf::Contract(tx.clone()))
+                    .view()
+                    .gas_limit(&50.into(), protocol)
+                    .to_string(),
+                p["gas"].as_str().unwrap(),
+                "gas preflight {i}"
+            );
             assert_eq!(tx.inner_gas_limit(), int(&p["inner_gas"]));
             assert_eq!(tx.fee_gas(), int(&p["fee_gas"]));
             assert_eq!(tx.minimum_fee(protocol, false), int(&p["minimum_fee"]));

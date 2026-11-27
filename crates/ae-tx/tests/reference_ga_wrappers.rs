@@ -93,6 +93,7 @@ fn check(tx: TransactionRef<'_>, row: &J) {
             tx.valid_at_protocol(protocol).unwrap(),
             p["valid"].as_bool().unwrap()
         );
+        assert_eq!(int(tx.gas_limit(&50.into(), protocol)), p["gas"]["value"]);
         let costs = tx.pricing(&50.into(), protocol);
         if !p["minimum_block_gas"].is_null() {
             assert_eq!(

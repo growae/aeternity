@@ -11,6 +11,7 @@ mod blocks;
 mod channels;
 mod contracts;
 mod currency;
+pub mod dry_run;
 mod ends;
 pub(crate) mod gas;
 mod key;

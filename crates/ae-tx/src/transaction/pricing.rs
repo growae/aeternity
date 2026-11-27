@@ -33,7 +33,7 @@ fn cap(value: BigInt, gas_price: Option<&Unsigned>) -> BigInt {
     gas_price.map_or(value.clone(), |p| value.min(number(p)))
 }
 impl TransactionRef<'_> {
-    pub fn pricing(self, height: &Unsigned, protocol: Protocol) -> Pricing {
+    fn base_and_size(self, protocol: Protocol) -> BigInt {
         let base = match self.leaf {
             TransactionLeaf::Contract(t) => t.base_gas(),
             TransactionLeaf::GaAttach(_) => ae_protocol::contracts::CREATE_BASE_GAS,
@@ -41,12 +41,49 @@ impl TransactionRef<'_> {
             TransactionLeaf::Channel(t) => t.base_gas(protocol),
             _ => ae_protocol::gas::TRANSACTION,
         };
-        let size = self.leaf.wire_size();
-        let base_and_size = if base == 0 {
+        if base == 0 {
             BigInt::ZERO
         } else {
-            BigInt::from(base) + size_gas(size)
+            BigInt::from(base) + size_gas(self.leaf.wire_size())
+        }
+    }
+    // Gas preflight does not need fee-price divisions, which can be costly for
+    // otherwise bounded transactions with very large integer fields.
+    pub fn gas_limit(self, height: &Unsigned, protocol: Protocol) -> BigInt {
+        let base_and_size = self.base_and_size(protocol);
+        let mut gas = match self.leaf {
+            TransactionLeaf::Contract(t) => base_and_size + number(t.gas()),
+            TransactionLeaf::GaAttach(t) => base_and_size + number(t.gas()),
+            TransactionLeaf::Channel(t) => base_and_size + number(&t.gas()),
+            TransactionLeaf::Oracle(t) => t
+                .operation()
+                .state_ttl()
+                .delta(height)
+                .map_or(BigInt::ZERO, |d| base_and_size + number(&state_gas(&d))),
+            _ => base_and_size,
         };
+        let mut inner_size = self.leaf.wire_size();
+        for layer in self.layers {
+            gas = match &layer.wrapper {
+                Wrapper::GaMeta(m) => {
+                    BigInt::from(ae_protocol::contracts::CREATE_BASE_GAS)
+                        + size_gas(layer.wire_size)
+                        + number(&m.gas)
+                        + (gas - size_gas(inner_size)).max(BigInt::ZERO)
+                }
+                Wrapper::PayingFor(_) => {
+                    BigInt::from(ae_protocol::gas::PAYING_FOR) + size_gas(layer.wire_size)
+                        - size_gas(inner_size)
+                        + gas
+                }
+            };
+            inner_size = layer.wire_size;
+        }
+        gas
+    }
+    pub fn pricing(self, height: &Unsigned, protocol: Protocol) -> Pricing {
+        let size = self.leaf.wire_size();
+        let base_and_size = self.base_and_size(protocol);
         let (gas_limit, fee_gas, gas_price) = match self.leaf {
             TransactionLeaf::Contract(t) => (
                 &base_and_size + number(t.gas()),

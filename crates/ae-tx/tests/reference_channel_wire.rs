@@ -62,6 +62,11 @@ fn check(t: TransactionRef<'_>, r: &J, label: &J) {
             p["valid"],
             "{label} protocol {protocol:?}"
         );
+        assert_eq!(
+            json!({"ok":{"integer":t.gas_limit(&50.into(), protocol).to_string()}}),
+            p["gas"],
+            "{label} gas preflight {protocol:?}"
+        );
         let costs = t.pricing(&50.into(), protocol);
         for (name, n) in [
             ("gas", costs.gas_limit),
