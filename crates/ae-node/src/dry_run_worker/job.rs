@@ -47,10 +47,11 @@ pub(super) struct Job {
     pub output_bytes: usize,
     pub core_notification: bool,
     pub native_heap: Option<usize>,
+    pub metering_notification: bool,
 }
 impl Wire for Job {
     fn put(&self, e: &mut Encoder) -> Result<(), Error> {
-        e.raw(b"AED4")?;
+        e.raw(b"AED5")?;
         self.roots.put(e)?;
         self.context.put(e)?;
         self.funding.put(e)?;
@@ -66,10 +67,11 @@ impl Wire for Job {
         self.reporting_floor.put(e)?;
         self.output_bytes.put(e)?;
         self.core_notification.put(e)?;
-        self.native_heap.put(e)
+        self.native_heap.put(e)?;
+        self.metering_notification.put(e)
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, Error> {
-        if d.raw(4)? != b"AED4" {
+        if d.raw(4)? != b"AED5" {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -89,6 +91,7 @@ impl Wire for Job {
             output_bytes: Wire::get(d)?,
             core_notification: Wire::get(d)?,
             native_heap: Wire::get(d)?,
+            metering_notification: Wire::get(d)?,
         })
     }
 }
@@ -265,10 +268,35 @@ fn execute_core<R: std::io::Read, W: std::io::Write>(
         Err(e) => return Err(Box::new(Failure::new(Stage::State, Kind::Operational, &e))),
     };
     // Funding precedes request preparation, preserving native failure order.
-    let setup = match core::setup(trees, &job.context, &job.funding, &job.options) {
+    let funded = match core::fund(trees, &job.context, &job.funding, &job.options) {
         Ok(v) => v,
         Err(e) => return Err(Box::new(Failure::execution(e))),
     };
+    let enabled = if job.metering_notification {
+        let result = (|| -> Result<bool, super::ServeError> {
+            let reply = session
+                .lock()
+                .map_err(|_| super::ServeError::Poisoned)?
+                .read(&[131])
+                .map_err(super::ServeError::Transport)?;
+            super::codec::decode(&reply).map_err(super::ServeError::Encoding)
+        })();
+        match result {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                return Err(Box::new(Failure::new(
+                    Stage::Execution,
+                    Kind::Operational,
+                    &e,
+                )));
+            }
+        }
+    } else {
+        job.options.store_read_gas_metering
+    };
+    let setup = funded
+        .metered(enabled)
+        .map_err(|e| Box::new(Failure::execution(e)))?;
     let state = ae_state::transport::Config {
         limits: job.state,
         existing_name_status_atoms: job.atoms.as_ref(),

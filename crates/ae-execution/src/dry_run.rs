@@ -147,12 +147,28 @@ pub struct Setup<A, C> {
     floor: Option<Protocol>,
     options: Options,
 }
+// Funding and metering are separate deterministic stages. An enclosing service
+// can resolve its captured metering policy after funding succeeds.
+#[derive(Debug)]
+pub struct Funded<A, C> {
+    trees: Trees<Overlay<A>, Overlay<C>>,
+    context: Context,
+    options: Options,
+}
 pub fn setup<A: NodeReader + Clone, C: NodeReader + Clone>(
-    mut trees: Trees<Overlay<A>, Overlay<C>>,
+    trees: Trees<Overlay<A>, Overlay<C>>,
     context: &Context,
     funding: &[Funding],
     options: &Options,
 ) -> Result<Setup<A, C>, Error<A, C>> {
+    fund(trees, context, funding, options)?.metered(options.store_read_gas_metering)
+}
+pub fn fund<A: NodeReader + Clone, C: NodeReader + Clone>(
+    mut trees: Trees<Overlay<A>, Overlay<C>>,
+    context: &Context,
+    funding: &[Funding],
+    options: &Options,
+) -> Result<Funded<A, C>, Error<A, C>> {
     check(options.control.as_ref())?;
     if funding.len() > options.max_accounts {
         return Err(Error::ResourceLimit);
@@ -197,19 +213,30 @@ pub fn setup<A: NodeReader + Clone, C: NodeReader + Clone>(
         }
         trees.accounts.enter(&account).map_err(Error::Funding)?;
     }
-    let (protocol, floor) = options
-        .profile
-        .metering(context.protocol, options.store_read_gas_metering);
     let mut context = context.clone();
-    context.protocol = protocol;
     context.dry_run = true;
-    check(options.control.as_ref())?;
-    Ok(Setup {
+    Ok(Funded {
         trees,
         context,
-        floor,
         options: options.clone(),
     })
+}
+impl<A: NodeReader + Clone, C: NodeReader + Clone> Funded<A, C> {
+    pub fn metered(mut self, enabled: bool) -> Result<Setup<A, C>, Error<A, C>> {
+        let (protocol, floor) = self
+            .options
+            .profile
+            .metering(self.context.protocol, enabled);
+        self.context.protocol = protocol;
+        self.options.store_read_gas_metering = enabled;
+        check(self.options.control.as_ref())?;
+        Ok(Setup {
+            trees: self.trees,
+            context: self.context,
+            floor,
+            options: self.options,
+        })
+    }
 }
 fn check<A, C>(control: Option<&ae_types::work::Control>) -> Result<(), Error<A, C>> {
     if let Some(control) = control {

@@ -52,6 +52,15 @@ pub type ReportingFloor = Box<
     dyn FnOnce() -> Result<Option<ae_types::Unsigned>, crate::configuration::resolution::Error>
         + Send,
 >;
+pub type Metering =
+    Box<dyn FnOnce() -> Result<bool, crate::configuration::resolution::Error> + Send>;
+#[derive(Default)]
+struct Policies {
+    native: Option<dry_run::Control>,
+    reporting: Option<ReportingFloor>,
+    metering: Option<Metering>,
+    heap: Option<usize>,
+}
 struct Completion {
     native: Option<dry_run::Control>,
     reporting: Option<ReportingFloor>,
@@ -59,6 +68,9 @@ struct Completion {
     completed: bool,
     succeeded: bool,
     reporting_read: bool,
+    metering: Option<Metering>,
+    metering_expected: bool,
+    metering_read: bool,
 }
 #[derive(Debug)]
 pub enum ReadError {
@@ -67,6 +79,7 @@ pub enum ReadError {
     Node(ae_trie::Error),
     Phase(dry_run::Error),
     Reporting(crate::configuration::resolution::Error),
+    Metering(crate::configuration::resolution::Error),
     Encoding(EncodingError),
 }
 impl<A: NodeReader, C: NodeReader> process::Broker for Broker<A, C> {
@@ -92,8 +105,21 @@ impl<A: NodeReader, C: NodeReader> process::Broker for Broker<A, C> {
         if self.completion.as_ref().is_some_and(|c| c.completed) {
             return Err(ReadError::Query);
         }
+        if q == [131] {
+            let completion = self.completion.as_mut().ok_or(ReadError::Query)?;
+            if !completion.metering_expected || completion.metering_read {
+                return Err(ReadError::Query);
+            }
+            completion.metering_read = true;
+            let enabled = completion.metering.take().ok_or(ReadError::Query)?()
+                .map_err(ReadError::Metering)?;
+            return codec::encode(&enabled, self.node_bytes).map_err(ReadError::Encoding);
+        }
         if let [129, success @ 0..=1] = q {
             let completion = self.completion.as_mut().ok_or(ReadError::Query)?;
+            if *success == 1 && completion.metering_expected && !completion.metering_read {
+                return Err(ReadError::Query);
+            }
             if let Some(native) = &completion.native {
                 native.finish_native().map_err(ReadError::Phase)?;
             }
@@ -154,7 +180,7 @@ pub fn submit<
         .reservation(process.input_bytes)
         .map_err(Error::Admission)?;
     let reservation = client.reserve(weight, timeout).map_err(Error::Admission)?;
-    let (bytes, broker) = prepare(&process, view, request, parameters, None, None, None)?;
+    let (bytes, broker) = prepare(&process, view, request, parameters, Policies::default())?;
     reservation
         .submit(move |control| process::run(process, bytes, broker, control))
         .map_err(Error::Admission)
@@ -164,19 +190,32 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
     view: Arc<View<Overlay<A>, Overlay<C>>>,
     request: Request<'_>,
     parameters: Parameters<'_>,
-    native: Option<dry_run::Control>,
-    reporting: Option<ReportingFloor>,
-    native_heap: Option<usize>,
+    policies: Policies,
 ) -> Result<(Vec<u8>, Broker<A, C>), Error> {
-    let deferred_reporting = reporting.is_some();
-    let completion = (native.is_some() || deferred_reporting).then_some(Completion {
+    let Policies {
         native,
         reporting,
-        public: request.options.profile == core::Profile::Public,
-        completed: false,
-        succeeded: false,
-        reporting_read: false,
-    });
+        metering,
+        heap: native_heap,
+    } = policies;
+    let deferred_reporting = reporting.is_some();
+    let metering_expected = metering.is_some()
+        && matches!(
+            request.options.profile,
+            core::Profile::Public | core::Profile::Internal
+        );
+    let completion =
+        (native.is_some() || deferred_reporting || metering_expected).then_some(Completion {
+            native,
+            reporting,
+            public: request.options.profile == core::Profile::Public,
+            completed: false,
+            succeeded: false,
+            reporting_read: false,
+            metering,
+            metering_expected,
+            metering_read: false,
+        });
     if request.inputs.len() > parameters.preparation.requests
         || request.inputs.len() > request.options.max_transactions
         || request.funding.len() > request.options.max_accounts
@@ -243,6 +282,7 @@ fn prepare<A: NodeReader + Clone, C: NodeReader + Clone>(
         output_bytes: process.output_bytes,
         core_notification: completion.is_some(),
         native_heap,
+        metering_notification: metering_expected,
     };
     let (bytes, controls) = codec::capture(&job, process.input_bytes)?;
     let broker = Broker {

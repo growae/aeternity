@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     path::PathBuf,
+    sync::Arc,
 };
 
 mod expand;
@@ -315,8 +316,23 @@ pub enum Step<'a> {
     },
 }
 pub struct Resolved<'a> {
-    user: Value,
+    user: Arc<Value>,
     context: &'a Context,
+}
+// A generation owns this immutable snapshot. Request callbacks share it and
+// never consult a replacement context or repeat user-variable expansion.
+#[derive(Clone)]
+pub struct Snapshot {
+    user: Arc<Value>,
+    context: Arc<Context>,
+}
+impl Snapshot {
+    pub fn resolved(&self) -> Resolved<'_> {
+        Resolved {
+            user: self.user.clone(),
+            context: &self.context,
+        }
+    }
 }
 impl fmt::Debug for Resolved<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -331,7 +347,14 @@ impl Configuration {
         } else {
             self.value.clone()
         };
-        Ok(Resolved { user, context })
+        Ok(Resolved {
+            user: Arc::new(user),
+            context,
+        })
+    }
+    pub fn capture(&self, context: Arc<Context>) -> Result<Snapshot, Error> {
+        let user = self.resolve(&context)?.user;
+        Ok(Snapshot { user, context })
     }
 }
 impl Resolved<'_> {

@@ -4,6 +4,29 @@ use super::resolution::{Error, Resolved, Strategy};
 use num_bigint::BigInt;
 use serde_json::{Value, json};
 
+// The scalar dry-run getter must never read reporting_utilization_override.
+pub fn reporting_floor(resolved: &Resolved<'_>) -> Result<Option<ae_types::Unsigned>, Error> {
+    let value = resolved.find(
+        &["http", "gas_price", "min_relay_gas_price"],
+        &[
+            Strategy::User,
+            Strategy::ApplicationPath {
+                app: "aehttp",
+                path: &["gas_price", "min_relay_gas_price"],
+            },
+        ],
+    )?;
+    Ok(value
+        .and_then(|v| {
+            v.as_number()
+                .and_then(|n| n.as_str().parse::<BigInt>().ok())
+        })
+        .filter(|n| *n > BigInt::ZERO)
+        .map(|n| {
+            ae_types::Unsigned::from_field_bytes(&n.to_bytes_be().1).expect("positive integer")
+        }))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GasReporting {
     pub price: Option<BigInt>,

@@ -34,8 +34,16 @@ fn original_gas_reporting_overrides_and_scalar_floor_use_nested_precedence() {
         let config = Configuration {
             value: json!({"http":{"gas_price":r["user"]}}),
         };
-        let reporting = GasReporting::resolve(&config.resolve(&context).unwrap()).unwrap();
+        let resolved = config.resolve(&context).unwrap();
+        let reporting = GasReporting::resolve(&resolved).unwrap();
         let expected = &r["result"]["value"];
+        assert_eq!(
+            reporting_floor(&resolved)
+                .unwrap()
+                .map(|v| BigInt::from_bytes_be(num_bigint::Sign::Plus, v.as_bytes())),
+            (!expected["floor"].is_null()).then(|| integer(&expected["floor"])),
+            "{r}"
+        );
         assert_eq!(
             reporting.price,
             (!expected["floor"].is_null()).then(|| integer(&expected["floor"])),
@@ -65,6 +73,33 @@ fn original_gas_reporting_overrides_and_scalar_floor_use_nested_precedence() {
             assert_eq!(row.utilization, integer(&sample["pair_utilization"]));
         }
     }
+}
+
+#[test]
+fn scalar_reporting_floor_skips_malformed_utilization_even_when_enabled() {
+    let mut context = Context::new(Directories {
+        home: "/release".into(),
+        data: "data".into(),
+        log: "log".into(),
+    })
+    .unwrap();
+    context
+        .set(
+            "aehttp".into(),
+            "gas_price".into(),
+            json!([
+                ["min_relay_gas_price", 2_000_000],
+                ["reporting_utilization_override"]
+            ]),
+        )
+        .unwrap();
+    let configuration = Configuration::empty();
+    let resolved = configuration.resolve(&context).unwrap();
+    assert_eq!(
+        reporting_floor(&resolved).unwrap(),
+        Some(2_000_000u64.into())
+    );
+    assert_eq!(GasReporting::resolve(&resolved), Err(Error::Lookup));
 }
 
 #[test]

@@ -63,31 +63,7 @@ fn capture_with_rendering<S>(
     base: &ae_execution::transactions::Config<'_>,
     rendering: dry_run::response::Limits,
 ) -> pipeline::Captured<S> {
-    let context = ae_node::configuration::resolution::Context::new(
-        ae_node::configuration::resolution::Directories {
-            home: "/release".into(),
-            data: "data".into(),
-            log: "log".into(),
-        },
-    )
-    .unwrap();
-    let configuration = ae_node::configuration::Configuration::from_value(
-        serde_json::json!({"http":{"dry_run":{"timeout_ms":row["input"]["timeout"],"max_heap_words":row["input"]["heap"]}}}),
-    )
-    .unwrap();
-    let resolved = configuration.resolve(&context).unwrap();
-    let native = ae_node::configuration::dry_run::timeout(
-        &resolved,
-        if request(row).profile == Profile::Public {
-            ae_execution::dry_run::Profile::Public
-        } else {
-            ae_execution::dry_run::Profile::Internal
-        },
-        None,
-    )
-    .unwrap()
-    .runtime()
-    .unwrap();
+    let settings = policy::settings(row);
     let keys: BTreeSet<_> = [
         "txs",
         "top",
@@ -112,12 +88,9 @@ fn capture_with_rendering<S>(
     .collect();
     let order = otp_order::profile(profile);
     let floor = Unsigned::from(row["input"]["floor"].as_u64().unwrap());
-    let gas = row["input"]["gas_limit"]
-        .as_number()
-        .unwrap()
-        .as_str()
-        .parse()
-        .unwrap();
+    // Captured Settings supplies the actual raw limit and metering value at
+    // their native phases, including application values outside user schema.
+    let gas = Default::default();
     pipeline::Captured::new(
         source,
         worker::Parameters {
@@ -138,16 +111,11 @@ fn capture_with_rendering<S>(
             limits: Default::default(),
         },
         ae_execution::dry_run::Options {
-            store_read_gas_metering: row["input"]["metering"].as_bool().unwrap(),
+            store_read_gas_metering: false,
             ..Default::default()
         },
     )
-    .with_native_timeout(native)
-    .with_native_heap(move || {
-        let resolved = configuration.resolve(&context)?;
-        let heap = ae_node::configuration::dry_run::max_heap_words(&resolved)?;
-        ae_node::configuration::dry_run::native_heap_bytes(&heap, 8)
-    })
+    .with_configuration(settings)
 }
 fn capture<S>(source: S, row: &J, profile: &J) -> pipeline::Captured<S> {
     configured(profile, |base| capture_with(source, row, profile, base))
@@ -435,5 +403,7 @@ async fn disconnect_and_owner_shutdown_join_blocked_selection_and_keep_credits()
 mod heap;
 #[path = "dry_run_pipeline_service/native.rs"]
 mod native;
+#[path = "dry_run_pipeline_service/policy.rs"]
+mod policy;
 #[path = "dry_run_pipeline_service/repository.rs"]
 mod repository;

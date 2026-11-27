@@ -82,6 +82,10 @@ pub struct Config<'a, O> {
     pub state: ae_state::transport::Config<'a>,
     pub limits: Limits,
 }
+pub enum GasLimit<'a> {
+    Integer(&'a BigInt),
+    Native(Value),
+}
 #[derive(Debug)]
 pub enum Error<E> {
     Rejected { code: u16, reason: String },
@@ -298,11 +302,12 @@ impl Gas {
         }
     }
 }
-fn preflight<S: Source, O>(
+fn preflight<'c, S: Source, O>(
     txs: &Value,
     source: &mut S,
     config: &Config<'_, O>,
     budget: &mut Budget,
+    read_limit: impl FnOnce() -> Result<GasLimit<'c>, Error<S::Error>>,
 ) -> Result<(), Error<S::Error>> {
     let height = source
         .top_height()
@@ -311,9 +316,6 @@ fn preflight<S: Source, O>(
     let protocol = source.protocol(height).map_err(Error::Source)?;
     let txs = txs.as_array().ok_or_else(internal)?;
     if txs.len() > config.limits.requests {
-        return Err(Error::Capacity);
-    }
-    if config.gas_limit.bits() > config.limits.number_chars.saturating_mul(4) as u64 {
         return Err(Error::Capacity);
     }
     let mut sum = Gas::Integer(0.into());
@@ -363,7 +365,36 @@ fn preflight<S: Source, O>(
         };
         sum = sum.add(gas)?;
     }
-    if sum.over(config.gas_limit) {
+    let over = match read_limit()? {
+        GasLimit::Integer(limit) => {
+            if limit.bits() > config.limits.number_chars.saturating_mul(4) as u64 {
+                return Err(Error::Capacity);
+            }
+            sum.over(limit)
+        }
+        GasLimit::Native(Value::Number(limit)) => {
+            let text = limit.as_str();
+            if text.len() > config.limits.number_chars {
+                return Err(Error::Capacity);
+            }
+            if text.contains(['.', 'e', 'E']) {
+                let limit = limit
+                    .as_f64()
+                    .filter(|n| n.is_finite())
+                    .ok_or_else(internal)?;
+                match sum {
+                    Gas::Integer(n) => n > BigInt::from_f64(limit.floor()).expect("finite limit"),
+                    Gas::Float(n) => n > limit,
+                }
+            } else {
+                sum.over(&budget.integer(text)?)
+            }
+        }
+        // Every non-number Erlang term sorts after a numeric gas sum. Preserve
+        // application settings that bypass schema validation without coercion.
+        GasLimit::Native(_) => false,
+    };
+    if over {
         Err(reject(403, "Over the gas limit"))
     } else {
         Ok(())
@@ -398,6 +429,18 @@ pub fn prepare<'a, S: Source, O: MapOrder>(
     source: &mut S,
     config: &Config<'_, O>,
 ) -> Result<Request<'a>, Error<S::Error>> {
+    prepare_with_limit(body, source, config, || {
+        Ok(GasLimit::Integer(config.gas_limit))
+    })
+}
+// Resolve the public limit only after gas aggregation. Internal preparation
+// skips the getter, as do earlier malformed-input or source failures.
+pub fn prepare_with_limit<'a, 'c, S: Source, O: MapOrder>(
+    body: &'a Value,
+    source: &mut S,
+    config: &Config<'c, O>,
+    read_limit: impl FnOnce() -> Result<GasLimit<'c>, Error<S::Error>>,
+) -> Result<Request<'a>, Error<S::Error>> {
     for key in ["txs", "top", "accounts", "tx_events"] {
         if !config.existing_keys.contains(key) {
             return Err(Error::MissingAtomProfile);
@@ -411,7 +454,7 @@ pub fn prepare<'a, S: Source, O: MapOrder>(
     keys(map, config, &mut budget, 0)?;
     let txs = map.get("txs").ok_or_else(internal)?;
     if config.profile == Profile::Public {
-        preflight(txs, source, config, &mut budget)?;
+        preflight(txs, source, config, &mut budget, read_limit)?;
     }
     let top = match map.get("top") {
         None => source

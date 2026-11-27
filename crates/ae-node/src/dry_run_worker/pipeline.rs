@@ -9,6 +9,7 @@ use ae_vm_fate::maps::order::Otp26;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, io::Write, sync::Arc};
 
+pub mod configuration;
 pub mod repository;
 
 pub type Selected<S> = Arc<
@@ -103,11 +104,19 @@ pub struct Captured<S> {
     helper: Helper,
     options: core::Options,
     native_timeout: Option<Timeout>,
+    timeout_policy: Option<TimeoutPolicy>,
+    gas_limit: Option<GasPolicy>,
+    metering: Option<super::Metering>,
+    configuration: Option<Arc<configuration::Settings>>,
     heap: Option<HeapPolicy>,
     reporting: Option<super::ReportingFloor>,
 }
 type HeapPolicy =
     Box<dyn FnOnce() -> Result<Option<usize>, crate::configuration::resolution::Error> + Send>;
+type TimeoutPolicy = Box<
+    dyn FnOnce(core::Profile) -> Result<Timeout, crate::configuration::resolution::Error> + Send,
+>;
+type GasPolicy = Box<dyn FnOnce() -> Result<Value, crate::configuration::resolution::Error> + Send>;
 impl<S> Captured<S> {
     // Call inside the admitted capture closure, from one owner/configuration
     // generation. Native helper preparation and selected execution share source.
@@ -139,6 +148,10 @@ impl<S> Captured<S> {
             },
             options,
             native_timeout: None,
+            timeout_policy: None,
+            gas_limit: None,
+            metering: None,
+            configuration: None,
             heap: None,
             reporting: None,
         }
@@ -147,7 +160,46 @@ impl<S> Captured<S> {
     // armed only after successful schema/helper preparation, before selection.
     pub fn with_native_timeout(mut self, timeout: Timeout) -> Self {
         self.native_timeout = Some(timeout);
+        self.timeout_policy = None;
         self
+    }
+    pub fn with_timeout_policy(
+        mut self,
+        read: impl FnOnce(core::Profile) -> Result<Timeout, crate::configuration::resolution::Error>
+        + Send
+        + 'static,
+    ) -> Self {
+        self.native_timeout = None;
+        self.timeout_policy = Some(Box::new(read));
+        self
+    }
+    pub fn with_gas_limit(
+        mut self,
+        read: impl FnOnce() -> Result<Value, crate::configuration::resolution::Error> + Send + 'static,
+    ) -> Self {
+        self.gas_limit = Some(Box::new(read));
+        self
+    }
+    pub fn with_store_read_metering(
+        mut self,
+        read: impl FnOnce() -> Result<bool, crate::configuration::resolution::Error> + Send + 'static,
+    ) -> Self {
+        self.metering = Some(Box::new(read));
+        self
+    }
+    // Capture alongside source from the same runtime generation. Retain the
+    // snapshot through the response, even after all one-shot getters finish.
+    pub fn with_configuration(mut self, settings: Arc<configuration::Settings>) -> Self {
+        self.configuration = Some(settings.clone());
+        let gas = settings.clone();
+        let timeout = settings.clone();
+        let heap = settings.clone();
+        let metering = settings.clone();
+        self.with_gas_limit(move || gas.gas_limit())
+            .with_timeout_policy(move |profile| timeout.timeout(profile))
+            .with_native_heap(move || heap.heap())
+            .with_store_read_metering(move || metering.metering())
+            .with_reporting_floor(move || settings.reporting_floor())
     }
     // Resolve after helper preparation and native timer creation, before
     // state selection. The closure belongs to the captured configuration.
@@ -240,6 +292,7 @@ impl Reservation {
 pub enum ReadError<E> {
     Control(admission::Error),
     Source(E),
+    Configuration(crate::configuration::resolution::Error),
 }
 struct Checked<'a, S> {
     source: &'a mut S,
@@ -366,7 +419,8 @@ fn run<S: Source>(
     {
         return Err(Error::Capacity);
     }
-    let prepared = match http::prepare(
+    let gas_policy = captured.gas_limit.take();
+    let prepared = match http::prepare_with_limit(
         &parsed.input,
         &mut Checked {
             source: &mut captured.source,
@@ -383,6 +437,21 @@ fn run<S: Source>(
             },
             limits: helper.limits,
         },
+        || {
+            control
+                .check()
+                .map_err(|e| http::Error::Source(ReadError::Control(e)))?;
+            let value = match gas_policy {
+                Some(read) => http::GasLimit::Native(
+                    read().map_err(|e| http::Error::Source(ReadError::Configuration(e)))?,
+                ),
+                None => http::GasLimit::Integer(&helper.gas_limit),
+            };
+            control
+                .check()
+                .map_err(|e| http::Error::Source(ReadError::Control(e)))?;
+            Ok(value)
+        },
     ) {
         Ok(v) => v,
         Err(http::Error::Rejected { code, reason }) => {
@@ -396,6 +465,14 @@ fn run<S: Source>(
         }
         Err(e) => return Err(Error::Preparation(e)),
     };
+    control.check().map_err(Error::Control)?;
+    if let Some(read) = captured.timeout_policy.take() {
+        let profile = match request.profile {
+            http::Profile::Public => core::Profile::Public,
+            http::Profile::Internal => core::Profile::Internal,
+        };
+        captured.native_timeout = Some(read(profile).map_err(Error::Configuration)?);
+    }
     control.check().map_err(Error::Control)?;
     if let Some(timeout) = captured.native_timeout {
         control.start_native(timeout).map_err(Error::Control)?;
@@ -453,9 +530,12 @@ fn run<S: Source>(
                     rendering: p.rendering,
                     reporting_floor: p.reporting_floor.as_ref(),
                 },
-                captured.native_timeout.map(|_| control.clone()),
-                captured.reporting.take(),
-                native_heap,
+                super::Policies {
+                    native: captured.native_timeout.map(|_| control.clone()),
+                    reporting: captured.reporting.take(),
+                    heap: native_heap,
+                    metering: captured.metering.take(),
+                },
             )
         })
         .map_err(Error::Encoding)?;

@@ -15,7 +15,7 @@ use std::sync::{Arc, LazyLock};
 // Share the native fixture decoder without coupling HTTP tests to mining tests.
 #[allow(clippy::duplicate_mod)]
 pub(crate) mod otp_order;
-fn unpack(v: &J, pool: &[J]) -> J {
+pub(crate) fn unpack(v: &J, pool: &[J]) -> J {
     match v {
         J::Object(m) if m.len() == 1 && m.contains_key("$ref") => {
             unpack(&pool[m["$ref"].as_u64().unwrap() as usize], pool)

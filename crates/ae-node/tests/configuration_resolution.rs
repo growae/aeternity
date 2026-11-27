@@ -14,6 +14,70 @@ fn context() -> Context {
     })
     .unwrap()
 }
+
+#[test]
+fn captured_resolution_retains_its_context_and_literal_expansion_across_replacement() {
+    use std::sync::Arc;
+    let configuration =
+        Configuration::from_value(json!({"sync": {"whitelist_file": "$ROOT"}})).unwrap();
+    let mut original = context();
+    original
+        .set_global_variables(vec![
+            Definition::new("ROOT".into(), Variable::Literal(json!("$HOME/original"))).unwrap(),
+        ])
+        .unwrap();
+    original
+        .set(
+            "aehttp".into(),
+            "external".into(),
+            json!([["gas_limit", 123]]),
+        )
+        .unwrap();
+    let original = Arc::new(original);
+    let weak = Arc::downgrade(&original);
+    let snapshot = configuration.capture(original.clone()).unwrap();
+    drop(original);
+    let mut replacement = context();
+    replacement
+        .set_global_variables(vec![
+            Definition::new("ROOT".into(), Variable::Literal(json!("/replacement"))).unwrap(),
+        ])
+        .unwrap();
+    replacement
+        .set(
+            "aehttp".into(),
+            "external".into(),
+            json!([["gas_limit", 456]]),
+        )
+        .unwrap();
+    let newer = configuration.capture(Arc::new(replacement)).unwrap();
+    drop(configuration);
+    for _ in 0..2 {
+        let resolved = snapshot.resolved();
+        assert_eq!(
+            resolved.get(&["sync", "whitelist_file"]).unwrap(),
+            Some(&json!("$HOME/original"))
+        );
+        assert_eq!(
+            ae_node::configuration::http::external_dry_run_gas_limit(&resolved).unwrap(),
+            json!(123)
+        );
+    }
+    assert_eq!(
+        newer.resolved().get(&["sync", "whitelist_file"]).unwrap(),
+        Some(&json!("/replacement"))
+    );
+    assert_eq!(
+        ae_node::configuration::http::external_dry_run_gas_limit(&newer.resolved()).unwrap(),
+        json!(456)
+    );
+    assert!(weak.upgrade().is_some());
+    let retained = snapshot.clone();
+    drop(snapshot);
+    assert!(weak.upgrade().is_some());
+    drop(retained);
+    assert!(weak.upgrade().is_none());
+}
 fn definitions(value: &Value) -> Vec<Definition> {
     value
         .as_array()
