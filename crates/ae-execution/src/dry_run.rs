@@ -17,6 +17,8 @@ use ae_vm_fate::maps::MapOrder;
 use num_bigint::BigInt;
 use std::sync::Arc;
 
+pub mod prepare;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Profile {
     Public,
@@ -53,6 +55,15 @@ impl<'a> Prepared<'a> {
             auth_tx: None,
             auth_tx_hash: None,
         }
+    }
+    pub fn prepare_environment(&self, context: &mut Context, events: &mut Vec<batch::Event>) {
+        if let Some(tx) = &self.auth_tx {
+            context.ga_transaction = Some(tx.clone());
+        }
+        if let Some(hash) = self.auth_tx_hash {
+            context.ga_transaction_hash = Some(hash);
+        }
+        events.clear();
     }
 }
 #[derive(Debug, Clone)]
@@ -174,13 +185,7 @@ pub fn run<A: NodeReader + Clone, C: NodeReader + Clone, O: MapOrder>(
     let mut results = Vec::with_capacity(prepared.len());
     let mut events = vec![];
     for (index, request) in prepared.iter().enumerate() {
-        if let Some(tx) = &request.auth_tx {
-            context.ga_transaction = Some(tx.clone());
-        }
-        if let Some(hash) = request.auth_tx_hash {
-            context.ga_transaction_hash = Some(hash);
-        }
-        events.clear();
+        request.prepare_environment(&mut context, &mut events);
         let mut candidate = trees.clone();
         let result = match batch::apply(
             std::slice::from_ref(request.transaction),

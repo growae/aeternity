@@ -15,7 +15,7 @@ use std::sync::{Arc, LazyLock};
 #[path = "../../ae-vm-fate/tests/support/otp_order.rs"]
 mod otp_order;
 
-static FIXTURE: LazyLock<J> = LazyLock::new(|| {
+fn fixture(text: &str) -> J {
     fn unpack(v: &J, pool: &[J]) -> J {
         match v {
             J::Object(m) if m.len() == 1 && m.contains_key("$ref") => {
@@ -30,9 +30,15 @@ static FIXTURE: LazyLock<J> = LazyLock::new(|| {
             v => v.clone(),
         }
     }
-    let v: J =
-        serde_json::from_str(include_str!("fixtures/erlang_dry_run_sequences.json")).unwrap();
+    let v: J = serde_json::from_str(text).unwrap();
     unpack(&v["root"], v["values"].as_array().unwrap())
+}
+static FIXTURE: LazyLock<J> =
+    LazyLock::new(|| fixture(include_str!("fixtures/erlang_dry_run_sequences.json")));
+static REQUEST_EXECUTION: LazyLock<J> = LazyLock::new(|| {
+    fixture(include_str!(
+        "fixtures/erlang_dry_run_request_execution.json"
+    ))
 });
 fn bytes(v: &J) -> Vec<u8> {
     hex::decode(v.as_str().unwrap()).unwrap()
@@ -177,14 +183,46 @@ fn prepared<'a>(row: &J, signed: &'a [SignedTransaction<Transaction>]) -> Vec<dr
 }
 #[test]
 fn original_sequences_calls_events_and_profile_metering() {
-    let rows = FIXTURE["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 560);
-    for runtime_profile in [&FIXTURE["profile"], &FIXTURE["repeat_profile"]] {
+    compare_sequences(&FIXTURE, 560, false);
+}
+#[test]
+fn original_full_request_preparation_and_execution_sequences() {
+    compare_sequences(&REQUEST_EXECUTION, 544, true);
+}
+fn compare_sequences(fixture: &J, count: usize, requests: bool) {
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), count);
+    for runtime_profile in [&fixture["profile"], &fixture["repeat_profile"]] {
         for (i, row) in rows.iter().enumerate() {
             let initial = trees(row);
             let before = initial.serialize_to_binary(Default::default()).unwrap();
             let signed = signed(row);
-            let prepared = prepared(row, &signed);
+            let owned = if requests {
+                let inputs = row["inputs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| match v["kind"].as_str().unwrap() {
+                        "tx" => dry::prepare::Input::transaction(
+                            Transaction::decode_with_limits(
+                                &bytes(&v["transaction"]),
+                                Default::default(),
+                            )
+                            .unwrap(),
+                        ),
+                        "call_req" => dry::prepare::Input::CallRequest(&v["request"]),
+                        _ => panic!(),
+                    })
+                    .collect();
+                dry::prepare::all(inputs, Default::default(), Default::default()).unwrap()
+            } else {
+                vec![]
+            };
+            let prepared = if requests {
+                owned.iter().map(|v| v.as_prepared()).collect()
+            } else {
+                prepared(row, &signed)
+            };
             let base = Protocol::try_from(row["protocol"].as_u64().unwrap() as u32).unwrap();
             let options = dry::Options {
                 profile: profile(row),
