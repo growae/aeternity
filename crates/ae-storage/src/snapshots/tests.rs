@@ -29,6 +29,52 @@ fn database(path: &Temp) -> Arc<Database> {
 }
 
 #[test]
+fn shared_factory_preserves_limits_and_reader_owned_generation() {
+    let path = Temp::new();
+    let db = database(&path);
+    assert!(matches!(Owner::current(&db), Err(Error::NotRunning)));
+    let owner = Owner::start(
+        db.clone(),
+        Config {
+            maximum_snapshots: 1,
+            maximum_node_bytes: 3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let shared = Owner::current(&db).unwrap();
+    let hash = blake2b_256(b"four");
+    db.db.put(repo::key(repo::NODES, hash.0), b"four").unwrap();
+    let capture = shared.capture(|_| Ok(())).unwrap();
+    assert_eq!(owner.live_snapshots(), 1);
+    assert!(matches!(
+        owner.capture(|_| Ok(())),
+        Err(Error::ResourceLimit)
+    ));
+    drop((owner, shared));
+    let retained = Owner::current(&db).unwrap();
+    assert_eq!(capture.reader().node(&hash), Err(TrieError::ResourceLimit));
+    assert!(matches!(
+        Owner::start(db.clone(), Default::default()),
+        Err(Error::AlreadyRunning)
+    ));
+    drop(capture);
+    assert_eq!(retained.live_snapshots(), 0);
+    drop(retained);
+    assert!(matches!(Owner::current(&db), Err(Error::NotRunning)));
+    let next = Owner::start(db.clone(), Default::default()).unwrap();
+    assert_eq!(
+        next.capture(|_| Ok(()))
+            .unwrap()
+            .reader()
+            .node(&hash)
+            .unwrap()
+            .unwrap(),
+        b"four"
+    );
+}
+
+#[test]
 fn real_snapshot_survives_deletion_corruption_and_external_database_drop() {
     let path = Temp::new();
     let db = database(&path);

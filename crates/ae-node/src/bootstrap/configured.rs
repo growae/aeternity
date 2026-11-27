@@ -27,6 +27,7 @@ pub enum Error {
     Genesis(genesis::Error),
 }
 pub struct Prepared {
+    dry_run: std::sync::Arc<crate::dry_run_worker::pipeline::configuration::Settings>,
     cwd: PathBuf,
     mode: Mode,
     genesis: genesis::Prepared,
@@ -41,6 +42,7 @@ pub struct Prepared {
         Result<std::sync::Arc<serde_json::Value>, crate::configuration::resolution::Error>,
 }
 pub struct Open {
+    dry_run: std::sync::Arc<crate::dry_run_worker::pipeline::configuration::Settings>,
     cwd: PathBuf,
     mode: Mode,
     chain: Opened,
@@ -107,6 +109,13 @@ impl Prepared {
         )
         .map_err(Error::Genesis)?;
         Ok(Self {
+            dry_run: std::sync::Arc::new(
+                crate::dry_run_worker::pipeline::configuration::Settings::from_snapshot(
+                    resolved.snapshot(),
+                    specification.word_bytes(),
+                )
+                .map_err(Error::Resolution)?,
+            ),
             cwd: cwd.into(),
             mode: resolved.mode().map_err(Error::Resolution)?,
             genesis,
@@ -130,6 +139,7 @@ impl Prepared {
         let path = self.cwd.join(path);
         let chain = self.genesis.open(path, config).map_err(Error::Genesis)?;
         Ok(Open {
+            dry_run: self.dry_run,
             cwd: self.cwd,
             mode: self.mode,
             chain,
@@ -142,6 +152,11 @@ impl Prepared {
     }
 }
 impl Open {
+    pub(crate) fn dry_run(
+        &self,
+    ) -> &std::sync::Arc<crate::dry_run_worker::pipeline::configuration::Settings> {
+        &self.dry_run
+    }
     pub(crate) fn gas_reporting(
         &self,
     ) -> &Result<

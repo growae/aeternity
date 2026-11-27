@@ -16,6 +16,7 @@ mod ends;
 pub(crate) mod gas;
 mod json;
 mod key;
+mod listeners;
 mod model;
 mod names;
 mod oracles;
@@ -30,6 +31,8 @@ mod text;
 pub mod transaction;
 mod transactions;
 mod transport;
+pub use dry_run::service::Config as DryRunConfig;
+pub(crate) use listeners::Running;
 pub use post::Limits as SubmissionLimits;
 pub use response::Cors;
 
@@ -118,8 +121,16 @@ pub struct Status {
 pub struct Handle {
     stop: watch::Sender<bool>,
     status: watch::Receiver<Status>,
+    listeners: Arc<[Handle]>,
 }
 impl Handle {
+    pub fn listeners(&self) -> Vec<Status> {
+        if self.listeners.is_empty() {
+            vec![self.status()]
+        } else {
+            self.listeners.iter().map(Self::status).collect()
+        }
+    }
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
     }
@@ -131,16 +142,19 @@ impl Handle {
         Ok(self.status())
     }
 }
-pub(crate) struct Running {
+struct Listener {
     handle: Handle,
     task: Option<JoinHandle<Status>>,
 }
-impl Running {
-    pub async fn start(parent: runtime::Handle, config: Config) -> Result<Self, Error> {
+struct BoundListener {
+    listener: TcpListener,
+    config: Arc<Config>,
+    posts: post::Service,
+    address: SocketAddr,
+}
+impl BoundListener {
+    async fn bind(config: Config) -> Result<Self, Error> {
         config.validate()?;
-        if !parent.status().running {
-            return Err(Error::Closed);
-        }
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(|e| Error::Io(e.to_string()))?;
@@ -148,6 +162,24 @@ impl Running {
             .local_addr()
             .map_err(|e| Error::Io(e.to_string()))?;
         let posts = post::Service::new(&config)?;
+        Ok(Self {
+            listener,
+            config: Arc::new(config),
+            posts,
+            address,
+        })
+    }
+    fn start(
+        self,
+        parent: runtime::Handle,
+        dry_run: Option<dry_run::service::Service>,
+    ) -> Listener {
+        let Self {
+            listener,
+            config,
+            posts,
+            address,
+        } = self;
         let state = Status {
             address,
             running: true,
@@ -160,20 +192,21 @@ impl Running {
         };
         let (publish, status) = watch::channel(state);
         let (stop, stopping) = watch::channel(false);
-        let handle = Handle { stop, status };
+        let handle = Handle {
+            stop,
+            status,
+            listeners: Arc::default(),
+        };
         let task = tokio::spawn(run(
-            parent,
-            Arc::new(config),
-            posts,
-            listener,
-            stopping,
-            publish,
+            parent, config, posts, dry_run, listener, stopping, publish,
         ));
-        Ok(Self {
+        Listener {
             handle,
             task: Some(task),
-        })
+        }
     }
+}
+impl Listener {
     pub fn handle(&self) -> Handle {
         self.handle.clone()
     }
@@ -191,7 +224,7 @@ impl Running {
         }
     }
 }
-impl Drop for Running {
+impl Drop for Listener {
     fn drop(&mut self) {
         self.handle.request_shutdown();
     }
@@ -200,6 +233,7 @@ async fn run(
     mut parent: runtime::Handle,
     config: Arc<Config>,
     posts: post::Service,
+    dry_run: Option<dry_run::service::Service>,
     listener: TcpListener,
     mut stopping: watch::Receiver<bool>,
     publish: watch::Sender<Status>,
@@ -226,7 +260,8 @@ async fn run(
                         state.active += 1;
                         let config = config.clone(); let parent = parent.clone();
                         let posts = posts.clone();
-                        clients.spawn(async move { transport::exchange(stream, parent, config, posts).await });
+                        let dry_run = dry_run.clone();
+                        clients.spawn(async move { transport::exchange(stream, parent, config, posts, dry_run).await });
                         publish.send_replace(state.clone());
                     },
                     Err(error) => { state.failure = Some(Error::Io(error.to_string())); break; }

@@ -88,10 +88,13 @@ impl Response {
         }
     }
     pub fn json(status: u16, body: Value) -> Self {
+        Self::raw_json(status, serde_json::to_vec(&body).expect("JSON value"))
+    }
+    pub fn raw_json(status: u16, body: Vec<u8>) -> Self {
         Self {
             status,
             headers: Headers::from([("content-type".into(), "application/json".into())]),
-            body: serde_json::to_vec(&body).expect("JSON value"),
+            body,
             application_headers: true,
         }
     }
@@ -147,6 +150,10 @@ pub(super) fn integers_as_strings(value: &mut Value) {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Operation {
+    DryRun {
+        v3: bool,
+        profile: super::dry_run::Profile,
+    },
     GasPrices {
         v3: bool,
     },
@@ -200,9 +207,6 @@ pub(super) enum Operation {
     },
 }
 pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
-    if config.target != Target::External {
-        return None;
-    }
     let enabled = |group: &str| config.groups.contains(group) || config.groups.contains("external");
     let segments = super::transport::path_segments(path)?;
     let (version, suffix) = segments.split_first()?;
@@ -212,6 +216,23 @@ pub(super) fn route(path: &str, config: &Config) -> Option<(bool, Operation)> {
         _ => return None,
     };
     let suffix: Vec<_> = suffix.iter().map(Vec::as_slice).collect();
+    let dry_run = match (config.target, suffix.as_slice()) {
+        (Target::External, [b"dry-run"]) if enabled("dry-run") => {
+            Some(super::dry_run::Profile::Public)
+        }
+        (Target::Internal, [b"debug", b"transactions", b"dry-run"])
+            if config.groups.contains("debug") || config.groups.contains("internal") =>
+        {
+            Some(super::dry_run::Profile::Internal)
+        }
+        _ => None,
+    };
+    if let Some(profile) = dry_run {
+        return Some((v3, Operation::DryRun { v3, profile }));
+    }
+    if config.target != Target::External {
+        return None;
+    }
     if let Some(operation) = super::channels::route(&suffix) {
         return enabled("channel").then_some((v3, Operation::Channels { operation, v3 }));
     }

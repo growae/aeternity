@@ -6,6 +6,7 @@ pub mod failure;
 mod pipeline_tests;
 pub mod response;
 pub mod schema;
+pub(crate) mod service;
 use ae_codec::api::{self, ApiType};
 use ae_execution::dry_run::prepare::Input;
 use ae_protocol::Protocol;

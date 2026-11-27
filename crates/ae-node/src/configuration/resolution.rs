@@ -40,6 +40,7 @@ pub enum Variable {
     Literal(Value),
     Expand(Value),
 }
+#[derive(Clone)]
 pub struct Definition {
     name: String,
     pattern: Regex,
@@ -76,6 +77,7 @@ pub struct Directories {
     pub data: String,
     pub log: String,
 }
+#[derive(Clone)]
 pub struct Context {
     directories: Directories,
     applications: BTreeMap<String, BTreeMap<String, Value>>,
@@ -358,6 +360,12 @@ impl Configuration {
     }
 }
 impl Resolved<'_> {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            user: self.user.clone(),
+            context: Arc::new(self.context.clone()),
+        }
+    }
     // application:get_env/2 does not apply setup's variable expansion.
     pub(crate) fn raw_application(&self, app: &str, key: &str) -> Option<&Value> {
         self.context

@@ -488,18 +488,20 @@ fn original_full_router_groups_match_every_implemented_route_without_exposing_ot
         "PostTransaction",
         "GetTransactionByHash",
         "GetTransactionInfoByHash",
+        "ProtectedDryRunTxs",
+        "DryRunTxs",
     ];
     let catalog: Vec<_> = ["swagger2", "oas3"]
         .into_iter()
         .flat_map(|v| fixture["tables"][v].as_array().unwrap())
         .collect();
-    assert_eq!(implemented.len(), 41);
+    assert_eq!(implemented.len(), 43);
     assert_eq!(
         catalog
             .iter()
             .filter(|op| implemented.contains(&op["id"].as_str().unwrap()))
             .count(),
-        76
+        80
     );
     assert_eq!(fixture["rows"].as_array().unwrap().len(), 280);
     let mut checked = 0;

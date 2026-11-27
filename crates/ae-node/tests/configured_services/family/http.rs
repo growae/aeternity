@@ -7,6 +7,8 @@ mod channels;
 mod contracts;
 #[path = "http/currency.rs"]
 mod currency;
+#[path = "http/dry_run.rs"]
+mod dry_run;
 #[path = "http/ends.rs"]
 mod ends;
 #[path = "http/gas.rs"]

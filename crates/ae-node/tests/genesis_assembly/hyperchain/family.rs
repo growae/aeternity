@@ -50,6 +50,79 @@ async fn ready(h: &mut node::Handle) {
 }
 
 #[tokio::test]
+async fn live_hyperchain_dry_runs_share_existing_snapshot_authority_and_join_listeners() {
+    use ae_node::http::{Config, DryRunConfig, Target};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+    let parent = Parent::start();
+    let lab = Hc::new(8, json!({"dev_mode": true}), &parent);
+    let p = prepare(&lab, Default::default());
+    let db = p.configured().chain().database().clone();
+    let clock = Clock::new();
+    let s = settings(&lab, &p, Arc::new(move |_| Ok(clock.clone())));
+    let mut running = p.launch(s, || Ok(Default::default())).unwrap();
+    let mut h = running.handle();
+    ready(&mut h).await;
+    assert!(ae_storage::snapshots::Owner::current(&db).is_ok());
+    assert!(matches!(
+        ae_storage::snapshots::Owner::start(db.clone(), Default::default()),
+        Err(ae_storage::snapshots::Error::AlreadyRunning)
+    ));
+    let before = db.view().unwrap().status();
+    let listeners = running
+        .listen_http_group(
+            vec![
+                Config {
+                    listen: ([127, 0, 0, 1], 0).into(),
+                    groups: ["dry-run".into()].into(),
+                    ..Default::default()
+                },
+                Config {
+                    listen: ([127, 0, 0, 1], 0).into(),
+                    target: Target::Internal,
+                    groups: ["debug".into()].into(),
+                    ..Default::default()
+                },
+            ],
+            Some(DryRunConfig::new(
+                env!("CARGO_BIN_EXE_ae-dry-run-worker").into(),
+                std::env::temp_dir(),
+            )),
+        )
+        .await
+        .unwrap();
+    for (listener, path) in [
+        (&listeners[0], "/v3/dry-run"),
+        (&listeners[1], "/v3/debug/transactions/dry-run"),
+    ] {
+        let mut socket = TcpStream::connect(listener.status().address).await.unwrap();
+        socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{{\"txs\":[]}}").as_bytes()).await.unwrap();
+        let mut bytes = vec![];
+        socket.read_to_end(&mut bytes).await.unwrap();
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut response = httparse::Response::new(&mut headers);
+        let end = response.parse(&bytes).unwrap().unwrap();
+        assert_eq!(
+            response.code,
+            Some(200),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes[end..]).unwrap(),
+            json!({"results": []})
+        );
+    }
+    assert_eq!(db.view().unwrap().status(), before);
+    assert_eq!(h.http().unwrap().listeners().len(), 2);
+    let exit = running.shutdown().await.unwrap();
+    assert!(exit.status().joined && exit.status().failure.is_none());
+    assert!(listeners.iter().all(|listener| listener.status().joined));
+}
+
+#[tokio::test]
 async fn protocol_parameters_report_configured_hyperchain_timing_from_active_rules() {
     let parent = Parent::start();
     let mut lab = Hc::new(8, json!({"dev_mode":true}), &parent);

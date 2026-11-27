@@ -25,6 +25,7 @@ mod configuration;
 mod launch;
 mod metrics;
 pub(crate) struct Information {
+    pub dry_run: Arc<http::dry_run::service::Bound>,
     pub gas_reporting: Result<
         Arc<crate::configuration::http::GasReporting>,
         crate::configuration::resolution::Error,
@@ -314,11 +315,15 @@ pub struct Handle {
     inner: HandleInner,
     mode: ApplicationMode,
     metrics: Option<metrics::View>,
-    http: Option<http::Handle>,
+    http: Option<tokio::sync::watch::Receiver<Option<http::Handle>>>,
     notice_next: Arc<AtomicBool>,
     pub(crate) information: Arc<Information>,
 }
 impl Handle {
+    pub(crate) fn without_http(mut self) -> Self {
+        self.http = None;
+        self
+    }
     pub fn mode(&self) -> ApplicationMode {
         self.mode
     }
@@ -332,7 +337,7 @@ impl Handle {
             Some(metrics) => metrics.apply(status),
             None => status,
         };
-        match &self.http {
+        match self.http() {
             Some(http) => apply_http(status, http.status()),
             None => status,
         }
@@ -341,9 +346,10 @@ impl Handle {
         self.metrics.as_ref().map(|m| m.client.clone())
     }
     pub fn http(&self) -> Option<http::Handle> {
-        self.http.clone()
+        self.http.as_ref().and_then(|slot| slot.borrow().clone())
     }
     pub async fn changed(&mut self) -> Result<Status, Error> {
+        let mut http = self.http();
         let changed = async {
             match &mut self.inner {
                 HandleInner::Cuckoo(h) | HandleInner::OnDemand(h) => {
@@ -362,13 +368,14 @@ impl Handle {
         tokio::select! {
             result = changed => result?,
             _ = async { self.metrics.as_mut().expect("configured metrics").changed().await }, if self.metrics.is_some() => (),
-            result = async { self.http.as_mut().expect("configured HTTP").changed().await }, if self.http.as_ref().is_some_and(|h| !h.status().joined) => { result.map_err(Error::Http)?; },
+            _ = async { self.http.as_mut().expect("HTTP ownership subscription").changed().await }, if self.http.as_ref().is_some_and(|slot| slot.has_changed().is_ok()) => (),
+            result = async { http.as_mut().expect("configured HTTP").changed().await }, if http.as_ref().is_some_and(|h| !h.status().joined) => { result.map_err(Error::Http)?; },
         }
         Ok(self.status())
     }
     pub fn request_shutdown(&self) {
         self.information.gas_cache.close();
-        if let Some(http) = &self.http {
+        if let Some(http) = self.http() {
             http.request_shutdown();
         }
         if let Some(metrics) = &self.metrics {
@@ -457,7 +464,8 @@ impl Handle {
         }
     }
     pub fn take_exit(&self) -> Option<Exit> {
-        if self.http.as_ref().is_some_and(|h| !h.status().joined) {
+        let http = self.http();
+        if http.as_ref().is_some_and(|h| !h.status().joined) {
             return None;
         }
         if self.metrics.as_ref().is_some_and(|m| !m.done()) {
@@ -472,7 +480,7 @@ impl Handle {
             Some(m) => m.exit(exit),
             None => exit,
         };
-        Some(match &self.http {
+        Some(match &http {
             Some(http) => Exit::Http {
                 inner: Box::new(exit),
                 status: http.status(),
@@ -487,6 +495,7 @@ enum RunningInner {
     Hyperchain(hyperchain::Running<Otp26>),
 }
 pub struct Running {
+    http_handle: tokio::sync::watch::Sender<Option<http::Handle>>,
     gas_cache_owner: http::gas::Owner,
     inner: RunningInner,
     mode: ApplicationMode,
@@ -496,12 +505,27 @@ pub struct Running {
     information: Arc<Information>,
 }
 impl Running {
+    pub async fn listen_http_group(
+        &mut self,
+        configs: Vec<http::Config>,
+        dry_run: Option<http::DryRunConfig>,
+    ) -> Result<Vec<http::Handle>, http::Error> {
+        if self.http.is_some() {
+            return Err(http::Error::AlreadyListening);
+        }
+        let server = http::Running::start_group(self.handle(), configs, dry_run).await?;
+        let handles = server.listener_handles();
+        self.http_handle.send_replace(Some(server.handle()));
+        self.http = Some(server);
+        Ok(handles)
+    }
     pub async fn listen_http(&mut self, config: http::Config) -> Result<http::Handle, http::Error> {
         if self.http.is_some() {
             return Err(http::Error::AlreadyListening);
         }
         let server = http::Running::start(self.handle(), config).await?;
         let handle = server.handle();
+        self.http_handle.send_replace(Some(handle.clone()));
         self.http = Some(server);
         Ok(handle)
     }
@@ -516,7 +540,7 @@ impl Running {
             },
             notice_next: self.notice_next.clone(),
             metrics: self.metrics.as_ref().map(metrics::Owner::view),
-            http: self.http.as_ref().map(http::Running::handle),
+            http: Some(self.http_handle.subscribe()),
         }
     }
     pub async fn wait(self) -> Result<Exit, Error> {

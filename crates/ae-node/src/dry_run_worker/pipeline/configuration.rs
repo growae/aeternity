@@ -18,11 +18,14 @@ impl Settings {
         context: Arc<Context>,
         word_bytes: usize,
     ) -> Result<Self, Error> {
+        Self::from_snapshot(configuration.capture(context)?, word_bytes)
+    }
+    pub fn from_snapshot(snapshot: Snapshot, word_bytes: usize) -> Result<Self, Error> {
         if !matches!(word_bytes, 4 | 8) {
             return Err(Error::Field("dry_run_heap_budget"));
         }
         Ok(Self {
-            snapshot: configuration.capture(context)?,
+            snapshot,
             word_bytes,
         })
     }

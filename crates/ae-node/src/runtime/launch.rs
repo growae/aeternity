@@ -66,6 +66,7 @@ impl Prepared {
         }
         let metrics_config = self.1.clone();
         let information = Arc::new(Information {
+            dry_run: Arc::new(http::dry_run::service::Bound::capture(&self)),
             gas_reporting: self.configured().gas_reporting().clone(),
             gas_cache: Arc::new(
                 chain::query::gas_prices::Cache::new(Default::default())
@@ -214,6 +215,7 @@ impl Prepared {
             _ => unreachable!("checked family and prepared identity"),
         };
         let mut running = Running {
+            http_handle: tokio::sync::watch::channel(None).0,
             gas_cache_owner: http::gas::Owner(information.gas_cache.clone()),
             mode,
             information,

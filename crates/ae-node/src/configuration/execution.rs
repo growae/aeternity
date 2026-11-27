@@ -50,6 +50,9 @@ fn parse_word(object: &Map<String, Value>, key: &'static str) -> Result<WordSize
     }
 }
 impl Specification {
+    pub(crate) fn word_bytes(&self) -> usize {
+        usize::from(bits(self.word) / 8)
+    }
     pub fn from_value(value: &Value) -> Result<Self, Error> {
         super::budget(value).map_err(|_| Error::Limit)?;
         let m = value.as_object().ok_or(Error::Field("profile"))?;

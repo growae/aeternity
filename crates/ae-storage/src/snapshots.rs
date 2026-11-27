@@ -38,15 +38,15 @@ impl Default for Config {
 pub enum Error {
     Config,
     AlreadyRunning,
+    NotRunning,
     ResourceLimit,
     Repository(repo::Error),
     Worker(String),
 }
-struct Shared {
+pub(crate) struct Shared {
     database: Arc<Database>,
     config: Config,
     live: AtomicUsize,
-    _lease: Arc<()>,
 }
 // One configuration/limit owner per open database. Outstanding readers retain
 // the lease even after this factory is dropped; replacement cannot evade limits.
@@ -62,7 +62,11 @@ impl Owner {
         {
             return Err(Error::Config);
         }
-        let lease = Arc::new(());
+        let shared = Arc::new(Shared {
+            database: database.clone(),
+            config,
+            live: AtomicUsize::new(0),
+        });
         {
             let mut owner = database
                 .snapshot_owner
@@ -71,14 +75,20 @@ impl Owner {
             if owner.upgrade().is_some() {
                 return Err(Error::AlreadyRunning);
             }
-            *owner = Arc::downgrade(&lease);
+            *owner = Arc::downgrade(&shared);
         }
-        Ok(Self(Arc::new(Shared {
-            database,
-            config,
-            live: AtomicUsize::new(0),
-            _lease: lease,
-        })))
+        Ok(Self(shared))
+    }
+    // Additional services share the established owner's exact limits. Readers
+    // retain this authority even after the original factory is dropped.
+    pub fn current(database: &Arc<Database>) -> Result<Self, Error> {
+        database
+            .snapshot_owner
+            .lock()
+            .map_err(|_| Error::Worker("poisoned snapshot ownership".into()))?
+            .upgrade()
+            .map(Self)
+            .ok_or(Error::NotRunning)
     }
     pub fn live_snapshots(&self) -> usize {
         self.0.live.load(Ordering::Acquire)

@@ -282,7 +282,10 @@ fn plan_routed(
     v3: bool,
     mut operation: Operation,
 ) -> Result<(Operation, bool), Response> {
-    let method = if matches!(operation, Operation::PostTransaction { .. }) {
+    let method = if matches!(
+        operation,
+        Operation::PostTransaction { .. } | Operation::DryRun { .. }
+    ) {
         "POST"
     } else {
         "GET"
@@ -301,13 +304,18 @@ fn plan_routed(
     if !accepts_json(&request.headers) {
         return Err(Response::empty(406));
     }
-    if matches!(operation, Operation::PostTransaction { .. }) {
+    if matches!(
+        operation,
+        Operation::PostTransaction { .. } | Operation::DryRun { .. }
+    ) {
         body::validate_headers(&request.headers)?;
     }
     let strings = if v3
         && !matches!(
             operation,
-            Operation::SyncStatus { .. } | Operation::PostTransaction { .. }
+            Operation::SyncStatus { .. }
+                | Operation::PostTransaction { .. }
+                | Operation::DryRun { .. }
         ) {
         strings(&request.query)?
     } else {
@@ -389,6 +397,7 @@ pub(super) fn dispatch(
                 | Operation::Blocks { .. }
                 | Operation::PendingKey
                 | Operation::PostTransaction { .. },
+                // Dry-run normally returns its already validated raw body.
                 strings,
             )),
             Ok(mut body),
@@ -398,6 +407,7 @@ pub(super) fn dispatch(
             }
             Response::json(200, body)
         }
+        (Ok((Operation::DryRun { .. }, _)), Ok(_)) => Response::internal(),
     }
 }
 pub(super) async fn exchange(
@@ -405,6 +415,7 @@ pub(super) async fn exchange(
     parent: runtime::Handle,
     config: Arc<Config>,
     posts: super::post::Service,
+    dry_service: Option<super::dry_run::service::Service>,
 ) {
     let request = match tokio::time::timeout(config.timeout, read(&mut stream, &config)).await {
         Ok(result) => result,
@@ -445,9 +456,32 @@ pub(super) async fn exchange(
     let mut retained = None;
     let mut rendered = None;
     let mut post_credits = None;
+    let mut dry_receipt = None;
     let mut pending_candidate = None;
     let mut account_pool_credits = None;
     let result = match &plan {
+        Ok((Operation::DryRun { v3, profile }, _)) => {
+            match dry_service.as_ref().filter(|_| captured.is_some()) {
+                None => Err(Response::unavailable(false)),
+                Some(service) => match dry_run(
+                    &mut stream,
+                    &headers,
+                    prefetched,
+                    service,
+                    &config,
+                    (*v3, *profile, query, http11),
+                )
+                .await
+                {
+                    Ok(mut held) => {
+                        rendered = Some(super::dry_run::service::response(&mut held));
+                        dry_receipt = Some(held);
+                        Err(Response::unavailable(false))
+                    }
+                    Err(response) => Err(response),
+                },
+            }
+        }
         Ok((Operation::GasPrices { v3 }, strings)) => {
             match super::gas::query(&parent, &config, captured.as_ref(), *v3, *strings).await {
                 Ok(reply) => {
@@ -661,6 +695,7 @@ pub(super) async fn exchange(
     );
     drop(retained);
     drop(post_credits);
+    drop(dry_receipt);
     drop(pending_candidate);
     drop(account_pool_credits);
     if written {
@@ -710,6 +745,61 @@ async fn post(
     }
     let body = body::read(stream, headers, prefetched, config).await?;
     super::post::submit(posts, reservation, parent, config, body, (v3, query)).await
+}
+async fn dry_run(
+    stream: &mut TcpStream,
+    headers: &Headers,
+    prefetched: Vec<u8>,
+    service: &super::dry_run::service::Service,
+    config: &Config,
+    options: (bool, super::dry_run::Profile, String, bool),
+) -> Result<super::dry_run::service::Receipt, Response> {
+    let (v3, profile, query, http11) = options;
+    let reservation = service.reserve(config.timeout)?;
+    if http11
+        && headers
+            .get("expect")
+            .is_some_and(|e| e.eq_ignore_ascii_case("100-continue"))
+    {
+        tokio::time::timeout(
+            config.timeout,
+            stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        )
+        .await
+        .map_err(|_| Response::empty(408))?
+        .map_err(|_| Response::empty(400))?;
+    }
+    let body = body::read(stream, headers, prefetched, config).await?;
+    let (body, more) = match body {
+        super::post::Body::Complete(b) => (b, false),
+        super::post::Body::More(b) => (b, true),
+    };
+    let ticket = service.submit(
+        reservation,
+        crate::dry_run_worker::pipeline::Request {
+            body,
+            more,
+            query,
+            v3,
+            profile,
+        },
+    )?;
+    tokio::select! {
+        result = ticket.wait_retained() => result.map_err(super::dry_run::service::admission_error),
+        _ = disconnected(stream) => Err(Response::empty(400)),
+    }
+}
+async fn disconnected(stream: &mut TcpStream) {
+    let mut buffer = [0; 1024];
+    loop {
+        match stream.read(&mut buffer).await {
+            Err(_) => return,
+            // A write half-close is legal while waiting for a response. Only
+            // a connection error cancels work; owner/HTTP deadlines still apply.
+            Ok(0) => std::future::pending::<()>().await,
+            Ok(_) => (),
+        }
+    }
 }
 async fn write(stream: &mut TcpStream, mut response: Response) -> std::io::Result<()> {
     let phrase = match response.status {

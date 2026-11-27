@@ -53,7 +53,7 @@ pub struct Database {
     pinning_children_owner: Mutex<std::sync::Weak<()>>,
     pinning_agent_owner: Mutex<std::sync::Weak<()>>,
     hyperchain_owner: Mutex<std::sync::Weak<()>>,
-    snapshot_owner: Mutex<std::sync::Weak<()>>,
+    snapshot_owner: Mutex<std::sync::Weak<snapshots::Shared>>,
     pow_generator_owner: Mutex<std::sync::Weak<()>>,
     pow_producer_owner: Mutex<std::sync::Weak<()>>,
     pow_group_owner: Mutex<std::sync::Weak<()>>,
