@@ -1,0 +1,22 @@
+[package]
+name = "ae-worker-heap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "=0.2.191"
+
+[dev-dependencies]
+ae-vm-fate.workspace = true
+ae-vm-aevm.workspace = true
+
+# The sole unsafe boundary is the System allocator adapter. Other crates retain
+# the workspace forbid(unsafe_code) policy; this package denies it elsewhere.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

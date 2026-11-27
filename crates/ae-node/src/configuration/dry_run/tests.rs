@@ -58,6 +58,57 @@ fn first(opts: &Value, key: &str) -> Value {
     json!({"atom":"undefined"})
 }
 #[test]
+fn native_heap_words_select_process_cap_without_disabling_service_backstop() {
+    use ae_worker_heap::{Limit, Source};
+    assert_eq!(
+        heap_limit(&json!(4096), 8, 65536).unwrap(),
+        Limit {
+            bytes: 32768,
+            source: Source::Native
+        }
+    );
+    assert_eq!(
+        heap_limit(&json!(4096), 4, 65536).unwrap(),
+        Limit {
+            bytes: 16384,
+            source: Source::Native
+        }
+    );
+    assert_eq!(
+        heap_limit(&json!(4096), 8, 32768).unwrap(),
+        Limit {
+            bytes: 32768,
+            source: Source::Native
+        }
+    );
+    let service = Limit {
+        bytes: 65536,
+        source: Source::Service,
+    };
+    for raw in [
+        json!(0),
+        json!(-1),
+        json!(false),
+        Value::Null,
+        json!(1.0),
+        json!("4096"),
+        json!(256000000),
+    ] {
+        assert_eq!(heap_limit(&raw, 8, 65536).unwrap(), service, "{raw}");
+    }
+    let huge: Value = serde_json::from_str(&(BigInt::from(1) << 100_usize).to_string()).unwrap();
+    assert!(matches!(
+        heap_limit(&huge, 8, 65536),
+        Err(Error::Field("max_heap_words"))
+    ));
+    for (word, cap) in [(0, 65536), (16, 65536), (8, 0), (8, usize::MAX)] {
+        assert!(matches!(
+            heap_limit(&json!(0), word, cap),
+            Err(Error::Field("dry_run_heap_budget"))
+        ));
+    }
+}
+#[test]
 fn original_timeout_profile_and_worker_setting_accessors() {
     let rows = DATA["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 1680);

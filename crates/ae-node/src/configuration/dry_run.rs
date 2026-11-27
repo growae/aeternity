@@ -87,6 +87,37 @@ pub fn max_heap_words(resolved: &Resolved<'_>) -> Result<Value, Error> {
 pub fn heap_guard_words(value: &Value) -> Option<BigInt> {
     integer(value).filter(|n| n > &BigInt::ZERO)
 }
+// Select an absolute Rust-worker allocation cap. Native words are interpreted
+// with the captured Erlang word size; disabled native guarding never disables
+// the independent service cap. Rust and Erlang heap layouts are not identical.
+pub fn heap_limit(
+    value: &Value,
+    word_bytes: usize,
+    service_bytes: usize,
+) -> Result<ae_worker_heap::Limit, Error> {
+    use ae_worker_heap::{Limit, Source};
+    if !matches!(word_bytes, 4 | 8) || service_bytes == 0 || service_bytes == usize::MAX {
+        return Err(Error::Field("dry_run_heap_budget"));
+    }
+    let native = heap_guard_words(value)
+        .map(|words| {
+            usize::try_from(words * word_bytes)
+                .ok()
+                .filter(|n| *n < usize::MAX)
+                .ok_or(Error::Field("max_heap_words"))
+        })
+        .transpose()?;
+    Ok(match native {
+        Some(bytes) if bytes <= service_bytes => Limit {
+            bytes,
+            source: Source::Native,
+        },
+        _ => Limit {
+            bytes: service_bytes,
+            source: Source::Service,
+        },
+    })
+}
 pub fn store_read_gas_metering(resolved: &Resolved<'_>) -> Result<Value, Error> {
     setting(resolved, "store_read_gas_metering", &json!(true))
 }

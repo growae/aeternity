@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie", "crates/ae-state", "crates/ae-tx", "crates/ae-consensus", "crates/ae-execution", "crates/ae-vm-aevm", "crates/ae-vm-fate", "crates/ae-mempool", "crates/ae-hyperchain", "crates/ae-chain", "crates/ae-storage", "crates/ae-p2p", "crates/ae-sync", "crates/ae-node", "crates/ae-stratum"]
+members = ["crates/ae-worker-heap", "crates/ae-types", "crates/ae-crypto", "crates/ae-codec", "crates/ae-protocol", "crates/ae-trie", "crates/ae-state", "crates/ae-tx", "crates/ae-consensus", "crates/ae-execution", "crates/ae-vm-aevm", "crates/ae-vm-fate", "crates/ae-mempool", "crates/ae-hyperchain", "crates/ae-chain", "crates/ae-storage", "crates/ae-p2p", "crates/ae-sync", "crates/ae-node", "crates/ae-stratum"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ rust-version = "1.97.1"
 publish = false
 
 [workspace.dependencies]
+ae-worker-heap = { path = "crates/ae-worker-heap" }
 gethostname = "=1.1.0"
 fancy-regex = "=0.18.0"
 yaml-rust2 = { version = "=0.13.2", default-features = false }

@@ -147,6 +147,7 @@ dependencies = [
  "ae-types",
  "ae-vm-aevm",
  "ae-vm-fate",
+ "ae-worker-heap",
  "base64 0.22.1",
  "fancy-regex",
  "hex",
@@ -345,6 +346,15 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "serde_json",
+]
+
+[[package]]
+name = "ae-worker-heap"
+version = "0.1.0"
+dependencies = [
+ "ae-vm-aevm",
+ "ae-vm-fate",
+ "libc",
 ]
 
 [[package]]
