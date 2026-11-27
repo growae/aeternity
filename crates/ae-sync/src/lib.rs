@@ -11,6 +11,7 @@ pub mod bindings;
 pub mod blocking;
 pub mod chain;
 pub mod conductor;
+pub mod dry_run;
 pub mod events;
 pub mod gossip;
 mod http;

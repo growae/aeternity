@@ -8,6 +8,7 @@ pub mod chain;
 pub mod consensus;
 pub mod currency;
 pub mod discovery;
+pub mod dry_run;
 pub mod execution;
 mod files;
 pub mod http;
