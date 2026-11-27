@@ -2,7 +2,6 @@
 // aec_chain_hc run environments and aetx_env:tx_env_and_trees_from_hash,
 // aeternity fa2a6d7. Copyright (c) Aeternity. ISC: repository LICENSE.
 use super::{Error, Identity, Read, View, vm_history};
-use crate::block::Block;
 use ae_codec::headers::Header;
 use ae_execution::{Context, contracts};
 use ae_hyperchain::chain::{self, LookupError, source};
@@ -12,6 +11,8 @@ use ae_types::{AccountPublicKey, Hash256, Unsigned};
 use ae_vm_fate::machine::program::remote::context::{Consensus, Environment};
 use num_bigint::{BigInt, Sign};
 use std::sync::Arc;
+
+mod dry_run;
 
 pub use ae_hyperchain::chain::Profile;
 pub type Reader<S, O> = chain::Reader<Overlay<S>, Overlay<S>, O, Snapshot<S>>;
@@ -110,31 +111,31 @@ impl<S: Read> Snapshot<S> {
         &self.repository
     }
     pub fn contract_view(&self, hash: Hash256) -> Result<Arc<ContractView<S>>, LookupError> {
+        use crate::dry_run::Error as E;
+        self.dry_run_view(&crate::dry_run::Selector::Hash(hash))
+            .map_err(|e| match e {
+                E::InvalidHash => LookupError::InvalidHash,
+                E::StateGarbageCollected => LookupError::StateGarbageCollected,
+                E::Source(e) => e,
+                E::MissingLeader(hash) => backend(Error::Missing(hash)),
+                E::ExpectedKey => backend(Error::Corrupt("micro leader type")),
+                _ => backend(Error::Corrupt("hash execution selection")),
+            })
+    }
+    fn selected_view(
+        &self,
+        selected: crate::dry_run::Selected<ae_state::Trees<Overlay<S>, Overlay<S>>>,
+    ) -> Result<Arc<ContractView<S>>, LookupError> {
+        let crate::dry_run::Selected {
+            state: trees,
+            key,
+            key_hash,
+            timestamp,
+            ..
+        } = selected;
         let view = &self.repository;
-        let block = view
-            .block(hash)
-            .map_err(backend)?
-            .ok_or(LookupError::InvalidHash)?;
-        let (key, key_hash, timestamp) = match &block {
-            Block::Key(k) => (k.clone(), hash, BigInt::from(k.time) + 1),
-            Block::Micro(m) => {
-                let key_hash = Hash256(m.header.common.previous_key_hash);
-                let Block::Key(k) = view.require_block(key_hash).map_err(backend)? else {
-                    return Err(backend(Error::Corrupt("micro leader type")));
-                };
-                // Hash queries take height and protocol from the leader key.
-                // HC micro blocks can advance height before the next key;
-                // admission checks belong to insertion, not this lookup.
-                (k, key_hash, BigInt::from(m.header.time))
-            }
-        };
         let protocol = Protocol::try_from(key.common.version)
             .map_err(|_| backend(Error::Corrupt("context protocol")))?;
-        let trees = match view.trees(hash, self.config.overlays) {
-            Ok(t) => t,
-            Err(Error::Missing(h)) if h == hash => return Err(LookupError::StateGarbageCollected),
-            Err(e) => return Err(backend(e)),
-        };
         let history =
             Arc::new(vm_history(view, &key, self.config.maximum_history_headers).map_err(backend)?);
         let (consensus, difficulty) = match view.identity().algorithm {

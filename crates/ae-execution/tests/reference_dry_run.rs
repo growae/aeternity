@@ -163,6 +163,104 @@ fn funding() -> Vec<dry::Funding> {
         },
     ]
 }
+
+#[test]
+fn signed_funding_bounds_preserve_authorization_and_allow_clean_retry() {
+    let row = &FIXTURE["rows"][0];
+    let mut trees = trees(row);
+    let mut account = ae_state::accounts::Account::new(small(99), 100.into());
+    account.set_nonce(7.into());
+    account.set_flags(5.into());
+    account
+        .attach_authorization(
+            ae_types::Id::new(ae_types::IdTag::Contract, [88; 32]),
+            [77; 32],
+        )
+        .unwrap();
+    trees.accounts.enter(&account).unwrap();
+    let before = trees.serialize_to_binary(Default::default()).unwrap();
+    let context = Context::transaction(50, Protocol::Ceres);
+    let funds = [dry::Funding {
+        account: small(99),
+        amount: (-40).into(),
+    }];
+    for options in [
+        dry::Options {
+            max_accounts: 0,
+            ..Default::default()
+        },
+        dry::Options {
+            max_funding_bytes: 0,
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            dry::setup(trees.clone(), &context, &funds, &options),
+            Err(dry::Error::ResourceLimit)
+        ));
+    }
+    let large = [dry::Funding {
+        account: small(99),
+        amount: BigInt::from(1) << 4096,
+    }];
+    assert!(matches!(
+        dry::setup(
+            trees.clone(),
+            &context,
+            &large,
+            &dry::Options {
+                max_funding_bytes: 1024,
+                ..Default::default()
+            }
+        ),
+        Err(dry::Error::ResourceLimit)
+    ));
+    let late = [
+        funds[0].clone(),
+        dry::Funding {
+            account: small(99),
+            amount: (-61).into(),
+        },
+    ];
+    assert!(
+        matches!(dry::setup(trees.clone(),&context,&late,&Default::default()),Err(dry::Error::NegativeBalance { index:1,balance,.. }) if balance == BigInt::from(-1))
+    );
+    let result = dry::setup(trees.clone(), &context, &funds, &Default::default()).unwrap();
+    account.spend_without_nonce_bump(&40.into()).unwrap();
+    assert_eq!(
+        result.trees().accounts.lookup(small(99)).unwrap(),
+        Some(account)
+    );
+    assert_eq!(
+        trees.serialize_to_binary(Default::default()).unwrap(),
+        before
+    );
+    let empty = vec![];
+    let result = dry::setup(
+        trees.clone(),
+        &context,
+        &empty,
+        &dry::Options {
+            max_transactions: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bad = json!({});
+    assert!(matches!(
+        configured(&FIXTURE["profile"], |cfg| result.requests(
+            cfg,
+            vec![dry::prepare::Input::CallRequest(&bad)],
+            Default::default(),
+            Default::default()
+        )),
+        Err(dry::Error::ResourceLimit)
+    ));
+    assert_eq!(
+        trees.serialize_to_binary(Default::default()).unwrap(),
+        before
+    );
+}
 fn signed(row: &J) -> Vec<SignedTransaction<Transaction>> {
     row["transactions"]
         .as_array()
@@ -197,8 +295,8 @@ fn compare_sequences(fixture: &J, count: usize, requests: bool) {
             let initial = trees(row);
             let before = initial.serialize_to_binary(Default::default()).unwrap();
             let signed = signed(row);
-            let owned = if requests {
-                let inputs = row["inputs"]
+            let inputs = if requests {
+                row["inputs"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -213,13 +311,12 @@ fn compare_sequences(fixture: &J, count: usize, requests: bool) {
                         "call_req" => dry::prepare::Input::CallRequest(&v["request"]),
                         _ => panic!(),
                     })
-                    .collect();
-                dry::prepare::all(inputs, Default::default(), Default::default()).unwrap()
+                    .collect()
             } else {
                 vec![]
             };
             let prepared = if requests {
-                owned.iter().map(|v| v.as_prepared()).collect()
+                vec![]
             } else {
                 prepared(row, &signed)
             };
@@ -240,14 +337,17 @@ fn compare_sequences(fixture: &J, count: usize, requests: bool) {
                 "row {i}"
             );
             let out = configured(runtime_profile, |cfg| {
-                dry::run(
+                let setup = dry::setup(
                     initial.clone(),
                     &Context::transaction(50, base),
-                    cfg,
                     &funding(),
-                    &prepared,
                     &options,
-                )
+                )?;
+                if requests {
+                    setup.requests(cfg, inputs, Default::default(), Default::default())
+                } else {
+                    setup.prepared(cfg, &prepared)
+                }
             })
             .unwrap();
             let results:Vec<_>=out.results.iter().map(|r| {

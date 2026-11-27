@@ -4,6 +4,7 @@ pub mod admission;
 pub mod block;
 pub mod channel;
 pub mod contract;
+pub mod dry_run;
 pub mod execution;
 pub mod forks;
 pub mod fraud;

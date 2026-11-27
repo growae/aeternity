@@ -855,6 +855,8 @@ fn generation_reset_policy_and_persistent_records_reject_malformed_values() {
     );
 }
 
+#[path = "dry_run_tests.rs"]
+mod dry_run_tests;
 #[path = "rollback_tests.rs"]
 mod rollback_tests;
 #[path = "scan_tests.rs"]
