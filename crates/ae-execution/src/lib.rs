@@ -18,6 +18,7 @@ pub mod aevm_chain;
 pub mod chain_history;
 pub mod channels;
 pub mod contracts;
+pub mod dry_run;
 pub mod fate_chain;
 pub mod fate_compat;
 pub mod fate_store;
