@@ -1,5 +1,6 @@
 // Bounded ordered ingress for the live Stratum transport. Accounting is
 // durable before a positive miner response. Mining adds joined chain admission.
+pub mod configured;
 pub mod mining;
 use ae_storage::{
     Database,
@@ -34,6 +35,7 @@ impl Default for Limits {
 #[derive(Debug)]
 pub enum Error {
     Configuration,
+    Setup(crate::configuration::stratum::Error),
     Storage(storage::Failure),
     Runtime(runtime::Error),
     Io(std::io::ErrorKind),

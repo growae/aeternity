@@ -82,7 +82,7 @@ async fn run(arguments: application::command::Arguments) -> Result<(), Box<dyn s
                 .and_then(|g| g.network.status().listening)
                 .map(|a| a.to_string());
             let ready = emit(
-                serde_json::json!({"event":"ready","network_id":String::from_utf8_lossy(&identity.network),"genesis":ae_codec::api::encode(ae_codec::api::ApiType::KeyBlockHash,identity.genesis.as_ref()),"family":format!("{:?}",handle.status().family),"sync":sync,"http":listeners.iter().map(|h|h.status().address.to_string()).collect::<Vec<_>>()}),
+                serde_json::json!({"event":"ready","network_id":String::from_utf8_lossy(&identity.network),"genesis":ae_codec::api::encode(ae_codec::api::ApiType::KeyBlockHash,identity.genesis.as_ref()),"family":format!("{:?}",handle.status().family),"sync":sync,"stratum":handle.pow().and_then(|h|h.stratum()).map(|s|s.transport.address().to_string()),"http":listeners.iter().map(|h|h.status().address.to_string()).collect::<Vec<_>>()}),
             );
             if let Err(error) = ready {
                 failure = Some(Box::new(error));

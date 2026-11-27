@@ -42,16 +42,27 @@ pub(super) enum Input {
     },
 }
 impl Input {
-    pub fn pending(&self, limits: pending::Limits) -> (pending::Config, Arc<dyn generator::Clock>) {
+    pub fn pending(
+        &self,
+        limits: pending::Limits,
+        stratum: Option<&crate::stratum::configured::Config>,
+    ) -> (pending::Config, Arc<dyn generator::Clock>) {
         match self {
             Self::Cuckoo { config, clocks } => (
                 pending::Config {
-                    beneficiary: config.mining.as_ref().map(|m| m.beneficiary),
+                    beneficiary: stratum
+                        .map(|s| s.beneficiary())
+                        .or_else(|| config.mining.as_ref().map(|m| m.beneficiary)),
                     release_info: config.mining.as_ref().map_or(0, |m| m.release_info),
-                    key: config
-                        .mining
-                        .as_ref()
-                        .map_or(config.generator.key, |m| m.preparation),
+                    key: stratum.map_or_else(
+                        || {
+                            config
+                                .mining
+                                .as_ref()
+                                .map_or(config.generator.key, |m| m.preparation)
+                        },
+                        |s| s.preparation,
+                    ),
                     limits,
                 },
                 clocks.preparation(0),
@@ -65,6 +76,18 @@ impl Input {
                 },
                 clock.clone(),
             ),
+        }
+    }
+    pub fn stratum_compatible(&self) -> bool {
+        matches!(self, Self::Cuckoo { config, .. } if config.mining.is_none() && config.producer.external_key_work)
+    }
+    pub fn stratum_inputs(&self, generation: u64) -> Option<(bool, Arc<dyn generator::Clock>)> {
+        match self {
+            Self::Cuckoo { config, clocks } => Some((
+                config.producer.strictly_follow_top,
+                clocks.preparation(generation),
+            )),
+            Self::Commands { .. } => None,
         }
     }
     pub fn algorithm(&self) -> ConsensusAlgorithm {

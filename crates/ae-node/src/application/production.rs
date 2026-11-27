@@ -16,7 +16,11 @@ pub(super) struct Plan {
     mining: Option<mining::Configuration>,
 }
 impl Plan {
-    pub fn resolve(resolved: &Resolved<'_>, family: runtime::Family) -> Result<Self, Error> {
+    pub fn resolve(
+        resolved: &Resolved<'_>,
+        family: runtime::Family,
+        stratum: bool,
+    ) -> Result<Self, Error> {
         let read = |name, application, fallback| {
             resolved
                 .user_or_application(&["mining", name], "aecore", application, &fallback)
@@ -45,7 +49,7 @@ impl Plan {
                 json!(false),
             )?)?
         };
-        let beneficiary = if family == runtime::Family::Hyperchain {
+        let beneficiary = if family == runtime::Family::Hyperchain || stratum {
             None
         } else {
             resolved
@@ -72,7 +76,7 @@ impl Plan {
                 })
                 .transpose()?
         };
-        let (timeout, mining) = if family == runtime::Family::Cuckoo {
+        let (timeout, mining) = if family == runtime::Family::Cuckoo && !stratum {
             let timeout = read(
                 "attempt_timeout",
                 "mining_attempt_timeout",
@@ -111,10 +115,15 @@ impl Plan {
         node: &runtime::Prepared,
         directories: &mining::Directories,
         cache_size: usize,
+        stratum: Option<crate::stratum::configured::Config>,
     ) -> Result<runtime::Settings, Error> {
         Ok(match node.family() {
             runtime::Family::Cuckoo => {
-                let mut config: crate::pow::Config = Default::default();
+                let mut config: crate::pow::Config = crate::pow::Config {
+                    stratum: stratum.map(Arc::new),
+                    ..Default::default()
+                };
+                config.production.producer.external_key_work = config.stratum.is_some();
                 let cycle = node.configured().chain().settings().micro_cycle_ms();
                 config.production.producer.micro_cycle_ms = cycle;
                 config.production.generator.packing.window_ms =

@@ -19,14 +19,17 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
 mod production;
+mod stratum;
 pub use production::{CommandGeneration, Commands};
 use production::{Input, Live, Retired, Retirement};
+pub use stratum::{StratumExit, StratumStatus};
 
 #[derive(Clone)]
 pub struct Config<P = configured::Production> {
     pub workers: workers::Config,
     pub connections: connection::Config,
     pub production: P,
+    pub stratum: Option<Arc<crate::stratum::configured::Config>>,
     pub pending_key: pending::Limits,
     pub cache_entries: usize,
     pub cache_limit: usize,
@@ -45,6 +48,7 @@ impl<P> Config<P> {
             workers: Default::default(),
             connections: Default::default(),
             production,
+            stratum: None,
             pending_key: Default::default(),
             cache_entries: 1000,
             cache_limit: 100_000,
@@ -60,6 +64,7 @@ impl<P> Config<P> {
                 workers: self.workers,
                 connections: self.connections,
                 production: (),
+                stratum: self.stratum,
                 pending_key: self.pending_key,
                 cache_entries: self.cache_entries,
                 cache_limit: self.cache_limit,
@@ -105,6 +110,7 @@ pub enum Error {
     Production(group::Error),
     Commands(service::Error),
     PendingKey(pending::Error),
+    Stratum(crate::stratum::configured::Failure),
     ChildStopped(Child),
     ChildTask(Child),
     Unsettled,
@@ -123,8 +129,12 @@ pub struct Status {
     pub commands: Option<service::Status>,
     pub pending_key: Option<pending::Status>,
     pub production_starts: u64,
+    pub stratum: Option<StratumStatus>,
+    pub stratum_starts: u64,
 }
 pub enum Output {
+    Stratum(ae_stratum::runtime::Lease<ae_stratum::runtime::Output>),
+    StratumRetired(Box<StratumExit>),
     Production(Arc<group::Output>),
     Retired(Box<group::Released>),
     Command {
@@ -137,6 +147,7 @@ pub enum Output {
     },
 }
 pub struct Exit {
+    pub stratum: Option<StratumExit>,
     pub status: Status,
     pub production: Option<Result<group::Report, Error>>,
     pub commands: Option<Result<service::Report, Error>>,
@@ -145,6 +156,7 @@ pub struct Exit {
     pub prepared: Option<Prepared>,
 }
 struct Controls {
+    stratum: Option<crate::stratum::configured::Handle>,
     importer: Option<Arc<ae_sync::chain::Importer>>,
     workers: Option<workers::Handle>,
     connections: Option<connection::Handle>,
@@ -195,6 +207,9 @@ impl Handle {
     }
     pub fn commands(&self) -> Option<CommandGeneration> {
         lock(&self.shared.controls).commands.clone()
+    }
+    pub fn stratum(&self) -> Option<crate::stratum::configured::Handle> {
+        lock(&self.shared.controls).stratum.clone()
     }
     // Desired production state is retained while worker dependencies rebind.
     pub fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
@@ -271,6 +286,11 @@ struct Owner {
     connections: Option<connection::Handle>,
     connection_task: Option<JoinHandle<connection::Status>>,
     production: Option<Live>,
+    stratum: Option<stratum::Generation>,
+    pending_stratum: Option<StratumExit>,
+    collect_stratum_first: bool,
+    stratum_epoch: Instant,
+    stratum_last_restart: Option<u64>,
     pending_key: Option<pending::Worker>,
     pending_retirement: Option<Retirement>,
     dependencies: (u64, u64),
@@ -284,7 +304,10 @@ pub fn launch<F>(
 where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
-    let (production, config) = config.into_parts();
+    let (mut production, config) = config.into_parts();
+    if config.stratum.is_some() {
+        production.producer.external_key_work = true;
+    }
     launch_inner(
         prepared,
         config,
@@ -332,6 +355,7 @@ where
         || config.startup_timeout > Duration::from_secs(300)
         || !(1..=128).contains(&config.outputs)
         || !config.pending_key.valid()
+        || (config.stratum.is_some() && !input.stratum_compatible())
     {
         Some(Error::Configuration)
     } else if let Err(error) = input.validate(prepared.rules().admission.micro_cycle_ms) {
@@ -356,6 +380,8 @@ where
         commands: None,
         pending_key: None,
         production_starts: 0,
+        stratum: None,
+        stratum_starts: 0,
     };
     let (published, observed) = watch::channel(status.clone());
     let (stop, stopped) = watch::channel(false);
@@ -363,6 +389,7 @@ where
         stop,
         published,
         controls: Mutex::new(Controls {
+            stratum: None,
             importer: None,
             workers: None,
             connections: None,
@@ -391,6 +418,11 @@ where
         connections: None,
         connection_task: None,
         production: None,
+        stratum: None,
+        pending_stratum: None,
+        collect_stratum_first: true,
+        stratum_epoch: Instant::now(),
+        stratum_last_restart: None,
         pending_key: None,
         pending_retirement: None,
         dependencies: (0, 0),
@@ -417,6 +449,7 @@ impl Owner {
         *self.stop.borrow()
     }
     fn publish(&mut self) {
+        self.status.stratum = self.stratum.as_ref().map(stratum::Generation::status);
         self.status.workers = self.workers.as_ref().map(workers::Handle::status);
         self.status.connections = self.connections.as_ref().map(connection::Handle::status);
         if let Some(pending) = &self.pending_key {
@@ -433,7 +466,9 @@ impl Owner {
                 .pending_key
                 .as_ref()
                 .is_some_and(|p| p.running && p.accepting)
-            && self.production.as_ref().is_some_and(Live::ready);
+            && self.production.as_ref().is_some_and(Live::ready)
+            && (self.config.stratum.is_none()
+                || self.status.stratum.as_ref().is_some_and(|s| s.healthy));
         self.shared.published.send_replace(self.status.clone());
     }
     fn phase(&mut self, phase: Phase) {
@@ -560,7 +595,9 @@ impl Owner {
             .bindings()
             .keys
             .ok_or(Error::NotReady)?;
-        let (config, clock) = self.input.pending(self.config.pending_key);
+        let (config, clock) = self
+            .input
+            .pending(self.config.pending_key, self.config.stratum.as_deref());
         let pending = self
             .services
             .as_ref()
@@ -672,13 +709,16 @@ impl Owner {
             self.publish();
             let production = self.production.as_ref().unwrap();
             production.check()?;
-            if production.ready() {
+            if production.ready() && self.refresh_stratum().await? {
                 return Ok(());
             }
             self.pause().await;
         }
     }
     fn collect(&mut self) {
+        if self.collect_stratum_first {
+            self.collect_stratum();
+        }
         if let Some(p) = &self.production {
             p.collect(
                 &mut lock(&self.shared.outputs),
@@ -686,6 +726,10 @@ impl Owner {
                 self.status.production_starts,
             );
         }
+        if !self.collect_stratum_first {
+            self.collect_stratum();
+        }
+        self.collect_stratum_first = !self.collect_stratum_first;
     }
     fn changed_dependencies(&self) -> bool {
         let w = self.workers.as_ref().unwrap();
@@ -696,6 +740,7 @@ impl Owner {
             || b.keys.as_ref().is_none_or(|k| k.current().is_none())
     }
     async fn stop_production(&mut self) -> Result<(), Error> {
+        self.stop_stratum().await?;
         {
             let mut controls = lock(&self.shared.controls);
             controls.production = None;
@@ -722,6 +767,7 @@ impl Owner {
             }
             self.worker_health()?;
             self.connection_health()?;
+            let stratum_released = self.release_stratum()?;
             let retired = &mut self.pending_retirement.as_mut().unwrap().value;
             // A command with a recovery-required or unknown outcome must not
             // be retried by constructing a replacement controller.
@@ -731,7 +777,8 @@ impl Owner {
                 return Err(e);
             }
             let settled = retired.poll()?;
-            if settled && lock(&self.shared.outputs).len() < self.config.outputs {
+            if settled && stratum_released && lock(&self.shared.outputs).len() < self.config.outputs
+            {
                 break;
             }
             // A slow reader applies bounded backpressure, not a child failure.
@@ -766,6 +813,7 @@ impl Owner {
             }
             self.connection_health()?;
             self.production.as_ref().unwrap().check()?;
+            self.refresh_stratum().await?;
             self.publish();
             self.pause().await;
         }
@@ -774,6 +822,10 @@ impl Owner {
     async fn finish(&mut self) {
         self.phase(Phase::Stopping);
         let mut joined = true;
+        if let Err(error) = self.stop_stratum().await {
+            joined = false;
+            self.status.failure.get_or_insert(error);
+        }
         if let Some(production) = &self.production {
             production.request_shutdown();
         }
@@ -876,12 +928,19 @@ impl Owner {
                 Retired::Commands(report) => commands = Some(Ok(*report)),
             }
         }
+        if let Some(s) = &self.pending_stratum {
+            joined &= s.report.settled();
+            if let Some(failure) = s.report.failure() {
+                self.status.failure.get_or_insert(Error::Stratum(failure));
+            }
+        }
         self.status.phase = Phase::Stopped;
         self.status.running = false;
         self.status.ready = false;
         self.status.joined = joined;
         let retained = lock(&self.shared.outputs).drain(..).collect();
         *lock(&self.shared.exit) = Some(Exit {
+            stratum: self.pending_stratum.take(),
             status: self.status.clone(),
             production,
             commands,
@@ -896,6 +955,9 @@ impl Owner {
 // additionally joins them and retains the single terminal receipt.
 impl Drop for Owner {
     fn drop(&mut self) {
+        if let Some(s) = &self.stratum {
+            s.worker.handle().request_shutdown();
+        }
         if let Some(pending) = &self.pending_key {
             pending.request_shutdown();
         }

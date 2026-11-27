@@ -326,7 +326,7 @@ fn foreground_arguments_and_native_database_guard_fail_without_mutation() {
     }
     let original = lab.config();
     for (name, phase) in [
-        ("stratum", "Stratum application integration"),
+        ("stratum", "Stratum configuration"),
         ("temporary", "nonpersistent storage integration"),
     ] {
         let mut config = original.clone();
@@ -432,4 +432,69 @@ fn foreground_http_reuses_connections_and_preserves_pipelined_dry_run_requests()
     process.wait(true);
     assert_eq!(idle.read(&mut [0]).unwrap(), 0);
     drop(TcpListener::bind(address).unwrap());
+}
+
+#[test]
+fn foreground_stratum_creates_and_reuses_reward_keys_serves_tcp_and_joins_on_signal() {
+    let lab = Lab::new("pow_cuckoo", false);
+    let reservation = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let mut config = lab.config();
+    config["mining"]
+        .as_object_mut()
+        .unwrap()
+        .remove("beneficiary");
+    config["stratum"] = json!({
+        "enabled":true,"connection":{"port":port,"max_connections":4,"num_acceptors":2},
+        "reward":{"keys":{"dir":"pool-keys"},"beneficiaries":[]}
+    });
+    lab.write("node.json", &config);
+    let directory = lab.0.join("resources/aestratum/pool-keys");
+    let mut saved = None;
+    for attempt in 0..2 {
+        let mut process = Process::spawn(&lab, lab.command(), &format!("stratum-{attempt}"));
+        let ready = process.event("ready");
+        assert_eq!(ready["family"], "Cuckoo");
+        let address: SocketAddr = ready["stratum"].as_str().unwrap().parse().unwrap();
+        assert!(address.ip().is_unspecified());
+        let local = SocketAddr::from(([127, 0, 0, 1], address.port()));
+        let public = std::fs::read(directory.join("sign_key.pub")).unwrap();
+        let secret = std::fs::read(directory.join("sign_key")).unwrap();
+        assert_eq!((public.len(), secret.len()), (32, 64));
+        if let Some((p, s)) = &saved {
+            assert!(p == &public && s == &secret);
+        }
+        saved = Some((public.clone(), secret));
+        let (code, pending) = request(
+            addresses(&ready)[0],
+            "GET /v3/key-blocks/pending HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 200, "{pending}");
+        assert_eq!(
+            pending["beneficiary"],
+            ae_codec::api::encode(ae_codec::api::ApiType::AccountPubkey, &public)
+        );
+        assert_ne!(pending["miner"], pending["beneficiary"]);
+        let mut socket = TcpStream::connect_timeout(&local, Duration::from_secs(5)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(socket,"{}",json!({"jsonrpc":"2.0","id":1,"method":"mining.subscribe","params":["test/1",null,null,port]})).unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], 1);
+        assert!(reply["error"].is_null(), "{reply}");
+        process.signal(rustix::process::Signal::TERM);
+        assert_eq!(
+            process.event("stopped"),
+            json!({"event":"stopped","joined":true,"failed":false})
+        );
+        process.wait(true);
+        line.clear();
+        assert_eq!(socket.read_line(&mut line).unwrap(), 0);
+        drop(TcpListener::bind(address).unwrap());
+    }
 }

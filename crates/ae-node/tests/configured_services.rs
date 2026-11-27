@@ -1083,3 +1083,5 @@ async fn configured_importer_activation_rejects_unready_or_foreign_worker_owner(
 mod family;
 #[path = "configured_services/on_demand.rs"]
 mod on_demand_root;
+#[path = "configured_services/stratum.rs"]
+mod stratum_root;

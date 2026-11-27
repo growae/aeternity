@@ -103,18 +103,17 @@ impl Prepared {
         options: Options,
     ) -> Result<Self, Error> {
         let resolved = snapshot.resolved();
-        // These services have standalone owners but are not yet composed here.
-        // Reject an explicit request rather than silently run a different node.
-        if resolved
-            .get(&["stratum", "enabled"])
-            .map_err(|e| Error::at("Stratum configuration", e))?
-            == Some(&serde_json::json!(true))
-        {
-            return Err(Error::at(
-                "Stratum application integration",
-                "not yet connected",
-            ));
-        }
+        let stratum_directory = options.cwd.join(
+            resolved
+                .data_directory("aestratum")
+                .map_err(|e| Error::at("Stratum resource directory", e))?,
+        );
+        // Validate cached user values before opening storage. Resolve the payment
+        // contract against the actual network once the genesis binding exists.
+        let stratum_enabled =
+            configuration::stratum::Plan::resolve(&resolved, b"", &stratum_directory)
+                .map_err(|e| Error::at("Stratum configuration", e))?
+                .is_some();
         if resolved
             .get(&["chain", "persist"])
             .map_err(|e| Error::at("storage configuration", e))?
@@ -156,9 +155,33 @@ impl Prepared {
         .map_err(|e| Error::at("database", e))?;
         let mut node = runtime::Prepared::new(open, options.preparation)
             .map_err(|e| Error::at("consensus preparation", e.error))?;
-        let production = production::Plan::resolve(&resolved, node.family())?;
-        let mut settings =
-            production.settings(&node, &options.miner_directories, core.cache_size())?;
+        let stratum = if stratum_enabled {
+            if node.family() != runtime::Family::Cuckoo {
+                return Err(Error::at("Stratum consensus", "Cuckoo required"));
+            }
+            let prepared = configuration::stratum::Plan::resolve(
+                &resolved,
+                node.configured().chain().settings().profile().network_id(),
+                &stratum_directory,
+            )
+            .map_err(|e| Error::at("Stratum configuration", e))?
+            .expect("validated enabled section")
+            .load_or_create()
+            .map_err(|e| Error::at("Stratum reward keys", e))?;
+            Some(
+                crate::stratum::configured::Config::new(prepared)
+                    .map_err(|e| Error::at("Stratum runtime configuration", e))?,
+            )
+        } else {
+            None
+        };
+        let production = production::Plan::resolve(&resolved, node.family(), stratum_enabled)?;
+        let mut settings = production.settings(
+            &node,
+            &options.miner_directories,
+            core.cache_size(),
+            stratum,
+        )?;
         settings
             .apply_core(&core)
             .map_err(|e| Error::at("core services", e))?;
