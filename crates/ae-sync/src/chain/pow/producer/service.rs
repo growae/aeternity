@@ -76,6 +76,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             state.shutdown = true;
             state.status.accepting = false;
         }
+        if let Some(commands) = lock(&self.shared.commands).clone() {
+            commands.request_shutdown();
+        }
         self.status.enabled = false;
         let mut controls: Vec<_> = self
             .generator_pending
@@ -98,6 +101,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         let mining = self.mining.take().map(mining::Mining::retire);
         let outputs = lock(&self.shared.state).outputs.drain(..).collect();
         let mut report = Report {
+            commands: None,
             status: self.status,
             outputs,
             completions,
@@ -245,11 +249,20 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         Ok(())
     }
     fn sync(&mut self, running: bool) {
+        // Promotion may have completed after the drive loop's initial sample.
+        // Publish the leader together with the completed promotion barrier.
+        let keys = self.keys.info();
+        self.status.leader = policy::leader(
+            keys.running && keys.accepting,
+            self.selected.miner,
+            keys.keys.signing,
+        );
         let mut s = lock(&self.shared.state);
         self.status.running = running;
         self.status.accepting = running && !s.shutdown;
         self.status.requested_enabled = s.status.requested_enabled;
         self.status.request_revision = s.status.request_revision;
+        self.status.observed_revision = self.cursor.revision();
         self.status.top = self.selected.top;
         self.status.key = self.selected.key;
         self.status.miner = self.selected.miner;

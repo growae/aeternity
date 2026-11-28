@@ -120,7 +120,8 @@ impl Plan {
         Ok(match node.family() {
             family
                 if family == runtime::Family::Cuckoo
-                    || (family == runtime::Family::OnDemand && self.autostart) =>
+                    || (family == runtime::Family::OnDemand
+                        && (self.autostart || self.beneficiary.is_some())) =>
             {
                 let mut config: crate::pow::Config = crate::pow::Config {
                     stratum: stratum.map(Arc::new),

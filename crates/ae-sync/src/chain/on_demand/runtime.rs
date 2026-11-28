@@ -5,7 +5,7 @@ use super::control::{self, Command, Host};
 use crate::{
     chain::{
         self,
-        pow::{generator::Clock, packing, preparation},
+        pow::{generator::Clock, packing, preparation, producer},
     },
     keys,
 };
@@ -77,6 +77,7 @@ pub enum Error {
     AdmissionStart(chain::Error),
     Admission(usize),
     Encoding,
+    Producer(producer::Error),
 }
 #[derive(Debug)]
 pub struct Admission {
@@ -113,11 +114,23 @@ struct Leases {
     _producer: ae_storage::pow::ProducerLease,
     _generator: ae_storage::pow::GeneratorLease,
 }
+enum Ownership {
+    Exclusive {
+        leases: Leases,
+    },
+    // Constructed only by the producer that joins this command worker before
+    // releasing its lease. Key promotion stays with that producer.
+    Shared {
+        producer: producer::Client,
+        lease: ae_storage::pow::ProducerLease,
+    },
+}
 // A caller retiring an owner with an uncertain pool receipt must keep this
 // value until the same pool worker has joined. No replacement owner can acquire
 // these leases while this receipt is retained.
 pub struct Retired {
-    _leases: Leases,
+    _exclusive: Option<Leases>,
+    _shared: Option<ae_storage::pow::ProducerLease>,
     pending: Option<packing::Cancelled>,
 }
 impl Retired {
@@ -174,7 +187,7 @@ pub struct Controller<O = Otp26> {
     failed: bool,
     packing: Option<packing::Packing<O>>,
     quarantine: Option<packing::Cancelled>,
-    leases: Leases,
+    ownership: Ownership,
     resume: Option<AccountPublicKey>,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
@@ -185,6 +198,39 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
         keys: keys::Client,
         clock: Arc<dyn Clock>,
         config: Config,
+    ) -> Result<Self, Error> {
+        Self::new_inner(importer, snapshots, pool, keys, clock, config, None)
+    }
+    pub(in crate::chain) fn shared(
+        importer: &chain::Importer<O>,
+        snapshots: snapshots::Owner,
+        pool: worker::Client,
+        keys: keys::Client,
+        clock: Arc<dyn Clock>,
+        config: Config,
+        producer: (producer::Client, ae_storage::pow::ProducerLease),
+    ) -> Result<Self, Error> {
+        if !producer.0.uses_snapshots(&snapshots) {
+            return Err(Error::Binding);
+        }
+        Self::new_inner(
+            importer,
+            snapshots,
+            pool,
+            keys,
+            clock,
+            config,
+            Some(producer),
+        )
+    }
+    fn new_inner(
+        importer: &chain::Importer<O>,
+        snapshots: snapshots::Owner,
+        pool: worker::Client,
+        keys: keys::Client,
+        clock: Arc<dyn Clock>,
+        config: Config,
+        producer: Option<(producer::Client, ae_storage::pow::ProducerLease)>,
     ) -> Result<Self, Error> {
         let db = importer.database();
         let chain::strategy::Strategy::Pow(profile) = &importer.context.strategy else {
@@ -254,10 +300,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
             },
         )
         .map_err(Error::Preparation)?;
-        let leases = Leases {
-            _group: ae_storage::pow::GroupLease::acquire(db).map_err(Error::Snapshot)?,
-            _producer: ae_storage::pow::ProducerLease::acquire(db).map_err(Error::Snapshot)?,
-            _generator: ae_storage::pow::GeneratorLease::acquire(db).map_err(Error::Snapshot)?,
+        let ownership = match producer {
+            Some((producer, lease)) => Ownership::Shared { producer, lease },
+            None => Ownership::Exclusive {
+                leases: Leases {
+                    _group: ae_storage::pow::GroupLease::acquire(db).map_err(Error::Snapshot)?,
+                    _producer: ae_storage::pow::ProducerLease::acquire(db)
+                        .map_err(Error::Snapshot)?,
+                    _generator: ae_storage::pow::GeneratorLease::acquire(db)
+                        .map_err(Error::Snapshot)?,
+                },
+            },
         };
         let mut owner = Self {
             importer: importer.borrowed(),
@@ -274,10 +327,10 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
             failed: false,
             packing: None,
             quarantine: None,
-            leases,
+            ownership,
             resume: None,
         };
-        if owner.config.resume_current {
+        if owner.config.resume_current && matches!(owner.ownership, Ownership::Exclusive { .. }) {
             owner.resume = Some(owner.leader(&selected)?);
         }
         db.publish_selected_height().map_err(Error::Repository)?;
@@ -298,8 +351,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Controller<O> {
             .quarantine
             .take()
             .or_else(|| self.packing.take().map(packing::Packing::cancel));
+        let (_exclusive, _shared) = match self.ownership {
+            Ownership::Exclusive { leases } => (Some(leases), None),
+            Ownership::Shared { lease, .. } => (None, Some(lease)),
+        };
         Retired {
-            _leases: self.leases,
+            _exclusive,
+            _shared,
             pending,
         }
     }
@@ -435,6 +493,25 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Runtime<'_, O> {
     }
     fn events(&mut self) -> Result<(), Error> {
         self.check()?;
+        if let Ownership::Shared { producer, .. } = &self.owner.ownership {
+            // Wait for a fixed admitted revision. Requiring the newest top
+            // on every poll would starve explicit commands during mining.
+            let revision = self
+                .owner
+                .importer
+                .database()
+                .view()
+                .map_err(Error::Repository)?
+                .status()
+                .revision;
+            loop {
+                self.check()?;
+                if producer.observed(revision).map_err(Error::Producer)? {
+                    return Ok(());
+                }
+                pause();
+            }
+        }
         if let Some(miner) = self.owner.resume {
             self.owner.promote(miner, &mut self.promotions)?;
             self.owner.resume = None;
@@ -557,6 +634,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host for Runtime<'_, O> {
     type Error = Error;
     fn is_leader(&mut self) -> Result<bool, Error> {
         let top = self.top()?;
+        if let Ownership::Shared { producer, .. } = &self.owner.ownership {
+            return Ok(producer.status().leader);
+        }
         let info = self.owner.keys.info();
         if !info.accepting {
             return Err(Error::Stopped);

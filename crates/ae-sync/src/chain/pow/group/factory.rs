@@ -9,9 +9,11 @@ struct Inputs<O> {
     mining: Option<producer::mining::Config>,
     clocks: Arc<dyn Clocks>,
     execution: Option<Arc<Owned<O>>>,
+    commands: Option<chain::on_demand::Config>,
 }
 pub(super) struct Factory<O>(Mutex<Inputs<O>>);
 impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         importer: &chain::Importer<O>,
         snapshots: snapshots::Owner,
@@ -20,6 +22,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
         config: &Config<O>,
         clocks: Arc<dyn Clocks>,
         execution: Option<Arc<Owned<O>>>,
+        commands: Option<chain::on_demand::Config>,
     ) -> Self {
         Self(Mutex::new(Inputs {
             importer: importer.borrowed(),
@@ -31,6 +34,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Factory<O> {
             mining: config.mining.clone(),
             clocks,
             execution,
+            commands,
         }))
     }
 }
@@ -76,7 +80,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
         generation: u64,
         generator: &Self::Generator,
     ) -> Result<Self::Conductor, StartError> {
-        let (importer, keys, mut config, mining, snapshots, clocks) = {
+        let (importer, keys, mut config, mining, snapshots, clocks, pool, commands) = {
             let i = lock(&self.0);
             (
                 i.importer.borrowed(),
@@ -85,13 +89,33 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
                 i.mining.clone(),
                 i.snapshots.clone(),
                 i.clocks.clone(),
+                i.pool.clone(),
+                i.commands.clone(),
             )
         };
         // Activation happens only after a complete pair is published, under
         // the same lock as group desired-state changes and shutdown admission.
         config.enabled = false;
-        match mining {
-            Some(mining) => producer::Worker::spawn_with_mining(
+        match (mining, commands) {
+            (Some(mining), Some(commands)) => producer::Worker::spawn_with_commands(
+                &importer,
+                generator.client(),
+                keys,
+                config,
+                ProducerClock(clocks.producer(generation)),
+                producer::mining::Inputs {
+                    snapshots: snapshots.clone(),
+                    config: mining,
+                    clock: clocks.preparation(generation),
+                },
+                producer::CommandInputs {
+                    snapshots,
+                    pool,
+                    config: commands,
+                    clock: clocks.commands(generation),
+                },
+            ),
+            (Some(mining), None) => producer::Worker::spawn_with_mining(
                 &importer,
                 generator.client(),
                 keys,
@@ -103,13 +127,14 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
                     clock: clocks.preparation(generation),
                 },
             ),
-            None => producer::Worker::spawn(
+            (None, None) => producer::Worker::spawn(
                 &importer,
                 generator.client(),
                 keys,
                 config,
                 ProducerClock(clocks.producer(generation)),
             ),
+            (None, Some(_)) => Err(producer::Error::Binding),
         }
         .map_err(StartError::Producer)
     }

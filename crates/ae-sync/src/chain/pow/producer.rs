@@ -2,6 +2,7 @@
 // aec_conductor:handle_info(candidate_block), start_micro_signing/setup_loop,
 // aeternity fa2a6d7. ISC copyright: repository LICENSE.
 use super::generator;
+use crate::chain::on_demand;
 use crate::{chain, keys};
 use ae_chain::{
     block::{Block, MicroBlock},
@@ -90,6 +91,8 @@ pub enum Error {
     Admission(chain::Error),
     Block(ae_chain::block::Error),
     Mining(mining::Error),
+    CommandStart(String),
+    Commands(on_demand::service::Error),
 }
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -111,6 +114,7 @@ pub struct Status {
     pub admissions: u64,
     pub promotions: u64,
     pub published: u64,
+    pub observed_revision: u64,
     pub discarded: u64,
     pub failure: Option<Error>,
     pub mining: Option<mining::Status>,
@@ -138,6 +142,7 @@ struct Shared {
     wake: Condvar,
     credits: Arc<Mutex<usize>>,
     limit: usize,
+    commands: Mutex<Option<on_demand::service::Client>>,
 }
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -145,6 +150,16 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct Client(Arc<Shared>);
 impl Client {
+    pub fn commands(&self) -> Option<on_demand::service::Client> {
+        lock(&self.0.commands).clone()
+    }
+    pub(in crate::chain) fn observed(&self, revision: u64) -> Result<bool, Error> {
+        let s = lock(&self.0.state);
+        if s.shutdown || !s.status.running || !s.status.accepting {
+            return Err(Error::Closed);
+        }
+        Ok(s.status.observed_revision >= revision && !s.status.promotion_pending)
+    }
     pub fn uses_snapshots(&self, snapshots: &ae_storage::snapshots::Owner) -> bool {
         snapshots.uses_database(&self.0.database)
     }
@@ -204,11 +219,22 @@ impl Client {
         s.status.accepting = false;
         s.shutdown = true;
         self.0.wake.notify_all();
+        drop(s);
+        if let Some(commands) = self.commands() {
+            commands.request_shutdown();
+        }
     }
 }
 pub struct Worker {
     client: Client,
     thread: Option<JoinHandle<Report>>,
+    commands: Option<on_demand::service::Worker>,
+}
+pub struct CommandInputs {
+    pub snapshots: ae_storage::snapshots::Owner,
+    pub pool: ae_storage::pool::worker::Client,
+    pub config: on_demand::Config,
+    pub clock: Arc<dyn generator::Clock>,
 }
 #[derive(Clone, Copy)]
 struct Selected {
@@ -241,7 +267,7 @@ impl Worker {
         config: Config,
         clock: impl Clock,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(importer, generator, keys, config, clock, None)
+        Self::spawn_inner(importer, generator, keys, config, clock, None, None)
     }
     pub fn spawn_with_mining<O: MapOrder + Clone + Send + Sync + 'static>(
         importer: &chain::Importer<O>,
@@ -251,7 +277,37 @@ impl Worker {
         clock: impl Clock,
         mining: mining::Inputs,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(importer, generator, keys, config, clock, Some(mining))
+        Self::spawn_inner(importer, generator, keys, config, clock, Some(mining), None)
+    }
+    pub fn spawn_with_commands<O: MapOrder + Clone + Send + Sync + 'static>(
+        importer: &chain::Importer<O>,
+        generator: generator::Client<O>,
+        keys: keys::Client,
+        config: Config,
+        clock: impl Clock,
+        mining: mining::Inputs,
+        commands: CommandInputs,
+    ) -> Result<Self, Error> {
+        if importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand
+            || commands.config.controller.beneficiary != mining.config.beneficiary
+            || commands.config.controller.release_info != mining.config.release_info
+        {
+            return Err(Error::Binding);
+        }
+        commands
+            .config
+            .service
+            .validate()
+            .map_err(Error::Commands)?;
+        Self::spawn_inner(
+            importer,
+            generator,
+            keys,
+            config,
+            clock,
+            Some(mining),
+            Some(commands),
+        )
     }
     fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
         importer: &chain::Importer<O>,
@@ -260,6 +316,7 @@ impl Worker {
         config: Config,
         clock: impl Clock,
         mining: Option<mining::Inputs>,
+        commands: Option<CommandInputs>,
     ) -> Result<Self, Error> {
         if (config.external_key_work && mining.is_some())
             || config.poll.is_zero()
@@ -310,6 +367,7 @@ impl Worker {
             admissions: 0,
             promotions: 0,
             published: 0,
+            observed_revision: cursor.revision(),
             discarded: 0,
             failure: None,
             mining: mining.as_ref().map(mining::Mining::status),
@@ -325,7 +383,26 @@ impl Worker {
             wake: Condvar::new(),
             credits: Arc::new(Mutex::new(0)),
             limit: config.outputs,
+            commands: Mutex::new(None),
         });
+        let commands = commands
+            .map(|inputs| {
+                let controller = on_demand::runtime::Controller::shared(
+                    importer,
+                    inputs.snapshots,
+                    inputs.pool,
+                    keys.clone(),
+                    inputs.clock,
+                    inputs.config.controller,
+                    (Client(shared.clone()), lease.clone()),
+                )
+                .map_err(|e| Error::CommandStart(format!("{e:?}")))?;
+                let worker = on_demand::service::Worker::spawn(controller, inputs.config.service)
+                    .map_err(|e| Error::Commands(e.error.clone()))?;
+                *lock(&shared.commands) = Some(worker.client());
+                Ok::<_, Error>(worker)
+            })
+            .transpose()?;
         let service = service::Service::new(
             importer.borrowed(),
             generator,
@@ -347,6 +424,7 @@ impl Worker {
         Ok(Self {
             client: Client(shared),
             thread: Some(thread),
+            commands,
         })
     }
     pub fn client(&self) -> Client {
@@ -354,15 +432,41 @@ impl Worker {
     }
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+            || self
+                .commands
+                .as_ref()
+                .is_some_and(on_demand::service::Worker::is_finished)
     }
     pub fn shutdown(mut self) -> thread::Result<Report> {
         self.client.request_shutdown();
-        self.thread.take().expect("producer thread").join()
+        let commands = self.commands.take().map(|w| Box::new(w.shutdown()));
+        match self.thread.take().expect("producer thread").join() {
+            Ok(mut report) => {
+                if let Some(failure) = commands.as_ref().and_then(|r| r.status.failure.clone()) {
+                    report
+                        .status
+                        .failure
+                        .get_or_insert(Error::Commands(failure));
+                }
+                report.commands = commands;
+                Ok(report)
+            }
+            Err(panic) => {
+                // Keep an uncertain command receipt even if the producer's
+                // thread failed outside its normal panic boundary.
+                if commands.is_some() {
+                    Err(Box::new((panic, commands)))
+                } else {
+                    Err(panic)
+                }
+            }
+        }
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.client.request_shutdown();
+        drop(self.commands.take());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

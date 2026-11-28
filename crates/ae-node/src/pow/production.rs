@@ -3,32 +3,20 @@ use ae_protocol::ConsensusAlgorithm;
 use ae_storage::pool::worker as pool;
 use ae_sync::{
     chain::{
-        on_demand::{runtime, service},
+        on_demand::service,
         pending::service as pending,
         pow::{generator, group},
     },
     keys,
 };
-use ae_types::AccountPublicKey;
 use ae_vm_fate::maps::order::Otp26;
 use std::{collections::VecDeque, sync::Arc};
 
-#[derive(Clone)]
-pub struct Commands {
-    pub controller: runtime::Config,
-    pub service: service::Config,
-}
-impl Commands {
-    pub fn new(beneficiary: AccountPublicKey) -> Self {
-        Self {
-            controller: runtime::Config::new(beneficiary),
-            service: Default::default(),
-        }
-    }
-}
+pub use ae_sync::chain::on_demand::Config as Commands;
 #[derive(Clone)]
 pub struct CommandGeneration {
     pub number: u64,
+    pub production: Option<group::GenerationId>,
     pub client: service::Client,
 }
 pub(super) enum Input {
@@ -36,6 +24,7 @@ pub(super) enum Input {
         algorithm: ConsensusAlgorithm,
         config: Box<configured::Production>,
         clocks: Arc<dyn group::Clocks>,
+        commands: Option<Box<Commands>>,
     },
     Commands {
         config: Box<Commands>,
@@ -88,6 +77,7 @@ impl Input {
                 algorithm: ConsensusAlgorithm::Cuckoo,
                 config,
                 clocks,
+                ..
             } => Some((
                 config.producer.strictly_follow_top,
                 clocks.preparation(generation),
@@ -129,14 +119,27 @@ impl Input {
             })
         };
         Ok(match self {
-            Self::Automatic { config, clocks, .. } => {
+            Self::Automatic {
+                config,
+                clocks,
+                commands,
+                ..
+            } => {
                 let mut config = config.as_ref().clone();
                 config.producer.enabled = false;
-                Live::Automatic(
-                    services
-                        .production(pool, keys, config, clocks.clone())
-                        .map_err(start)?,
-                )
+                let worker = if let Some(commands) = commands {
+                    services.production_with_commands(
+                        pool,
+                        keys,
+                        config,
+                        clocks.clone(),
+                        commands.as_ref().clone(),
+                    )
+                } else {
+                    services.production(pool, keys, config, clocks.clone())
+                }
+                .map_err(start)?;
+                Live::Automatic(worker)
             }
             Self::Commands { config, clock } => {
                 let controller = services
@@ -177,7 +180,14 @@ impl Live {
     }
     pub fn update(&self, status: &mut Status) {
         match self {
-            Self::Automatic(w) => status.production = Some(w.client().status()),
+            Self::Automatic(w) => {
+                let client = w.client();
+                status.production = Some(client.status());
+                status.commands = client
+                    .current()
+                    .and_then(|g| g.producer.commands())
+                    .map(|c| c.status());
+            }
             Self::Commands(w) => status.commands = Some(w.client().status()),
         }
     }
@@ -258,7 +268,10 @@ pub(super) enum Retired {
 impl Retired {
     pub fn update(&self, status: &mut Status) {
         match self {
-            Self::Automatic(r) => status.production = Some(r.status.clone()),
+            Self::Automatic(r) => {
+                status.production = Some(r.status.clone());
+                status.commands = r.commands_status();
+            }
             Self::Commands(r) => status.commands = Some(r.status.clone()),
         }
     }

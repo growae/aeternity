@@ -353,6 +353,26 @@ impl Services {
         config: Production,
         clocks: Arc<dyn group::Clocks>,
     ) -> Result<group::Worker<Otp26>, Error> {
+        self.production_inner(pool, keys, config, clocks, None)
+    }
+    pub fn production_with_commands(
+        &self,
+        pool: pool::Client,
+        keys: keys::Client,
+        config: Production,
+        clocks: Arc<dyn group::Clocks>,
+        commands: on_demand::Config,
+    ) -> Result<group::Worker<Otp26>, Error> {
+        self.production_inner(pool, keys, config, clocks, Some(commands))
+    }
+    fn production_inner(
+        &self,
+        pool: pool::Client,
+        keys: keys::Client,
+        config: Production,
+        clocks: Arc<dyn group::Clocks>,
+        commands: Option<on_demand::Config>,
+    ) -> Result<group::Worker<Otp26>, Error> {
         if !matches!(
             self.open.chain().identity().algorithm,
             ConsensusAlgorithm::Cuckoo | ConsensusAlgorithm::OnDemand
@@ -366,6 +386,19 @@ impl Services {
             poll: config.poll,
             outputs: config.outputs,
         };
+        if let Some(commands) = commands {
+            return group::Worker::spawn_owned_with_commands(
+                &self.importer,
+                self.snapshots.clone(),
+                pool,
+                keys,
+                config,
+                clocks,
+                self.execution.clone(),
+                commands,
+            )
+            .map_err(Error::Production);
+        }
         group::Worker::spawn_owned(
             &self.importer,
             self.snapshots.clone(),

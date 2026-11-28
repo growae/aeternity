@@ -5,6 +5,7 @@ pub struct GeneratorExit {
     pub final_retirement: Option<packing::CancelReport>,
 }
 pub struct ProducerExit {
+    pub commands: Option<Box<chain::on_demand::service::Released>>,
     pub status: producer::Status,
     pub outputs: Vec<Arc<producer::Output>>,
     pub completions: Vec<producer::Completion>,
@@ -37,7 +38,7 @@ impl Retirement {
             let report = result
                 .as_mut()
                 .map_err(|_| Error::MissingRetirement(supervisor::Member::Conductor))?;
-            ready &= report.poll();
+            ready &= report.poll_owned().map_err(Error::Commands)?;
         }
         if let Some((_, result)) = &mut self.raw.generator {
             let report = result
@@ -75,6 +76,12 @@ impl Retirement {
             let mut r = r.unwrap_or_else(|_| unreachable!("checked retirement"));
             assert!(r.is_settled());
             let out = ProducerExit {
+                commands: r.commands.take().map(|r| {
+                    Box::new(
+                        r.release()
+                            .unwrap_or_else(|_| unreachable!("checked command retirement")),
+                    )
+                }),
                 status: r.status.clone(),
                 outputs: std::mem::take(&mut r.outputs),
                 completions: std::mem::take(&mut r.completions),
@@ -108,6 +115,23 @@ pub struct Released {
     pub settled: Vec<Retired>,
 }
 impl Report {
+    pub fn commands_status(&self) -> Option<chain::on_demand::service::Status> {
+        let pending = self.retirements.iter().filter_map(|r| {
+            let (generation, report) = r.raw.conductor.as_ref()?;
+            Some((
+                *generation,
+                report.as_ref().ok()?.commands.as_ref()?.status.clone(),
+            ))
+        });
+        let settled = self.settled.iter().filter_map(|r| {
+            let (generation, report) = r.producer.as_ref()?;
+            Some((*generation, report.commands.as_ref()?.status.clone()))
+        });
+        pending
+            .chain(settled)
+            .max_by_key(|(generation, _)| *generation)
+            .map(|(_, status)| status)
+    }
     pub fn release(self) -> Result<Released, Box<Self>> {
         if !self.is_settled() {
             return Err(Box::new(self));

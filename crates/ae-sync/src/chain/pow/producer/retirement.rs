@@ -84,6 +84,7 @@ impl Pending {
     }
 }
 pub struct Report {
+    pub commands: Option<Box<on_demand::service::Report>>,
     pub status: Status,
     // Transfer all unacknowledged publications on exit, even when the caller
     // did not retain a Client. External Arc clones continue to hold credits.
@@ -100,6 +101,18 @@ impl Report {
     // Poll only the original accepted requests. This method never signs,
     // promotes, inserts, cancels or redirects work to replacement services.
     pub fn poll(&mut self) -> bool {
+        match self.poll_owned() {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.status.failure.get_or_insert(Error::Commands(error));
+                false
+            }
+        }
+    }
+    pub(in crate::chain::pow) fn poll_owned(&mut self) -> Result<bool, on_demand::service::Error> {
+        if let Some(commands) = &mut self.commands {
+            commands.poll()?;
+        }
         if let Some(mining) = &mut self.mining {
             let mut completed = Vec::new();
             mining.poll(&mut completed);
@@ -124,10 +137,11 @@ impl Report {
                 index += 1;
             }
         }
-        self.is_settled()
+        Ok(self.is_settled())
     }
     pub fn is_settled(&self) -> bool {
-        self.pending.is_none()
+        self.commands.as_ref().is_none_or(|r| r.is_settled())
+            && self.pending.is_none()
             && self.generator.is_empty()
             && self
                 .mining

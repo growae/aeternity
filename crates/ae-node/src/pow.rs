@@ -206,7 +206,16 @@ impl Handle {
         lock(&self.shared.controls).production.clone()
     }
     pub fn commands(&self) -> Option<CommandGeneration> {
-        lock(&self.shared.controls).commands.clone()
+        let controls = lock(&self.shared.controls);
+        if let Some(commands) = &controls.commands {
+            return Some(commands.clone());
+        }
+        let generation = controls.production.as_ref()?.current()?;
+        Some(CommandGeneration {
+            number: self.status().production_starts,
+            production: Some(generation.id),
+            client: generation.producer.commands()?,
+        })
     }
     pub fn stratum(&self) -> Option<crate::stratum::configured::Handle> {
         lock(&self.shared.controls).stratum.clone()
@@ -319,6 +328,7 @@ where
             algorithm: ae_protocol::ConsensusAlgorithm::Cuckoo,
             config: Box::new(production),
             clocks,
+            commands: None,
         },
         outputs,
     )
@@ -333,6 +343,14 @@ where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
     let (production, config) = config.into_parts();
+    let commands = production.mining.as_ref().map(|mining| {
+        let mut commands = Commands::new(mining.beneficiary);
+        commands.controller.release_info = mining.release_info;
+        commands.controller.key = mining.preparation;
+        commands.controller.micro = production.generator.candidate;
+        commands.controller.resume_current = production.producer.resume_current;
+        Box::new(commands)
+    });
     launch_inner(
         prepared,
         config,
@@ -340,6 +358,7 @@ where
             algorithm: ae_protocol::ConsensusAlgorithm::OnDemand,
             config: Box::new(production),
             clocks,
+            commands,
         },
         outputs,
     )
@@ -724,6 +743,7 @@ impl Owner {
                 Live::Commands(worker) => {
                     controls.commands = Some(CommandGeneration {
                         number,
+                        production: None,
                         client: worker.client(),
                     });
                 }

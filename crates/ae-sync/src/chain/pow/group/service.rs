@@ -11,6 +11,7 @@ pub(super) struct Service<O: MapOrder + Clone + Send + Sync + 'static> {
     lease: Option<GroupLease>,
     retiring: Option<Retirement>,
     outbox: VecDeque<Event>,
+    commands_first: bool,
 }
 impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
     pub fn new(
@@ -31,6 +32,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             lease: Some(lease),
             retiring: None,
             outbox: VecDeque::new(),
+            commands_first: false,
         }
     }
     pub fn run(mut self) -> Report {
@@ -166,17 +168,8 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         self.controls()?;
         if *lock(&self.shared.credits) < self.shared.limit {
             let current = lock(&self.shared.state).current.clone();
-            if let Some(current) = current
-                && let Some(output) = current.producer.front()
-            {
-                self.outbox.push_back(Event::Produced {
-                    generation: current.id,
-                    output: output.clone(),
-                });
-                if !current.producer.acknowledge(&output) {
-                    return Err(Error::Binding);
-                }
-                self.flush()?;
+            if let Some(current) = current {
+                self.collect(&current)?;
             }
         }
         let dead = self
@@ -211,6 +204,36 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                     generator: generator_generation,
                     producer: conductor_generation,
                 })),
+            }
+        }
+        Ok(())
+    }
+    fn collect(&mut self, current: &Generation<O>) -> Result<(), Error> {
+        let order = [self.commands_first, !self.commands_first];
+        self.commands_first = !self.commands_first;
+        for commands in order {
+            if commands {
+                if let Some(client) = current.producer.commands()
+                    && let Some(completion) = client.front()
+                    && client.acknowledge(&completion)
+                {
+                    self.outbox.push_back(Event::Command {
+                        generation: current.id,
+                        completion,
+                    });
+                    self.flush()?;
+                    return Ok(());
+                }
+            } else if let Some(output) = current.producer.front() {
+                self.outbox.push_back(Event::Produced {
+                    generation: current.id,
+                    output: output.clone(),
+                });
+                if !current.producer.acknowledge(&output) {
+                    return Err(Error::Binding);
+                }
+                self.flush()?;
+                return Ok(());
             }
         }
         Ok(())

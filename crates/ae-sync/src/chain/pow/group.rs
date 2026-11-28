@@ -22,6 +22,9 @@ pub trait Clocks: Send + Sync + 'static {
     fn preparation(&self, generation: u64) -> Arc<dyn generator::Clock> {
         self.generator(generation)
     }
+    fn commands(&self, generation: u64) -> Arc<dyn generator::Clock> {
+        self.generator(generation)
+    }
     fn second(&self) -> u64;
 }
 pub struct SystemClocks(Instant);
@@ -63,6 +66,7 @@ pub enum Error {
     MissingRetirement(supervisor::Member),
     Packing(packing::Error),
     Producer(producer::Error),
+    Commands(chain::on_demand::service::Error),
 }
 #[derive(Debug)]
 pub enum StartError {
@@ -93,6 +97,10 @@ pub enum Event {
     Produced {
         generation: GenerationId,
         output: Arc<producer::Output>,
+    },
+    Command {
+        generation: GenerationId,
+        completion: Arc<chain::on_demand::service::Completion>,
     },
     Retired(Box<Retired>),
     StartFailed(supervisor::StartFailure<StartError>),
@@ -216,7 +224,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         config: Config<O>,
         clocks: Arc<dyn Clocks>,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(importer, snapshots, pool, keys, config, clocks, None)
+        Self::spawn_inner(importer, snapshots, pool, keys, config, clocks, None, None)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_owned(
@@ -236,6 +244,29 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             config,
             clocks,
             Some(execution),
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_owned_with_commands(
+        importer: &chain::Importer<O>,
+        snapshots: snapshots::Owner,
+        pool: pool::Client,
+        keys: keys::Client,
+        config: Config<O>,
+        clocks: Arc<dyn Clocks>,
+        execution: Arc<Owned<O>>,
+        commands: chain::on_demand::Config,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(
+            importer,
+            snapshots,
+            pool,
+            keys,
+            config,
+            clocks,
+            Some(execution),
+            Some(commands),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -247,6 +278,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         config: Config<O>,
         clocks: Arc<dyn Clocks>,
         execution: Option<Arc<Owned<O>>>,
+        commands: Option<chain::on_demand::Config>,
     ) -> Result<Self, Error> {
         if execution.as_ref().is_some_and(|e| {
             e.network() != importer.network() || e.consensus() != importer.consensus()
@@ -261,6 +293,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         }
         if importer.consensus() != ae_protocol::ConsensusType::Pow
             || config.generator.preparation.micro_cycle_ms != config.producer.micro_cycle_ms
+            || (commands.is_some()
+                && (config.mining.is_none()
+                    || importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand))
         {
             return Err(Error::Binding);
         }
@@ -303,6 +338,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             &config,
             clocks.clone(),
             execution,
+            commands,
         );
         let service =
             service::Service::new(factory, shared.clone(), pool, clocks, config.poll, lease);

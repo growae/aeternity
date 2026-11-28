@@ -3,3 +3,17 @@
 pub mod control;
 pub mod runtime;
 pub mod service;
+
+#[derive(Clone)]
+pub struct Config {
+    pub controller: runtime::Config,
+    pub service: service::Config,
+}
+impl Config {
+    pub fn new(beneficiary: ae_types::AccountPublicKey) -> Self {
+        Self {
+            controller: runtime::Config::new(beneficiary),
+            service: Default::default(),
+        }
+    }
+}

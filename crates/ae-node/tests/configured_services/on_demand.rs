@@ -56,7 +56,7 @@ async fn automatic_on_demand_root_seals_native_keys_toggles_and_reopens() {
             .unwrap();
             let h = running.handle();
             root_ready(&h, 1).await;
-            assert!(h.commands().is_none());
+            assert!(h.commands().unwrap().production.is_some());
             assert!(matches!(
                 h.importer()
                     .unwrap()
@@ -134,6 +134,402 @@ async fn automatic_on_demand_root_seals_native_keys_toggles_and_reopens() {
         }
     }
 }
+struct SharedClockGate {
+    database: Arc<ae_storage::Database>,
+    revision: u64,
+    entered: mpsc::SyncSender<()>,
+    release: Mutex<Option<mpsc::Receiver<()>>>,
+}
+impl generator::Clock for SharedClockGate {
+    fn unix_millis(&self) -> i128 {
+        if self.database.view().unwrap().status().revision >= self.revision
+            && let Some(release) = self.release.lock().unwrap().take()
+        {
+            self.entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        generator::SystemClock.unix_millis()
+    }
+}
+struct SharedClocks {
+    epoch: std::time::Instant,
+    preparation: Arc<dyn generator::Clock>,
+    commands: Arc<dyn generator::Clock>,
+}
+impl group::Clocks for SharedClocks {
+    fn generator(&self, _: u64) -> Arc<dyn generator::Clock> {
+        Arc::new(generator::SystemClock)
+    }
+    fn producer(&self, _: u64) -> Box<dyn ae_sync::chain::pow::producer::Clock> {
+        Box::new(ae_sync::chain::pow::producer::SystemClock)
+    }
+    fn preparation(&self, _: u64) -> Arc<dyn generator::Clock> {
+        self.preparation.clone()
+    }
+    fn commands(&self, _: u64) -> Arc<dyn generator::Clock> {
+        self.commands.clone()
+    }
+    fn second(&self) -> u64 {
+        self.epoch.elapsed().as_secs()
+    }
+}
+fn shared_gate(
+    db: Arc<ae_storage::Database>,
+    revision: u64,
+) -> (Arc<SharedClockGate>, mpsc::Receiver<()>, Release) {
+    let (sent, entered) = mpsc::sync_channel(1);
+    let (release, recv) = mpsc::channel();
+    (
+        Arc::new(SharedClockGate {
+            database: db,
+            revision,
+            entered: sent,
+            release: Mutex::new(Some(recv)),
+        }),
+        entered,
+        Release(Some(release)),
+    )
+}
+async fn shared_result(h: &root::Handle, ticket: &service::Ticket) -> Arc<service::Completion> {
+    within(async {
+        loop {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            if let Some(completion) = ticket.try_result().unwrap() {
+                return completion;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+}
+#[tokio::test]
+async fn shared_on_demand_commands_commit_while_automatic_preparation_is_inflight() {
+    use ae_sync::chain::pow::producer::mining;
+    let lab = Lab::new();
+    let p = prepared(&lab, true);
+    let tx = transaction(&p);
+    let db = p.configured().chain().database().clone();
+    let snapshots = p.snapshots().clone();
+    let (gate, entered, mut release) = shared_gate(db.clone(), 1);
+    let mut config = root_config(&lab);
+    config.production.producer.enabled = true;
+    config.production.mining = Some(mining::Config::new(AccountPublicKey([42; 32])));
+    let running = root::launch_on_demand(
+        p,
+        config,
+        Arc::new(SharedClocks {
+            epoch: std::time::Instant::now(),
+            preparation: gate,
+            commands: Arc::new(generator::SystemClock),
+        }),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    within(async {
+        while entered.try_recv().is_err() {
+            while h.try_output().is_some() {}
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let commands = h.commands().unwrap();
+    let generation = commands.production.unwrap();
+    assert!(
+        h.production()
+            .unwrap()
+            .current()
+            .unwrap()
+            .producer
+            .status()
+            .enabled
+    );
+    h.workers()
+        .unwrap()
+        .bindings()
+        .admission
+        .current()
+        .unwrap()
+        .client
+        .push(tx.clone(), ae_mempool::pool::Event::Created, false)
+        .unwrap()
+        .await
+        .unwrap();
+    let ticket = commands
+        .client
+        .submit(Command::Blocks {
+            count: 2,
+            kind: Kind::Any,
+        })
+        .unwrap();
+    let completion = shared_result(&h, &ticket).await;
+    let report = completion.result.as_ref().unwrap();
+    assert!(report.command.result.is_ok(), "{report:?}");
+    assert_eq!(report.admissions.len(), 2);
+    assert!(report.promotions.is_empty());
+    assert!(db.view().unwrap().location(tx.hash()).unwrap().is_some());
+    let ae_chain::block::Block::Key(key) = report.admissions[0].block.as_ref() else {
+        panic!()
+    };
+    assert_eq!(key.nonce, 0);
+    let first = report.admissions[0].block.hash().unwrap();
+    assert_eq!(
+        db.view()
+            .unwrap()
+            .header_record(first)
+            .unwrap()
+            .unwrap()
+            .seal_present,
+        None
+    );
+    assert!(matches!(
+        report.admissions[0].origin,
+        ae_chain::repository::ledger::Origin::Sync
+    ));
+    assert!(matches!(
+        report.admissions[1].origin,
+        ae_chain::repository::ledger::Origin::Gossip
+    ));
+    assert_eq!(
+        h.production()
+            .unwrap()
+            .current()
+            .unwrap()
+            .producer
+            .status()
+            .promotions,
+        1
+    );
+    // The conductor's completed promotion must already be visible to the
+    // native leader-dependent zero-micro command; it must not emit another key.
+    let empty = commands
+        .client
+        .submit(Command::Blocks {
+            count: 0,
+            kind: Kind::Micro,
+        })
+        .unwrap();
+    let empty = shared_result(&h, &empty).await;
+    assert!(empty.result.as_ref().unwrap().command.result.is_ok());
+    assert!(empty.result.as_ref().unwrap().admissions.is_empty());
+    release.open();
+    within(async {
+        while db.view().unwrap().canonical_key(2).unwrap().is_none() {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    h.set_enabled(false).unwrap();
+    within(async {
+        loop {
+            while h.try_output().is_some() {}
+            let status = h.production().unwrap().current().unwrap().producer.status();
+            if !status.enabled && status.applied_revision == status.request_revision {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let hash = db.view().unwrap().canonical_key(2).unwrap().unwrap();
+    assert_eq!(
+        db.view()
+            .unwrap()
+            .header_record(hash)
+            .unwrap()
+            .unwrap()
+            .seal_present,
+        Some(true)
+    );
+    assert_eq!(h.commands().unwrap().production, Some(generation));
+    let next = commands.client.submit(Command::Key).unwrap();
+    assert!(
+        shared_result(&h, &next)
+            .await
+            .result
+            .as_ref()
+            .unwrap()
+            .command
+            .result
+            .is_ok()
+    );
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert!(exit.status.commands.as_ref().unwrap().joined);
+    assert_eq!(exit.status.commands.as_ref().unwrap().completed, 3);
+    assert!(!commands.client.status().accepting);
+    assert_eq!(snapshots.live_snapshots(), 0);
+}
+#[tokio::test]
+async fn shared_on_demand_replacement_waits_for_partial_command_and_never_replays_it() {
+    use ae_sync::chain::pow::producer::mining;
+    let lab = Lab::new();
+    let p = prepared(&lab, true);
+    let db = p.configured().chain().database().clone();
+    let (gate, entered, mut release) = shared_gate(db.clone(), 2);
+    let mut config = root_config(&lab);
+    config.production.mining = Some(mining::Config::new(AccountPublicKey([42; 32])));
+    let running = root::launch_on_demand(
+        p,
+        config,
+        Arc::new(SharedClocks {
+            epoch: std::time::Instant::now(),
+            preparation: Arc::new(generator::SystemClock),
+            commands: gate,
+        }),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    let old = h.commands().unwrap();
+    let active = old
+        .client
+        .submit(Command::Blocks {
+            count: 2,
+            kind: Kind::Key,
+        })
+        .unwrap();
+    let queued = old.client.submit(Command::Key).unwrap();
+    within(async {
+        while entered.try_recv().is_err() {
+            while h.try_output().is_some() {}
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let producer = h.production().unwrap().current().unwrap().producer;
+    producer.request_shutdown();
+    within(async {
+        while producer.status().running {
+            while h.try_output().is_some() {}
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    assert!(active.try_result().unwrap().is_none());
+    assert!(ae_storage::pow::ProducerLease::acquire(&db).is_err());
+    assert!(h.commands().is_none_or(|c| c.production == old.production));
+    release.open();
+    let result = shared_result(&h, &active).await;
+    let report = result.result.as_ref().unwrap();
+    assert!(report.command.result.is_err());
+    assert_eq!(report.admissions.len(), 1);
+    assert!(report.admissions[0].result.is_ok());
+    assert!(matches!(
+        shared_result(&h, &queued).await.result,
+        Err(service::Error::Cancelled)
+    ));
+    let fresh = within(async {
+        loop {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            if let Some(next) = h.commands()
+                && next.production != old.production
+            {
+                return next;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    assert_eq!(db.view().unwrap().status().revision, 2);
+    assert_eq!(fresh.client.status().accepted, 0);
+    assert!(old.client.submit(Command::Key).is_err());
+    let next = fresh.client.submit(Command::Key).unwrap();
+    assert!(
+        shared_result(&h, &next)
+            .await
+            .result
+            .as_ref()
+            .unwrap()
+            .command
+            .result
+            .is_ok()
+    );
+    assert_eq!(db.view().unwrap().status().revision, 3);
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert!(exit.status.commands.as_ref().unwrap().joined);
+}
+
+#[tokio::test]
+async fn shared_on_demand_root_rebinds_keys_and_pool_without_replaying_commands() {
+    use ae_sync::chain::pow::producer::mining;
+    let lab = Lab::new();
+    let p = prepared(&lab, false);
+    let db = p.configured().chain().database().clone();
+    let mut config = root_config(&lab);
+    config.production.mining = Some(mining::Config::new(AccountPublicKey([42; 32])));
+    let running =
+        root::launch_on_demand(p, config, Arc::new(group::SystemClocks::default()), || {
+            Ok(Default::default())
+        })
+        .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    let importer = h.importer().unwrap();
+    let network = h.connections().unwrap().current().unwrap().number;
+    let workers = h.workers().unwrap();
+    let mut receipts = Vec::new();
+    for (number, child) in [(1, workers::Child::Keys), (2, workers::Child::Admission)] {
+        let old = h.commands().unwrap();
+        assert_eq!(old.number, number);
+        assert!(old.production.is_some());
+        let ticket = old.client.submit(Command::Key).unwrap();
+        receipts.push(shared_result(&h, &ticket).await);
+        within(workers.restart(child, 1).unwrap().wait())
+            .await
+            .unwrap();
+        within(async {
+            loop {
+                while h.try_output().is_some() {}
+                let s = h.status();
+                assert!(s.failure.is_none(), "{s:?}");
+                if s.ready && s.production_starts == number + 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        assert!(old.client.status().joined);
+        assert!(old.client.submit(Command::Key).is_err());
+        assert!(Arc::ptr_eq(&importer, &h.importer().unwrap()));
+        assert_eq!(h.commands().unwrap().client.status().accepted, 0);
+    }
+    assert_eq!(db.view().unwrap().status().revision, 3);
+    assert_eq!(h.connections().unwrap().current().unwrap().number, network);
+    for receipt in &receipts {
+        let report = receipt.result.as_ref().unwrap();
+        assert!(report.command.result.is_ok());
+        assert_eq!(report.admissions.len(), 1);
+        assert!(report.promotions.is_empty());
+    }
+    let ticket = h.commands().unwrap().client.submit(Command::Key).unwrap();
+    assert!(
+        shared_result(&h, &ticket)
+            .await
+            .result
+            .as_ref()
+            .unwrap()
+            .command
+            .result
+            .is_ok()
+    );
+    assert_eq!(db.view().unwrap().status().revision, 4);
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert!(exit.status.commands.as_ref().unwrap().joined);
+}
+
 async fn sealed_candidate(h: &root::Handle, height: u64) -> ae_codec::headers::KeyHeader {
     within(async {
         loop {

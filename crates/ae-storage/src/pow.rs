@@ -29,6 +29,9 @@ pub struct Prepared<O> {
     pub metadata: snapshots::Metadata,
 }
 
+// A conductor may retain its existing authority for an owned command worker.
+// Cloning never creates another owner or permits a replacement to acquire it.
+#[derive(Clone)]
 pub struct ProducerLease(Arc<()>);
 impl ProducerLease {
     pub fn acquire(database: &crate::Database) -> Result<Self, snapshots::Error> {
