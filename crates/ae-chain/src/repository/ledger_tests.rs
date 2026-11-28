@@ -98,6 +98,152 @@ fn u(v: &J) -> Unsigned {
 fn data() -> J {
     serde_json::from_str(include_str!("../../tests/fixtures/erlang_chain_store.json")).unwrap()
 }
+fn seal_view(block: &Block, record: Vec<u8>) -> View<Memory> {
+    let hash = block.hash().unwrap();
+    let mut db = Memory::default();
+    let values = Arc::make_mut(&mut db.kv);
+    values.insert(
+        IDENTITY.to_vec(),
+        Identity::new(&NetworkProfile::mainnet(), hash, Hash256::ZERO).encode(),
+    );
+    values.insert(STATUS.to_vec(), Status::default().encode());
+    values.insert(key(BLOCKS, hash.0), record);
+    View::load(db).unwrap()
+}
+#[test]
+fn native_zero_seal_presence_survives_records_without_changing_canonical_bytes() {
+    let rows: J = serde_json::from_str(include_str!(
+        "../../tests/fixtures/erlang_key_seal_presence.json"
+    ))
+    .unwrap();
+    let config = ReadConfig::default();
+    for row in rows.as_array().unwrap() {
+        let wire = hex::decode(row["wire"].as_str().unwrap()).unwrap();
+        let block = Block::decode(&wire, config.block()).unwrap();
+        let hash = block.hash().unwrap();
+        assert_eq!(hex::encode_upper(hash.0), row["hash"]);
+        let v2 = blocks::encode_with_presence(&block, &config, true).unwrap();
+        for (bytes, present) in [
+            (wire.clone(), None),
+            (blocks::encode(&block, &config).unwrap(), None),
+            (v2.clone(), Some(true)),
+        ] {
+            let view = seal_view(&block, bytes);
+            let record = view.header_record(hash).unwrap().unwrap();
+            assert_eq!(record.header, block.header());
+            assert_eq!(record.seal_present, present);
+            assert_eq!(view.require_block(hash).unwrap().encode().unwrap(), wire);
+            let stream = view
+                .stream_block(hash, 1 << 20, &mut || Ok::<_, Error>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(stream.header(), &block.header());
+            stream
+                .for_each(&mut || Ok::<_, Error>(()), |_| panic!("key transaction"))
+                .unwrap();
+        }
+        let config = ReadConfig {
+            max_block_bytes: v2.len() - 1,
+            ..config.clone()
+        };
+        assert_eq!(
+            blocks::encode_with_presence(&block, &config, true),
+            Err(Error::ResourceLimit)
+        );
+        let view = seal_view(&block, v2);
+        let view = View::load_with_config(view.source().clone(), config).unwrap();
+        assert_eq!(view.header_record(hash), Err(Error::ResourceLimit));
+        assert!(matches!(view.block(hash), Err(Error::ResourceLimit)));
+        assert!(matches!(
+            view.stream_block(hash, 1 << 20, &mut || Ok::<_, Error>(())),
+            Err(Error::ResourceLimit)
+        ));
+    }
+    assert_eq!(rows.as_array().unwrap().len(), 24);
+}
+#[test]
+fn malformed_seal_presence_records_fail_all_read_paths() {
+    let rows: J = serde_json::from_str(include_str!(
+        "../../tests/fixtures/erlang_key_seal_presence.json"
+    ))
+    .unwrap();
+    let config = ReadConfig::default();
+    let block = Block::decode(
+        &hex::decode(rows[0]["wire"].as_str().unwrap()).unwrap(),
+        config.block(),
+    )
+    .unwrap();
+    let record = |block: &Block, version: u8, flag: Option<Value>| {
+        let mut fields = vec![
+            Value::Bytes(block.header().encode().unwrap()),
+            Value::List(vec![]),
+            Value::Bytes(vec![]),
+        ];
+        if let Some(flag) = flag {
+            fields.push(flag);
+        }
+        let mut bytes = b"\0aeblock".to_vec();
+        bytes.push(version);
+        bytes.extend(Value::List(fields).encode());
+        bytes
+    };
+    let mut invalid = vec![];
+    for flag in [
+        None,
+        Some(Value::Bytes(vec![])),
+        Some(Value::Bytes(vec![2])),
+        Some(Value::List(vec![])),
+    ] {
+        invalid.push((block.clone(), record(&block, 2, flag)));
+    }
+    for version in [1, 3] {
+        invalid.push((
+            block.clone(),
+            record(&block, version, Some(Value::Bytes(vec![1]))),
+        ));
+    }
+    let Block::Key(mut nonzero) = block else {
+        panic!()
+    };
+    nonzero.seal = [1; 42];
+    let nonzero = Block::Key(nonzero);
+    invalid.push((
+        nonzero.clone(),
+        record(&nonzero, 2, Some(Value::Bytes(vec![1]))),
+    ));
+    let mut micro = None;
+    for trace in data()["traces"].as_array().unwrap() {
+        for row in trace.as_array().unwrap() {
+            let b = Block::decode(
+                &hex::decode(row["block"].as_str().unwrap()).unwrap(),
+                config.block(),
+            )
+            .unwrap();
+            if matches!(b, Block::Micro(_)) {
+                micro = Some(b);
+                break;
+            }
+        }
+        if micro.is_some() {
+            break;
+        }
+    }
+    let micro = micro.unwrap();
+    invalid.push((
+        micro.clone(),
+        record(&micro, 2, Some(Value::Bytes(vec![1]))),
+    ));
+    for (block, bytes) in invalid {
+        let hash = block.hash().unwrap();
+        let view = seal_view(&block, bytes);
+        assert!(view.header_record(hash).is_err());
+        assert!(view.block(hash).is_err());
+        assert!(
+            view.stream_block(hash, 1 << 20, &mut || Ok::<_, Error>(()))
+                .is_err()
+        );
+    }
+}
 #[test]
 fn header_queries_read_both_record_formats_without_transaction_records() {
     let data = data();

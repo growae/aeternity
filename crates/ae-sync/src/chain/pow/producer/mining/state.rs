@@ -319,13 +319,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
                 return Ok(());
             }
             let block = Block::Key(solution.header.as_ref().clone());
-            let bytes = block.encode().map_err(Error::Block)?;
             let hash = block.hash().map_err(|_| Error::Binding)?;
-            let result = if strict {
-                importer.import_created_block_at(bytes, wall, solution.candidate.request.parent)
-            } else {
-                importer.import_created_block(bytes, wall)
-            };
+            let result = importer.import_created_key(
+                solution.header.as_ref().clone(),
+                wall,
+                strict.then_some(solution.candidate.request.parent),
+            );
             match result {
                 Ok(ticket) => {
                     let solution = self.solution.take().expect("accepted solution");

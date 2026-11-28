@@ -257,6 +257,88 @@ fn full_state_scan_detects_deep_damage_and_keeps_the_original_rocksdb_snapshot()
     assert_eq!(reopened.view().unwrap().status(), original_status);
 }
 #[test]
+fn on_demand_seal_presence_upgrade_preserves_legacy_records_and_archive_binding() {
+    use ae_protocol::ConsensusAlgorithm;
+    use ae_trie::Value;
+    let network = NetworkProfile::custom(
+        b"seal_presence_upgrade".to_vec(),
+        NetworkProfile::uat().activations().to_vec(),
+    )
+    .unwrap();
+    let trees = Trees {
+        accounts: Default::default(),
+        contracts: Default::default(),
+        calls: Default::default(),
+        channels: Default::default(),
+        names: Default::default(),
+        oracles: Default::default(),
+    };
+    let Header::Key(mut header) = genesis::header(Network::Uat).unwrap() else {
+        panic!()
+    };
+    header.common.state_hash = trees.roots().hash().0;
+    header.target = ae_consensus::on_demand::TAG;
+    let wire = Header::Key(header.clone()).encode().unwrap();
+    let hash = Header::Key(header.clone()).hash().unwrap();
+    let id = Identity::for_algorithm(&network, hash, Hash256::ZERO, ConsensusAlgorithm::OnDemand);
+    let Value::List(mut fields) = Value::decode(&id.encode()).unwrap() else {
+        panic!()
+    };
+    assert_eq!(fields[0], Value::Bytes(vec![23]));
+    fields[0] = Value::Bytes(vec![22]);
+    let legacy = Value::List(fields).encode();
+    assert_eq!(id.binding(), legacy);
+    assert_eq!(Identity::decode(&legacy).unwrap(), id);
+    let mut v1 = b"\0aeblock\x01".to_vec();
+    v1.extend(
+        Value::List(vec![
+            Value::Bytes(wire.clone()),
+            Value::List(vec![]),
+            Value::Bytes(vec![]),
+        ])
+        .encode(),
+    );
+    for record in [wire.clone(), v1] {
+        let dir = Temp::new();
+        let db = Database::open(&dir.0, id.clone()).unwrap();
+        db.commit(
+            ledger::bootstrap(
+                &db.view().unwrap(),
+                &network,
+                &header,
+                &trees,
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let block_key = repo::key(repo::BLOCKS, hash.0);
+        db.db.put(repo::IDENTITY, &legacy).unwrap();
+        db.db.put(&block_key, &record).unwrap();
+        let before = db.view().unwrap().source().prefix(&[], 100).unwrap();
+        drop(db);
+        let db = Database::open(&dir.0, id.clone()).unwrap();
+        assert_eq!(db.db.get(repo::IDENTITY).unwrap(), Some(id.encode()));
+        let after = db.view().unwrap().source().prefix(&[], 100).unwrap();
+        let records = |entries: repo::Entries| {
+            entries
+                .into_iter()
+                .filter(|(key, _)| key != repo::IDENTITY)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(records(before), records(after));
+        let view = db.view().unwrap();
+        assert_eq!(view.identity().binding(), legacy);
+        assert_eq!(
+            view.header_record(hash).unwrap().unwrap().seal_present,
+            None
+        );
+        assert_eq!(view.require_block(hash).unwrap().encode().unwrap(), wire);
+        assert_eq!(db.db.get(block_key).unwrap(), Some(record));
+    }
+}
+
+#[test]
 fn legacy_schema_upgrade_retains_canonical_transactions_and_all_existing_records() {
     for schema in 1..=9 {
         use ae_trie::Value;

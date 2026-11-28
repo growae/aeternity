@@ -7,6 +7,22 @@ mod stream;
 pub(super) use header::decode as header;
 
 const MAGIC: &[u8] = b"\0aeblock\x01";
+const PRESENT_MAGIC: &[u8] = b"\0aeblock\x02";
+fn payload(bytes: &[u8]) -> Result<(&[u8], bool), Error> {
+    if let Some(payload) = bytes.strip_prefix(MAGIC) {
+        Ok((payload, false))
+    } else if let Some(payload) = bytes.strip_prefix(PRESENT_MAGIC) {
+        Ok((payload, true))
+    } else {
+        Err(Error::Corrupt("block record version"))
+    }
+}
+fn validate_presence(header: &Header, present: bool) -> Result<(), Error> {
+    if present && !matches!(header, Header::Key(k) if k.seal == [0; 42]) {
+        return Err(Error::Corrupt("block seal presence"));
+    }
+    Ok(())
+}
 fn bounded(block: &Block, config: &ReadConfig) -> Result<(), Error> {
     let mut size = block
         .header()
@@ -32,7 +48,15 @@ fn bounded(block: &Block, config: &ReadConfig) -> Result<(), Error> {
     Ok(())
 }
 pub(super) fn encode(block: &Block, config: &ReadConfig) -> Result<Vec<u8>, Error> {
+    encode_with_presence(block, config, false)
+}
+pub(super) fn encode_with_presence(
+    block: &Block,
+    config: &ReadConfig,
+    present: bool,
+) -> Result<Vec<u8>, Error> {
     bounded(block, config)?;
+    let present = present && matches!(block, Block::Key(k) if k.seal == [0; 42]);
     let header = block
         .header()
         .encode()
@@ -63,9 +87,13 @@ pub(super) fn encode(block: &Block, config: &ReadConfig) -> Result<Vec<u8>, Erro
     {
         return Err(Error::UnsupportedBlock);
     }
-    let payload = list(vec![binary(header), list(hashes), binary(proof)]).encode();
+    let mut fields = vec![binary(header), list(hashes), binary(proof)];
+    if present {
+        fields.push(binary([1]));
+    }
+    let payload = list(fields).encode();
     ae_codec::rlp::decode_with_limits(&payload, config.body).map_err(|_| Error::ResourceLimit)?;
-    let mut out = MAGIC.to_vec();
+    let mut out = if present { PRESENT_MAGIC } else { MAGIC }.to_vec();
     out.extend(payload);
     if out.len() > config.max_block_bytes {
         return Err(Error::ResourceLimit);
@@ -108,9 +136,7 @@ pub(super) fn decode_with_transactions<S: Read>(
         }
         return Ok(block);
     }
-    let payload = bytes
-        .strip_prefix(MAGIC)
-        .ok_or(Error::Corrupt("block record version"))?;
+    let (payload, present) = payload(bytes)?;
     let rlp = ae_codec::rlp::decode_with_limits(payload, config.body).map_err(|e| {
         if e == ae_codec::rlp::DecodeError::ResourceLimit {
             Error::ResourceLimit
@@ -119,9 +145,13 @@ pub(super) fn decode_with_transactions<S: Read>(
         }
     })?;
     let value = Value::from_rlp(&rlp);
-    let f = fields(&value, 3)?;
+    let f = fields(&value, if present { 4 } else { 3 })?;
+    if present && blob(&f[3])? != [1] {
+        return Err(Error::Corrupt("block seal presence"));
+    }
     let header =
         Header::decode(blob(&f[0])?, config.mode).map_err(|_| Error::Corrupt("stored header"))?;
+    validate_presence(&header, present)?;
     let hashes = items(&f[1])?;
     if hashes.len() > config.max_transactions {
         return Err(Error::ResourceLimit);
@@ -161,7 +191,7 @@ pub(super) fn decode_with_transactions<S: Read>(
             })
         }
     };
-    if encode(&block, config)? != bytes {
+    if encode_with_presence(&block, config, present)? != bytes {
         return Err(Error::Corrupt("block record encoding"));
     }
     Ok(block)

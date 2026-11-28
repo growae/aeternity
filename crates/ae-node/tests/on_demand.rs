@@ -166,7 +166,7 @@ fn algorithm_identity_preserves_existing_bindings_and_rejects_cross_open() {
     for (algorithm, schema, binding) in [
         (ConsensusAlgorithm::Cuckoo, 21, 7),
         (ConsensusAlgorithm::Hyperchain, 21, 10),
-        (ConsensusAlgorithm::OnDemand, 22, 22),
+        (ConsensusAlgorithm::OnDemand, 23, 22),
     ] {
         let i = Identity::for_algorithm(s.profile(), id.genesis, fingerprint(), algorithm);
         assert_eq!(Identity::decode(&i.encode()).unwrap(), i);
@@ -191,7 +191,7 @@ fn algorithm_identity_preserves_existing_bindings_and_rejects_cross_open() {
         panic!()
     };
     for (field, value) in [
-        (0, Bytes(vec![23])),
+        (0, Bytes(vec![24])),
         (5, Bytes(vec![1])),
         (6, Bytes(vec![])),
         (6, Bytes(vec![2])),

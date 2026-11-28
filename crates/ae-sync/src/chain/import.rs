@@ -1,5 +1,10 @@
 use super::*;
 
+#[derive(Default)]
+struct Insertion {
+    parent: Option<Hash256>,
+    sealed_key: bool,
+}
 struct Poison<'a>(&'a Mutex<Option<Error>>);
 impl Drop for Poison<'_> {
     fn drop(&mut self) {
@@ -12,6 +17,33 @@ impl Drop for Poison<'_> {
     }
 }
 impl<O: MapOrder> Context<O> {
+    pub(super) fn apply_created_key(
+        &self,
+        header: ae_codec::headers::KeyHeader,
+        now_ms: u64,
+        cancel: blocking::Cancellation,
+        parent: Option<Hash256>,
+    ) -> Result<Report, Failure> {
+        let _poison = Poison(&self.recovery);
+        let result = (|| {
+            self.check(&cancel, None)?;
+            if parent.is_some_and(|p| header.common.previous_hash != p.0) {
+                return Err(Error::Stale);
+            }
+            self.insert_expected(
+                &Block::Key(header),
+                now_ms,
+                &cancel,
+                None,
+                ledger::Origin::Created,
+                Insertion {
+                    parent,
+                    sealed_key: true,
+                },
+            )
+        })();
+        Self::block_report(result)
+    }
     pub(super) fn apply_created_block_at(
         &self,
         bytes: Vec<u8>,
@@ -33,7 +65,10 @@ impl<O: MapOrder> Context<O> {
                 &cancel,
                 None,
                 ledger::Origin::Created,
-                Some(parent),
+                Insertion {
+                    parent: Some(parent),
+                    sealed_key: false,
+                },
             )
         })();
         Self::block_report(result)
@@ -251,7 +286,7 @@ impl<O: MapOrder> Context<O> {
         client: Option<&net::Client>,
         origin: ledger::Origin,
     ) -> Result<Accepted, Error> {
-        self.insert_expected(block, now_ms, cancel, client, origin, None)
+        self.insert_expected(block, now_ms, cancel, client, origin, Insertion::default())
     }
     fn insert_expected(
         &self,
@@ -260,7 +295,7 @@ impl<O: MapOrder> Context<O> {
         cancel: &blocking::Cancellation,
         client: Option<&net::Client>,
         origin: ledger::Origin,
-        expected: Option<Hash256>,
+        expected: Insertion,
     ) -> Result<Accepted, Error> {
         let mut observation = None;
         let result = (|| {
@@ -268,7 +303,7 @@ impl<O: MapOrder> Context<O> {
             for attempt in 0..=self.config.conflicts {
                 self.check(cancel, client)?;
                 let view = self.db.view()?;
-                if expected.is_some() && view.status().tip != expected {
+                if expected.parent.is_some() && view.status().tip != expected.parent {
                     return Err(Error::Stale);
                 }
                 let height = block.header().common().height;
@@ -312,7 +347,7 @@ impl<O: MapOrder> Context<O> {
                     strategy::Strategy::Pow(pow) => {
                         let mut rules = pow.rules.clone();
                         rules.admission.now_ms = now_ms;
-                        let update = pow
+                        let mut update = pow
                             .execution
                             .with_config(|execution| {
                                 let mut limits = self.config.ledger;
@@ -337,6 +372,12 @@ impl<O: MapOrder> Context<O> {
                                     reason: format!("{other:?}"),
                                 },
                             })?;
+                        if expected.sealed_key {
+                            let Block::Key(header) = block else {
+                                return Err(Error::WrongConsensus);
+                            };
+                            update = update.with_created_key_seal(header, view.config())?;
+                        }
                         self.check(cancel, client)?;
                         self.commit(update, &mut || self.check(cancel, client))
                     }

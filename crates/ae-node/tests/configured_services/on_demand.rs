@@ -122,12 +122,176 @@ async fn automatic_on_demand_root_seals_native_keys_toggles_and_reopens() {
                 assert_eq!((header.target, header.nonce), (1338, 1338));
                 assert_eq!(header.seal, [0; 42]);
                 assert_eq!(header.beneficiary, [42; 32]);
+                assert_eq!(
+                    view.header_record(hash).unwrap().unwrap().seal_present,
+                    Some(true)
+                );
                 height += 1;
             }
             assert!(height > previous_height + 2);
             previous_height = height - 1;
             assert_eq!(snapshots.live_snapshots(), 0);
         }
+    }
+}
+async fn sealed_candidate(h: &root::Handle, height: u64) -> ae_codec::headers::KeyHeader {
+    within(async {
+        loop {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            if let Some(candidate) = h
+                .production()
+                .and_then(|p| p.current())
+                .and_then(|p| p.producer.status().mining)
+                .and_then(|m| m.candidate)
+                && candidate.header.common.height == height
+            {
+                let mut header = candidate.header.clone();
+                ae_consensus::on_demand::seal(&mut header);
+                return header;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn on_demand_seal_presence_keeps_first_admission_and_survives_reopen_and_rollback() {
+    use ae_chain::repository::rollback;
+    use ae_sync::chain::{pow::producer::mining, query::blocks};
+    for local_first in [false, true] {
+        let lab = Lab::new();
+        let p = prepared(&lab, false);
+        let db = p.configured().chain().database().clone();
+        let mut config = root_config(&lab);
+        config.production.mining = Some(mining::Config::new(AccountPublicKey([42; 32])));
+        let running =
+            root::launch_on_demand(p, config, Arc::new(group::SystemClocks::default()), || {
+                Ok(Default::default())
+            })
+            .unwrap();
+        let h = running.handle();
+        root_ready(&h, 1).await;
+        let importer = h.importer().unwrap();
+        let first = sealed_candidate(&h, 1).await;
+        let block = ae_chain::block::Block::Key(first.clone());
+        let hash = block.hash().unwrap();
+        let wire = block.encode().unwrap();
+        let ticket = if local_first {
+            importer.import_created_key(first.clone(), first.time, None)
+        } else {
+            importer.import_synced_block(wire.clone(), first.time)
+        }
+        .unwrap();
+        ticket.wait().await.unwrap();
+        let revision = db.view().unwrap().status().revision;
+        let ticket = if local_first {
+            importer.import_synced_block(wire.clone(), first.time)
+        } else {
+            importer.import_created_key(first.clone(), first.time, None)
+        }
+        .unwrap();
+        let duplicate = ticket.wait().await.unwrap();
+        assert!(matches!(
+            duplicate.accepted[0].outcome,
+            ae_sync::chain::Outcome::Present
+        ));
+        assert_eq!(db.view().unwrap().status().revision, revision);
+        let expected = local_first.then_some(true);
+        let blocks::Reply::Header(reply) = importer
+            .blocks(blocks::Request::CurrentKey)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reply.seal_present, expected);
+        assert_eq!(
+            db.view()
+                .unwrap()
+                .require_block(hash)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            wire
+        );
+        let second = sealed_candidate(&h, 2).await;
+        let second_hash = ae_codec::headers::Header::Key(second.clone())
+            .hash()
+            .unwrap();
+        importer
+            .import_created_key(second.clone(), second.time, Some(hash))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let exit = running.shutdown().await.unwrap();
+        assert_root_joined(&exit);
+        assert!(exit.status.failure.is_none());
+        drop(exit);
+        drop(h);
+        drop(importer);
+        drop(db);
+        // Shutdown closes the managed writer. Reopen before offline rollback.
+        let reopened = prepared(&lab, false);
+        let db = reopened.configured().chain().database().clone();
+        assert_eq!(
+            db.view()
+                .unwrap()
+                .header_record(second_hash)
+                .unwrap()
+                .unwrap()
+                .seal_present,
+            Some(true)
+        );
+        db.rollback(rollback::Target::Height(1), Default::default())
+            .unwrap();
+        assert!(
+            db.view()
+                .unwrap()
+                .header_record(second_hash)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.view()
+                .unwrap()
+                .header_record(hash)
+                .unwrap()
+                .unwrap()
+                .seal_present,
+            expected
+        );
+        drop(db);
+        drop(reopened);
+        let reopened = prepared(&lab, false);
+        assert_eq!(
+            reopened
+                .configured()
+                .chain()
+                .database()
+                .view()
+                .unwrap()
+                .header_record(hash)
+                .unwrap()
+                .unwrap()
+                .seal_present,
+            expected
+        );
+        assert!(
+            reopened
+                .configured()
+                .chain()
+                .database()
+                .view()
+                .unwrap()
+                .header_record(second_hash)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 async fn completed(c: &service::Client, n: u64) {

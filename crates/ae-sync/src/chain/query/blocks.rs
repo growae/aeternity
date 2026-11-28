@@ -32,6 +32,7 @@ impl Kind {
 pub struct ClientHeader {
     pub header: Header,
     pub previous: Kind,
+    pub seal_present: Option<bool>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
@@ -66,7 +67,17 @@ fn header<S: Read>(
         };
         Kind::of(&previous)
     };
-    Ok(Reply::Header(ClientHeader { header, previous }))
+    let hash = header
+        .hash()
+        .map_err(|_| repository::Error::Corrupt("header hash"))?;
+    let stored = view
+        .header_record(hash)?
+        .ok_or(repository::Error::Missing(hash))?;
+    Ok(Reply::Header(ClientHeader {
+        header,
+        previous,
+        seal_present: stored.seal_present,
+    }))
 }
 fn canonical<S: Read>(view: &View<S>, height: u128) -> Result<Option<Hash256>, repository::Error> {
     match u64::try_from(height) {

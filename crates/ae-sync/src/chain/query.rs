@@ -132,6 +132,7 @@ impl<O: MapOrder + Send + Sync + 'static> PendingHeader<O> {
             Ok(Some(blocks::ClientHeader {
                 header: Header::Key(header.as_ref().clone()),
                 previous,
+                seal_present: None,
             }))
         })?;
         Ok(Ticket {

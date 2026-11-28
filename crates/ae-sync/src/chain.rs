@@ -490,6 +490,35 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
     pub fn import_created_block(&self, bytes: Vec<u8>, now_ms: u64) -> Result<Ticket, Error> {
         self.import_block_with_origin(bytes, now_ms, ledger::Origin::Created)
     }
+    // A local sealer has an explicit seal even when its canonical proof words
+    // are zero. Byte-oriented imports cannot recover that native record detail.
+    pub fn import_created_key(
+        &self,
+        header: ae_codec::headers::KeyHeader,
+        now_ms: u64,
+        parent: Option<Hash256>,
+    ) -> Result<Ticket, Error> {
+        self.check_open()?;
+        if self.consensus() != ConsensusType::Pow {
+            return Err(Error::WrongConsensus);
+        }
+        if ae_codec::headers::Header::Key(header.clone())
+            .encode()
+            .map_err(|_| Error::Hash)?
+            .len()
+            > self.context.config.messages.body_bytes
+        {
+            return Err(Error::Busy);
+        }
+        let context = self.context.clone();
+        self.reserve()?
+            .submit(move |cancel| context.apply_created_key(header, now_ms, cancel, parent))
+            .map(|pending| Ticket {
+                pending,
+                timeout: self.context.config.timeout,
+            })
+            .map_err(Into::into)
+    }
     // PoW strictly-follow-top production still uses ordinary validation and
     // execution. The selected parent is checked on every conflict retry; the
     // repository's expected revision makes that check atomic with commit.

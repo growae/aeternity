@@ -44,10 +44,12 @@ fn foreground_on_demand_autostart_advances_height_and_reopens_stopped() {
     let ready = process.event("ready");
     let (code, value) = request(
         addresses(&ready)[0],
-        "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        "GET /v3/key-blocks/current HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(code, 200);
     assert!(value["height"].as_u64().unwrap() >= height);
+    assert_eq!(value["nonce"], 1338);
+    assert_eq!(value["pow"], json!(vec![0; 42]));
     process.signal(rustix::process::Signal::INT);
     assert_eq!(
         process.event("stopped"),

@@ -38,6 +38,7 @@ fn original_pending_dispatcher_headers_and_failure_codes_match() {
                     key.common.height = 0;
                 }
                 let value = body(Some(ClientHeader {
+                    seal_present: None,
                     header: Header::Key(key),
                     previous: if input["previous_type"] == "key" {
                         Kind::Key

@@ -173,6 +173,34 @@ impl Update {
     pub fn writes(&self) -> &Writes {
         &self.writes
     }
+    // The creator supplies information lost by canonical wire decoding. Store
+    // it in the same admission transaction; received duplicates never rewrite it.
+    pub fn with_created_key_seal(
+        mut self,
+        header: &KeyHeader,
+        config: &ReadConfig,
+    ) -> Result<Self, Error> {
+        let block = Block::Key(header.clone());
+        let hash = block.hash().map_err(|_| Error::UnsupportedBlock)?;
+        if self.change.inserted != Some(hash)
+            || !matches!(self.publication.origin, crate::publication::Origin::Created)
+        {
+            return Err(Error::Conflict);
+        }
+        let record_key = key(BLOCKS, hash.0);
+        if self.writes.get(&record_key).and_then(Option::as_ref)
+            != Some(&blocks::encode(&block, config)?)
+        {
+            return Err(Error::Conflict);
+        }
+        put(
+            &mut self.writes,
+            record_key,
+            blocks::encode_with_presence(&block, config, true)?,
+        );
+        let limit = self.commit_bytes;
+        publish(self, limit)
+    }
     // Resolve the admitted insertion with its staged transaction records,
     // before durable publication. The supplied view must be this plan's base.
     pub fn inserted_block<S: Read>(&self, view: &View<S>) -> Result<Option<Block>, Error> {

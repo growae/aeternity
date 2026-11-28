@@ -55,6 +55,13 @@ pub const GC_PENDING: u8 = 15;
 pub const HC_EVENTS: u8 = 19;
 pub const HC_STATE: &[u8] = b"\0hc-state";
 pub const GC_STATE: &[u8] = b"\0gc";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderRecord {
+    pub header: ae_codec::headers::Header,
+    // None preserves canonical decoding for legacy and v1 records. Some(true)
+    // retains a locally constructed zero seal, which native DB records keep.
+    pub seal_present: Option<bool>,
+}
 pub fn key(prefix: u8, suffix: impl AsRef<[u8]>) -> Vec<u8> {
     let mut k = vec![prefix];
     k.extend_from_slice(suffix.as_ref());
@@ -179,9 +186,9 @@ impl Identity {
     }
     pub fn encode(&self) -> Vec<u8> {
         // Existing NG/HC writer capabilities and stable bindings are unchanged.
-        // Version 22 explicitly identifies on-demand; older binaries reject it.
+        // Version 23 adds local zero-seal presence. Older writers reject it.
         self.encode_version(if self.algorithm == ConsensusAlgorithm::OnDemand {
-            22
+            23
         } else {
             21
         })
@@ -230,7 +237,7 @@ impl Identity {
         let v = decode(bytes)?;
         let all = items(&v)?;
         let version = integer(all.first().ok_or(Error::Corrupt("identity fields"))?)?;
-        if !matches!(version, 1..=22) {
+        if !matches!(version, 1..=23) {
             return Err(Error::Corrupt("schema version"));
         }
         let a = fields(
@@ -256,7 +263,7 @@ impl Identity {
         if network.is_empty() || network.len() > 1024 {
             return Err(Error::Identity);
         }
-        let algorithm = if version == 22 {
+        let algorithm = if version >= 22 {
             if consensus != ConsensusType::Pow
                 || integer(&a[6])? != 1
                 || matches!(network.as_slice(), b"ae_mainnet" | b"ae_uat")
@@ -623,14 +630,22 @@ impl<S: Read> View<S> {
     // Authenticate only the header. This does not load transaction records or
     // validate transaction/proof contents and cannot replace block validation.
     pub fn header(&self, h: Hash256) -> Result<Option<ae_codec::headers::Header>, Error> {
+        Ok(self.header_record(h)?.map(|record| record.header))
+    }
+    pub fn header_record(&self, h: Hash256) -> Result<Option<HeaderRecord>, Error> {
         self.source
             .get_bounded(&key(BLOCKS, h.0), self.config.max_block_bytes)?
             .map(|bytes| {
-                let header = blocks::header(&bytes, &self.config)?;
-                if header.hash().map_err(|_| Error::Corrupt("header hash"))? != h {
+                let record = blocks::header(&bytes, &self.config)?;
+                if record
+                    .header
+                    .hash()
+                    .map_err(|_| Error::Corrupt("header hash"))?
+                    != h
+                {
                     return Err(Error::Corrupt("block identity"));
                 }
-                Ok(header)
+                Ok(record)
             })
             .transpose()
     }

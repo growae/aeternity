@@ -33,10 +33,11 @@ impl ReadConfig {
     pub(super) fn header_body(&self) -> Result<ae_codec::rlp::DecodeLimits, super::Error> {
         Ok(ae_codec::rlp::DecodeLimits {
             // Both record formats have flat binary transaction/hash entries,
-            // at most two list levels and at most six other RLP items.
+            // at most two list levels and at most seven other RLP items,
+            // including the explicit seal-presence flag in version two.
             max_items: self.body.max_items.min(
                 self.max_transactions
-                    .checked_add(6)
+                    .checked_add(7)
                     .ok_or(super::Error::ResourceLimit)?,
             ),
             max_depth: self.body.max_depth.min(2),

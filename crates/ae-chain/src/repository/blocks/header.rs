@@ -4,7 +4,10 @@ use ae_codec::rlp::{self, Rlp};
 // Metadata queries inspect the stored envelope and authenticate its header.
 // All body bytes stay borrowed; no transaction records are read and neither
 // transaction contents nor fraud proofs are validated here.
-pub(in crate::repository) fn decode(bytes: &[u8], config: &ReadConfig) -> Result<Header, Error> {
+pub(in crate::repository) fn decode(
+    bytes: &[u8],
+    config: &ReadConfig,
+) -> Result<HeaderRecord, Error> {
     if bytes.len() > config.max_block_bytes {
         return Err(Error::ResourceLimit);
     }
@@ -17,19 +20,35 @@ pub(in crate::repository) fn decode(bytes: &[u8], config: &ReadConfig) -> Result
             }
         })
     };
+    let mut seal_present = None;
     let header = if bytes.starts_with(b"\0aeblock") {
-        let payload = bytes
-            .strip_prefix(MAGIC)
-            .ok_or(Error::Corrupt("block record version"))?;
+        let (payload, present) = payload(bytes)?;
         let value = body(payload)?;
         let Rlp::List(fields) = value else {
             return Err(Error::Corrupt("block record fields"));
         };
-        let [Rlp::Bytes(raw), Rlp::List(hashes), Rlp::Bytes(proof)] = fields.as_slice() else {
+        let [
+            Rlp::Bytes(raw),
+            Rlp::List(hashes),
+            Rlp::Bytes(proof),
+            flags @ ..,
+        ] = fields.as_slice()
+        else {
             return Err(Error::Corrupt("block record fields"));
         };
+        if !(if present {
+            matches!(flags, [Rlp::Bytes([1])])
+        } else {
+            flags.is_empty()
+        }) {
+            return Err(Error::Corrupt("block seal presence"));
+        }
         let header =
             Header::decode(raw, config.mode).map_err(|_| Error::Corrupt("stored header"))?;
+        validate_presence(&header, present)?;
+        if present {
+            seal_present = Some(true);
+        }
         if hashes.len() > config.max_transactions {
             return Err(Error::ResourceLimit);
         }
@@ -81,5 +100,8 @@ pub(in crate::repository) fn decode(bytes: &[u8], config: &ReadConfig) -> Result
         }
         header
     };
-    Ok(header)
+    Ok(HeaderRecord {
+        header,
+        seal_present,
+    })
 }

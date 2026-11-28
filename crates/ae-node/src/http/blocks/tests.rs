@@ -2,6 +2,27 @@ use super::*;
 use ae_codec::headers::HeaderMode;
 
 #[test]
+fn stored_local_and_decoded_on_demand_headers_match_native_mnesia_client_fields() {
+    let rows: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ae-chain/tests/fixtures/erlang_key_seal_presence.json"
+    )))
+    .unwrap();
+    for row in rows.as_array().unwrap() {
+        let wire = hex::decode(row["wire"].as_str().unwrap()).unwrap();
+        for (seal_present, expected) in [(Some(true), "reopened"), (None, "stored_decoded")] {
+            let client = ClientHeader {
+                header: Header::decode(&wire, HeaderMode::ProofOfWork).unwrap(),
+                previous: Kind::Key,
+                seal_present,
+            };
+            assert_eq!(header(&client, None).unwrap(), row[expected]);
+        }
+    }
+    assert_eq!(rows.as_array().unwrap().len(), 24);
+}
+
+#[test]
 fn original_header_client_serialization_matches_saved_mainnet_and_constructed_headers() {
     let corpus: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/erlang_http_headers.json"
@@ -26,6 +47,7 @@ fn original_header_client_serialization_matches_saved_mainnet_and_constructed_he
         };
         match header(
             &ClientHeader {
+                seal_present: None,
                 header: value,
                 previous,
             },
@@ -146,6 +168,7 @@ fn original_block_and_generation_callback_responses_match() {
                     m.time = 44;
                     Reply::Generation {
                         key: ClientHeader {
+                            seal_present: None,
                             header: key,
                             previous,
                         },
@@ -157,6 +180,7 @@ fn original_block_and_generation_callback_responses_match() {
                     }
                 } else {
                     Reply::Header(ClientHeader {
+                        seal_present: None,
                         header: if matches!(request, Request::MicroHeader(_))
                             || scenario == "micro_top"
                         {

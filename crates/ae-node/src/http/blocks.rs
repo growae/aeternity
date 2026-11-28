@@ -170,7 +170,10 @@ pub(super) fn header(value: &ClientHeader, seal_present: Option<bool>) -> Result
             body["target"] = json!(k.target);
             body["time"] = json!(k.time);
             body["info"] = json!(api::encode(ApiType::ContractBytearray, info));
-            if seal_present.unwrap_or_else(|| k.seal.iter().any(|n| *n != 0)) {
+            if seal_present
+                .or(value.seal_present)
+                .unwrap_or_else(|| k.seal.iter().any(|n| *n != 0))
+            {
                 body["pow"] = json!(k.seal.as_slice());
                 body["nonce"] = json!(k.nonce);
             }

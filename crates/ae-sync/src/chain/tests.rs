@@ -92,6 +92,13 @@ async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
 
 #[tokio::test]
 async fn strictly_follow_top_rechecks_parent_after_real_commit_conflict() {
+    strict_parent_conflict(false).await;
+}
+#[tokio::test]
+async fn locally_sealed_key_rechecks_parent_after_real_commit_conflict() {
+    strict_parent_conflict(true).await;
+}
+async fn strict_parent_conflict(local_header: bool) {
     let (_temp, mut importer) = setup(Default::default());
     let block = fixtures::blocks(&NetworkProfile::mainnet()).remove(0);
     let parent = Hash256(block.header().common().previous_hash);
@@ -113,10 +120,14 @@ async fn strictly_follow_top_rechecks_parent_after_real_commit_conflict() {
         db.commit(update)
     }));
     let result = within(
-        importer
-            .import_created_block_at(block.encode().unwrap(), NOW, parent)
-            .unwrap()
-            .wait(),
+        (if local_header {
+            let Block::Key(header) = &block else { panic!() };
+            importer.import_created_key(header.clone(), NOW, Some(parent))
+        } else {
+            importer.import_created_block_at(block.encode().unwrap(), NOW, parent)
+        })
+        .unwrap()
+        .wait(),
     )
     .await;
     assert!(

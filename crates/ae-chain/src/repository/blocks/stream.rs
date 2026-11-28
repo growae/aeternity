@@ -210,14 +210,11 @@ fn parse<'a>(bytes: &'a [u8], config: &ReadConfig) -> Result<Envelope<'a>, Error
         return Err(Error::ResourceLimit);
     }
     let modern = bytes.starts_with(b"\0aeblock");
+    let mut present = false;
     let (header, payload, canonical_header) = if modern {
-        (
-            None,
-            bytes
-                .strip_prefix(MAGIC)
-                .ok_or(Error::Corrupt("block record version"))?,
-            true,
-        )
+        let (payload, flag) = payload(bytes)?;
+        present = flag;
+        (None, payload, true)
     } else {
         let (header, payload) = Header::decode_partial(bytes, config.mode)
             .map_err(|_| Error::Corrupt("stored header"))?;
@@ -249,11 +246,20 @@ fn parse<'a>(bytes: &'a [u8], config: &ReadConfig) -> Result<Envelope<'a>, Error
         return Err(Error::Corrupt("block record fields"));
     };
     let (header, proof, proof_shape, index, canonical) = if modern {
-        let [Rlp::Bytes(raw), Rlp::List(_), Rlp::Bytes(proof)] = fields.as_slice() else {
+        let [Rlp::Bytes(raw), Rlp::List(_), Rlp::Bytes(proof), flags @ ..] = fields.as_slice()
+        else {
             return Err(Error::Corrupt("block record fields"));
         };
+        if !(if present {
+            matches!(flags, [Rlp::Bytes([1])])
+        } else {
+            flags.is_empty()
+        }) {
+            return Err(Error::Corrupt("block seal presence"));
+        }
         let header =
             Header::decode(raw, config.mode).map_err(|_| Error::Corrupt("stored header"))?;
+        validate_presence(&header, present)?;
         let canonical = canonical
             && header
                 .encode()

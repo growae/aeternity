@@ -594,7 +594,7 @@ fn streamed_modern_records_enforce_canonical_transport_size_and_identity() {
         Err(repo::Error::Corrupt("block identity"))
     ));
     let mut bytes = db.data[&repo::key(repo::BLOCKS, h.0)].clone();
-    bytes[b"\0aeblock".len()] = 2;
+    bytes[b"\0aeblock".len()] = 3;
     db.put(repo::key(repo::BLOCKS, h.0), bytes);
     let view = View::load(db).unwrap();
     assert!(matches!(
