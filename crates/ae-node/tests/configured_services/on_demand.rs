@@ -728,6 +728,263 @@ async fn sealed_candidate(h: &root::Handle, height: u64) -> ae_codec::headers::K
 }
 
 #[tokio::test]
+async fn stopped_on_demand_leadership_follows_native_key_origin_and_commits_real_transfers() {
+    use ae_sync::chain::pow::producer::mining;
+    let native: Value = serde_json::from_str(include_str!(
+        "../../../ae-sync/tests/fixtures/erlang_pow_micro_producer.json"
+    ))
+    .unwrap();
+    for origin in ["block_synced", "block_received", "block_created"] {
+        let captured = native["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["origin"] == origin && row["leader"] == true && row["running"] == false)
+            .unwrap();
+        let starts = captured["result"]["effects"] == json!(["start_generator"]);
+        let lab = Lab::new();
+        let p = prepared(&lab, false);
+        let tx = transaction(&p);
+        let db = p.configured().chain().database().clone();
+        let snapshots = p.snapshots().clone();
+        let mut config = root_config(&lab);
+        config.production.mining = Some(mining::Config::new(AccountPublicKey([42; 32])));
+        let running =
+            root::launch_on_demand(p, config, Arc::new(group::SystemClocks::default()), || {
+                Ok(Default::default())
+            })
+            .unwrap();
+        let h = running.handle();
+        root_ready(&h, 1).await;
+        h.workers()
+            .unwrap()
+            .bindings()
+            .admission
+            .current()
+            .unwrap()
+            .client
+            .push(tx.clone(), ae_mempool::pool::Event::Created, false)
+            .unwrap()
+            .await
+            .unwrap();
+        let key = sealed_candidate(&h, 1).await;
+        let wire = ae_chain::block::Block::Key(key.clone()).encode().unwrap();
+        let importer = h.importer().unwrap();
+        let ticket = match origin {
+            "block_synced" => importer.import_synced_block(wire, key.time),
+            "block_received" => importer.import_block(wire, key.time),
+            "block_created" => importer.import_created_key(key.clone(), key.time, None),
+            _ => unreachable!(),
+        }
+        .unwrap();
+        ticket.wait().await.unwrap();
+        let revision = db.view().unwrap().status().revision;
+        let generation = h.production().unwrap().current().unwrap();
+        within(async {
+            loop {
+                while h.try_output().is_some() {}
+                let status = generation.producer.status();
+                assert!(h.status().failure.is_none(), "{:?}", h.status());
+                assert!(!status.enabled);
+                if status.observed_revision >= revision
+                    && status.request_revision == status.applied_revision
+                    && !status.promotion_pending
+                    && !status.generator_pending
+                    && generation.generator.status().generating == starts
+                    && (!starts || db.view().unwrap().location(tx.hash()).unwrap().is_some())
+                {
+                    assert!(status.leader, "{origin}: {status:?}");
+                    assert!(status.activated);
+                    assert_eq!(status.signatures > 0, starts);
+                    assert_eq!(status.admissions > 0, starts);
+                    assert!(
+                        status
+                            .mining
+                            .unwrap()
+                            .workers
+                            .iter()
+                            .all(|w| w.submitted == 0)
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        if !starts {
+            assert!(db.view().unwrap().location(tx.hash()).unwrap().is_none());
+            let ticket = h.commands().unwrap().client.submit(Command::Micro).unwrap();
+            let completion = shared_result(&h, &ticket).await;
+            assert!(completion.result.as_ref().unwrap().command.result.is_ok());
+            assert!(db.view().unwrap().location(tx.hash()).unwrap().is_some());
+        }
+        assert!(db.view().unwrap().canonical_key(2).unwrap().is_none());
+        let exit = running.shutdown().await.unwrap();
+        assert_root_joined(&exit);
+        assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+        // Retained generator clients own their last candidate snapshot.
+        drop(generation);
+        assert_eq!(snapshots.live_snapshots(), 0);
+    }
+}
+
+struct ProducerPause {
+    armed: std::sync::atomic::AtomicBool,
+    entered: mpsc::SyncSender<()>,
+    release: Mutex<Option<mpsc::Receiver<()>>>,
+}
+struct PausedProducer(Arc<ProducerPause>);
+impl ae_sync::chain::pow::producer::Clock for PausedProducer {
+    fn now(&self) -> Result<(u64, std::time::Instant), ae_sync::chain::pow::producer::Error> {
+        if self.0.armed.swap(false, Ordering::SeqCst) {
+            let release = self.0.release.lock().unwrap().take().unwrap();
+            self.0.entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        ae_sync::chain::pow::producer::Clock::now(&ae_sync::chain::pow::producer::SystemClock)
+    }
+}
+struct PausedProducerClocks {
+    clock: Arc<ProducerPause>,
+    epoch: std::time::Instant,
+}
+impl group::Clocks for PausedProducerClocks {
+    fn generator(&self, _: u64) -> Arc<dyn generator::Clock> {
+        Arc::new(generator::SystemClock)
+    }
+    fn producer(&self, _: u64) -> Box<dyn ae_sync::chain::pow::producer::Clock> {
+        Box::new(PausedProducer(self.clock.clone()))
+    }
+    fn second(&self) -> u64 {
+        self.epoch.elapsed().as_secs()
+    }
+}
+
+#[tokio::test]
+async fn stop_fences_already_published_key_events_but_later_keys_restore_micro_leadership() {
+    use ae_sync::chain::pow::producer::mining;
+    let lab = Lab::new();
+    let p = prepared(&lab, false);
+    let tx = transaction(&p);
+    let db = p.configured().chain().database().clone();
+    let snapshots = p.snapshots().clone();
+    let mut config = root_config(&lab);
+    config.production.producer.enabled = true;
+    let mut mining = mining::Config::new(AccountPublicKey([42; 32]));
+    // Candidate preparation remains live without racing an automatic sealer.
+    mining.instances.clear();
+    config.production.mining = Some(mining);
+    let (sent, entered) = mpsc::sync_channel(1);
+    let (release, recv) = mpsc::channel();
+    let pause = Arc::new(ProducerPause {
+        armed: false.into(),
+        entered: sent,
+        release: Mutex::new(Some(recv)),
+    });
+    let running = root::launch_on_demand(
+        p,
+        config,
+        Arc::new(PausedProducerClocks {
+            clock: pause.clone(),
+            epoch: std::time::Instant::now(),
+        }),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let mut release = Release(Some(release));
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    let key = sealed_candidate(&h, 1).await;
+    let generation = h.production().unwrap().current().unwrap();
+    assert!(generation.producer.status().enabled);
+    pause.armed.store(true, Ordering::SeqCst);
+    within(async {
+        while entered.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    h.workers()
+        .unwrap()
+        .bindings()
+        .admission
+        .current()
+        .unwrap()
+        .client
+        .push(tx.clone(), ae_mempool::pool::Event::Created, false)
+        .unwrap()
+        .await
+        .unwrap();
+    h.importer()
+        .unwrap()
+        .import_created_key(key.clone(), key.time, None)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let revision = db.view().unwrap().status().revision;
+    h.set_enabled(false).unwrap();
+    within(async {
+        while generation.producer.status().requested_enabled {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let pending = generation.producer.status();
+    assert!(pending.observed_revision < revision);
+    assert!(pending.applied_revision < pending.request_revision);
+    release.open();
+    within(async {
+        loop {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            let status = generation.producer.status();
+            if status.observed_revision >= revision
+                && status.request_revision == status.applied_revision
+                && !status.promotion_pending
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    let stopped = generation.producer.status();
+    assert!(!stopped.enabled && !stopped.leader);
+    assert_eq!(stopped.signatures, 0);
+    assert!(!generation.generator.status().generating);
+    assert!(db.view().unwrap().location(tx.hash()).unwrap().is_none());
+    let key = sealed_candidate(&h, 2).await;
+    h.importer()
+        .unwrap()
+        .import_block(
+            ae_chain::block::Block::Key(key.clone()).encode().unwrap(),
+            key.time,
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    within(async {
+        while db.view().unwrap().location(tx.hash()).unwrap().is_none() {
+            while h.try_output().is_some() {}
+            assert!(h.status().failure.is_none(), "{:?}", h.status());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let resumed = generation.producer.status();
+    assert!(!resumed.enabled && resumed.leader);
+    assert!(resumed.signatures > 0 && resumed.admissions > 0);
+    assert!(db.view().unwrap().canonical_key(3).unwrap().is_none());
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    drop(generation);
+    assert_eq!(snapshots.live_snapshots(), 0);
+}
+
+#[tokio::test]
 async fn on_demand_seal_presence_keeps_first_admission_and_survives_reopen_and_rollback() {
     use ae_chain::repository::rollback;
     use ae_sync::chain::{pow::producer::mining, query::blocks};

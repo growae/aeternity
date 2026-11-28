@@ -44,6 +44,8 @@ impl Clock for SystemClock {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
+    // Automatic key production. Later selected-block events can establish
+    // microblock leadership while this state remains stopped.
     pub enabled: bool,
     // Stratum supplies key-block work externally. Promotion still runs while
     // local micro production is stopped; no local miner is constructed.
@@ -99,6 +101,7 @@ pub enum Error {
 pub struct Status {
     pub running: bool,
     pub accepting: bool,
+    pub activated: bool,
     pub requested_enabled: bool,
     pub request_revision: u64,
     pub applied_revision: u64,
@@ -135,6 +138,8 @@ struct State {
     status: Status,
     shutdown: bool,
     outputs: VecDeque<Arc<Output>>,
+    control_after: u64,
+    resume: bool,
 }
 struct Shared {
     database: Arc<ae_storage::Database>,
@@ -144,8 +149,8 @@ struct Shared {
     credits: Arc<Mutex<usize>>,
     limit: usize,
     commands: Mutex<Option<on_demand::service::Client>>,
-    command_owner: bool,
     start_allowed: bool,
+    resume_current: bool,
 }
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -161,7 +166,10 @@ impl Client {
         if s.shutdown || !s.status.running || !s.status.accepting {
             return Err(Error::Closed);
         }
-        Ok(s.status.observed_revision >= revision && !s.status.promotion_pending)
+        Ok(s.status.activated
+            && s.status.request_revision == s.status.applied_revision
+            && s.status.observed_revision >= revision
+            && !s.status.promotion_pending)
     }
     pub fn uses_snapshots(&self, snapshots: &ae_storage::snapshots::Owner) -> bool {
         snapshots.uses_database(&self.0.database)
@@ -176,7 +184,11 @@ impl Client {
         if state.shutdown || !state.status.running || !state.status.accepting {
             return Err(Error::Closed);
         }
-        if state.status.top != parent || state.status.promotion_pending {
+        if !state.status.activated
+            || state.status.request_revision != state.status.applied_revision
+            || state.status.top != parent
+            || state.status.promotion_pending
+        {
             return Ok(None);
         }
         let keys = self.0.keys.info();
@@ -189,18 +201,34 @@ impl Client {
     // Applied revision observes the coordinator's gate. Already accepted key
     // or admission work is retained and may complete after disabling.
     pub fn set_enabled(&self, enabled: bool) -> Result<u64, Error> {
+        self.desired(enabled, false)
+    }
+    // A supervised pair remains dormant until its owning group publishes it.
+    pub(in crate::chain::pow) fn activate(&self, enabled: bool) -> Result<u64, Error> {
+        self.desired(enabled, true)
+    }
+    fn desired(&self, enabled: bool, activate: bool) -> Result<u64, Error> {
         let mut s = lock(&self.0.state);
         if !s.status.accepting {
             return Err(Error::Closed);
         }
         policy::start(s.status.requested_enabled, enabled, self.0.start_allowed)?;
-        if s.status.requested_enabled != enabled {
-            s.status.request_revision = s
+        let changed = s.status.requested_enabled != enabled;
+        let activating = activate && !s.status.activated;
+        if changed || activating {
+            let revision = s
                 .status
                 .request_revision
                 .checked_add(1)
                 .ok_or(Error::Sequence)?;
+            // Already published blocks precede this control, including events
+            // the producer has not consumed yet. Later blocks may restore
+            // leadership even while automatic key production remains stopped.
+            s.control_after = self.0.database.events().info().status.revision;
+            s.resume = enabled && self.0.resume_current;
+            s.status.request_revision = revision;
             s.status.requested_enabled = enabled;
+            s.status.activated |= activating;
             self.0.wake.notify_all();
         }
         Ok(s.status.request_revision)
@@ -271,7 +299,7 @@ impl Worker {
         config: Config,
         clock: impl Clock,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(importer, generator, keys, config, clock, None, None)
+        Self::spawn_inner(importer, generator, keys, config, clock, None, None, true)
     }
     pub fn spawn_with_mining<O: MapOrder + Clone + Send + Sync + 'static>(
         importer: &chain::Importer<O>,
@@ -281,7 +309,16 @@ impl Worker {
         clock: impl Clock,
         mining: mining::Inputs,
     ) -> Result<Self, Error> {
-        Self::spawn_inner(importer, generator, keys, config, clock, Some(mining), None)
+        Self::spawn_inner(
+            importer,
+            generator,
+            keys,
+            config,
+            clock,
+            Some(mining),
+            None,
+            true,
+        )
     }
     pub fn spawn_with_commands<O: MapOrder + Clone + Send + Sync + 'static>(
         importer: &chain::Importer<O>,
@@ -292,20 +329,6 @@ impl Worker {
         mining: Option<mining::Inputs>,
         commands: CommandInputs,
     ) -> Result<Self, Error> {
-        if importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand
-            || commands.config.controller.beneficiary
-                != mining.as_ref().map(|m| m.config.beneficiary)
-            || mining
-                .as_ref()
-                .is_some_and(|m| commands.config.controller.release_info != m.config.release_info)
-        {
-            return Err(Error::Binding);
-        }
-        commands
-            .config
-            .service
-            .validate()
-            .map_err(Error::Commands)?;
         Self::spawn_inner(
             importer,
             generator,
@@ -314,9 +337,10 @@ impl Worker {
             clock,
             mining,
             Some(commands),
+            true,
         )
     }
-    fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
+    pub(in crate::chain::pow) fn spawn_group<O: MapOrder + Clone + Send + Sync + 'static>(
         importer: &chain::Importer<O>,
         generator: generator::Client<O>,
         keys: keys::Client,
@@ -325,6 +349,37 @@ impl Worker {
         mining: Option<mining::Inputs>,
         commands: Option<CommandInputs>,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(
+            importer, generator, keys, config, clock, mining, commands, false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_inner<O: MapOrder + Clone + Send + Sync + 'static>(
+        importer: &chain::Importer<O>,
+        generator: generator::Client<O>,
+        keys: keys::Client,
+        config: Config,
+        clock: impl Clock,
+        mining: Option<mining::Inputs>,
+        commands: Option<CommandInputs>,
+        activated: bool,
+    ) -> Result<Self, Error> {
+        if let Some(commands) = &commands {
+            if importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand
+                || commands.config.controller.beneficiary
+                    != mining.as_ref().map(|m| m.config.beneficiary)
+                || mining.as_ref().is_some_and(|m| {
+                    commands.config.controller.release_info != m.config.release_info
+                })
+            {
+                return Err(Error::Binding);
+            }
+            commands
+                .config
+                .service
+                .validate()
+                .map_err(Error::Commands)?;
+        }
         let start_allowed = commands
             .as_ref()
             .is_none_or(|c| c.config.controller.beneficiary.is_some());
@@ -364,6 +419,7 @@ impl Worker {
         let status = Status {
             running: true,
             accepting: true,
+            activated,
             requested_enabled: config.enabled,
             request_revision: 0,
             applied_revision: 0,
@@ -392,13 +448,15 @@ impl Worker {
                 status: status.clone(),
                 shutdown: false,
                 outputs: VecDeque::new(),
+                control_after: cursor.revision(),
+                resume: activated && config.resume_current,
             }),
             wake: Condvar::new(),
             credits: Arc::new(Mutex::new(0)),
             limit: config.outputs,
             commands: Mutex::new(None),
-            command_owner: commands.is_some(),
             start_allowed,
+            resume_current: config.resume_current,
         });
         let commands = commands
             .map(|inputs| {

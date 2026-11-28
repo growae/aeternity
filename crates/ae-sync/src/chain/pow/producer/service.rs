@@ -17,6 +17,9 @@ pub(super) struct Service<O> {
     last_time: Option<Instant>,
     sleep: Option<Instant>,
     generation_wanted: bool,
+    initialized: bool,
+    leadership_allowed: bool,
+    control_after: u64,
     generator_pending: Option<(bool, generator::Ticket)>,
     promote: Option<AccountPublicKey>,
     ready: Option<Arc<generator::Candidate<O>>>,
@@ -54,9 +57,12 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             epoch: 0,
             last_time: None,
             sleep: None,
-            generation_wanted: config.resume_current,
+            generation_wanted: false,
+            initialized: false,
+            leadership_allowed: false,
+            control_after: 0,
             generator_pending: None,
-            promote: config.resume_current.then_some(selected.miner),
+            promote: None,
             ready: None,
             pending: None,
             signed: None,
@@ -117,9 +123,20 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
     }
     fn drive(&mut self) -> Result<(), Error> {
         loop {
-            if lock(&self.shared.state).shutdown {
+            let state = lock(&self.shared.state);
+            if state.shutdown {
                 return Ok(());
             }
+            if !state.status.activated {
+                drop(
+                    self.shared
+                        .wake
+                        .wait_timeout(state, self.config.poll)
+                        .unwrap_or_else(|e| e.into_inner()),
+                );
+                continue;
+            }
+            drop(state);
             let (wall, now) = self.clock.now()?;
             if self.last_time.is_some_and(|last| now < last) {
                 return Err(Error::Time);
@@ -134,7 +151,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 return Err(Error::Keys(keys::Error::Stopped));
             }
             self.status.leader = policy::leader(
-                keys.running && keys.accepting,
+                self.leadership_allowed && keys.running && keys.accepting,
                 self.selected.miner,
                 keys.keys.signing,
             );
@@ -216,20 +233,29 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         }
     }
     fn controls(&mut self) -> Result<(), Error> {
-        let (revision, enabled) = {
+        let (revision, enabled, resume, after) = {
             let s = lock(&self.shared.state);
             if s.shutdown {
                 return Err(Error::Closed);
             }
-            (s.status.request_revision, s.status.requested_enabled)
+            (
+                s.status.request_revision,
+                s.status.requested_enabled,
+                s.resume,
+                s.control_after,
+            )
         };
-        if revision != self.status.applied_revision {
+        if !self.initialized || revision != self.status.applied_revision {
+            self.initialized = true;
+            self.status.activated = true;
             self.status.applied_revision = revision;
             self.status.enabled = enabled;
+            self.control_after = after;
+            self.leadership_allowed = resume;
             self.epoch = self.epoch.checked_add(1).ok_or(Error::Sequence)?;
             self.ready = None;
             self.sleep = None;
-            self.generation_wanted = enabled && self.config.resume_current;
+            self.generation_wanted = enabled && resume;
             if let Some(mining) = &mut self.mining {
                 if enabled {
                     mining.enable();
@@ -237,14 +263,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                     mining.invalidate().map_err(Error::Mining)?;
                 }
             }
-            if self.mining.is_some() || self.config.external_key_work || self.shared.command_owner {
-                if enabled && self.config.resume_current && self.promote.is_none() {
-                    self.promote = Some(self.selected.miner);
-                }
-            } else {
-                self.promote =
-                    (enabled && self.config.resume_current).then_some(self.selected.miner);
-            }
+            self.promote = resume.then_some(self.selected.miner);
         }
         Ok(())
     }
@@ -253,7 +272,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         // Publish the leader together with the completed promotion barrier.
         let keys = self.keys.info();
         self.status.leader = policy::leader(
-            keys.running && keys.accepting,
+            self.leadership_allowed && keys.running && keys.accepting,
             self.selected.miner,
             keys.keys.signing,
         );
@@ -308,6 +327,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             self.ready = None;
             let context = event.context();
             if context.origin == publication::Origin::Rollback {
+                self.leadership_allowed = false;
                 self.generation_wanted = false;
                 self.promote = None;
                 self.sleep = None;
@@ -320,6 +340,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             if block.kind == publication::Kind::Key {
                 self.promote = Some(next.miner);
             }
+            if change.revision <= self.control_after {
+                // This event was already published when the control was
+                // accepted. Catch up the selected tip and key authority, but
+                // do not restore leadership or generation cleared by a stop.
+                continue;
+            }
+            self.leadership_allowed = true;
             let leader = keys.signing == next.miner
                 || (block.kind == publication::Kind::Key && keys.candidate == next.miner);
             match policy::origin(leader, context.origin, block.kind) {
@@ -335,8 +362,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         Ok(caught_up)
     }
     fn current(&self, parent: Hash256, epoch: u64, signer: AccountPublicKey) -> bool {
-        self.status.enabled
-            && self.status.leader
+        self.status.leader
             && self.selected.top == parent
             && self.epoch == epoch
             && self.selected.miner == signer
@@ -361,7 +387,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
         if !info.running || !info.accepting {
             return Err(Error::GeneratorClosed);
         }
-        let target = self.status.enabled && self.status.leader && self.generation_wanted;
+        let target = self.status.leader && self.generation_wanted;
         if self.generator_pending.is_none() && info.generating != target {
             let reply = if target {
                 self.generator.start()
@@ -381,7 +407,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             let Some(event) = self.generator.front() else {
                 break;
             };
-            if self.status.enabled && self.status.leader {
+            if self.status.leader {
                 // Native events fetch the current candidate, not the payload
                 // of an older notification still waiting in a bounded queue.
                 let candidate = self
@@ -479,30 +505,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
     }
     fn authorized(&self, s: &State) -> bool {
         !s.shutdown
-            && s.status.requested_enabled
+            && s.status.activated
             && s.status.request_revision == self.status.applied_revision
-            && self.status.enabled
     }
     fn act(&mut self, wall: u64, now: Instant, keys: keys::PublicKeys) -> Result<(), Error> {
-        if !self.status.enabled
-            && self.mining.is_none()
-            && !self.config.external_key_work
-            && !self.shared.command_owner
-        {
-            return Ok(());
-        }
         if let Some(expected) = self.promote {
             if expected == self.selected.miner && keys.candidate == expected {
                 let shared = self.shared.clone();
                 let s = lock(&shared.state);
                 // Native key promotion precedes preparation even while PoW
                 // production is stopped. It remains owned by this producer.
-                let stopped_promotion = (self.mining.is_some()
-                    || self.config.external_key_work
-                    || self.shared.command_owner)
-                    && !s.shutdown
-                    && s.status.request_revision == self.status.applied_revision;
-                if !self.authorized(&s) && !stopped_promotion {
+                if !self.authorized(&s) {
                     return Ok(());
                 }
                 match self.keys.promote_candidate(expected) {
@@ -517,7 +530,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             }
             self.promote = None;
         }
-        if !self.status.enabled || !self.status.leader || self.generator_pending.is_some() {
+        if !self.status.leader || self.generator_pending.is_some() {
             return Ok(());
         }
         let sleeping = self.sleep.is_some_and(|at| now < at);

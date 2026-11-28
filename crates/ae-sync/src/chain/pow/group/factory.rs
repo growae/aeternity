@@ -96,45 +96,24 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
         // Activation happens only after a complete pair is published, under
         // the same lock as group desired-state changes and shutdown admission.
         config.enabled = false;
-        match (mining, commands) {
-            (mining, Some(commands)) => producer::Worker::spawn_with_commands(
-                &importer,
-                generator.client(),
-                keys,
+        producer::Worker::spawn_group(
+            &importer,
+            generator.client(),
+            keys,
+            config,
+            ProducerClock(clocks.producer(generation)),
+            mining.map(|config| producer::mining::Inputs {
+                snapshots: snapshots.clone(),
                 config,
-                ProducerClock(clocks.producer(generation)),
-                mining.map(|config| producer::mining::Inputs {
-                    snapshots: snapshots.clone(),
-                    config,
-                    clock: clocks.preparation(generation),
-                }),
-                producer::CommandInputs {
-                    snapshots,
-                    pool,
-                    config: commands,
-                    clock: clocks.commands(generation),
-                },
-            ),
-            (Some(mining), None) => producer::Worker::spawn_with_mining(
-                &importer,
-                generator.client(),
-                keys,
+                clock: clocks.preparation(generation),
+            }),
+            commands.map(|config| producer::CommandInputs {
+                snapshots,
+                pool,
                 config,
-                ProducerClock(clocks.producer(generation)),
-                producer::mining::Inputs {
-                    snapshots,
-                    config: mining,
-                    clock: clocks.preparation(generation),
-                },
-            ),
-            (None, None) => producer::Worker::spawn(
-                &importer,
-                generator.client(),
-                keys,
-                config,
-                ProducerClock(clocks.producer(generation)),
-            ),
-        }
+                clock: clocks.commands(generation),
+            }),
+        )
         .map_err(StartError::Producer)
     }
 }

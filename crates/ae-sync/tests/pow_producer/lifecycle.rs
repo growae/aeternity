@@ -243,7 +243,9 @@ fn startup_recovery_is_explicit_and_foreign_signers_never_start_generation() {
         }
         assert_eq!(worker.client().status().signatures, 0);
         assert!(!node.generator().status().generating);
-        assert_eq!(worker.client().status().leader, !foreign);
+        // Native initialization starts leader=false. Matching the selected
+        // signing key alone does not replace explicit recovery or a new event.
+        assert!(!worker.client().status().leader);
         assert!(stop(worker, &gate).status.failure.is_none());
     }
 }

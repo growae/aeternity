@@ -515,6 +515,7 @@ fn disable_or_shutdown_during_construction_prevents_replacement_activation() {
             let report = finish(worker);
             let (_, p) = report.settled.last().unwrap().producer.as_ref().unwrap();
             assert_eq!(p.status.signatures, 0);
+            assert!(!p.status.activated);
             assert_eq!(report.status.supervisor.generator_generation, 2);
         } else {
             let second = generation(&client, 2);

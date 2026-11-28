@@ -224,14 +224,16 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                     self.flush()?;
                     return Ok(());
                 }
-            } else if let Some(output) = current.producer.front() {
+            } else if let Some(output) = current.producer.front()
+                && current.producer.acknowledge(&output)
+            {
+                // Claim before publishing. A concurrently exiting producer
+                // can transfer this output to its retirement report between
+                // front and acknowledge; that report then owns its delivery.
                 self.outbox.push_back(Event::Produced {
                     generation: current.id,
-                    output: output.clone(),
+                    output,
                 });
-                if !current.producer.acknowledge(&output) {
-                    return Err(Error::Binding);
-                }
                 self.flush()?;
                 return Ok(());
             }
@@ -270,7 +272,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             return Err(Error::Closed);
         }
         if let Some(current) = &s.current {
-            match current.producer.set_enabled(s.status.requested_enabled) {
+            match current.producer.activate(s.status.requested_enabled) {
                 Ok(revision) => {
                     let p = current.producer.status();
                     if p.applied_revision == revision && p.enabled == s.status.requested_enabled {
