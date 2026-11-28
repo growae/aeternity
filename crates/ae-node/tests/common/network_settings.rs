@@ -40,7 +40,9 @@ pub fn configure_policy_only(
             .unwrap();
     }
     let upnp = match settings {
-        runtime::Settings::Cuckoo(s) => &mut s.config.workers.upnp,
+        runtime::Settings::Cuckoo(s) | runtime::Settings::OnDemandAutomatic(s) => {
+            &mut s.config.workers.upnp
+        }
         runtime::Settings::OnDemand(s) => &mut s.config.workers.upnp,
         runtime::Settings::Hyperchain(s) => &mut s.config.workers.upnp,
     };
@@ -132,7 +134,9 @@ pub fn configure(
         .configure_optional_network(&configuration.resolve(&context).unwrap(), settings)
         .unwrap();
     let upnp = match settings {
-        runtime::Settings::Cuckoo(s) => &mut s.config.workers.upnp,
+        runtime::Settings::Cuckoo(s) | runtime::Settings::OnDemandAutomatic(s) => {
+            &mut s.config.workers.upnp
+        }
         runtime::Settings::OnDemand(s) => &mut s.config.workers.upnp,
         runtime::Settings::Hyperchain(s) => &mut s.config.workers.upnp,
     };
@@ -153,7 +157,9 @@ pub fn configure(
         .configure_discovery(&discovery.resolve(&context).unwrap(), settings)
         .unwrap();
     let config = match settings {
-        runtime::Settings::Cuckoo(s) => &mut s.config.connections,
+        runtime::Settings::Cuckoo(s) | runtime::Settings::OnDemandAutomatic(s) => {
+            &mut s.config.connections
+        }
         runtime::Settings::OnDemand(s) => &mut s.config.connections,
         runtime::Settings::Hyperchain(s) => &mut s.config.connections,
     };

@@ -353,7 +353,10 @@ impl Services {
         config: Production,
         clocks: Arc<dyn group::Clocks>,
     ) -> Result<group::Worker<Otp26>, Error> {
-        if self.open.chain().identity().algorithm != ConsensusAlgorithm::Cuckoo {
+        if !matches!(
+            self.open.chain().identity().algorithm,
+            ConsensusAlgorithm::Cuckoo | ConsensusAlgorithm::OnDemand
+        ) {
             return Err(Error::Binding);
         }
         let config = group::Config {

@@ -232,6 +232,14 @@ impl Configuration {
         config.instances = workers;
         Ok(Prepared { config, instances })
     }
+    // The native on-demand callback ignores the executable, repeat count,
+    // device and graph. Only the expanded number of configured instances is
+    // used; each owns one immediate sealing callback, never an external miner.
+    pub fn prepare_on_demand(&self, mut config: mining::Config) -> Result<Prepared, Error> {
+        let instances = self.instances()?;
+        config.instances = vec![mining::Instance::default(); instances.len()];
+        Ok(Prepared { config, instances })
+    }
 }
 
 #[cfg(test)]

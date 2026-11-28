@@ -74,6 +74,7 @@ pub enum Error {
 }
 #[derive(Debug)]
 pub struct Candidate {
+    pub algorithm: ae_protocol::ConsensusAlgorithm,
     pub edge_bits: cuckoo::EdgeBits,
     pub id: preparation::Id,
     pub request: preparation::Request,
@@ -126,6 +127,7 @@ pub struct Status {
     pub workers: Vec<miner::Status>,
 }
 struct Preparing {
+    algorithm: ae_protocol::ConsensusAlgorithm,
     edge_bits: cuckoo::EdgeBits,
     task: preparation::Task,
     epoch: u64,
@@ -156,7 +158,11 @@ struct Admission {
     ticket: chain::Ticket,
 }
 
-fn prepared(done: preparation::Completion, edge_bits: cuckoo::EdgeBits) -> Completion {
+fn prepared(
+    done: preparation::Completion,
+    edge_bits: cuckoo::EdgeBits,
+    algorithm: ae_protocol::ConsensusAlgorithm,
+) -> Completion {
     let preparation::Completion {
         id,
         request,
@@ -178,6 +184,7 @@ fn prepared(done: preparation::Completion, edge_bits: cuckoo::EdgeBits) -> Compl
         // CPU work needs only frozen header bytes. Release the trie snapshot
         // here; ordinary admission will capture and validate state again.
         Ok(Arc::new(Candidate {
+            algorithm,
             edge_bits,
             id,
             request,
@@ -195,16 +202,32 @@ fn prepared(done: preparation::Completion, edge_bits: cuckoo::EdgeBits) -> Compl
     }
 }
 fn seal(job: &Job, result: &miner::Completion) -> Result<Option<Box<KeyHeader>>, Error> {
-    if result.id != job.ticket.id()
-        || result.work != job.ticket.work()
-        || miner::Work::key_with_edge_bits(
+    use ae_protocol::ConsensusAlgorithm;
+    let expected = match job.candidate.algorithm {
+        ConsensusAlgorithm::Cuckoo => miner::Work::key_with_edge_bits(
             &job.candidate.header,
             result.work.nonces,
             job.candidate.edge_bits,
-        )
-        .map_err(Error::Worker)?
-            != result.work
-    {
+        ),
+        ConsensusAlgorithm::OnDemand => miner::Work::on_demand(&job.candidate.header),
+        ConsensusAlgorithm::Hyperchain => return Err(Error::Binding),
+    }
+    .map_err(Error::Worker)?;
+    if result.id != job.ticket.id() || result.work != job.ticket.work() || expected != result.work {
+        return Err(Error::Binding);
+    }
+    if job.candidate.algorithm == ConsensusAlgorithm::OnDemand {
+        return match &result.result {
+            Ok(miner::Outcome::OnDemand { seal }) if *seal == ae_consensus::on_demand::TAG => {
+                let mut header = Box::new(job.candidate.header.clone());
+                ae_consensus::on_demand::seal(&mut header);
+                Ok(Some(header))
+            }
+            Err(_) => Ok(None),
+            Ok(_) => Err(Error::Binding),
+        };
+    }
+    if matches!(result.result, Ok(miner::Outcome::OnDemand { .. })) {
         return Err(Error::Binding);
     }
     let Ok(miner::Outcome::Found { nonce, proof }) = &result.result else {
@@ -244,7 +267,7 @@ impl Retirement {
         if let Some(p) = &mut self.preparing
             && let Some(done) = p.task.try_result()
         {
-            outputs.push(prepared(done, p.edge_bits));
+            outputs.push(prepared(done, p.edge_bits, p.algorithm));
             self.preparing = None;
         }
         if let Some(s) = self.solution.take() {

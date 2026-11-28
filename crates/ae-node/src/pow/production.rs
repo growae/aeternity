@@ -32,7 +32,8 @@ pub struct CommandGeneration {
     pub client: service::Client,
 }
 pub(super) enum Input {
-    Cuckoo {
+    Automatic {
+        algorithm: ConsensusAlgorithm,
         config: Box<configured::Production>,
         clocks: Arc<dyn group::Clocks>,
     },
@@ -48,7 +49,7 @@ impl Input {
         stratum: Option<&crate::stratum::configured::Config>,
     ) -> (pending::Config, Arc<dyn generator::Clock>) {
         match self {
-            Self::Cuckoo { config, clocks } => (
+            Self::Automatic { config, clocks, .. } => (
                 pending::Config {
                     beneficiary: stratum
                         .map(|s| s.beneficiary())
@@ -79,35 +80,39 @@ impl Input {
         }
     }
     pub fn stratum_compatible(&self) -> bool {
-        matches!(self, Self::Cuckoo { config, .. } if config.mining.is_none() && config.producer.external_key_work)
+        matches!(self, Self::Automatic { algorithm: ConsensusAlgorithm::Cuckoo, config, .. } if config.mining.is_none() && config.producer.external_key_work)
     }
     pub fn stratum_inputs(&self, generation: u64) -> Option<(bool, Arc<dyn generator::Clock>)> {
         match self {
-            Self::Cuckoo { config, clocks } => Some((
+            Self::Automatic {
+                algorithm: ConsensusAlgorithm::Cuckoo,
+                config,
+                clocks,
+            } => Some((
                 config.producer.strictly_follow_top,
                 clocks.preparation(generation),
             )),
-            Self::Commands { .. } => None,
+            _ => None,
         }
     }
     pub fn algorithm(&self) -> ConsensusAlgorithm {
         match self {
-            Self::Cuckoo { .. } => ConsensusAlgorithm::Cuckoo,
+            Self::Automatic { algorithm, .. } => *algorithm,
             Self::Commands { .. } => ConsensusAlgorithm::OnDemand,
         }
     }
     pub fn enabled(&self) -> Option<bool> {
         match self {
-            Self::Cuckoo { config, .. } => Some(config.producer.enabled),
+            Self::Automatic { config, .. } => Some(config.producer.enabled),
             Self::Commands { .. } => None,
         }
     }
     pub fn validate(&self, cycle: u64) -> Result<(), Error> {
         match self {
-            Self::Cuckoo { config, .. } if config.producer.micro_cycle_ms != cycle => {
+            Self::Automatic { config, .. } if config.producer.micro_cycle_ms != cycle => {
                 Err(Error::Configuration)
             }
-            Self::Cuckoo { .. } => Ok(()),
+            Self::Automatic { .. } => Ok(()),
             Self::Commands { config, .. } => config.service.validate().map_err(Error::Commands),
         }
     }
@@ -124,10 +129,10 @@ impl Input {
             })
         };
         Ok(match self {
-            Self::Cuckoo { config, clocks } => {
+            Self::Automatic { config, clocks, .. } => {
                 let mut config = config.as_ref().clone();
                 config.producer.enabled = false;
-                Live::Cuckoo(
+                Live::Automatic(
                     services
                         .production(pool, keys, config, clocks.clone())
                         .map_err(start)?,
@@ -157,13 +162,13 @@ pub(super) struct StartFailure {
     pub retired: Option<Retired>,
 }
 pub(super) enum Live {
-    Cuckoo(group::Worker<Otp26>),
+    Automatic(group::Worker<Otp26>),
     Commands(service::Worker),
 }
 impl Live {
     pub fn ready(&self) -> bool {
         match self {
-            Self::Cuckoo(w) => w.client().current().is_some(),
+            Self::Automatic(w) => w.client().current().is_some(),
             Self::Commands(w) => {
                 let s = w.client().status();
                 s.running && s.accepting
@@ -172,13 +177,13 @@ impl Live {
     }
     pub fn update(&self, status: &mut Status) {
         match self {
-            Self::Cuckoo(w) => status.production = Some(w.client().status()),
+            Self::Automatic(w) => status.production = Some(w.client().status()),
             Self::Commands(w) => status.commands = Some(w.client().status()),
         }
     }
     pub fn check(&self) -> Result<(), Error> {
         let running = match self {
-            Self::Cuckoo(w) => {
+            Self::Automatic(w) => {
                 let s = w.client().status();
                 if let Some(e) = s.failure {
                     return Err(Error::Production(e));
@@ -204,7 +209,7 @@ impl Live {
         // the attempts too, so that race cannot monopolize the root loop.
         for _ in outputs.len()..limit {
             match self {
-                Self::Cuckoo(w) => {
+                Self::Automatic(w) => {
                     let c = w.client();
                     let Some(output) = c.front() else {
                         break;
@@ -230,15 +235,15 @@ impl Live {
     }
     pub fn request_shutdown(&self) {
         match self {
-            Self::Cuckoo(w) => w.client().request_shutdown(),
+            Self::Automatic(w) => w.client().request_shutdown(),
             Self::Commands(w) => w.client().request_shutdown(),
         }
     }
     pub async fn stop(self) -> Result<Retired, Error> {
         tokio::task::spawn_blocking(move || match self {
-            Self::Cuckoo(w) => w
+            Self::Automatic(w) => w
                 .shutdown()
-                .map(|r| Retired::Cuckoo(Box::new(r)))
+                .map(|r| Retired::Automatic(Box::new(r)))
                 .map_err(|_| Error::ChildTask(Child::Production)),
             Self::Commands(w) => Ok(Retired::Commands(Box::new(w.shutdown()))),
         })
@@ -247,25 +252,25 @@ impl Live {
     }
 }
 pub(super) enum Retired {
-    Cuckoo(Box<group::Report>),
+    Automatic(Box<group::Report>),
     Commands(Box<service::Report>),
 }
 impl Retired {
     pub fn update(&self, status: &mut Status) {
         match self {
-            Self::Cuckoo(r) => status.production = Some(r.status.clone()),
+            Self::Automatic(r) => status.production = Some(r.status.clone()),
             Self::Commands(r) => status.commands = Some(r.status.clone()),
         }
     }
     pub fn failure(&self) -> Option<Error> {
         match self {
-            Self::Cuckoo(r) => r.status.failure.clone().map(Error::Production),
+            Self::Automatic(r) => r.status.failure.clone().map(Error::Production),
             Self::Commands(r) => r.status.failure.clone().map(Error::Commands),
         }
     }
     pub fn poll(&mut self) -> Result<bool, Error> {
         match self {
-            Self::Cuckoo(r) => r.poll().map_err(Error::Production),
+            Self::Automatic(r) => r.poll().map_err(Error::Production),
             Self::Commands(r) => r.poll().map_err(Error::Commands),
         }
     }
@@ -277,11 +282,11 @@ pub(super) struct Retirement {
 impl Retirement {
     pub fn release(self) -> Result<Output, Self> {
         match self.value {
-            Retired::Cuckoo(r) => match r.release() {
+            Retired::Automatic(r) => match r.release() {
                 Ok(released) => Ok(Output::Retired(Box::new(released))),
                 Err(r) => Err(Self {
                     number: self.number,
-                    value: Retired::Cuckoo(r),
+                    value: Retired::Automatic(r),
                 }),
             },
             Retired::Commands(r) => match r.release() {

@@ -1,10 +1,11 @@
 use super::*;
 use conductor::runtime::supervision;
 
-pub struct Cuckoo {
+pub struct Automatic {
     pub config: pow::Config,
     pub clocks: Arc<dyn group::Clocks>,
 }
+pub type Cuckoo = Automatic;
 pub struct OnDemand {
     pub config: pow::Config<pow::Commands>,
     pub clock: Arc<dyn generator::Clock>,
@@ -20,13 +21,14 @@ pub struct Hyperchain {
 pub enum Settings {
     Cuckoo(Box<Cuckoo>),
     OnDemand(Box<OnDemand>),
+    OnDemandAutomatic(Box<Automatic>),
     Hyperchain(Box<Hyperchain>),
 }
 impl Settings {
     pub fn family(&self) -> Family {
         match self {
             Self::Cuckoo(_) => Family::Cuckoo,
-            Self::OnDemand(_) => Family::OnDemand,
+            Self::OnDemand(_) | Self::OnDemandAutomatic(_) => Family::OnDemand,
             Self::Hyperchain(_) => Family::Hyperchain,
         }
     }
@@ -94,7 +96,9 @@ impl Prepared {
         });
         let mode = self.configured().mode().application();
         let prefix = match &settings {
-            Settings::Cuckoo(s) => &s.config.connections.observer.prefix,
+            Settings::Cuckoo(s) | Settings::OnDemandAutomatic(s) => {
+                &s.config.connections.observer.prefix
+            }
             Settings::OnDemand(s) => &s.config.connections.observer.prefix,
             Settings::Hyperchain(s) => &s.config.connections.observer.prefix,
         }
@@ -144,6 +148,21 @@ impl Prepared {
                                 metrics_config,
                             ),
                             settings: Settings::Cuckoo(s),
+                        }));
+                    }
+                }
+            }
+            (PreparedInner::Pow(p), Settings::OnDemandAutomatic(s)) => {
+                match pow::launch_on_demand(*p, s.config.clone(), s.clocks.clone(), outputs) {
+                    Ok(r) => RunningInner::OnDemand(r),
+                    Err(e) => {
+                        return Err(Box::new(StartError {
+                            error: Error::Pow(Box::new(e.error)),
+                            prepared: Prepared(
+                                PreparedInner::Pow(Box::new(e.prepared)),
+                                metrics_config,
+                            ),
+                            settings: Settings::OnDemandAutomatic(s),
                         }));
                     }
                 }

@@ -76,7 +76,7 @@ impl Plan {
                 })
                 .transpose()?
         };
-        let (timeout, mining) = if family == runtime::Family::Cuckoo && !stratum {
+        let (timeout, mining) = if family != runtime::Family::Hyperchain && !stratum {
             let timeout = read(
                 "attempt_timeout",
                 "mining_attempt_timeout",
@@ -118,7 +118,10 @@ impl Plan {
         stratum: Option<crate::stratum::configured::Config>,
     ) -> Result<runtime::Settings, Error> {
         Ok(match node.family() {
-            runtime::Family::Cuckoo => {
+            family
+                if family == runtime::Family::Cuckoo
+                    || (family == runtime::Family::OnDemand && self.autostart) =>
+            {
                 let mut config: crate::pow::Config = crate::pow::Config {
                     stratum: stratum.map(Arc::new),
                     ..Default::default()
@@ -133,27 +136,29 @@ impl Plan {
                 if let Some(beneficiary) = self.beneficiary {
                     let mut mining = producer::mining::Config::new(beneficiary);
                     mining.attempt_timeout = self.timeout;
+                    let configuration = self.mining.as_ref().expect("PoW configuration");
+                    let prepared = if family == runtime::Family::OnDemand {
+                        configuration.prepare_on_demand(mining)
+                    } else {
+                        configuration.prepare(directories, Default::default(), mining)
+                    };
                     config.production.mining = Some(
-                        self.mining
-                            .as_ref()
-                            .expect("Cuckoo configuration")
-                            .prepare(directories, Default::default(), mining)
-                            .map_err(|e| Error::at("miner executable configuration", e))?
+                        prepared
+                            .map_err(|e| Error::at("miner configuration", e))?
                             .config,
                     );
                 }
-                runtime::Settings::Cuckoo(Box::new(runtime::Cuckoo {
+                let automatic = Box::new(runtime::Automatic {
                     config,
                     clocks: Arc::new(group::SystemClocks::default()),
-                }))
+                });
+                if family == runtime::Family::OnDemand {
+                    runtime::Settings::OnDemandAutomatic(automatic)
+                } else {
+                    runtime::Settings::Cuckoo(automatic)
+                }
             }
             runtime::Family::OnDemand => {
-                if self.autostart {
-                    return Err(Error::at(
-                        "automatic on-demand production integration",
-                        "command runtime requires explicit block requests",
-                    ));
-                }
                 let beneficiary = self.beneficiary.ok_or_else(|| {
                     Error::at(
                         "on-demand beneficiary",
@@ -167,6 +172,7 @@ impl Plan {
                     clock: Arc::new(generator::SystemClock),
                 }))
             }
+            runtime::Family::Cuckoo => unreachable!("handled automatic Cuckoo settings"),
             runtime::Family::Hyperchain => {
                 let (gossip, cache) =
                     ae_storage::pool::worker::GossipCache::managed(cache_size, 100_000)

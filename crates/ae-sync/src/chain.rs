@@ -254,9 +254,12 @@ impl<O: MapOrder + Send + Sync + 'static> Importer<O> {
         let strategy::Strategy::Pow(profile) = &self.context.strategy else {
             return Err(Error::Binding);
         };
-        // This owner prepares Cuckoo CPU/Stratum work. On-demand callers use
-        // the algorithm-aware candidate builder without a Cuckoo worker.
-        if profile.algorithm != ae_protocol::ConsensusAlgorithm::Cuckoo {
+        // Preparation is shared by local PoW callbacks; each worker and the
+        // Stratum entrypoint bind their own consensus algorithm separately.
+        if !matches!(
+            profile.algorithm,
+            ae_protocol::ConsensusAlgorithm::Cuckoo | ae_protocol::ConsensusAlgorithm::OnDemand
+        ) {
             return Err(Error::Binding);
         }
         let identity = self

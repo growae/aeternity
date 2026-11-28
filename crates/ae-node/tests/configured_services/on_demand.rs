@@ -29,6 +29,107 @@ fn launch(lab: &Lab, development: bool) -> root::Running {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn automatic_on_demand_root_seals_native_keys_toggles_and_reopens() {
+    use ae_sync::chain::pow::producer::mining;
+    for strict in [false, true] {
+        let lab = Lab::new();
+        let mut previous_height = 0;
+        for round in 0..2 {
+            let prepared = prepared(&lab, false);
+            let db = prepared.configured().chain().database().clone();
+            let snapshots = prepared.snapshots().clone();
+            let mut config = root_config(&lab);
+            config.outputs = 1;
+            config.production.producer.enabled = round != 0;
+            config.production.producer.strictly_follow_top = strict;
+            let mut mining = mining::Config::new(AccountPublicKey([42; 32]));
+            mining.instances = vec![mining::Instance::default(); 2];
+            config.production.mining = Some(mining);
+            let running = root::launch_on_demand(
+                prepared,
+                config,
+                Arc::new(group::SystemClocks::default()),
+                || Ok(Default::default()),
+            )
+            .unwrap();
+            let h = running.handle();
+            root_ready(&h, 1).await;
+            assert!(h.commands().is_none());
+            assert!(matches!(
+                h.importer()
+                    .unwrap()
+                    .stratum_builder(snapshots.clone(), Default::default()),
+                Err(mining::Error::Binding)
+            ));
+            if round == 0 {
+                within(async {
+                    loop {
+                        while h.try_output().is_some() {}
+                        let generation = h.production().unwrap().current().unwrap();
+                        let status = generation.producer.status();
+                        assert!(!status.enabled);
+                        if let Some(mining) = status.mining
+                            && let Some(candidate) = mining.candidate
+                        {
+                            assert_eq!(
+                                candidate.algorithm,
+                                ae_protocol::ConsensusAlgorithm::OnDemand
+                            );
+                            assert_eq!(candidate.header.common.height, 1);
+                            assert_eq!(mining.workers.len(), 2);
+                            assert!(
+                                mining
+                                    .workers
+                                    .iter()
+                                    .all(|w| w.submitted == 0 && w.external.is_none())
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await;
+                assert!(db.view().unwrap().canonical_key(1).unwrap().is_none());
+                h.set_enabled(true).unwrap();
+            }
+            within(async {
+                while db
+                    .view()
+                    .unwrap()
+                    .canonical_key(previous_height + 2)
+                    .unwrap()
+                    .is_none()
+                {
+                    while h.try_output().is_some() {}
+                    assert!(h.status().failure.is_none(), "{:?}", h.status());
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            h.set_enabled(false).unwrap();
+            // Shutdown must join even with the one-slot output queue unread.
+            let exit = running.shutdown().await.unwrap();
+            assert_root_joined(&exit);
+            assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+            let view = db.view().unwrap();
+            let mut height = 1;
+            while let Some(hash) = view.canonical_key(height).unwrap() {
+                let ae_chain::block::Block::Key(header) = view.require_block(hash).unwrap() else {
+                    panic!()
+                };
+                assert_eq!((header.target, header.nonce), (1338, 1338));
+                assert_eq!(header.seal, [0; 42]);
+                assert_eq!(header.beneficiary, [42; 32]);
+                height += 1;
+            }
+            assert!(height > previous_height + 2);
+            previous_height = height - 1;
+            assert_eq!(snapshots.live_snapshots(), 0);
+        }
+    }
+}
 async fn completed(c: &service::Client, n: u64) {
     within(async {
         while c.status().completed < n {

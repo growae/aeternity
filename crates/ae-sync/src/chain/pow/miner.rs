@@ -9,6 +9,7 @@ use ae_consensus::{
     target::Target,
 };
 use ae_crypto::blake2b_256;
+use ae_protocol::ConsensusAlgorithm;
 use ae_types::Hash256;
 use std::{
     collections::VecDeque,
@@ -21,6 +22,7 @@ use std::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Work {
+    pub algorithm: ConsensusAlgorithm,
     pub hash: Hash256,
     pub target: Target,
     pub edge_bits: u8,
@@ -37,10 +39,25 @@ impl Work {
         edge_bits: cuckoo::EdgeBits,
     ) -> Result<Self, Error> {
         Ok(Self {
+            algorithm: ConsensusAlgorithm::Cuckoo,
             hash: blake2b_256(&cuckoo::sealing_bytes(header).map_err(|_| Error::Header)?),
             target: Target(header.target),
             edge_bits: edge_bits.get(),
             nonces,
+        })
+    }
+    pub fn on_demand(header: &KeyHeader) -> Result<Self, Error> {
+        if header.target != ae_consensus::on_demand::TAG || header.hole || header.end_of_epoch {
+            return Err(Error::Header);
+        }
+        Ok(Self {
+            algorithm: ConsensusAlgorithm::OnDemand,
+            hash: Hash256(ae_consensus::on_demand::sealing_input(header)),
+            target: Target(ae_consensus::on_demand::TAG),
+            // No Cuckoo graph or nonce search is used by this callback.
+            edge_bits: 0,
+            nonces: Nonces::reserve(ae_consensus::on_demand::TAG.into(), 1)
+                .expect("fixed native on-demand nonce"),
         })
     }
 }
@@ -94,6 +111,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Found { nonce: u64, proof: Box<[u64; 42]> },
+    OnDemand { seal: u32 },
     Exhausted,
     // External no_value maps to native no_solution, without attested coverage.
     NoSolution,
@@ -186,6 +204,7 @@ struct Shared {
     credits: Arc<AtomicUsize>,
     config: Config,
     external: Option<external::Config>,
+    algorithm: ConsensusAlgorithm,
     #[cfg(test)]
     hook: Mutex<Option<Hook>>,
     #[cfg(test)]
@@ -208,8 +227,20 @@ impl Client {
         if !s.status.accepting {
             return Err(Error::Closed);
         }
-        if !(1..=63).contains(&work.edge_bits)
-            || work.nonces.repeats() > self.0.config.maximum_attempts
+        if work.algorithm != self.0.algorithm
+            || match work.algorithm {
+                ConsensusAlgorithm::Cuckoo => {
+                    !(1..=63).contains(&work.edge_bits)
+                        || work.nonces.repeats() > self.0.config.maximum_attempts
+                }
+                ConsensusAlgorithm::OnDemand => {
+                    work.target != Target(ae_consensus::on_demand::TAG)
+                        || work.edge_bits != 0
+                        || work.nonces.start() != u64::from(ae_consensus::on_demand::TAG)
+                        || work.nonces.repeats() != 1
+                }
+                ConsensusAlgorithm::Hyperchain => true,
+            }
         {
             return Err(Error::Configuration);
         }
@@ -251,13 +282,20 @@ pub struct Worker {
 static NEXT_WORKER: AtomicU64 = AtomicU64::new(1);
 impl Worker {
     pub fn spawn(config: Config) -> Result<Self, Error> {
-        Self::spawn_backend(config, None)
+        Self::spawn_backend(config, None, ConsensusAlgorithm::Cuckoo)
     }
     pub fn spawn_external(config: Config, external: external::Config) -> Result<Self, Error> {
         external.validate()?;
-        Self::spawn_backend(config, Some(external))
+        Self::spawn_backend(config, Some(external), ConsensusAlgorithm::Cuckoo)
     }
-    fn spawn_backend(config: Config, external: Option<external::Config>) -> Result<Self, Error> {
+    pub fn spawn_on_demand(config: Config) -> Result<Self, Error> {
+        Self::spawn_backend(config, None, ConsensusAlgorithm::OnDemand)
+    }
+    fn spawn_backend(
+        config: Config,
+        external: Option<external::Config>,
+        algorithm: ConsensusAlgorithm,
+    ) -> Result<Self, Error> {
         config.validate()?;
         let worker = NEXT_WORKER
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
@@ -284,6 +322,7 @@ impl Worker {
             credits: Arc::new(AtomicUsize::new(0)),
             config,
             external,
+            algorithm,
             #[cfg(test)]
             hook: Mutex::new(None),
             #[cfg(test)]
@@ -406,7 +445,21 @@ fn run(shared: &Shared) {
             s.active = Some(receipt.clone());
             receipt
         };
-        let (attempts, work, result, external) = if let Some(config) = &shared.external {
+        let (attempts, work, result, external) = if shared.algorithm == ConsensusAlgorithm::OnDemand
+        {
+            let (count, result) = if receipt.cancelled.load(Ordering::Acquire) {
+                (0, Err(Error::Cancelled))
+            } else {
+                lock(&shared.state).status.nonce = Some(ae_consensus::on_demand::TAG.into());
+                (
+                    1,
+                    Ok(Outcome::OnDemand {
+                        seal: ae_consensus::on_demand::TAG,
+                    }),
+                )
+            };
+            (Some(count), Some(0), result, None)
+        } else if let Some(config) = &shared.external {
             let (report, result) = external::execute(shared, &receipt, config);
             // An external executable does not attest how many nonces or solver
             // operations it attempted. Only unstarted work is known to be zero.

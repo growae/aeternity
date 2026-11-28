@@ -82,7 +82,7 @@ impl Owner {
         let Some(config) = self.config.stratum.clone() else {
             return Ok(true);
         };
-        let Some(Live::Cuckoo(group)) = &self.production else {
+        let Some(Live::Automatic(group)) = &self.production else {
             return Err(Error::Configuration);
         };
         let current = group.client().current().filter(|g| {

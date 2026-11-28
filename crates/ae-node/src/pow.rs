@@ -315,7 +315,29 @@ where
     launch_inner(
         prepared,
         config,
-        Input::Cuckoo {
+        Input::Automatic {
+            algorithm: ae_protocol::ConsensusAlgorithm::Cuckoo,
+            config: Box::new(production),
+            clocks,
+        },
+        outputs,
+    )
+}
+pub fn launch_on_demand<F>(
+    prepared: Prepared,
+    config: Config,
+    clocks: Arc<dyn group::Clocks>,
+    outputs: F,
+) -> Result<Running, Box<StartError>>
+where
+    F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
+{
+    let (production, config) = config.into_parts();
+    launch_inner(
+        prepared,
+        config,
+        Input::Automatic {
+            algorithm: ae_protocol::ConsensusAlgorithm::OnDemand,
             config: Box::new(production),
             clocks,
         },
@@ -692,10 +714,10 @@ impl Owner {
         {
             let mut controls = lock(&self.shared.controls);
             match self.production.as_ref().unwrap() {
-                Live::Cuckoo(worker) => {
+                Live::Automatic(worker) => {
                     let client = worker.client();
                     client
-                        .set_enabled(controls.enabled.expect("Cuckoo control"))
+                        .set_enabled(controls.enabled.expect("automatic production control"))
                         .map_err(Error::Production)?;
                     controls.production = Some(client);
                 }
@@ -708,7 +730,7 @@ impl Owner {
             }
         }
         if self.config.stratum.is_some()
-            && let Some(Live::Cuckoo(group)) = &self.production
+            && let Some(Live::Automatic(group)) = &self.production
         {
             let database = self
                 .services
@@ -880,7 +902,7 @@ impl Owner {
             joined = false;
             self.status.failure.get_or_insert(e.clone());
             match self.input {
-                Input::Cuckoo { .. } => production_failure = Some(e),
+                Input::Automatic { .. } => production_failure = Some(e),
                 Input::Commands { .. } => command_failure = Some(e),
             }
         }
@@ -949,7 +971,7 @@ impl Owner {
         let mut commands = command_failure.map(Err);
         if let Some(retirement) = self.pending_retirement.take() {
             match retirement.value {
-                Retired::Cuckoo(report) => production = Some(Ok(*report)),
+                Retired::Automatic(report) => production = Some(Ok(*report)),
                 Retired::Commands(report) => commands = Some(Ok(*report)),
             }
         }

@@ -37,14 +37,16 @@ fn pow<P>(core: &Core, target: &mut crate::pow::Config<P>) -> Result<(), Error> 
 impl Settings {
     pub fn apply_network(&mut self, network: &crate::configuration::network::Network) {
         match self {
-            Self::Cuckoo(s) => network.apply(&mut s.config.connections),
+            Self::Cuckoo(s) | Self::OnDemandAutomatic(s) => {
+                network.apply(&mut s.config.connections)
+            }
             Self::OnDemand(s) => network.apply(&mut s.config.connections),
             Self::Hyperchain(s) => network.apply(&mut s.config.connections),
         }
     }
     pub fn apply_core(&mut self, core: &Core) -> Result<(), Error> {
         match self {
-            Self::Cuckoo(s) => pow(core, &mut s.config),
+            Self::Cuckoo(s) | Self::OnDemandAutomatic(s) => pow(core, &mut s.config),
             Self::OnDemand(s) => pow(core, &mut s.config),
             Self::Hyperchain(s) => {
                 if !s.cache.uses_cache(&s.runtime.gossip) {
@@ -92,7 +94,7 @@ impl Prepared {
         }
         let metrics = Metrics::resolve(resolved)?;
         let (routing, observer) = match settings {
-            Settings::Cuckoo(s) => (
+            Settings::Cuckoo(s) | Settings::OnDemandAutomatic(s) => (
                 &mut s.config.workers.routing,
                 &mut s.config.connections.observer,
             ),
@@ -120,7 +122,9 @@ impl Prepared {
         }
         let optional = Optional::resolve(resolved)?;
         match settings {
-            Settings::Cuckoo(s) => optional.apply(&mut s.config.workers, &mut s.config.connections),
+            Settings::Cuckoo(s) | Settings::OnDemandAutomatic(s) => {
+                optional.apply(&mut s.config.workers, &mut s.config.connections)
+            }
             Settings::OnDemand(s) => {
                 optional.apply(&mut s.config.workers, &mut s.config.connections)
             }
@@ -141,7 +145,9 @@ impl Prepared {
         }
         let discovery = Discovery::resolve(resolved)?;
         match settings {
-            Settings::Cuckoo(s) => discovery.apply(&mut s.config.connections)?,
+            Settings::Cuckoo(s) | Settings::OnDemandAutomatic(s) => {
+                discovery.apply(&mut s.config.connections)?
+            }
             Settings::OnDemand(s) => discovery.apply(&mut s.config.connections)?,
             Settings::Hyperchain(s) => {
                 discovery.apply(&mut s.config.connections)?;

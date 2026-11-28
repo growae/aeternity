@@ -504,3 +504,5 @@ mod stratum;
 
 #[path = "application/miners.rs"]
 mod miners;
+#[path = "application/on_demand.rs"]
+mod on_demand;

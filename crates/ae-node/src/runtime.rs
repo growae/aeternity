@@ -41,7 +41,7 @@ pub(crate) struct Information {
     pub currency:
         Result<Arc<crate::configuration::currency::Plan>, crate::configuration::currency::Error>,
 }
-pub use launch::{Cuckoo, Hyperchain, OnDemand, Settings, StartError};
+pub use launch::{Automatic, Cuckoo, Hyperchain, OnDemand, Settings, StartError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
@@ -436,7 +436,10 @@ impl Handle {
             HandleInner::Cuckoo(h) => h
                 .set_enabled(enabled)
                 .map_err(|error| Error::Pow(Box::new(error))),
-            HandleInner::OnDemand(_) => Err(Error::UnsupportedControl),
+            HandleInner::OnDemand(h) => h.set_enabled(enabled).map_err(|error| match error {
+                pow::Error::UnsupportedControl => Error::UnsupportedControl,
+                error => Error::Pow(Box::new(error)),
+            }),
             HandleInner::Hyperchain(h) => if enabled {
                 h.start_production()
             } else {

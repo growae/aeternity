@@ -7,6 +7,7 @@ use std::{
 
 fn work(start: u64, repeats: u64) -> Work {
     Work {
+        algorithm: ConsensusAlgorithm::Cuckoo,
         hash: blake2b_256(b"wsffgujnjkqhduihsahswgdf"),
         target: HIGHEST_TARGET,
         edge_bits: 15,
@@ -36,6 +37,112 @@ fn pause(worker: &Worker, phase: Phase, panic: bool) -> (mpsc::Receiver<()>, mps
 }
 fn received(wait: &mpsc::Receiver<()>) {
     wait.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+#[test]
+fn on_demand_callback_matches_native_headers_without_graph_search() {
+    use ae_codec::headers::{Header, HeaderMode};
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../ae-consensus/tests/fixtures/erlang_on_demand.json"
+    ))
+    .unwrap();
+    let worker = Worker::spawn_on_demand(Config::default()).unwrap();
+    let client = worker.client();
+    let mut count = 0;
+    for row in rows["blocks"].as_array().unwrap() {
+        if row["result"]["ok"] != true {
+            continue;
+        }
+        let expected = &row["result"]["value"];
+        let Header::Key(mut header) = Header::decode(
+            &hex::decode(expected["before_hex"].as_str().unwrap()).unwrap(),
+            HeaderMode::ProofOfWork,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        let work = Work::on_demand(&header).unwrap();
+        assert_eq!(hex::encode_upper(work.hash.0), expected["sealing_input"]);
+        let ticket = client.submit(work).unwrap();
+        let result = ticket.blocking_wait();
+        assert_eq!(result.id, ticket.id());
+        assert_eq!(result.work, work);
+        assert_eq!(result.result, Ok(Outcome::OnDemand { seal: 1338 }));
+        assert_eq!((result.attempts, result.work_units), (Some(1), Some(0)));
+        assert!(result.external.is_none());
+        ticket.request_cancel();
+        assert!(!ticket.cancel_if_pending());
+        assert!(Arc::ptr_eq(&result, &ticket.try_result().unwrap()));
+        ae_consensus::on_demand::seal(&mut header);
+        assert_eq!(
+            hex::encode_upper(Header::Key(header).encode().unwrap()),
+            expected["sealed_hex"]
+        );
+        count += 1;
+    }
+    assert_eq!(count, 24);
+    let status = worker.shutdown();
+    assert!(!status.running && !status.accepting);
+    assert_eq!(status.completed, 24);
+    assert_eq!(status.pending, 0);
+}
+#[test]
+fn on_demand_workers_bind_consensus_and_retain_receipt_capacity_after_join() {
+    let worker = Worker::spawn_on_demand(Config {
+        requests: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let client = worker.client();
+    let cuckoo = work(38, 1);
+    assert!(matches!(client.submit(cuckoo), Err(Error::Configuration)));
+    let request = Work {
+        algorithm: ConsensusAlgorithm::OnDemand,
+        target: Target(1338),
+        edge_bits: 0,
+        nonces: Nonces::reserve(1338, 1).unwrap(),
+        ..cuckoo
+    };
+    let graph = Worker::spawn(Config::default()).unwrap();
+    assert!(matches!(
+        graph.client().submit(request),
+        Err(Error::Configuration)
+    ));
+    assert_eq!(graph.shutdown().submitted, 0);
+    for invalid in [
+        Work {
+            edge_bits: 29,
+            ..request
+        },
+        Work {
+            target: Target(1339),
+            ..request
+        },
+        Work {
+            nonces: Nonces::reserve(1339, 1).unwrap(),
+            ..request
+        },
+        Work {
+            nonces: Nonces::reserve(1338, 2).unwrap(),
+            ..request
+        },
+        Work {
+            algorithm: ConsensusAlgorithm::Hyperchain,
+            ..request
+        },
+    ] {
+        assert!(matches!(client.submit(invalid), Err(Error::Configuration)));
+    }
+    let ticket = client.submit(request).unwrap();
+    let result = ticket.blocking_wait();
+    drop(ticket);
+    assert!(matches!(client.submit(request), Err(Error::Busy)));
+    let status = worker.shutdown();
+    assert_eq!(status.completed, 1);
+    assert!(!status.running && !status.accepting);
+    assert_eq!(result.result, Ok(Outcome::OnDemand { seal: 1338 }));
+    assert!(matches!(client.submit(request), Err(Error::Closed)));
+    drop(result);
+    assert_eq!(client.retained(), 0);
 }
 fn found(receipt: &Completion, expected_nonce: u64) {
     let Ok(Outcome::Found { nonce, proof }) = &receipt.result else {

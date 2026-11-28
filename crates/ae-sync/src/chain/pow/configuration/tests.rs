@@ -40,6 +40,44 @@ fn prepare(config: &Configuration) -> Result<Prepared, Error> {
 }
 
 #[test]
+fn on_demand_preparation_keeps_native_instances_but_ignores_external_miner_options() {
+    let system = System::default().with_miners(&serde_json::from_str(
+        r#"[["does-not-exist","--unused",true,18446744073709551616,[3,-1,3],"unknown-group"]]"#,
+    ).unwrap()).unwrap();
+    let configuration = Configuration::from_value(&json!({}), &system).unwrap();
+    let prepared = configuration
+        .prepare_on_demand(mining::Config::new(AccountPublicKey([7; 32])))
+        .unwrap();
+    assert_eq!(prepared.instances, configuration.instances().unwrap());
+    assert_eq!(prepared.config.instances.len(), 3);
+    assert_eq!(
+        prepared
+            .instances
+            .iter()
+            .map(|i| (i.native_id, i.device.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, Some(3.into())),
+            (1, Some((-1).into())),
+            (0, Some(3.into()))
+        ]
+    );
+    for instance in &prepared.config.instances {
+        assert!(instance.external.is_none());
+        assert_eq!(instance.repeats, 1);
+    }
+    let empty = Configuration::from_value(&json!({"miners":[]}), &system).unwrap();
+    assert!(
+        empty
+            .prepare_on_demand(prepared.config)
+            .unwrap()
+            .config
+            .instances
+            .is_empty()
+    );
+}
+
+#[test]
 fn system_tuple_translation_retains_existing_resource_limits_before_workers() {
     let row = json!(["miner", "", false, 1, null, "aecuckoo"]);
     let parse = |value: Value| System::default().with_miners(&value);

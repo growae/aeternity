@@ -102,7 +102,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Importer<O> {
         snapshots: snapshots::Owner,
         limits: ae_chain::repository::pow::key::Limits,
     ) -> Result<preparation::Builder<O>, super::producer::mining::Error> {
-        if !snapshots.uses_database(self.database()) {
+        if self.algorithm() != ae_protocol::ConsensusAlgorithm::Cuckoo
+            || !snapshots.uses_database(self.database())
+        {
             return Err(super::producer::mining::Error::Binding);
         }
         self.pow_preparation(snapshots, limits)

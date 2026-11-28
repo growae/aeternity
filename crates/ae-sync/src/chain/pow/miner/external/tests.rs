@@ -31,6 +31,7 @@ pub(crate) fn configuration(mode: &str) -> Config {
 }
 fn work() -> Work {
     Work {
+        algorithm: ae_protocol::ConsensusAlgorithm::Cuckoo,
         hash: blake2b_256(b"wsffgujnjkqhduihsahswgdf"),
         target: HIGHEST_TARGET,
         edge_bits: 15,

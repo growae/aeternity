@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in crate::chain::pow::producer) struct Mining<O> {
+    algorithm: ae_protocol::ConsensusAlgorithm,
     builder: preparation::Builder<O>,
     instrumentation: ae_chain::instrumentation::Publisher,
     config: Config,
@@ -24,6 +25,13 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             config,
             clock,
         } = inputs;
+        let algorithm = importer.algorithm();
+        if !matches!(
+            algorithm,
+            ae_protocol::ConsensusAlgorithm::Cuckoo | ae_protocol::ConsensusAlgorithm::OnDemand
+        ) {
+            return Err(Error::Binding);
+        }
         if !snapshots.uses_database(importer.database())
             || config.instances.len() > 64
             || config.retry > Duration::from_secs(60)
@@ -38,14 +46,20 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             return Err(Error::Configuration);
         }
         let builder = importer.pow_preparation(snapshots, config.preparation)?;
-        if builder.edge_bits() != config.edge_bits {
+        if algorithm == ae_protocol::ConsensusAlgorithm::Cuckoo
+            && builder.edge_bits() != config.edge_bits
+        {
             return Err(Error::Binding);
         }
         let mut cpus = Vec::new();
         for instance in &config.instances {
-            let worker = match &instance.external {
-                Some(config) => miner::Worker::spawn_external(instance.worker, config.clone()),
-                None => miner::Worker::spawn(instance.worker),
+            let worker = if algorithm == ae_protocol::ConsensusAlgorithm::OnDemand {
+                miner::Worker::spawn_on_demand(instance.worker)
+            } else {
+                match &instance.external {
+                    Some(config) => miner::Worker::spawn_external(instance.worker, config.clone()),
+                    None => miner::Worker::spawn(instance.worker),
+                }
             }
             .map_err(Error::Worker)?;
             cpus.push(Cpu {
@@ -55,6 +69,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             });
         }
         Ok(Self {
+            algorithm,
             builder,
             instrumentation: importer.database().instrumentation().clone(),
             config,
@@ -176,7 +191,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             && let Some(done) = p.task.try_result()
         {
             let epoch = p.epoch;
-            let mut out = prepared(done, p.edge_bits);
+            let mut out = prepared(done, p.edge_bits, p.algorithm);
             self.preparing = None;
             self.wanted = true;
             if let Completion::Prepared { result, used, .. } = &mut out {
@@ -347,6 +362,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
                     )
                     .map_err(|_| Error::Binding)?;
                 self.preparing = Some(Preparing {
+                    algorithm: self.algorithm,
                     edge_bits: self.config.edge_bits,
                     task,
                     epoch: self.epoch,
@@ -371,13 +387,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
             if cpu.job.is_some() {
                 continue;
             }
-            let nonces = Nonces::reserve(candidate.nonce, cpu.config.repeats)
-                .map_err(|_| Error::Configuration)?;
-            let work = miner::Work::key_with_edge_bits(
-                &candidate.value.header,
-                nonces,
-                candidate.value.edge_bits,
-            )
+            let work = if self.algorithm == ae_protocol::ConsensusAlgorithm::OnDemand {
+                miner::Work::on_demand(&candidate.value.header)
+            } else {
+                let nonces = Nonces::reserve(candidate.nonce, cpu.config.repeats)
+                    .map_err(|_| Error::Configuration)?;
+                miner::Work::key_with_edge_bits(
+                    &candidate.value.header,
+                    nonces,
+                    candidate.value.edge_bits,
+                )
+            }
             .map_err(Error::Worker)?;
             match cpu
                 .worker
@@ -393,7 +413,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Mining<O> {
                         deadline,
                         timed_out: false,
                     });
-                    candidate.nonce = nonces.next().into();
+                    candidate.nonce = work.nonces.next().into();
                 }
                 Err(miner::Error::Busy) => retry = true,
                 Err(e) => return Err(Error::Worker(e)),
