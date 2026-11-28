@@ -214,7 +214,17 @@ impl Prepared {
         let node = self
             .node
             .launch(self.settings, || Ok(Default::default()))
-            .map_err(|e| Error::at("runtime launch", e.error))?;
+            .map_err(|e| {
+                let phase = match &e.error {
+                    runtime::Error::Pow(error)
+                        if **error == crate::pow::Error::BeneficiaryNotConfigured =>
+                    {
+                        "autostart: beneficiary not configured"
+                    }
+                    _ => "runtime launch",
+                };
+                Error::at(phase, e.error)
+            })?;
         Ok(Running {
             node,
             http: self.http,

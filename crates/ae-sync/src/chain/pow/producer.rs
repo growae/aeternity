@@ -74,6 +74,7 @@ impl Default for Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Configuration,
+    BeneficiaryNotConfigured,
     Binding,
     Closed,
     Time,
@@ -143,6 +144,8 @@ struct Shared {
     credits: Arc<Mutex<usize>>,
     limit: usize,
     commands: Mutex<Option<on_demand::service::Client>>,
+    command_owner: bool,
+    start_allowed: bool,
 }
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -190,6 +193,7 @@ impl Client {
         if !s.status.accepting {
             return Err(Error::Closed);
         }
+        policy::start(s.status.requested_enabled, enabled, self.0.start_allowed)?;
         if s.status.requested_enabled != enabled {
             s.status.request_revision = s
                 .status
@@ -285,12 +289,15 @@ impl Worker {
         keys: keys::Client,
         config: Config,
         clock: impl Clock,
-        mining: mining::Inputs,
+        mining: Option<mining::Inputs>,
         commands: CommandInputs,
     ) -> Result<Self, Error> {
         if importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand
-            || commands.config.controller.beneficiary != mining.config.beneficiary
-            || commands.config.controller.release_info != mining.config.release_info
+            || commands.config.controller.beneficiary
+                != mining.as_ref().map(|m| m.config.beneficiary)
+            || mining
+                .as_ref()
+                .is_some_and(|m| commands.config.controller.release_info != m.config.release_info)
         {
             return Err(Error::Binding);
         }
@@ -305,7 +312,7 @@ impl Worker {
             keys,
             config,
             clock,
-            Some(mining),
+            mining,
             Some(commands),
         )
     }
@@ -318,6 +325,12 @@ impl Worker {
         mining: Option<mining::Inputs>,
         commands: Option<CommandInputs>,
     ) -> Result<Self, Error> {
+        let start_allowed = commands
+            .as_ref()
+            .is_none_or(|c| c.config.controller.beneficiary.is_some());
+        if config.enabled && !start_allowed {
+            return Err(Error::BeneficiaryNotConfigured);
+        }
         if (config.external_key_work && mining.is_some())
             || config.poll.is_zero()
             || config.poll > Duration::from_secs(1)
@@ -384,6 +397,8 @@ impl Worker {
             credits: Arc::new(Mutex::new(0)),
             limit: config.outputs,
             commands: Mutex::new(None),
+            command_owner: commands.is_some(),
+            start_allowed,
         });
         let commands = commands
             .map(|inputs| {

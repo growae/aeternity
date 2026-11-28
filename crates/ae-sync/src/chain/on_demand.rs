@@ -10,7 +10,7 @@ pub struct Config {
     pub service: service::Config,
 }
 impl Config {
-    pub fn new(beneficiary: ae_types::AccountPublicKey) -> Self {
+    pub fn new(beneficiary: impl Into<Option<ae_types::AccountPublicKey>>) -> Self {
         Self {
             controller: runtime::Config::new(beneficiary),
             service: Default::default(),

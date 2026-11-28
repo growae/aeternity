@@ -1,7 +1,7 @@
 use super::*;
 use ae_sync::chain::{
     hyperchain::conductor,
-    pow::{configuration as mining, generator, group, producer},
+    pow::{configuration as mining, group, producer},
 };
 use ae_types::AccountPublicKey;
 use configuration::resolution::{Resolved, Strategy};
@@ -118,11 +118,7 @@ impl Plan {
         stratum: Option<crate::stratum::configured::Config>,
     ) -> Result<runtime::Settings, Error> {
         Ok(match node.family() {
-            family
-                if family == runtime::Family::Cuckoo
-                    || (family == runtime::Family::OnDemand
-                        && (self.autostart || self.beneficiary.is_some())) =>
-            {
+            family @ (runtime::Family::Cuckoo | runtime::Family::OnDemand) => {
                 let mut config: crate::pow::Config = crate::pow::Config {
                     stratum: stratum.map(Arc::new),
                     ..Default::default()
@@ -159,21 +155,6 @@ impl Plan {
                     runtime::Settings::Cuckoo(automatic)
                 }
             }
-            runtime::Family::OnDemand => {
-                let beneficiary = self.beneficiary.ok_or_else(|| {
-                    Error::at(
-                        "on-demand beneficiary",
-                        "beneficiary required by command runtime",
-                    )
-                })?;
-                runtime::Settings::OnDemand(Box::new(runtime::OnDemand {
-                    config: crate::pow::Config::with_production(crate::pow::Commands::new(
-                        beneficiary,
-                    )),
-                    clock: Arc::new(generator::SystemClock),
-                }))
-            }
-            runtime::Family::Cuckoo => unreachable!("handled automatic Cuckoo settings"),
             runtime::Family::Hyperchain => {
                 let (gossip, cache) =
                     ae_storage::pool::worker::GossipCache::managed(cache_size, 100_000)

@@ -97,17 +97,17 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
         // the same lock as group desired-state changes and shutdown admission.
         config.enabled = false;
         match (mining, commands) {
-            (Some(mining), Some(commands)) => producer::Worker::spawn_with_commands(
+            (mining, Some(commands)) => producer::Worker::spawn_with_commands(
                 &importer,
                 generator.client(),
                 keys,
                 config,
                 ProducerClock(clocks.producer(generation)),
-                producer::mining::Inputs {
+                mining.map(|config| producer::mining::Inputs {
                     snapshots: snapshots.clone(),
-                    config: mining,
+                    config,
                     clock: clocks.preparation(generation),
-                },
+                }),
                 producer::CommandInputs {
                     snapshots,
                     pool,
@@ -134,7 +134,6 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> supervisor::Factory for Factor
                 config,
                 ProducerClock(clocks.producer(generation)),
             ),
-            (None, Some(_)) => Err(producer::Error::Binding),
         }
         .map_err(StartError::Producer)
     }

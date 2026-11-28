@@ -237,7 +237,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                     mining.invalidate().map_err(Error::Mining)?;
                 }
             }
-            if self.mining.is_some() || self.config.external_key_work {
+            if self.mining.is_some() || self.config.external_key_work || self.shared.command_owner {
                 if enabled && self.config.resume_current && self.promote.is_none() {
                     self.promote = Some(self.selected.miner);
                 }
@@ -484,7 +484,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
             && self.status.enabled
     }
     fn act(&mut self, wall: u64, now: Instant, keys: keys::PublicKeys) -> Result<(), Error> {
-        if !self.status.enabled && self.mining.is_none() && !self.config.external_key_work {
+        if !self.status.enabled
+            && self.mining.is_none()
+            && !self.config.external_key_work
+            && !self.shared.command_owner
+        {
             return Ok(());
         }
         if let Some(expected) = self.promote {
@@ -493,7 +497,9 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Service<O> {
                 let s = lock(&shared.state);
                 // Native key promotion precedes preparation even while PoW
                 // production is stopped. It remains owned by this producer.
-                let stopped_promotion = (self.mining.is_some() || self.config.external_key_work)
+                let stopped_promotion = (self.mining.is_some()
+                    || self.config.external_key_work
+                    || self.shared.command_owner)
                     && !s.shutdown
                     && s.status.request_revision == self.status.applied_revision;
                 if !self.authorized(&s) && !stopped_promotion {

@@ -1,0 +1,429 @@
+{
+  "server": {
+    "start": [
+      "error",
+      "beneficiary_not_configured"
+    ],
+    "stop": "ok",
+    "state": {
+      "options": {},
+      "workers": 0,
+      "beneficiary": false,
+      "instances": 0,
+      "keys_ready": true,
+      "leader": false,
+      "producing": "stopped"
+    },
+    "requests": [
+      {
+        "request": "key",
+        "result": {
+          "exception": {
+            "reason": "{badmatch,{error,beneficiary_not_configured}}",
+            "class": "error"
+          }
+        }
+      },
+      {
+        "request": "zero_key",
+        "result": {
+          "value": [
+            "ok",
+            []
+          ]
+        }
+      },
+      {
+        "request": "zero_micro",
+        "result": {
+          "exception": {
+            "reason": "{badmatch,{error,beneficiary_not_configured}}",
+            "class": "error"
+          }
+        }
+      },
+      {
+        "request": "empty_pool",
+        "result": {
+          "value": [
+            "ok",
+            [
+              "controlled_top_block"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "controls": [
+    {
+      "reply": "ok",
+      "running": "running",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "running"
+      },
+      "unchanged": true,
+      "effects": [],
+      "leader": false,
+      "action": "start"
+    },
+    {
+      "reply": "ok",
+      "running": "running",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "stopped"
+      },
+      "unchanged": false,
+      "effects": [
+        "stop_generator",
+        [
+          "publish",
+          "stop_mining"
+        ]
+      ],
+      "leader": false,
+      "action": "stop"
+    },
+    {
+      "reply": "ok",
+      "running": "running",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": true,
+        "producing": "running"
+      },
+      "unchanged": true,
+      "effects": [],
+      "leader": true,
+      "action": "start"
+    },
+    {
+      "reply": "ok",
+      "running": "running",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "stopped"
+      },
+      "unchanged": false,
+      "effects": [
+        "stop_generator",
+        [
+          "publish",
+          "stop_mining"
+        ]
+      ],
+      "leader": true,
+      "action": "stop"
+    },
+    {
+      "reply": [
+        "error",
+        "beneficiary_not_configured"
+      ],
+      "running": "stopped",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "stopped"
+      },
+      "unchanged": true,
+      "effects": [],
+      "leader": false,
+      "action": "start"
+    },
+    {
+      "reply": "ok",
+      "running": "stopped",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "stopped"
+      },
+      "unchanged": true,
+      "effects": [
+        "stop_generator",
+        [
+          "publish",
+          "stop_mining"
+        ]
+      ],
+      "leader": false,
+      "action": "stop"
+    },
+    {
+      "reply": [
+        "error",
+        "beneficiary_not_configured"
+      ],
+      "running": "stopped",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": true,
+        "producing": "stopped"
+      },
+      "unchanged": true,
+      "effects": [],
+      "leader": true,
+      "action": "start"
+    },
+    {
+      "reply": "ok",
+      "running": "stopped",
+      "state": {
+        "options": {
+          "strictly_follow_top": false
+        },
+        "workers": 0,
+        "beneficiary": false,
+        "instances": 0,
+        "keys_ready": true,
+        "leader": false,
+        "producing": "stopped"
+      },
+      "unchanged": false,
+      "effects": [
+        "stop_generator",
+        [
+          "publish",
+          "stop_mining"
+        ]
+      ],
+      "leader": true,
+      "action": "stop"
+    }
+  ],
+  "initialization": [
+    {
+      "result": {
+        "initial": {
+          "options": {
+            "strictly_follow_top": true
+          },
+          "workers": 0,
+          "beneficiary": false,
+          "instances": 0,
+          "keys_ready": false,
+          "leader": false,
+          "producing": "stopped"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config",
+          "miner_configs",
+          "height_metric",
+          [
+            "subscribe",
+            "candidate_block"
+          ]
+        ],
+        "after_keys": {
+          "value": {
+            "options": {
+              "strictly_follow_top": true
+            },
+            "workers": 0,
+            "beneficiary": false,
+            "instances": 0,
+            "keys_ready": true,
+            "leader": false,
+            "producing": "stopped"
+          }
+        }
+      },
+      "beneficiary": "missing",
+      "autostart": false
+    },
+    {
+      "result": {
+        "initial": {
+          "options": {
+            "strictly_follow_top": true
+          },
+          "workers": 0,
+          "beneficiary": false,
+          "instances": 0,
+          "keys_ready": false,
+          "leader": false,
+          "producing": "running"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config",
+          "miner_configs",
+          "height_metric",
+          [
+            "subscribe",
+            "candidate_block"
+          ]
+        ],
+        "after_keys": {
+          "exception": {
+            "reason": "function_clause",
+            "class": "error"
+          }
+        }
+      },
+      "beneficiary": "missing",
+      "autostart": true
+    },
+    {
+      "result": {
+        "initial": {
+          "options": {
+            "strictly_follow_top": true
+          },
+          "workers": 0,
+          "beneficiary": true,
+          "instances": 0,
+          "keys_ready": false,
+          "leader": false,
+          "producing": "stopped"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config",
+          "miner_configs",
+          "height_metric",
+          [
+            "subscribe",
+            "candidate_block"
+          ]
+        ]
+      },
+      "beneficiary": "valid",
+      "autostart": false
+    },
+    {
+      "result": {
+        "initial": {
+          "options": {
+            "strictly_follow_top": true
+          },
+          "workers": 0,
+          "beneficiary": true,
+          "instances": 0,
+          "keys_ready": false,
+          "leader": false,
+          "producing": "running"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config",
+          "miner_configs",
+          "height_metric",
+          [
+            "subscribe",
+            "candidate_block"
+          ]
+        ]
+      },
+      "beneficiary": "valid",
+      "autostart": true
+    },
+    {
+      "result": {
+        "exception": {
+          "reason": "{case_clause,{error,{beneficiary_error,invalid_encoding}}}",
+          "class": "error"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config"
+        ]
+      },
+      "beneficiary": "invalid",
+      "autostart": false
+    },
+    {
+      "result": {
+        "exception": {
+          "reason": "{case_clause,{error,{beneficiary_error,invalid_encoding}}}",
+          "class": "error"
+        },
+        "calls": [
+          "genesis_hash",
+          "top_hash",
+          "consensus_config",
+          "micro_cycle",
+          "top_hash",
+          "stratum_config",
+          "beneficiary_config"
+        ]
+      },
+      "beneficiary": "invalid",
+      "autostart": true
+    }
+  ]
+}

@@ -140,6 +140,7 @@ struct Shared<O> {
     wake: Condvar,
     credits: Arc<Mutex<usize>>,
     limit: usize,
+    start_allowed: bool,
 }
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -169,6 +170,9 @@ impl<O> Client<O> {
         let mut s = lock(&self.0.state);
         if !s.status.accepting {
             return Err(Error::Closed);
+        }
+        if enabled && !s.status.requested_enabled && !self.0.start_allowed {
+            return Err(Error::Producer(producer::Error::BeneficiaryNotConfigured));
         }
         if s.status.requested_enabled != enabled {
             s.status.request_revision = s
@@ -294,10 +298,15 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
         if importer.consensus() != ae_protocol::ConsensusType::Pow
             || config.generator.preparation.micro_cycle_ms != config.producer.micro_cycle_ms
             || (commands.is_some()
-                && (config.mining.is_none()
-                    || importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand))
+                && importer.algorithm() != ae_protocol::ConsensusAlgorithm::OnDemand)
         {
             return Err(Error::Binding);
+        }
+        let start_allowed = commands
+            .as_ref()
+            .is_none_or(|c| c.controller.beneficiary.is_some());
+        if config.producer.enabled && !start_allowed {
+            return Err(Error::Producer(producer::Error::BeneficiaryNotConfigured));
         }
         let lease = GroupLease::acquire(importer.database()).map_err(Error::Ownership)?;
         let status = Status {
@@ -319,6 +328,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Worker<O> {
             failure: None,
         };
         let shared = Arc::new(Shared {
+            start_allowed,
             database: importer.database().clone(),
             state: Mutex::new(State {
                 status,

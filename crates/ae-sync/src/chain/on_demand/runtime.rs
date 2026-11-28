@@ -32,7 +32,7 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub beneficiary: AccountPublicKey,
+    pub beneficiary: Option<AccountPublicKey>,
     pub release_info: u32,
     pub commands: control::Limits,
     pub key: pow::key::Limits,
@@ -44,9 +44,9 @@ pub struct Config {
     pub resume_current: bool,
 }
 impl Config {
-    pub fn new(beneficiary: AccountPublicKey) -> Self {
+    pub fn new(beneficiary: impl Into<Option<AccountPublicKey>>) -> Self {
         Self {
-            beneficiary,
+            beneficiary: beneficiary.into(),
             release_info: 0,
             commands: Default::default(),
             key: Default::default(),
@@ -61,6 +61,7 @@ impl Config {
 pub enum Error {
     Binding,
     Configuration,
+    BeneficiaryNotConfigured,
     Stopped,
     RecoveryRequired,
     Time,
@@ -645,6 +646,11 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host for Runtime<'_, O> {
     }
     fn key(&mut self) -> Result<Arc<Block>, Error> {
         let parent = self.tip()?;
+        let beneficiary = self
+            .owner
+            .config
+            .beneficiary
+            .ok_or(Error::BeneficiaryNotConfigured)?;
         let info = self.owner.keys.info();
         if !info.accepting {
             return Err(Error::Stopped);
@@ -656,7 +662,7 @@ impl<O: MapOrder + Clone + Send + Sync + 'static> Host for Runtime<'_, O> {
                 preparation::Request {
                     parent,
                     miner: info.keys.candidate,
-                    beneficiary: self.owner.config.beneficiary,
+                    beneficiary,
                     release_info: self.owner.config.release_info,
                 },
                 self.owner.clock.clone(),

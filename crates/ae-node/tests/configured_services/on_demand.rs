@@ -204,6 +204,181 @@ async fn shared_result(h: &root::Handle, ticket: &service::Ticket) -> Arc<servic
     .await
 }
 #[tokio::test]
+async fn missing_on_demand_beneficiary_keeps_stopped_commands_and_rebinds_without_enabling() {
+    use ae_sync::chain::on_demand::control::{Error as CommandError, Reply};
+    use ae_sync::chain::pow::producer;
+    let native: Value = serde_json::from_str(include_str!(
+        "../../../ae-sync/tests/fixtures/erlang_on_demand_beneficiary.json"
+    ))
+    .unwrap();
+    let lab = Lab::new();
+    let p = prepared(&lab, false);
+    let db = p.configured().chain().database().clone();
+    let snapshots = p.snapshots().clone();
+    let revision = db.view().unwrap().status().revision;
+    let running = root::launch_on_demand(
+        p,
+        root_config(&lab),
+        Arc::new(group::SystemClocks::default()),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    let h = running.handle();
+    root_ready(&h, 1).await;
+    let importer = h.importer().unwrap();
+    for round in 0..3 {
+        let commands = h.commands().unwrap();
+        let group = h.production().unwrap();
+        let producer = group.current().unwrap().producer;
+        let before = (
+            group.status().request_revision,
+            producer.status().request_revision,
+        );
+        assert_eq!(
+            h.set_enabled(true),
+            Err(root::Error::BeneficiaryNotConfigured)
+        );
+        assert_eq!(
+            group.set_enabled(true),
+            Err(group::Error::Producer(
+                producer::Error::BeneficiaryNotConfigured
+            ))
+        );
+        assert_eq!(
+            producer.set_enabled(true),
+            Err(producer::Error::BeneficiaryNotConfigured)
+        );
+        assert_eq!(
+            before,
+            (
+                group.status().request_revision,
+                producer.status().request_revision
+            )
+        );
+        assert!(!group.status().requested_enabled && !producer.status().enabled);
+        assert!(producer.status().mining.is_none());
+        for row in native["server"]["requests"].as_array().unwrap() {
+            let command = match row["request"].as_str().unwrap() {
+                "key" => Command::Key,
+                "zero_key" => Command::Blocks {
+                    count: 0,
+                    kind: Kind::Key,
+                },
+                "zero_micro" => Command::Blocks {
+                    count: 0,
+                    kind: Kind::Micro,
+                },
+                "empty_pool" => Command::EmptyPool,
+                _ => unreachable!(),
+            };
+            let result = shared_result(&h, &commands.client.submit(command).unwrap()).await;
+            let report = result.result.as_ref().unwrap();
+            assert!(report.admissions.is_empty());
+            if row["result"].get("exception").is_some() {
+                assert_eq!(
+                    row["result"]["exception"]["reason"],
+                    "{badmatch,{error,beneficiary_not_configured}}"
+                );
+                assert!(matches!(
+                    report.command.result,
+                    Err(CommandError::Host(runtime::Error::BeneficiaryNotConfigured))
+                ));
+            } else {
+                let Ok(Reply::Blocks(blocks)) = &report.command.result else {
+                    panic!("{report:?}")
+                };
+                assert_eq!(
+                    blocks.len(),
+                    row["result"]["value"][1].as_array().unwrap().len()
+                );
+            }
+        }
+        h.set_enabled(false).unwrap();
+        assert_eq!(db.view().unwrap().status().revision, revision);
+        if round != 2 {
+            let child = if round == 0 {
+                workers::Child::Keys
+            } else {
+                workers::Child::Admission
+            };
+            within(h.workers().unwrap().restart(child, 1).unwrap().wait())
+                .await
+                .unwrap();
+            within(async {
+                loop {
+                    while h.try_output().is_some() {}
+                    assert_eq!(
+                        h.set_enabled(true),
+                        Err(root::Error::BeneficiaryNotConfigured)
+                    );
+                    let status = h.status();
+                    assert!(status.failure.is_none(), "{status:?}");
+                    if status.ready && status.production_starts == round + 2 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await;
+            assert!(commands.client.status().joined);
+            assert!(commands.client.submit(Command::Key).is_err());
+            assert!(Arc::ptr_eq(&importer, &h.importer().unwrap()));
+        }
+    }
+    let exit = running.shutdown().await.unwrap();
+    assert_root_joined(&exit);
+    assert!(exit.status.failure.is_none(), "{:?}", exit.status);
+    assert!(exit.status.commands.as_ref().unwrap().joined);
+    assert_eq!(snapshots.live_snapshots(), 0);
+}
+
+#[tokio::test]
+async fn missing_on_demand_beneficiary_rejects_autostart_and_returns_prepared_chain() {
+    let native: Value = serde_json::from_str(include_str!(
+        "../../../ae-sync/tests/fixtures/erlang_on_demand_beneficiary.json"
+    ))
+    .unwrap();
+    let row = native["initialization"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["beneficiary"] == "missing" && r["autostart"] == true)
+        .unwrap();
+    assert_eq!(
+        row["result"]["after_keys"]["exception"]["reason"],
+        "function_clause"
+    );
+    let lab = Lab::new();
+    let p = prepared(&lab, false);
+    let db = p.configured().chain().database().clone();
+    let mut config = root_config(&lab);
+    config.production.producer.enabled = true;
+    let failure =
+        root::launch_on_demand(p, config, Arc::new(group::SystemClocks::default()), || {
+            Ok(Default::default())
+        })
+        .err()
+        .unwrap();
+    assert_eq!(failure.error, root::Error::BeneficiaryNotConfigured);
+    assert!(Arc::ptr_eq(
+        &db,
+        failure.prepared.configured().chain().database()
+    ));
+    // The rejected startup owns no running children or production leases.
+    let lease = ae_storage::pow::ProducerLease::acquire(&db).unwrap();
+    drop(lease);
+    let running = root::launch_on_demand(
+        failure.prepared,
+        root_config(&lab),
+        Arc::new(group::SystemClocks::default()),
+        || Ok(Default::default()),
+    )
+    .unwrap();
+    root_ready(&running.handle(), 1).await;
+    assert_root_joined(&running.shutdown().await.unwrap());
+}
+
+#[tokio::test]
 async fn shared_on_demand_commands_commit_while_automatic_preparation_is_inflight() {
     use ae_sync::chain::pow::producer::mining;
     let lab = Lab::new();

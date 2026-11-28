@@ -98,6 +98,7 @@ pub enum Child {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Configuration,
+    BeneficiaryNotConfigured,
     NoRuntime,
     Closed,
     ReceiptTaken,
@@ -164,6 +165,7 @@ struct Controls {
     commands: Option<CommandGeneration>,
     pending_key: Option<pending::Client>,
     enabled: Option<bool>,
+    start_allowed: bool,
 }
 struct Shared {
     stop: watch::Sender<bool>,
@@ -228,6 +230,9 @@ impl Handle {
         let mut c = lock(&self.shared.controls);
         if c.enabled.is_none() {
             return Err(Error::UnsupportedControl);
+        }
+        if enabled && c.enabled == Some(false) && !c.start_allowed {
+            return Err(Error::BeneficiaryNotConfigured);
         }
         if let Some(p) = &c.production {
             p.set_enabled(enabled).map_err(Error::Production)?;
@@ -343,14 +348,14 @@ where
     F: FnMut() -> Result<observe::Outputs, observe::Error> + Send + 'static,
 {
     let (production, config) = config.into_parts();
-    let commands = production.mining.as_ref().map(|mining| {
-        let mut commands = Commands::new(mining.beneficiary);
+    let mut commands = Commands::new(production.mining.as_ref().map(|m| m.beneficiary));
+    commands.controller.micro = production.generator.candidate;
+    commands.controller.key = production.generator.key;
+    commands.controller.resume_current = production.producer.resume_current;
+    if let Some(mining) = &production.mining {
         commands.controller.release_info = mining.release_info;
         commands.controller.key = mining.preparation;
-        commands.controller.micro = production.generator.candidate;
-        commands.controller.resume_current = production.producer.resume_current;
-        Box::new(commands)
-    });
+    }
     launch_inner(
         prepared,
         config,
@@ -358,7 +363,7 @@ where
             algorithm: ae_protocol::ConsensusAlgorithm::OnDemand,
             config: Box::new(production),
             clocks,
-            commands,
+            commands: Some(Box::new(commands)),
         },
         outputs,
     )
@@ -442,6 +447,7 @@ where
             commands: None,
             pending_key: None,
             enabled: input.enabled(),
+            start_allowed: input.start_allowed(),
         }),
         outputs: Mutex::new(VecDeque::new()),
         exit: Mutex::new(None),

@@ -1,4 +1,12 @@
 use super::*;
+pub(super) fn start(running: bool, requested: bool, beneficiary: bool) -> Result<(), Error> {
+    // Native handle_call tests already-running before the beneficiary guard.
+    if requested && !running && !beneficiary {
+        Err(Error::BeneficiaryNotConfigured)
+    } else {
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Decision {
     Ignore,
@@ -40,6 +48,24 @@ pub(super) fn leader(available: bool, miner: AccountPublicKey, signer: AccountPu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_missing_beneficiary_controls_check_running_before_beneficiary() {
+        let native: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/erlang_on_demand_beneficiary.json"
+        ))
+        .unwrap();
+        for row in native["controls"].as_array().unwrap() {
+            let result = start(row["running"] == "running", row["action"] == "start", false);
+            let reply = match result {
+                Ok(()) => serde_json::json!("ok"),
+                Err(Error::BeneficiaryNotConfigured) => {
+                    serde_json::json!(["error", "beneficiary_not_configured"])
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(reply, row["reply"], "{row}");
+        }
+    }
     #[test]
     fn actual_native_notification_origin_and_leader_decisions_match() {
         let native: serde_json::Value = serde_json::from_str(include_str!(

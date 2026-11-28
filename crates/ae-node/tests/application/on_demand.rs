@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn foreground_on_demand_without_beneficiary_serves_stopped_chain_and_reopens() {
+    let lab = Lab::new("on_demand", false);
+    let mut cfg = lab.config();
+    cfg["mining"].as_object_mut().unwrap().remove("beneficiary");
+    lab.write("node.json", &cfg);
+    for round in 0..2 {
+        let mut process =
+            Process::spawn(&lab, lab.command(), &format!("missing-beneficiary-{round}"));
+        let ready = process.event("ready");
+        assert_eq!(ready["family"], "OnDemand");
+        let address = addresses(&ready)[0];
+        let (code, height) = request(
+            address,
+            "GET /v3/key-blocks/current/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 200);
+        assert_eq!(height["height"], 0);
+        let (code, pending) = request(
+            address,
+            "GET /v3/key-blocks/pending HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 400, "{pending}");
+        assert!(pending.to_string().contains("beneficiary"), "{pending}");
+        process.signal(rustix::process::Signal::TERM);
+        assert_eq!(
+            process.event("stopped"),
+            json!({"event":"stopped","joined":true,"failed":false})
+        );
+        process.wait(true);
+    }
+}
+
+#[test]
+fn foreground_on_demand_without_beneficiary_reports_autostart_failure() {
+    let lab = Lab::new("on_demand", false);
+    let mut cfg = lab.config();
+    cfg["mining"].as_object_mut().unwrap().remove("beneficiary");
+    cfg["mining"]["autostart"] = json!(true);
+    lab.write("node.json", &cfg);
+    let mut process = Process::spawn(&lab, lab.command(), "missing-beneficiary-autostart");
+    process.wait(false);
+    assert!(
+        std::fs::read_to_string(&process.log)
+            .unwrap()
+            .contains("autostart: beneficiary not configured")
+    );
+}
+
+#[test]
 fn foreground_on_demand_autostart_advances_height_and_reopens_stopped() {
     let lab = Lab::new("on_demand", false);
     let mut cfg = lab.config();

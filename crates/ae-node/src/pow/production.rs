@@ -59,7 +59,7 @@ impl Input {
             ),
             Self::Commands { config, clock } => (
                 pending::Config {
-                    beneficiary: Some(config.controller.beneficiary),
+                    beneficiary: config.controller.beneficiary,
                     release_info: config.controller.release_info,
                     key: config.controller.key,
                     limits,
@@ -97,7 +97,19 @@ impl Input {
             Self::Commands { .. } => None,
         }
     }
+    pub fn start_allowed(&self) -> bool {
+        match self {
+            Self::Automatic {
+                commands: Some(commands),
+                ..
+            } => commands.controller.beneficiary.is_some(),
+            _ => true,
+        }
+    }
     pub fn validate(&self, cycle: u64) -> Result<(), Error> {
+        if self.enabled() == Some(true) && !self.start_allowed() {
+            return Err(Error::BeneficiaryNotConfigured);
+        }
         match self {
             Self::Automatic { config, .. } if config.producer.micro_cycle_ms != cycle => {
                 Err(Error::Configuration)
